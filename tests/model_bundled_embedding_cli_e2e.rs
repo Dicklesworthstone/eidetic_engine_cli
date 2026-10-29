@@ -3294,11 +3294,11 @@ fn copy_outcome_index_fixture(source: &Path, destination: &Path) -> TestResult {
 #[cfg(unix)]
 fn ensure_outcome_index_ready(value: &Value, generation: u64) -> TestResult {
     let data = response_data(value, "outcome index status")?;
-    ensure_eq_str(
-        string_member(data, "health")?,
-        "ready",
-        "outcome index health",
-    )?;
+    if string_member(data, "health")? != "ready" {
+        return Err(format!(
+            "outcome index is not ready at generation {generation}: {value}"
+        ));
+    }
     ensure_eq_u64(
         u64_member(data, "dbGeneration")?,
         generation,
@@ -3442,11 +3442,17 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     let run = |phase: &str, command: &[&str]| -> TestResult<Value> {
         let mut args = vec!["--workspace", workspace_arg, "--json"];
         args.extend_from_slice(command);
-        args.extend(["--database", database_arg.as_str()]);
-        if matches!(command.first().copied(), Some("index" | "search"))
-            || (copied_store && matches!(command.first().copied(), Some("job" | "maintenance")))
-        {
-            args.extend(["--index-dir", index_arg.as_str()]);
+        // Exercise default path inference separately from explicit-store
+        // addressing; supplying the default paths as flags would miss a
+        // disagreement between outcome, search, and the worker's resolvers.
+        if copied_store {
+            args.extend(["--database", database_arg.as_str()]);
+            if matches!(
+                command.first().copied(),
+                Some("index" | "search" | "job" | "maintenance")
+            ) {
+                args.extend(["--index-dir", index_arg.as_str()]);
+            }
         }
         let output = run_ee_with_env(&workspace, phase, &args, &env)?;
         ensure_success(&output, phase)?;
@@ -3473,7 +3479,14 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     let mut before = outcome_index_state(&database, memory_id)?;
     assert_eq!(before.generation, original_state.generation);
     assert_eq!(before.posterior, original_state.posterior);
+    assert_eq!(before.trust_class, original_state.trust_class);
+    assert_eq!(before.feedback_count, original_state.feedback_count + 1);
     assert_eq!(before.jobs, original_state.jobs);
+    ensure_outcome_index_ready(
+        &run("outcome_neutral_index", &["index", "status"])?,
+        before.generation,
+    )?;
+    ensure_outcome_index_search(&run("outcome_neutral_search", &query)?, memory_id, neural)?;
 
     // The second round reopens an already updated store, queues two new events
     // for the same document, and must retain each event's independent job.
@@ -3636,6 +3649,21 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         assert_eq!(outcome_index_state(&database, memory_id)?, completed);
         before = completed;
     }
+    // Replaying completed feedback must leave the worker idle, rather than
+    // producing an extra repair that happens to end at the same generation.
+    let idle = run(
+        "outcome_coalesce_idle",
+        &["job", "run", "index_coalesce", "--time-limit-ms", "300000"],
+    )?;
+    assert_eq!(idle["data"]["job"]["outcome"], "success", "{idle}");
+    assert_eq!(idle["data"]["job"]["itemsProcessed"], 0, "{idle}");
+    assert_eq!(idle["data"]["job"]["durableMutation"], false, "{idle}");
+    assert_eq!(outcome_index_state(&database, memory_id)?, before);
+    ensure_outcome_index_ready(
+        &run("outcome_idle_index", &["index", "status"])?,
+        before.generation,
+    )?;
+    ensure_outcome_index_search(&run("outcome_idle_search", &query)?, memory_id, neural)?;
     if copied_store {
         let implicit_index_arg = path_string(&implicit_index);
         let implicit_status = run_ee_with_env(
@@ -4487,10 +4515,14 @@ fn ee_command_with_env(
         .args(args)
         .env("HOME", &workspace.home)
         .env("XDG_DATA_HOME", &workspace.xdg_data)
+        .env("XDG_CONFIG_HOME", workspace.path.join("xdg-config"))
+        .env("XDG_CACHE_HOME", workspace.path.join("xdg-cache"))
+        .env("XDG_STATE_HOME", workspace.path.join("xdg-state"))
         .env("EE_NO_COLOR", "1")
-        .env_remove("EE_EMBED_MODEL_DIR")
-        .env_remove("EE_EMBED_MODEL_FIXTURE_DIR")
-        .env_remove("EE_EMBED_MODEL_PATH")
+        .env_remove("EE_DATABASE_PATH")
+        .env_remove("EE_INDEX_DIR")
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
         .env_remove("EE_EMBED_DOWNLOAD")
         .env_remove("FRANKENSEARCH_MODEL_DIR")
         .env_remove("FRANKENSEARCH_OFFLINE")
@@ -4510,10 +4542,68 @@ fn ee_command_with_env(
         .env_remove("all_proxy")
         .env_remove("NO_PROXY")
         .env_remove("no_proxy");
+    for name in isolated_ee::MODEL_SELECTION_ENV {
+        command.env_remove(name);
+    }
     for (name, value) in env {
         command.env(name, value);
     }
     command
+}
+
+#[test]
+fn model_cli_command_isolates_backend_and_store_environment() -> TestResult {
+    let workspace = E2eWorkspace::create("command-environment-isolation")?;
+    let command = ee_command_with_env(&workspace, &[], &[]);
+    let variables = command
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for name in isolated_ee::MODEL_SELECTION_ENV.into_iter().chain([
+        "EE_DATABASE_PATH",
+        "EE_INDEX_DIR",
+        "EE_WORKSPACE",
+        "EE_WORKSPACE_REGISTRY",
+        "EE_EMBED_DOWNLOAD",
+    ]) {
+        assert_eq!(
+            variables.get(std::ffi::OsStr::new(name)),
+            Some(&None),
+            "the fixture must explicitly remove inherited {name}"
+        );
+    }
+    for (name, directory) in [
+        ("XDG_CONFIG_HOME", "xdg-config"),
+        ("XDG_CACHE_HOME", "xdg-cache"),
+        ("XDG_STATE_HOME", "xdg-state"),
+    ] {
+        assert_eq!(
+            variables.get(std::ffi::OsStr::new(name)),
+            Some(&Some(workspace.path.join(directory).into_os_string())),
+            "{name} must stay inside the fixture"
+        );
+    }
+
+    // Intentional per-test selections still override isolation. Inspect the
+    // child command directly; never mutate this test process's environment.
+    let overrides = [
+        ("EE_EMBED_BACKEND".to_owned(), "local".to_owned()),
+        ("EE_EMBED_DOWNLOAD".to_owned(), "off".to_owned()),
+        (
+            "EE_EMBED_MODEL_DIR".to_owned(),
+            path_string(&workspace.path.join("selected-model")),
+        ),
+    ];
+    let command = ee_command_with_env(&workspace, &[], &overrides);
+    for (name, value) in &overrides {
+        assert!(
+            command.get_envs().any(|(key, configured)| {
+                key == std::ffi::OsStr::new(name) && configured == Some(std::ffi::OsStr::new(value))
+            }),
+            "explicit {name} override was lost"
+        );
+    }
+    Ok(())
 }
 
 fn run_ee_with_env(

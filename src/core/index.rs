@@ -9385,6 +9385,17 @@ impl EmbedderDescriptor {
         }
     }
 
+    fn pending_potion() -> Self {
+        Self {
+            // Describe the same pinned producer as the lazy execution stack,
+            // without creating that stack or claiming its weights are loaded.
+            semantic: false,
+            ready: false,
+            pending_download: true,
+            ..Self::potion()
+        }
+    }
+
     fn model2vec(model: &RegisteredModel2Vec) -> Self {
         Self {
             id: model2vec_model_name(model).to_owned(),
@@ -9498,7 +9509,13 @@ fn workspace_local_embedder_descriptors(
         if verified_default_model_dir(settings).is_some() {
             return Ok((EmbedderDescriptor::potion(), None));
         }
-        return Ok(stack_descriptors(&hash_fallback_embedder_stack()));
+        return Ok(match settings.download_mode {
+            // Missing assets do not select the hash producer in auto mode:
+            // execution selects a pending Model2Vec acquisition. Inspection
+            // must retain that distinction without downloading or loading it.
+            EeEmbedDownloadMode::Auto => (EmbedderDescriptor::pending_potion(), None),
+            EeEmbedDownloadMode::Off => stack_descriptors(&hash_fallback_embedder_stack()),
+        });
     };
     // Inspection shares execution's one-time resolution rather than answering
     // from discovery alone. A verified model directory establishes that the
@@ -15140,27 +15157,62 @@ mod tests {
         // No schema: any registry access would fail. An explicit configured
         // root must take precedence before registry inspection, even if absent.
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
-        let settings = EeEmbedderSettings {
+        let mut settings = EeEmbedderSettings {
             model_root: unique_test_dir("descriptor-missing-configured-root"),
             download_mode: EeEmbedDownloadMode::Auto,
             local_source: EmbedModelSource::Configured,
         };
         let resolved = OnceLock::new();
-        let (fast, quality) = workspace_local_embedder_descriptors(
-            &connection,
-            "workspace",
-            &resolved,
-            Some(&settings),
-        )
-        .map_err(|error| error.to_string())?;
-        ensure(
-            !fast.semantic && !fast.local_load_failed && quality.is_none(),
-            "missing configured assets must yield hash availability without inventing a load failure",
-        )?;
-        ensure(
-            resolved.get().is_none() && !settings.model_root.exists(),
-            "local observation must neither load a model nor start an auto download",
-        )?;
+        for mode in [EeEmbedDownloadMode::Auto, EeEmbedDownloadMode::Off] {
+            settings.download_mode = mode;
+            let (fast, quality) = workspace_local_embedder_descriptors(
+                &connection,
+                "workspace",
+                &resolved,
+                Some(&settings),
+            )
+            .map_err(|error| error.to_string())?;
+            let expected = match mode {
+                EeEmbedDownloadMode::Auto => {
+                    let pending = EeLazyModel2VecEmbedder::new(settings.model_root.clone());
+                    EmbedderDescriptor::from_embedder(&pending)
+                }
+                EeEmbedDownloadMode::Off => {
+                    EmbedderDescriptor::from_embedder(&HashEmbedder::default_256())
+                }
+            };
+            ensure(
+                fast.id == expected.id
+                    && fast.dimension == expected.dimension
+                    && fast.producer_revision == expected.producer_revision
+                    && fast.producer_revision.is_some()
+                    && fast.category == expected.category
+                    && fast.ready == expected.ready
+                    && fast.pending_download == expected.pending_download
+                    && !fast.semantic
+                    && !fast.local_load_failed
+                    && quality.is_none(),
+                "cold inspection must retain the execution policy's complete producer identity and readiness",
+            )?;
+            let posture = embedding_posture_from_records(
+                &fast,
+                None,
+                &[],
+                EmbeddingVectorCoverage::new(0, 0),
+            );
+            ensure(
+                posture.source
+                    == match mode {
+                        EeEmbedDownloadMode::Auto => "ee_model2vec_download_pending",
+                        EeEmbedDownloadMode::Off => "frankensearch_hash_fallback",
+                    },
+                "pending acquisition and an explicitly offline hash fallback must remain distinguishable",
+            )?;
+            ensure(
+                resolved.get().is_none() && !settings.model_root.exists(),
+                "local observation must neither load a model nor start an auto download",
+            )?;
+        }
         ensure(
             workspace_local_embedder_descriptors(&connection, "workspace", &resolved, None)
                 .is_err(),
@@ -15175,6 +15227,7 @@ mod tests {
         resolved
             .set(failed_selection)
             .map_err(|_| "local fixture already resolved")?;
+        settings.download_mode = EeEmbedDownloadMode::Auto;
         let (fast, quality) = workspace_local_embedder_descriptors(
             &connection,
             "workspace",

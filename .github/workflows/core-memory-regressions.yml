@@ -619,6 +619,8 @@ jobs:
           backup-contract contracts backup_import_roundtrip::
           core-cli e2e_core_workflow core_workflow_init_remember_search_context_why
           learning-cli session_arc_learning_cli public_cli_
+          model-fixture-isolation model_bundled_embedding_cli_e2e model_cli_command_isolates_backend_and_store_environment
+          model-auto-declaration model_bundled_embedding_cli_e2e model_cli_auto_declares_bundled_embedding_without_claiming_download
           memory-outcome-index model_bundled_embedding_cli_e2e helpful_outcome_index_coalesce_restores_freshness
           native-rule-pack integration_n_r rule_mark_update_e2e::sourced_rule_pack_replay_and_item_outcome_preserve_native_identity
           native-rule-outcome integration_n_r rule_mark_update_e2e::native_rule_outcome_changes_rule_once_without_changing_source_memory
