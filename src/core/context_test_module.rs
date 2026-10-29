@@ -5,7 +5,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
     use chrono::{DateTime, Utc};
@@ -4865,6 +4865,221 @@ pub fn unrelated_context() -> u64 {{
             degraded.is_empty(),
             "enabled proximity should not degrade: {degraded:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_cache_tracks_in_place_projection_changes() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let cache = RwLock::new(None);
+        let original_links = fixture
+            .connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(original_links.len(), 1);
+        let mut previous = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &previous,
+                &fixture.seed.to_string(),
+                &fixture.neighbor.to_string(),
+            ),
+            Some(1.0),
+        );
+        let hit = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(Arc::ptr_eq(&previous, &hit));
+
+        for statement in [
+            "UPDATE memory_links SET weight = 0.25",
+            "UPDATE memory_links SET confidence = 0.5",
+            "UPDATE memory_links SET relation = 'contradicts'",
+        ] {
+            fixture
+                .connection
+                .execute_raw(statement)
+                .map_err(|error| error.to_string())?;
+            let links = fixture
+                .connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(links.len(), original_links.len());
+            assert_eq!(links[0].created_at, original_links[0].created_at);
+            let updated = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+                .map_err(|error| format!("{error:?}"))?;
+            assert!(
+                !Arc::ptr_eq(&previous, &updated),
+                "projection change must rebuild the tree: {statement}",
+            );
+            assert_eq!(
+                crate::graph::gomory_hu::query_min_cut(
+                    &updated,
+                    &fixture.seed.to_string(),
+                    &fixture.neighbor.to_string(),
+                ),
+                Some(0.25),
+            );
+            previous = updated;
+        }
+
+        fixture
+            .connection
+            .execute_raw("UPDATE memory_links SET evidence_count = evidence_count + 1")
+            .map_err(|error| error.to_string())?;
+        let unchanged = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(
+            Arc::ptr_eq(&previous, &unchanged),
+            "nonprojected metadata must preserve a valid cached tree",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_cache_rechecks_live_mesh_visibility() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let cache = RwLock::new(None);
+        let original_links = fixture
+            .connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(original_links.len(), 1);
+        let initial = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+
+        for (metadata, expected_cut) in [
+            (
+                Some(mesh_link_metadata("allow", "metadata", true)),
+                Some(1.0),
+            ),
+            (Some(mesh_link_metadata("deny", "metadata", true)), None),
+            (
+                Some(mesh_link_metadata("allow", "metadata", true)),
+                Some(1.0),
+            ),
+            (Some(r#"{"mesh":"malformed"}"#.to_string()), None),
+            (Some(mesh_link_metadata("allow", "metadata", false)), None),
+            (None, Some(1.0)),
+        ] {
+            fixture
+                .connection
+                .execute(
+                    "UPDATE memory_links SET metadata_json = ?1",
+                    &[metadata.map_or(sqlmodel_core::Value::Null, sqlmodel_core::Value::Text)],
+                )
+                .map_err(|error| error.to_string())?;
+            let links = fixture
+                .connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(links.len(), original_links.len());
+            assert_eq!(links[0].created_at, original_links[0].created_at);
+            let updated = super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                crate::graph::gomory_hu::query_min_cut(
+                    &updated,
+                    &fixture.seed.to_string(),
+                    &fixture.neighbor.to_string(),
+                ),
+                expected_cut,
+                "cached proximity must honor current mesh admission",
+            );
+        }
+
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &initial,
+                &fixture.seed.to_string(),
+                &fixture.neighbor.to_string(),
+            ),
+            Some(1.0),
+            "refreshing the cache must not mutate an in-flight tree",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_cache_separates_foreign_store_topology() -> Result<(), String> {
+        let first = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let foreign = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let cache = RwLock::new(None);
+        for fixture in [&first, &foreign] {
+            fixture
+                .connection
+                .execute_raw("UPDATE memory_links SET created_at = '2026-01-01T00:00:00Z'")
+                .map_err(|error| error.to_string())?;
+        }
+        let original = super::context_proximity_tree_with_cache(&first.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        let identical = super::context_proximity_tree_with_cache(&foreign.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(
+            Arc::ptr_eq(&original, &identical),
+            "identical visible projections can safely share an immutable tree",
+        );
+        foreign
+            .connection
+            .execute(
+                "UPDATE memory_links SET dst_memory_id = ?1",
+                &[sqlmodel_core::Value::Text(foreign.orphan.to_string())],
+            )
+            .map_err(|error| error.to_string())?;
+        let foreign_tree = super::context_proximity_tree_with_cache(&foreign.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(!Arc::ptr_eq(&original, &foreign_tree));
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &foreign_tree,
+                &foreign.seed.to_string(),
+                &foreign.neighbor.to_string(),
+            ),
+            None,
+        );
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &foreign_tree,
+                &foreign.seed.to_string(),
+                &foreign.orphan.to_string(),
+            ),
+            Some(1.0),
+        );
+        let restored = super::context_proximity_tree_with_cache(&first.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &restored,
+                &first.seed.to_string(),
+                &first.neighbor.to_string(),
+            ),
+            Some(1.0),
+        );
+        assert_eq!(
+            crate::graph::gomory_hu::query_min_cut(
+                &restored,
+                &first.seed.to_string(),
+                &first.orphan.to_string(),
+            ),
+            None,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_cache_does_not_hide_source_read_errors() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let cache = RwLock::new(None);
+        super::context_proximity_tree_with_cache(&fixture.connection, &cache)
+            .map_err(|error| format!("{error:?}"))?;
+        fixture
+            .connection
+            .execute_raw("ALTER TABLE memory_links RENAME COLUMN weight TO unavailable_weight")
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            super::context_proximity_tree_with_cache(&fixture.connection, &cache),
+            Err(super::ContextProximityTreeError::Graph(_)),
+        ));
         Ok(())
     }
 

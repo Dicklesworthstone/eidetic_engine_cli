@@ -180,7 +180,7 @@ const CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW: u32 = 20;
 
 #[derive(Clone, Debug)]
 struct CachedContextProximityTree {
-    generation: u64,
+    projection_hash: blake3::Hash,
     tree: Arc<crate::graph::gomory_hu::GomoryHuTree>,
 }
 
@@ -12413,70 +12413,86 @@ enum ContextProximityTreeError {
 fn context_proximity_tree(
     connection: &DbConnection,
 ) -> Result<Arc<crate::graph::gomory_hu::GomoryHuTree>, ContextProximityTreeError> {
-    let generation = context_proximity_graph_generation(connection).ok();
-    if let Some(generation) = generation {
-        if let Some(tree) = cached_context_proximity_tree(generation) {
-            return Ok(tree);
+    context_proximity_tree_with_cache(connection, context_proximity_tree_cache())
+}
+
+fn context_proximity_tree_with_cache(
+    connection: &DbConnection,
+    cache: &RwLock<Option<CachedContextProximityTree>>,
+) -> Result<Arc<crate::graph::gomory_hu::GomoryHuTree>, ContextProximityTreeError> {
+    // Read visibility and graph inputs together before consulting the process-wide
+    // cache. Row counts/timestamps miss in-place edits and collide across stores.
+    // Building from this same projection also prevents a key/data read race.
+    let links = connection
+        .list_all_memory_links(None)
+        .map_err(|error| ContextProximityTreeError::Graph(error.to_string()))?
+        .into_iter()
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
+        .collect::<Vec<_>>();
+    let projection_hash = context_proximity_graph_hash(&links);
+    {
+        let guard = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = guard
+            .as_ref()
+            .filter(|cached| cached.projection_hash == projection_hash)
+        {
+            return Ok(Arc::clone(&cached.tree));
         }
     }
 
-    let graph = context_proximity_graph(connection).map_err(ContextProximityTreeError::Graph)?;
+    let graph = context_proximity_graph(links).map_err(ContextProximityTreeError::Graph)?;
     let tree = Arc::new(
         crate::graph::gomory_hu::build_gomory_hu_tree(&graph)
             .map_err(|error| ContextProximityTreeError::GomoryHu(error.to_string()))?,
     );
 
-    if let Some(generation) = generation {
-        store_context_proximity_tree(generation, Arc::clone(&tree));
-    }
-
-    Ok(tree)
-}
-
-fn cached_context_proximity_tree(
-    generation: u64,
-) -> Option<Arc<crate::graph::gomory_hu::GomoryHuTree>> {
-    let guard = context_proximity_tree_cache()
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard
-        .as_ref()
-        .filter(|cached| cached.generation == generation)
-        .map(|cached| Arc::clone(&cached.tree))
-}
-
-fn store_context_proximity_tree(generation: u64, tree: Arc<crate::graph::gomory_hu::GomoryHuTree>) {
-    let mut guard = context_proximity_tree_cache()
+    let mut guard = cache
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *guard = Some(CachedContextProximityTree { generation, tree });
+    *guard = Some(CachedContextProximityTree {
+        projection_hash,
+        tree: Arc::clone(&tree),
+    });
+
+    Ok(tree)
 }
 
 fn context_proximity_tree_cache() -> &'static RwLock<Option<CachedContextProximityTree>> {
     CONTEXT_PROXIMITY_TREE_CACHE.get_or_init(|| RwLock::new(None))
 }
 
-fn context_proximity_graph_generation(connection: &DbConnection) -> Result<u64, String> {
-    context_pack_l2_query_generation(
-        connection,
-        "SELECT \
-            COUNT(*), \
-            COALESCE(MAX(created_at), '') \
-         FROM memory_links",
-    )
+fn context_proximity_graph_hash(links: &[crate::db::StoredMemoryLink]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(&mut hasher, "schema", b"ee.context.proximity_graph.v1");
+    hash_labeled_count(&mut hasher, "links", links.len());
+    // Preserve the deterministic source order used for graph construction,
+    // including links with the same endpoints and different relations.
+    for link in links {
+        hash_labeled_bytes(&mut hasher, "src", link.src_memory_id.as_bytes());
+        hash_labeled_bytes(&mut hasher, "dst", link.dst_memory_id.as_bytes());
+        hash_labeled_bytes(&mut hasher, "relation", link.relation.as_bytes());
+        hash_labeled_bytes(&mut hasher, "weight", &link.weight.to_bits().to_le_bytes());
+        hash_labeled_bytes(
+            &mut hasher,
+            "confidence",
+            &link.confidence.to_bits().to_le_bytes(),
+        );
+    }
+    hasher.finalize()
 }
 
-fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Graph, String> {
+fn context_proximity_graph(
+    links: Vec<crate::db::StoredMemoryLink>,
+) -> Result<fnx_classes::Graph, String> {
     use fnx_classes::AttrMap;
     use fnx_runtime::CgseValue;
 
-    let links = connection
-        .list_all_memory_links(None)
-        .map_err(|error| error.to_string())?;
     let mut graph = fnx_classes::Graph::strict();
-    for link in links.into_iter().filter(|link| {
-        crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
-    }) {
+    for link in links {
         graph.add_node(&link.src_memory_id);
         graph.add_node(&link.dst_memory_id);
         let mut attrs = AttrMap::new();
