@@ -15,10 +15,24 @@
 # temporary fixtures; only --install-pre-push writes a Git hook, on explicit
 # request. AGENTS.md forbids scripts that rewrite project code under a hook.
 #
-# NOT WIRED INTO verify.sh, DELIBERATELY. The verify budget admits zero new
-# stages: the non-benchmark p50s total exactly 600 against a <=600 ceiling and
+# NOT WIRED INTO verify.sh, DELIBERATELY -- BUT THE BUDGET HALF OF THAT REASON
+# HAS EXPIRED. This paragraph said "The verify budget admits zero new stages:
+# the non-benchmark p50s total exactly 600 against a <=600 ceiling and
 # UNMEASURED_STAGE_ALLOWANCE sits at its down-only ratchet of 27. Only widening
-# an existing stage is available and none is a plausible host.
+# an existing stage is available and none is a plausible host."
+#
+# Re-measured 2026-10-28: the ceiling is 608, the non-benchmark total is 598, so
+# there is 10s of room, and the allowance is 24/24 (bd-e4ymh). A stage IS now
+# addable by the measured door. So if this file stays unwired it has to be for
+# the OTHER reasons below -- that it is a whole-working-tree check rather than a
+# staged-blob check, and that it needs rustfmt, which does not exist on this host
+# while the USB volume is unmounted. Those are real and unaffected.
+#
+# Wiring it is an operator decision and is deliberately NOT taken here: adding a
+# verify.sh stage moves the lockstep stage count that
+# tests/verification_drift_guard.rs pins, and that guard cannot be executed on
+# this host. Recording the expired premise so the next reader does not inherit a
+# constraint that no longer exists.
 #
 # This is a whole-working-tree check, not a staged-blob check. A pre-push
 # installation is per clone; see docs/testing-strategy.md. It does not change
@@ -420,11 +434,14 @@ self_test() {
     return 0
 }
 
-# bd-l6h3g. Rides here rather than becoming a verify.sh stage, because the
-# verify budget admits zero new stages (non-benchmark p50s total exactly 600
-# against a <=600 ceiling, UNMEASURED_STAGE_ALLOWANCE at its down-only ratchet
-# of 27). It belongs with the format check for a substantive reason, not just a
-# budgetary one: BOTH are questions about the POPULATION a tool examines.
+# bd-l6h3g. Rides here rather than becoming a verify.sh stage. The budgetary
+# half of that reason has EXPIRED -- it read "the verify budget admits zero new
+# stages (non-benchmark p50s total exactly 600 against a <=600 ceiling,
+# UNMEASURED_STAGE_ALLOWANCE at its down-only ratchet of 27)", and as of
+# 2026-10-28 the ceiling is 608, the total 598 and the allowance 24/24, so there
+# is 10s of room (bd-e4ymh). The SUBSTANTIVE half stands on its own and is why
+# this is still the right home: BOTH are questions about the POPULATION a tool
+# examines.
 # `cargo fmt --check` reported this tree clean while two drifted files sat in
 # it, because cargo walks targets and those files were reachable from none.
 # Same blind spot, and the formatter's version of it is the harmless one.

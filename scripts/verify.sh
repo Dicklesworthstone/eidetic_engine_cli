@@ -1876,9 +1876,10 @@ run_stage "Repo Hygiene E2E (bd-udjrq)" "./scripts/e2e_repo_hygiene.sh"
 #
 # MEASURED, not unmeasured: 2.30 2.30 2.34 2.58 2.73 seconds over five runs,
 # p50 2.34. Declared 3 so the hard-fail line lands at p50*3 = 9s. The
-# unmeasured allowance is exhausted at 27/27, so a new stage must carry a real
-# number; the budget for it comes from re-measuring Forbidden Dependencies
-# from an over-declared 10 down to 2, not from raising the 600s ceiling.
+# unmeasured allowance is exhausted (27/27 when this was written, 24/24 since
+# 2026-10-28), so a new stage must carry a real number; the budget for it comes
+# from re-measuring Forbidden Dependencies from an over-declared 10 down to 2,
+# not from raising the 600s ceiling.
 #
 # Its orphan_baseline.txt row is deleted in the same commit, for the same
 # reason the Repo Hygiene row was: the audit fails on a stale baseline entry
@@ -2708,8 +2709,9 @@ if [ "$CI_SMOKE" != "true" ]; then
     # never run has never been right, so running them came before wiring them.
     #
     # One stage for five scripts, not five stages: the budget ceiling admits
-    # measured seconds and the unmeasured allowance is exhausted at 27/27, so
-    # five 0.4s scripts do not each deserve an entry.
+    # measured seconds and the unmeasured allowance is exhausted (27/27 when
+    # this was written, 24/24 since 2026-10-28), so five 0.4s scripts do not
+    # each deserve an entry.
     #
     # MEASURED, not unmeasured: 1.98 2.11 1.99 2.52 2.88 seconds over five runs
     # of the driver on a six-agent-loaded machine, p50 2.11. Declared 3 so the

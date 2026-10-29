@@ -27,7 +27,21 @@ const UNMEASURED_MARKER: &str = "expected_seconds_p50_unmeasured = true";
 /// one means lowering this by one in the same commit. It is deliberately not
 /// slack for new stages -- a 28th unmeasured stage should fail here and be
 /// measured instead.
-const UNMEASURED_STAGE_ALLOWANCE: usize = 27;
+///
+/// 27 -> 24 on 2026-10-28 (bd-e4ymh): three of the 27 were never unmeasurable.
+/// `beads_export_repair.sh --self-test`, `mcp_lib_tests.sh --self-test` and
+/// `e2e_invocation_audit.sh --self-test` all run on the Mac checkout with no
+/// toolchain, no `ee` binary and no lane, in 3.7s, 0.03s and 0.3s. They held
+/// three slots in a FULL ratchet for six weeks because "unmeasured" was read as
+/// a property of this manifest rather than a claim about each stage that someone
+/// could falsify by typing the command.
+///
+/// NOTE THE ASSERTION BELOW IS `<=`, so a stale allowance does NOT fail: if the
+/// marker count drops and this number does not follow, the ratchet silently
+/// gains slack and nothing says so. That is why lowering it is a convention
+/// enforced by whoever reads this comment rather than by the test, and it is the
+/// one thing to get right when converting a stage.
+const UNMEASURED_STAGE_ALLOWANCE: usize = 24;
 
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

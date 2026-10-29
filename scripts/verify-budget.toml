@@ -36,10 +36,21 @@
 # deters work. Recomputing independently here (excluding the four opt-in stages)
 # lands at ~566-577 against 608, i.e. comfortably under either way.
 #
-# THERE IS CURRENTLY ZERO HEADROOM. The non-benchmark p50s total EXACTLY 608
-# against the 608 ceiling (measured 2026-10-19, 120 stages, 27 unmeasured,
-# benchmarks excluded). Any new stage carrying a measured p50 -- of any size,
-# one second included -- reds the guard on arrival. Read that before planning a
+# HEADROOM IS 10s, NOT ZERO, AND THAT IS RECENT. This paragraph read "THERE IS
+# CURRENTLY ZERO HEADROOM ... total EXACTLY 608" as measured on 2026-10-19 with
+# 120 stages and 27 unmeasured. Re-measured 2026-10-28: the non-benchmark p50s
+# total 598 against the 608 ceiling, with 24 unmeasured and benchmarks excluded.
+# The 608 ceiling itself has not moved.
+#
+# Do not read the 10s as budget to spend. It exists because three stages that
+# were carried as unmeasured turned out to run here in 3.7s, 0.03s and 0.3s
+# (bd-e4ymh), so their real cost replaced a blank -- the total went UP by 6 and
+# the ratchet came down 27 -> 24 with them. A new stage still has to justify its
+# seconds, and a stage that cannot be timed still has nowhere to go: the
+# unmeasured ratchet is full again at 24/24 by construction.
+#
+# Any new stage carrying a measured p50 over 10s -- and any stage at all once
+# that 10s is gone -- reds the guard on arrival. Read that before planning a
 # stage, because it is not a question of whether your stage is small.
 #
 # EVERY STAGE verify.sh GATES BEHIND AN OPT-IN FLAG is excluded from that
@@ -1081,7 +1092,8 @@ name = "Swarm Fixture Suite E2E (bd-udjrq)"
 # ./scripts/e2e_swarm_fixture_suite.sh on a six-agent-loaded machine, p50 2.11.
 # Declared 3, not 2.11, because the hard-fail line is p50*3 and 3 puts it at 9s
 # against a 2.88 worst observed. Five scripts share one stage because the
-# ceiling admits measured seconds and the unmeasured allowance is full at 27.
+# ceiling admits measured seconds and the unmeasured allowance is full (27 when
+# this was written; 24/24 since 2026-10-28, still full).
 expected_seconds_p50 = 3
 regression_factor = 1.5
 
@@ -1208,7 +1220,18 @@ expected_seconds_p50 = 120
 regression_factor = 1.5
 
 # ---------------------------------------------------------------------------
-# UNMEASURED STAGES (27, recorded 2026-09-16)
+# UNMEASURED STAGES (24; was 27 as recorded 2026-09-16)
+#
+# THREE OF THE ORIGINAL 27 WERE NEVER UNMEASURABLE, and that is the thing to
+# take from this section rather than the number. `beads_export_repair.sh
+# --self-test`, `mcp_lib_tests.sh --self-test` and `e2e_invocation_audit.sh
+# --self-test` are all in verify.sh's locally-runnable set -- no toolchain, no
+# `ee` binary, no lane -- and were timed on 2026-10-28 at 3.7s, 0.03s and 0.3s
+# (bd-e4ymh). They are measured above now and the allowance came down with them.
+#
+# So "unmeasured" is a claim about a stage, not a property of this file, and it
+# is falsifiable by typing the command. Before adding a row here, check whether
+# the stage is one verify.sh can run on the host you are sitting at.
 #
 # These run in verify.sh but have never been timed here, so they declare
 # no p50 and are not budget-enforced. They are listed rather than given a
@@ -1227,7 +1250,36 @@ expected_seconds_p50_unmeasured = true
 
 [[stage]]
 name = "Beads Export Repair Self-Test (bd-2p297.1, bd-2p297.2)"
-expected_seconds_p50_unmeasured = true
+# MEASURED 2026-10-28, bd-e4ymh. THIS STAGE WAS NEVER UNMEASURABLE -- it runs on
+# this host in under four seconds with no toolchain, no `ee` binary and no lane.
+#
+# It sat in the unmeasured ratchet for six weeks because the ratchet was read as
+# a property of the MANIFEST rather than a claim about each stage. Three of the
+# 27 unmeasured stages are in verify.sh's locally-runnable set, so three slots in
+# a FULL down-only ratchet were held by stages nobody had tried to run. The other
+# two are "MCP Lib Unit Tests Guard" and "E2E Invocation Audit Contract", both
+# converted in the same commit; UNMEASURED_STAGE_ALLOWANCE came down 27 -> 24
+# with them, which is what its own doc comment requires ("measuring one means
+# lowering this by one in the same commit").
+#
+# Five runs, exit 0 every time, 22/22 self-test arms each time:
+#   6.099  4.344  3.306  3.675  3.335      median 3.675   min 3.306   max 6.099
+#
+# p50 4 rounds the median up rather than down, because rounding a latency toward
+# zero is the direction that manufactures headroom.
+#
+# THE 2.0 FACTOR IS WIDER THAN THIS BLOCK'S 1.5 AND THE SPREAD IS WHY. The slow
+# sample is 1.66x the median, and the work explains it: the self-test builds
+# fixture trees under mktemp and the first run pays a cold page cache. A ceiling
+# of 8s clears the slowest observed run by 1.9s. 1.5 would put it at 6s, i.e.
+# BELOW a run already observed on an idle host, which is a gate that fails on
+# weather.
+#
+# Non-benchmark readiness total 592 -> 598 against the 608 ceiling (which is a
+# ceiling, not an equality -- see :1654 of verification_drift_guard.rs). No
+# ceiling raise was taken and no neighbour's p50 was retuned.
+expected_seconds_p50 = 4
+regression_factor = 2.0
 
 [[stage]]
 name = "Global Lane E2E (bd-1bfwa.4)"
@@ -1293,7 +1345,18 @@ expected_seconds_p50_unmeasured = true
 
 [[stage]]
 name = "MCP Lib Unit Tests Guard (bd-up1hk)"
-expected_seconds_p50_unmeasured = true
+# MEASURED 2026-10-28, bd-e4ymh, same pass as "Beads Export Repair Self-Test"
+# above, which carries the reasoning. Five runs, exit 0 every time:
+#   0.028  0.025  0.028  0.027  0.027      median 0.027
+#
+# Declares 1s per the sub-second convention of this block. 27 MILLISECONDS
+# invites the obvious suspicion, so it was checked rather than assumed: the run
+# reports `self-test: 5/5 passed` and names each arm, including "no result line
+# is distinguishable from zero" and "last result line wins". It is a text
+# classifier over fixture strings with no process spawning, so milliseconds are
+# the honest cost, not evidence of a stage that does nothing.
+expected_seconds_p50 = 1
+regression_factor = 1.5
 
 [[stage]]
 name = "E2E Invocation Audit"
@@ -1307,7 +1370,8 @@ name = "Repo Hygiene E2E (bd-udjrq)"
 # reasons unrelated to the code -- the same reason Swarm SLO Replay is 2 and not
 # its measured 0-1.
 #
-# It has to be measured: the unmeasured ratchet is full at 27/27, so the
+# It has to be measured: the unmeasured ratchet is full (27/27 when this was
+# written, 24/24 since 2026-10-28), so the
 # `(first execution)` route the earlier ten orphans used is closed. That is the
 # right outcome here, because this one has real timings.
 expected_seconds_p50 = 2
@@ -1315,7 +1379,17 @@ regression_factor = 1.5
 
 [[stage]]
 name = "E2E Invocation Audit Contract"
-expected_seconds_p50_unmeasured = true
+# MEASURED 2026-10-28, bd-e4ymh, same pass as "Beads Export Repair Self-Test"
+# above, which carries the reasoning. Five runs, exit 0 every time, 17/17
+# self-test arms:
+#   0.307  0.304  0.310  0.309  0.322      median 0.309   spread 0.018
+#
+# Declares 1s per the sub-second convention of this block. Note this is the
+# CONTRACT half only; the audit itself ("E2E Invocation Audit", without
+# --self-test) is a different stage and stays unmeasured, because that one reads
+# the live tree and is not in verify.sh's locally-runnable set.
+expected_seconds_p50 = 1
+regression_factor = 1.5
 
 # Wired 2026-09-16 by 9fd9ffab1 (bd-smxdr: four suites that were wired into nothing).
 
