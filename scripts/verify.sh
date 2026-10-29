@@ -2479,6 +2479,38 @@ run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee &&
 # own PATH default, so this stage validated whatever `ee` was installed
 # (bd-smxdr). Passing both names keeps the pin visible at the call site rather
 # than depending on an export several hundred lines away.
+#
+# IF THIS STAGE FAILS FOR YOU, READ THIS BEFORE ASSUMING IT IS YOUR CHANGE
+# (bd-kusni). Its last recorded measurement is 2026-10-11, on a fleet run at
+# base 35186e1af against ee 0.17.0:
+#
+#     88 pass / 4 fail / 1 drop over 8 steps
+#     per-step FAIL:  1:0  2:0  3:0  4:4  5:0  6:0  7:0  8:0
+#
+# All four were in STEP 4. The status today is UNVERIFIED -- not green and not
+# known-red -- and the distinction is the whole point of this note:
+#
+#   * step 4's owner was bd-16imy (imported-evidence acceptance), which CLOSED
+#     2026-10-17 -- but on `scripts/e2e_imported_transcript_retrieval.sh`, a
+#     DIFFERENT script, with 5 fresh-root runs and 18 assertions. Its own close
+#     reason says "verify.sh not run". So nothing has established that
+#     e2e_capture.sh step 4 is clean;
+#   * bd-2vq2z.9, named as the owner in older notes, closed 2026-10-11 and step
+#     6 (its clause) returned ZERO failures in that very run, so that
+#     attribution was already wrong when it was written;
+#   * no run of THIS stage has been recorded since.
+#
+# So: 4 failures in step 4 are plausibly pre-existing and not yours; anything
+# outside step 4 probably is yours. Diff against the per-step counts above
+# rather than against a green expectation. Establishing the current state needs
+# a run, and this stage cannot run on this Mac at all -- `verify.sh` refuses
+# before stage one without a native current `ee`
+# (bd-no-runnable-current-ee-binary-on-the-mac-wu6ay).
+#
+# DELIBERATELY NOT DONE HERE: marking the stage expected-fail against a recorded
+# baseline, or demoting it from push-gating to reporting. Both change what the
+# gate DOES on evidence nobody currently has, and bd-kusni lists them as the
+# operator's call. This note only replaces silence with the measurement.
 run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
 
 # Gate 6.1266: Shadow retrieval-tuning E2E (bd-2tehh.4 / ADR 0070). Real
