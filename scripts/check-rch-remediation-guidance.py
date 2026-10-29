@@ -20,6 +20,29 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 LIVE_STATUSES = {"open", "in_progress", "blocked", "deferred"}
 
+#: How many blocker kinds must carry a LIVE bead. A floor, and it only rises.
+#:
+#: THE COUNTERFORCE FOR A ONE-WAY DRIFT (bd-uaonk). Everything else in this file
+#: is symmetric, but the citations are not: a cited bead must be live, so when it
+#: CLOSES this gate goes red, and the cheapest way back to green is to delete the
+#: citation and write a sentence in its place. Nothing pushed the other way.
+#:
+#: Measured 2026-10-27: the table had decayed to 0 of 12 mapped, and its own
+#: prose was the evidence -- NINE of the twelve `unmapped_reason` texts existed
+#: because a bead had closed ("the historical ... is closed", "the former
+#: citation ..."). Every refusal an operator read, for any of the twelve kinds,
+#: said `remediation_bead: none`. Re-pointed to 4 of 12 in 79acfc0c9; this floor
+#: is what stops that repair decaying again silently.
+#:
+#: IT DOES NOT MAKE ZERO ILLEGAL, and that distinction is load-bearing. Intended
+#: absence is a real answer and `check()` still accepts an all-unmapped table --
+#: the `all_kinds_explicitly_unmapped` arm asserts exactly that, which is why
+#: this check lives OUTSIDE `check()` rather than inside the per-kind loop. The
+#: floor is a claim about the REAL table at a moment, not about the schema. Drop
+#: it deliberately, in a commit that says which owner disappeared; do not drop it
+#: to clear a red.
+MAPPED_FLOOR = 4
+
 
 class ContractError(ValueError):
     pass
@@ -87,13 +110,55 @@ def check(module, statuses):
     mapped = 0
     for kind, record in guidance.items():
         require(isinstance(record, dict), f"{kind}: guidance must be a record")
+        # THE EXACT-SET XOR STAYS, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+        #
+        # bd-uaonk proposes a third, differently-named companion key (e.g.
+        # `triage`) so a MAPPED kind can keep its one-line hint -- the cost of
+        # not having one is real and visible in 79acfc0c9, where four kinds lost
+        # useful text on gaining an owner, including remote_transport_timeout's
+        # "upload, execution, and artifact-return timeouts have different causes;
+        # identify the failed transfer phase first". That text now survives only
+        # in a source comment, which the receipt does not show.
+        #
+        # DECLINED FOR NOW, on verifiability rather than on taste. The key would
+        # have to be emitted by `attach_remediation_guidance` in rch_verify.sh,
+        # and that record is consumed by two Rust contract suites
+        # (tests/contracts/no_silent_fallback.rs,
+        # swarm_replay_selector_admission_conformance.rs) and three
+        # tests/fixtures/verify_ledger/*.json fixtures. Adding a field to a
+        # receipt shape with five consumers cannot be checked on this host --
+        # cargo does not run here at all, `~/.rustup/toolchains` being a dangling
+        # symlink into an unmounted volume -- and shipping an unverified schema
+        # change to the dispatch wrapper's receipt is a worse trade than losing a
+        # hint. The declining is the whole of the cost: no information is
+        # destroyed, it is just not in the receipt.
+        #
+        # WHAT WOULD CHANGE THE ANSWER: a lane that can run tests/contracts/.
+        # Then the change is small -- widen this set to allow
+        # {"bead", "triage"}, keep rejecting {"bead", "unmapped_reason"} (the
+        # `bead_and_reason_ambiguous` arm below, which is right: a key named
+        # *unmapped*_reason on a mapped record contradicts itself), and add an
+        # accepting arm for the new shape.
         require(set(record) in ({"bead"}, {"unmapped_reason"}),
                 f"{kind}: require exactly one live bead or explicit unmapped_reason")
         if "bead" in record:
             bead = record["bead"]
             require(isinstance(bead, str) and bead.startswith("bd-"), f"{kind}: invalid bead")
+            # THE MESSAGE NAMES THE PREFERRED REPAIR, because this string is
+            # where the decision actually gets made -- an operator staring at a
+            # red gate takes whichever repair is cheapest unless told which one
+            # is right, and the two are not equally good (bd-uaonk).
             require(statuses.get(bead) in LIVE_STATUSES,
-                    f"{kind}: bead {bead} is {statuses.get(bead, 'missing')}, not live")
+                    f"{kind}: bead {bead} is {statuses.get(bead, 'missing')}, "
+                    f"not live. PREFERRED REPAIR: re-point {kind} at the bead "
+                    f"that owns this blocker now, which keeps the refusal "
+                    f"receipt useful to whoever reads it. FALLBACK, only when no "
+                    f"owner exists: replace the citation with an "
+                    f"`unmapped_reason` sentence -- that turns this green but "
+                    f"makes every future refusal for {kind} report "
+                    f"`remediation_bead: none`, and nine of the twelve reasons "
+                    f"in this table already exist because somebody took the "
+                    f"fallback. Taking it also trips MAPPED_FLOOR.")
             mapped += 1
         else:
             reason = record["unmapped_reason"]
@@ -161,6 +226,31 @@ def check(module, statuses):
     require(set(unknown) == {"unmapped_reason"} and bool(unknown["unmapped_reason"].strip()),
             "unknown cached kind must have a reason and no invented bead")
     return {"kinds": len(kinds), "mapped": mapped, "unmapped_with_reason": len(kinds) - mapped}
+
+
+def mapped_floor_verdict(mapped, floor=MAPPED_FLOOR):
+    """(ok, note) for the mapped-citation floor. Pure, so it is directly testable.
+
+    Kept separate from `check()` on purpose: `check()` validates the SCHEMA and
+    must keep accepting an all-unmapped table, which the
+    `all_kinds_explicitly_unmapped` arm pins. This validates the TABLE.
+    """
+    if mapped < floor:
+        return False, (
+            f"mapped citations fell to {mapped}, below the floor of {floor}. A "
+            f"kind that had a live owner no longer cites one. Re-point it at the "
+            f"current owner; if the owner genuinely no longer exists, lower "
+            f"MAPPED_FLOOR to {mapped} in the same commit and say which owner "
+            f"disappeared. Do not lower it merely to clear this red -- that is "
+            f"the one-way drift this floor exists to stop (bd-uaonk)."
+        )
+    if mapped > floor:
+        return True, (
+            f"floor is STALE: {mapped} kinds carry a live bead against a floor of "
+            f"{floor}. Raise MAPPED_FLOOR to {mapped} in the commit that added "
+            f"the citation, so the gain cannot be lost silently."
+        )
+    return True, f"mapped citations at the floor of {floor}"
 
 
 def self_test(module, statuses):
@@ -236,6 +326,34 @@ def self_test(module, statuses):
                     for _ in table.keys]
     check(all_unmapped, statuses)
     results.append({"case": "all_kinds_explicitly_unmapped", "accepted": True})
+
+    # THE FLOOR, ALL THREE POLARITIES. Without the failing one the floor could be
+    # deleted and every run would still pass; without the "stale" one a gain
+    # could be made and then lost without anything noticing; without the equal
+    # one a clause that rejected everything would satisfy the other two.
+    for name, mapped, floor, want_ok, needle in (
+        ("mapped_floor_breach_rejected", 3, 4, False, "below the floor"),
+        ("mapped_floor_at_floor_accepted", 4, 4, True, "at the floor"),
+        ("mapped_floor_above_floor_reports_stale", 5, 4, True, "floor is STALE"),
+    ):
+        ok, note = mapped_floor_verdict(mapped, floor)
+        require(ok is want_ok, f"{name}: verdict {ok} for mapped={mapped} floor={floor}")
+        require(needle in note, f"{name}: note did not say {needle!r}: {note}")
+        results.append({"case": name, "accepted" if want_ok else "rejected": True})
+
+    # ZERO MUST STILL BE SCHEMA-LEGAL. The arm above proves `check()` accepts an
+    # all-unmapped table; this proves the floor is what refuses it, so the two
+    # concerns cannot be confused by a later reader.
+    ok, note = mapped_floor_verdict(0, 4)
+    require(not ok and "below the floor" in note,
+            "an all-unmapped table must be schema-legal but below a non-zero floor")
+    results.append({"case": "zero_is_schema_legal_but_below_floor", "rejected": True})
+
+    # And a floor of 0 must accept 0, or "intentional absence" could not be
+    # recorded at all once someone lowered the floor to match it.
+    ok, note = mapped_floor_verdict(0, 0)
+    require(ok, "a floor of 0 must accept 0 mapped citations")
+    results.append({"case": "zero_floor_accepts_zero", "accepted": True})
     return results
 
 
@@ -250,6 +368,14 @@ def main():
         statuses = load_statuses(args.beads.read_text())
         report = {"schema": "ee.rch.remediation_guidance_check.v1", "status": "pass",
                   **check(module, statuses)}
+        # `mapped` was already in this JSON and a decay to zero was therefore
+        # "visible" only to someone who read the field and knew what to compare
+        # it against. The floor makes the decay FAIL, which is the only form of
+        # visible that survives nobody looking (bd-uaonk).
+        floor_ok, floor_note = mapped_floor_verdict(report["mapped"])
+        report["mapped_floor"] = MAPPED_FLOOR
+        report["mapped_floor_note"] = floor_note
+        require(floor_ok, floor_note)
         if args.self_test:
             report["cases"] = self_test(module, statuses)
             report["passed"] = len(report["cases"])
