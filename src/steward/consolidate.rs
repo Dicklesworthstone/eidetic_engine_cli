@@ -146,7 +146,7 @@ impl<'a> BorrowedConsolidationProposal<'a> {
             proposed_content: self.source.content.clone(),
             proposed_confidence: self.source.confidence.max(self.target.confidence),
             reason: format!(
-                "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
+                "Duplicate {level}/{kind} memories share byte-identical content {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
                 normalized, self.target.id, self.source.id
             ),
         }
@@ -640,11 +640,13 @@ mod tests {
     }
 
     #[test]
-    fn normalization_and_limit_defaults_are_stable() -> TestResult {
-        let normalized = normalize_memory_content_for_consolidation("  Cargo   fmt\nCHECK  ");
-        if normalized != "cargo fmt check" {
+    fn lossless_content_identity_and_limit_defaults_are_stable() -> TestResult {
+        let content = "  Cargo   fmt\nCHECK  ";
+        let normalized = normalize_memory_content_for_consolidation(content);
+        if normalized != content {
             return Err(format!("unexpected normalized content: {normalized:?}"));
         }
+        assert!(normalize_memory_content_for_consolidation(" \t\n").is_empty());
 
         let default_limit = consolidation_sieve_candidate_limit(None);
         if default_limit != CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES {
@@ -702,7 +704,7 @@ mod tests {
                     proposed_content: source.content.clone(),
                     proposed_confidence: source.confidence.max(target.confidence),
                     reason: format!(
-                        "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
+                        "Duplicate {level}/{kind} memories share byte-identical content {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
                         normalized, target.id, source.id
                     ),
                 });
@@ -856,11 +858,7 @@ mod tests {
                 &format!("mem_{number:026}"),
                 &CreateMemoryInput {
                     workspace_id: workspace.clone(),
-                    content: if number == 1 {
-                        "Run cargo fmt before release.".to_owned()
-                    } else {
-                        "  Run  cargo fmt before release.  ".to_owned()
-                    },
+                    content: "Run cargo fmt before release.".to_owned(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     workflow_id: None,
@@ -894,7 +892,7 @@ mod tests {
                 stable_consolidation_candidate_id(&workspace, &source, &target)
             );
             assert_eq!(plan.proposed_content, "Run cargo fmt before release.");
-            assert_eq!(plan.normalized_content, "run cargo fmt before release.");
+            assert_eq!(plan.normalized_content, "Run cargo fmt before release.");
             assert_eq!(plan.proposed_confidence, 0.9);
         }
         let mut reversed = before.clone();

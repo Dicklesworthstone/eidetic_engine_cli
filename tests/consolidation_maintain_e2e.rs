@@ -19,8 +19,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 type TestResult = Result<(), String>;
 const TEST_ID: &str = "consolidation_maintain_e2e";
 const GROUP_PHRASE: &str = "Zephyr quill consolidation gate: run cargo fmt --check before release.";
-const DUPLICATE_PHRASE: &str =
-    "  zephyr   QUILL consolidation gate: run cargo fmt --check before release. ";
+const DUPLICATE_PHRASE: &str = GROUP_PHRASE;
 const WORDING_CONTROL_PHRASE: &str =
     "Zephyr quill consolidation gate: run cargo fmt --check before publishing.";
 const SEARCH_QUERY: &str = "zephyr quill consolidation gate";
@@ -734,7 +733,7 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         ),
         (
             "remember_b_duplicate",
-            "  quillmarsh   isolation gate: workspace B duplicate one. ",
+            "Quillmarsh isolation gate: workspace B duplicate one.",
         ),
     ] {
         let response = ws.run_json_in(

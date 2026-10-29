@@ -9207,7 +9207,7 @@ mod tests {
                 "mem_high",
                 "procedural",
                 "rule",
-                " run   cargo   fmt ",
+                "Run cargo fmt",
                 0.91,
                 0.80,
                 0.70,
@@ -9247,14 +9247,71 @@ mod tests {
         )?;
         ensure(
             candidate.normalized_content.as_str(),
-            "run cargo fmt",
-            "normalized content key",
+            "Run cargo fmt",
+            "lossless content key",
         )?;
         ensure(
             candidate.reason.contains(CONSOLIDATION_SIEVE_ALGORITHM),
             true,
             "reason mentions selector",
         )
+    }
+
+    #[test]
+    fn consolidation_planner_preserves_distinct_commands_literals_and_code() -> TestResult {
+        for (case, original, distinct) in [
+            ("flag case", "cargo -V", "cargo -v"),
+            (
+                "path case",
+                "Read /srv/Prod/config.toml",
+                "Read /srv/prod/config.toml",
+            ),
+            ("quoted spacing", "Print \"a  b\"", "Print \"a b\""),
+            (
+                "indentation",
+                "if ready:\n    deploy()\n    notify()",
+                "if ready:\n    deploy()\nnotify()",
+            ),
+            ("line boundary", "Stop\nStart", "Stop Start"),
+        ] {
+            let memories = vec![
+                stored_memory_for_consolidation(
+                    "mem_survivor",
+                    "procedural",
+                    "rule",
+                    original,
+                    0.95,
+                    0.80,
+                    0.70,
+                ),
+                stored_memory_for_consolidation(
+                    "mem_exact_duplicate",
+                    "procedural",
+                    "rule",
+                    original,
+                    0.40,
+                    0.30,
+                    0.20,
+                ),
+                stored_memory_for_consolidation(
+                    "mem_distinct",
+                    "procedural",
+                    "rule",
+                    distinct,
+                    0.60,
+                    0.50,
+                    0.40,
+                ),
+            ];
+            let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, None);
+            assert_eq!(selection.considered_candidates, 1, "{case}");
+            assert_eq!(selection.candidates.len(), 1, "{case}");
+            let candidate = &selection.candidates[0];
+            assert_eq!(candidate.source_memory_id, "mem_survivor", "{case}");
+            assert_eq!(candidate.target_memory_id, "mem_exact_duplicate", "{case}");
+            assert_eq!(candidate.proposed_content, original, "{case}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -9273,7 +9330,7 @@ mod tests {
                 "mem_rule_b",
                 "procedural",
                 "rule",
-                "repeatable   build rule",
+                "Repeatable build rule",
                 0.20,
                 0.10,
                 0.10,
@@ -9300,7 +9357,7 @@ mod tests {
                 "mem_fact_b",
                 "evidence",
                 "fact",
-                "worker preflight failed",
+                "Worker preflight failed",
                 0.30,
                 0.20,
                 0.20,
@@ -9318,7 +9375,7 @@ mod tests {
                 "mem_note_b",
                 "decision",
                 "note",
-                "keep static proof",
+                "Keep static proof",
                 0.58,
                 0.39,
                 0.29,
@@ -12007,7 +12064,7 @@ mod tests {
             insert_consolidation_memory(
                 &connection,
                 "mem_consolpass0000000000000002",
-                " run   rustfmt   before   commit. ",
+                "Run rustfmt before commit.",
                 0.41,
                 0.20,
                 0.10,
@@ -12121,7 +12178,7 @@ mod tests {
         insert_consolidation_memory(
             &connection,
             "mem_consolpass0000000000000002",
-            " run   rustfmt   before   commit. ",
+            "Run rustfmt before commit.",
             0.41,
             0.20,
             0.10,

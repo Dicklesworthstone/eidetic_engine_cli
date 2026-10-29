@@ -11924,7 +11924,7 @@ fn resolve_consolidate_absorb(
         if normalized_source.is_empty() || normalized_source != normalized_target {
             issues.push(validation_issue(
                 "consolidate_absorb_pair_no_longer_duplicates",
-                "Source and target content no longer normalize to the same duplicate group.",
+                "Source and target content must be byte-for-byte identical for duplicate consolidation.",
                 "Reject the candidate; one memory changed after the consolidation pass ran.",
             ));
         }
@@ -15757,7 +15757,7 @@ fn revalidate_consolidate_absorb_in_transaction(
     let normalized_target =
         crate::curate::normalize_memory_content_for_consolidation(&target.content);
     if normalized_source.is_empty() || normalized_source != normalized_target {
-        return Err(stale("pair no longer normalizes to one duplicate group"));
+        return Err(stale("pair no longer has byte-identical content"));
     }
     if current.proposed_content.as_deref() != Some(source.content.as_str()) {
         return Err(stale("proposed content drifted from the surviving source"));
@@ -28782,7 +28782,7 @@ mod tests {
     }
 
     /// Seed a workspace shaped exactly like a steward `consolidation_pass`
-    /// output: a surviving source memory, a whitespace-variant duplicate
+    /// output: a surviving source memory, a byte-identical duplicate
     /// target, and a pending `consolidate` candidate whose `source_id` names
     /// the survivor.
     fn seed_consolidate_absorb_candidate_database(
@@ -28840,7 +28840,7 @@ mod tests {
             &connection,
             workspace_id,
             target_memory_id,
-            "  zephyr   quill consolidation runs the rustfmt gate before every release. ",
+            CONSOLIDATE_ABSORB_SURVIVOR_CONTENT,
             0.41,
         )?;
         connection
@@ -29456,6 +29456,118 @@ mod tests {
         )
     }
 
+    #[test]
+    fn consolidate_absorb_rechecks_case_spacing_and_line_boundaries() -> TestResult {
+        for (case, changed_content) in [
+            (
+                "case",
+                CONSOLIDATE_ABSORB_SURVIVOR_CONTENT.to_ascii_lowercase(),
+            ),
+            (
+                "spacing",
+                CONSOLIDATE_ABSORB_SURVIVOR_CONTENT.replace("quill ", "quill  "),
+            ),
+            (
+                "line boundary",
+                CONSOLIDATE_ABSORB_SURVIVOR_CONTENT.replace("rustfmt gate", "rustfmt\ngate"),
+            ),
+        ] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+            let workspace_path = tempdir.path();
+            let database_path = workspace_path.join("ee.db");
+            let workspace_id = test_workspace_id(workspace_path);
+            let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E41)).to_string();
+            let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E42)).to_string();
+            let candidate_id = crate::curate::steward_consolidation_candidate_id(
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+            );
+            let connection = seed_consolidate_absorb_candidate_database(
+                &database_path,
+                workspace_path,
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+                None,
+            )?;
+            validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &candidate_id,
+                actor: Some("ScarletMill"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "approved candidate missing".to_owned())?;
+            let absorb = consolidate_absorb_plan_for_test(
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+            );
+            super::revalidate_consolidate_absorb_in_transaction(
+                &connection,
+                &workspace_id,
+                &stored,
+                &absorb,
+            )
+            .map_err(|error| format!("{case}: exact duplicate must pass: {}", error.message()))?;
+
+            // Only the target changes after approval. Lowercasing or
+            // collapsing whitespace would silently absorb this distinct row.
+            assert!(
+                connection
+                    .apply_memory_curation_update(
+                        &target_memory_id,
+                        &crate::db::ApplyMemoryCurationInput {
+                            workspace_id: workspace_id.clone(),
+                            content: changed_content.clone(),
+                            confidence: 0.41,
+                            trust_class: "agent_validated".to_owned(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?,
+                "{case}: fixture must update the target"
+            );
+
+            let error = super::revalidate_consolidate_absorb_in_transaction(
+                &connection,
+                &workspace_id,
+                &stored,
+                &absorb,
+            )
+            .expect_err("content differences must fail the in-transaction CAS");
+            assert!(
+                error
+                    .message()
+                    .contains("no longer has byte-identical content"),
+                "{case}: {}",
+                error.message()
+            );
+            assert_consolidate_absorb_blocked_without_mutation(
+                &connection,
+                workspace_path,
+                &database_path,
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+                "consolidate_absorb_pair_no_longer_duplicates",
+            )?;
+            let target = connection
+                .get_memory(&target_memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "blocked target disappeared".to_owned())?;
+            assert_eq!(target.content, changed_content, "{case}");
+        }
+        Ok(())
+    }
+
     /// bd-1oep7: the in-transaction CAS must anchor on the ACTUAL steward
     /// creation audit row. A candidate with perfect computable provenance
     /// (rule-engine source type, matching deterministic id) but no creation
@@ -29573,7 +29685,11 @@ mod tests {
     fn consolidate_absorb_in_transaction_cas_rejects_interleaved_mutations() -> TestResult {
         for (offset, interleave, expected_fragment) in [
             (0x7F00_u128, "tombstone_target", "already tombstoned"),
-            (0x7F10, "edit_survivor", "no longer normalizes"),
+            (
+                0x7F10,
+                "edit_survivor",
+                "no longer has byte-identical content",
+            ),
         ] {
             let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
             let workspace_path = tempdir.path();

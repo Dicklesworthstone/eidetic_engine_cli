@@ -116,7 +116,7 @@ assert_num() {
 with_temp_workspace WS
 
 GROUP_PHRASE="Zephyr quill consolidation gate: run cargo fmt --check before release."
-DUPLICATE_PHRASE="  zephyr   QUILL consolidation gate: run cargo fmt --check before release. "
+DUPLICATE_PHRASE="$GROUP_PHRASE"
 WORDING_CONTROL_PHRASE="Zephyr quill consolidation gate: run cargo fmt --check before publishing."
 SEARCH_QUERY="zephyr quill consolidation gate"
 

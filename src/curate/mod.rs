@@ -363,19 +363,18 @@ fn compare_hebbian_updates(
         .then_with(|| left.link_id.cmp(&right.link_id))
 }
 
-/// Canonical whitespace/case normalization used to decide whether two
-/// memories are exact-duplicate consolidation candidates. The steward
-/// proposer and the apply-time revalidation must share this single
-/// definition or a candidate could tombstone a memory that is no longer a
-/// duplicate.
+/// Lossless content identity for exact-duplicate consolidation. Case,
+/// spacing, indentation and line boundaries can change commands, literals
+/// and code, so none may be erased before authorizing a duplicate tombstone.
+/// The proposer and both apply-time checks share this definition. Blank
+/// content is never a consolidation candidate.
 #[must_use]
 pub(crate) fn normalize_memory_content_for_consolidation(content: &str) -> String {
-    content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_ascii_lowercase()
+    if content.trim().is_empty() {
+        String::new()
+    } else {
+        content.to_owned()
+    }
 }
 
 /// Canonical deterministic id for a steward-proposed Consolidate candidate:
