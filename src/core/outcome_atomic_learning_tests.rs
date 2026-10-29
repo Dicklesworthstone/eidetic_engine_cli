@@ -292,6 +292,16 @@ impl Fixture {
         Self::feedback_state_for(&self.db)
     }
 
+    fn persisted_feedback_state(&self) -> FeedbackState {
+        // Fault injection and review use different writers. Also observe the
+        // result through a fresh reader so an old snapshot cannot make a
+        // partial commit look like a successful rollback.
+        let observer = DbConnection::open_file_read_only(&self.database).unwrap();
+        let state = Self::feedback_state_for(&observer);
+        observer.close().unwrap();
+        state
+    }
+
     fn feedback_state_for(db: &DbConnection) -> FeedbackState {
         let mut audits = db.list_audit_entries(None, None).unwrap();
         audits.sort_by(|left, right| left.id.cmp(&right.id));
@@ -707,6 +717,7 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
         before,
         "queue failure must roll back the feedback key, posterior, trust, audits and generation"
     );
+    assert_eq!(fixture.persisted_feedback_state(), before);
 
     fixture
         .db
@@ -730,11 +741,13 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
     );
     fixture.assert_pending_memory_jobs(1);
     let learned = fixture.feedback_state();
+    assert_eq!(fixture.persisted_feedback_state(), learned);
     assert_eq!(
         record_outcome(&options).unwrap().status,
         OutcomeRecordStatus::AlreadyRecorded
     );
     assert_eq!(fixture.feedback_state(), learned);
+    assert_eq!(fixture.persisted_feedback_state(), learned);
 }
 
 #[test]
@@ -1215,6 +1228,7 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
     let audits = fixture.audit_count();
     let jobs = fixture.assert_pending_memory_jobs(1);
     let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
+    let before = fixture.persisted_feedback_state();
     fixture
         .db
         .execute_raw(&format!(
@@ -1249,6 +1263,11 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
     assert_eq!(
         fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
         generation
+    );
+    assert_eq!(
+        fixture.persisted_feedback_state(),
+        before,
+        "a failed release must leave no durable event, learning, index job or review transition"
     );
 
     // Use an independent writer for fault cleanup, as a new CLI invocation
@@ -1287,6 +1306,13 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
         "human_explicit"
     );
     fixture.assert_pending_memory_jobs(2);
+    let learned = fixture.feedback_state();
+    assert_eq!(fixture.persisted_feedback_state(), learned);
+    assert_eq!(
+        review_feedback_quarantine(&release).unwrap().status,
+        "already_reviewed"
+    );
+    assert_eq!(fixture.persisted_feedback_state(), learned);
 }
 
 #[test]
@@ -1312,6 +1338,7 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
         before,
         "a rejected index insert must preserve pending review and all prior committed learning"
     );
+    assert_eq!(fixture.persisted_feedback_state(), before);
 
     let cleanup = DbConnection::open_file(&fixture.database).unwrap();
     cleanup
@@ -1321,13 +1348,26 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
     let report = review_feedback_quarantine(&release).unwrap();
     assert_eq!(report.status, "released");
     assert_eq!(report.feedback_event_id.as_deref(), Some(HELD_EVENT));
+    assert_eq!(
+        fixture.posterior(),
+        (
+            before.posterior.0,
+            before.posterior.1 + DEFAULT_HARMFUL_WEIGHT
+        )
+    );
+    assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        before.workspace_generation.map(|generation| generation + 1)
+    );
     fixture.assert_pending_memory_jobs(2);
     let learned = fixture.feedback_state();
+    assert_eq!(fixture.persisted_feedback_state(), learned);
     assert_eq!(
         review_feedback_quarantine(&release).unwrap().status,
         "already_reviewed"
     );
     assert_eq!(fixture.feedback_state(), learned);
+    assert_eq!(fixture.persisted_feedback_state(), learned);
 }
 
 #[test]
