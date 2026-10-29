@@ -51,8 +51,12 @@ repo-wide, and nobody pays for a pinned dispatch to check a markdown table
 that touches docs or the CLI surface; it is the cheapest gate in the repository.
 
 **THE FAMILY IS NOT THE WHOLE LOCALLY-RUNNABLE SET, and the gap is where the
-red was hiding.** Of verify.sh's 134 stages, **30** run here with no toolchain,
-no binary and no lane: 15 `python3` stages and 15 shell `--self-test` stages.
+red was hiding.** Of verify.sh's 135 `run_stage` lines (134 distinct names; one
+stage is invoked twice and shares a single budget row), **31** match the grep
+below and run here with no toolchain, no binary and no lane: 16 `python3` stages
+and 15 shell `--self-test` stages. Re-measured 2026-10-28; it read 30 / 15 / 15
+before the Golden Consumption Floor stage landed, and these counts move whenever
+a stage is added, so re-run the grep rather than quoting the number.
 **Two of those Python stages are not named `check-*.py`**, so the glob above
 cannot see them — and one of the two was the red. Enumerate from verify.sh
 itself rather than from the glob:
@@ -66,6 +70,55 @@ stages, most of which need the `ee` binary or a dispatch, so the list stops
 being the locally-runnable set and you cannot tell a real red from an absent
 rail. (`fuzz_target_audit_self_test` is a shell FUNCTION stage, not a script
 path, so it is outside this enumeration and was not run.)
+
+**AND THAT GREP IS STILL NARROWER THAN THE HOST, WHICH IS WHERE A RED HID FOR
+EIGHT HOURS ON 2026-10-28.** The warning above is right — do not widen the
+pattern — but the set it produces is a claim about a GREP, not about this
+machine. `./scripts/e2e_invocation_audit.sh` carries no flag, so it matches
+neither alternative, and it completes here in under a second. It was RED (a
+stale-baseline failure caused by prose in a Python docstring naming an e2e
+script) and no sweep saw it, because every sweep used the grep.
+
+Classified all 135 `run_stage` lines: 49 shell-function dispatch, 5 naming
+cargo/binary/rch on the command line, 81 local candidates, of which the grep
+sees 26 and MISSES 55. Seventeen of the 55 carry an `ee_require_current_binary`
+guard directly or through a sourced library, so they genuinely cannot run.
+**NINE MORE DO RUN, measured green twice on 2026-10-28, and they must be named
+because no pattern distinguishes them:**
+
+```bash
+./scripts/e2e_repo_hygiene.sh
+./scripts/contract-drift-radar.sh --quiet
+./scripts/e2e_event_contract_radar_golden.sh
+./scripts/panic_helper_radar_golden.sh
+./scripts/ci_proof_lane_snapshot_fixture_test.sh
+./scripts/ci_proof_lane_hygiene.sh --json
+./scripts/e2e_release_provenance.sh --static
+./scripts/beads_export_repair.sh --fixture-suite tests/fixtures/beads_export
+./scripts/e2e_overhaul/lib/test_fake_tailscale.sh
+```
+
+So the locally-runnable set is **40**, not 31. Run these nine alongside the grep's
+output; all nine were green and none had ever been run on this host.
+
+**CLASSIFY BY THE SCRIPT'S CONTENTS, NOT ITS COMMAND LINE, and this is a tripwire
+matter rather than a tidiness one.** `./scripts/mcp_lib_tests.sh` names no cargo
+in `verify.sh`, so a command-line filter calls it local — but `:100` runs
+`cargo test --workspace --features mcp --lib`, which
+`check-local-cargo-tripwire.sh` forbids. A sweep built on the command line
+INVOKES A FORBIDDEN SUBCOMMAND without ever printing the word `cargo`; mine did,
+and it hung past 150s rather than failing, because a cargo BUILD command goes
+through the RCH shim and attempts a dispatch. (A trivial `cargo --version` fails
+locally in 1.4s with the dangling-symlink EEXIST, so "cargo fails fast here" is
+true of trivial commands and false of build commands.) Grep the script for
+`cargo (build|check|test|bench|clippy|doc|run|install|rustc|fix)` before adding
+it to any local sweep.
+
+Two more of the 55 are environment-dependent rather than logic reds, and the
+distinction is in their own output: `./scripts/lexical_relevance_pins.sh` and
+its `--guard` arm report "no lexical_relevance_contract binary under
+`<target>/debug/deps`. Gate 5 builds it; this stage must run after it." One of
+the two is labelled `(tracked red)` in its own stage name.
 
 Measured 2026-10-27 by running all 30: **29 green, one hard red.**
 `scripts/lib/emit_proof_capsule.py --self-test` had been exiting 1 for two days
