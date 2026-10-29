@@ -1264,6 +1264,92 @@ mod workflow_tests {
     }
 
     #[test]
+    fn feedback_on_a_retained_card_revision_blocks_native_learning_and_revalidation() -> TestResult
+    {
+        use crate::core::incident_card::{INCIDENT_CARD_DERIVATION, proof::CardChecks};
+
+        let workspace = Workspace::new()?;
+        let (session_id, _, _) =
+            workspace.episode(99_211, "Revised card work item.", COMMAND, true)?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let sources = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let arcs = session_failure_arcs(&workspace.id, &session, &sources);
+        let arc = arcs.first().ok_or("resolved episode")?;
+        let draft = IncidentCardSources::new(&sources)
+            .draft(&workspace.id, &session_id, arc)
+            .ok_or("draft")?;
+        let mut older = draft.clone();
+        older.input.excerpt.push_str("\nOriginal rendering.");
+        older.input.content_hash = format!(
+            "blake3:{}",
+            blake3::hash(older.input.excerpt.as_bytes()).to_hex()
+        );
+        workspace.db.insert_evidence_span(&older.id, &older.input)?;
+        older.input.excerpt.push_str("\nIntermediate rendering.");
+        older.input.content_hash = format!(
+            "blake3:{}",
+            blake3::hash(older.input.excerpt.as_bytes()).to_hex()
+        );
+        let prior = older.revision_draft();
+        workspace.db.insert_evidence_span(&prior.id, &prior.input)?;
+        let report = crate::core::cass_error_recall::record_session_error_recall(
+            &workspace.db,
+            &workspace.id,
+            &session_id,
+        )?;
+        assert_eq!(report.incident_cards_recorded, 1);
+        let current = workspace
+            .db
+            .get_evidence_span(&draft.revision_draft().id)?
+            .ok_or("current")?;
+        let before = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let initial = workspace.review(&session_id, 0.6, true)?;
+        let proposals = native(&initial);
+        assert_eq!(proposals.len(), 1);
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, &proposals[0].candidate_id)?
+            .ok_or("stored proposal")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        // A different error class remains independent, even for a real member
+        // of this incident family. Exact harmful feedback survives regeneration.
+        record_repair_feedback(&workspace, &workspace.id, "E0599", &prior.id, true)?;
+        assert_eq!(native(&workspace.review(&session_id, 0.6, false)?).len(), 1);
+        record_repair_feedback(&workspace, &workspace.id, "E0277", &prior.id, true)?;
+        assert!(native(&workspace.review(&session_id, 0.0, false)?).is_empty());
+        assert!(validate_recorded(&workspace.db, &stored).is_err());
+        assert!(validate_draft(&workspace.db, &workspace.id, proposals[0]).is_err());
+        let mut checks = CardChecks::default();
+        checks.observe(&current)?;
+        assert_eq!(
+            checks.withheld(&workspace.db, &workspace.id)?,
+            BTreeSet::from([current.id])
+        );
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session_id)?,
+            before
+        );
+
+        // The same reserved identity cannot become a prose lesson after a
+        // shape change, even when its displayed body looks like an explanation.
+        let mut reserved = workspace.db.get_evidence_span(&prior.id)?.ok_or("prior")?;
+        reserved.span_kind = "message".to_owned();
+        reserved.role = Some("assistant".to_owned());
+        reserved.excerpt = sources
+            .iter()
+            .find(|span| span.role.as_deref() == Some("assistant") && span.span_kind == "message")
+            .ok_or("repair")?
+            .excerpt
+            .clone();
+        assert!(reserved.has_screened_upstream_reference(&format!(
+            "ee-incident-card:{INCIDENT_CARD_DERIVATION}:{}",
+            reserved.id
+        )));
+        assert!(review_learning_text(&reserved).is_none());
+        Ok(())
+    }
+
+    #[test]
     fn native_mining_and_feedback_are_reused_only_inside_one_source_snapshot() -> TestResult {
         let workspace = Workspace::new()?;
         let (id, _, _) = workspace.episode(99_301, "Cached feedback work item.", COMMAND, true)?;

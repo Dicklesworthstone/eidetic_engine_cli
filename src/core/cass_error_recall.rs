@@ -73,7 +73,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// refusing partial chains as repair proof, without changing source identity.
 /// V19 validates standalone native rustc reports, including terminal styling
 /// and warning preludes, instead of salvaging raw error-looking substrings.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v19";
+/// V20 materializes immutable incident-card revisions when current derivation
+/// changes their text or provenance, retaining prior cards and their feedback.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v20";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -97,7 +99,7 @@ pub struct CassErrorRecallReport {
     /// run, excluding incident-card associations. Not newly inserted rows or
     /// total class history; unchanged retries report the same submissions.
     pub repair_links_recorded: u32,
-    /// Derived incident cards written by this run (ADR 0091).
+    /// Derived incident cards or immutable revisions written by this run.
     pub incident_cards_recorded: u32,
 }
 
@@ -112,17 +114,26 @@ pub fn record_session_error_recall(
     workspace_id: &str,
     session_id: &str,
 ) -> Result<CassErrorRecallReport> {
+    connection.with_transaction(|| {
+        record_session_error_recall_in_current_snapshot(connection, workspace_id, session_id)
+    })
+}
+
+fn record_session_error_recall_in_current_snapshot(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<CassErrorRecallReport> {
     let Some(session) = connection.get_session(session_id)? else {
         return Ok(CassErrorRecallReport::default());
     };
     if session.workspace_id != workspace_id {
         return Ok(CassErrorRecallReport::default());
     }
-    let spans = connection
+    let (cards, spans): (Vec<_>, Vec<_>) = connection
         .list_evidence_spans_for_session(session_id)?
         .into_iter()
-        .filter(|span| !span.is_derived_incident_card())
-        .collect::<Vec<_>>();
+        .partition(crate::core::incident_card::proof::requires_proof);
     let arcs = session_failure_arcs(workspace_id, &session, &spans);
     let mut report = CassErrorRecallReport::default();
     if arcs.is_empty() {
@@ -132,53 +143,85 @@ pub fn record_session_error_recall(
     // share a lazy borrowed index instead of rescanning every source per facet.
     let card_sources =
         (arcs.len() > 1).then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
-    connection.with_transaction(|| {
-        for arc in &arcs {
-            report.failures_seen = report.failures_seen.saturating_add(1);
-            if arc.resolution.is_some() {
-                report.resolved_failures = report.resolved_failures.saturating_add(1);
-            }
-            let recording = arc.recording();
-            for diagnostic in &arc.diagnostics {
-                // Acknowledgement is proportional to this observation, never
-                // to all previous sessions containing the same error class.
-                let receipt =
-                    persist_error_repair_links(connection, workspace_id, diagnostic, &recording)?;
-                report.fingerprints_recorded = report.fingerprints_recorded.saturating_add(1);
-                report.repair_links_recorded = report
-                    .repair_links_recorded
-                    .saturating_add(u32::try_from(receipt.links_submitted).unwrap_or(u32::MAX));
-            }
-            let card = match &card_sources {
-                Some(sources) => sources.draft(workspace_id, session_id, arc),
-                None => crate::core::incident_card::draft_incident_card(
-                    workspace_id,
-                    session_id,
-                    &spans,
-                    arc,
-                ),
-            };
-            let Some(card) = card else {
-                continue;
-            };
-            if connection.get_evidence_span(&card.id)?.is_none() {
+    for arc in &arcs {
+        report.failures_seen = report.failures_seen.saturating_add(1);
+        if arc.resolution.is_some() {
+            report.resolved_failures = report.resolved_failures.saturating_add(1);
+        }
+        let recording = arc.recording();
+        for diagnostic in &arc.diagnostics {
+            // Acknowledgement is proportional to this observation, never
+            // to all previous sessions containing the same error class.
+            let receipt =
+                persist_error_repair_links(connection, workspace_id, diagnostic, &recording)?;
+            report.fingerprints_recorded = report.fingerprints_recorded.saturating_add(1);
+            report.repair_links_recorded = report
+                .repair_links_recorded
+                .saturating_add(u32::try_from(receipt.links_submitted).unwrap_or(u32::MAX));
+        }
+        let card = match &card_sources {
+            Some(sources) => sources.draft(workspace_id, session_id, arc),
+            None => crate::core::incident_card::draft_incident_card(
+                workspace_id,
+                session_id,
+                &spans,
+                arc,
+            ),
+        };
+        let Some(mut card) = card else {
+            continue;
+        };
+        let original = connection.get_evidence_span(&card.id)?;
+        // New renderings never revive a withdrawn/attached card or repair
+        // malformed ownership. Existing native revisions retain all their
+        // source bytes, links, pack references and independent feedback.
+        if original.as_ref().is_some_and(|prior| {
+            prior.memory_id.is_some()
+                || prior.start_byte.is_some()
+                || prior.end_byte.is_some()
+                || prior.session_id != session_id
+                || !prior.is_derived_incident_card()
+                || !prior.is_direct_pack_admitted_for_session(workspace_id, &session)
+                || !prior.has_screened_upstream_reference(&card.input.cass_span_id)
+        }) || cards.iter().any(|prior| {
+            crate::core::incident_card::belongs_to_incident(
+                prior,
+                workspace_id,
+                session_id,
+                &arc.failure_id,
+            ) && (prior.memory_id.is_some()
+                || prior.start_byte.is_some()
+                || prior.end_byte.is_some()
+                || !prior.is_derived_incident_card()
+                || !prior.is_direct_pack_admitted_for_session(workspace_id, &session))
+        }) {
+            continue;
+        }
+        if let Some(prior) = original.as_ref()
+            && !prior.matches_screened_input(&card.input)?
+        {
+            card = card.revision_draft();
+        }
+        match connection.get_evidence_span(&card.id)? {
+            Some(prior) if !prior.matches_screened_input(&card.input)? => continue,
+            Some(_) => {}
+            None => {
                 connection.insert_evidence_span(&card.id, &card.input)?;
                 report.incident_cards_recorded = report.incident_cards_recorded.saturating_add(1);
             }
-            // The card is the compact form of this arc's repair: recall of the
-            // error class surfaces it, and its failing span stays its anchor.
-            let card_recording = ErrorRepairLinkRecording {
-                helpful_repairs: vec![card.id],
-                created_by: Some(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned()),
-                evidence_ref: Some(arc.failure_id.clone()),
-                ..ErrorRepairLinkRecording::default()
-            };
-            for diagnostic in &arc.diagnostics {
-                persist_error_repair_links(connection, workspace_id, diagnostic, &card_recording)?;
-            }
         }
-        Ok(())
-    })?;
+        // The card is the compact form of this arc's repair: recall of the
+        // error class surfaces it, and its failing span stays its anchor.
+        let card_recording = ErrorRepairLinkRecording {
+            helpful_repairs: vec![card.id],
+            created_by: Some(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned()),
+            evidence_ref: Some(arc.failure_id.clone()),
+            ..ErrorRepairLinkRecording::default()
+        };
+        for diagnostic in &arc.diagnostics {
+            persist_error_repair_links(connection, workspace_id, diagnostic, &card_recording)?;
+        }
+    }
     Ok(report)
 }
 
@@ -938,7 +981,10 @@ pub(crate) fn session_failure_arcs(
     let mut arcs = Vec::new();
 
     for (index, span) in spans.iter().enumerate() {
-        if span.workspace_id != workspace_id || span.session_id != session.id {
+        if span.workspace_id != workspace_id
+            || span.session_id != session.id
+            || crate::core::incident_card::proof::requires_proof(span)
+        {
             continue;
         }
         let events = match span.span_kind.as_str() {
@@ -1053,7 +1099,8 @@ fn resolve_pending(
             .iter()
             .rev()
             .filter(|span| {
-                span.span_kind == "message"
+                !crate::core::incident_card::proof::requires_proof(span)
+                    && span.span_kind == "message"
                     && span.role.as_deref() == Some("assistant")
                     && span.is_derivation_admitted_for_session(workspace_id, session)
                     && crate::core::incident_card::explains_a_fix(

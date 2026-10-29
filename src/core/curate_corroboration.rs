@@ -300,12 +300,29 @@ impl NativeRepairCandidates {
             }
             let card_id =
                 crate::core::incident_card::incident_card_id(workspace_id, &arc.failure_id);
+            let card_revisions = spans
+                .iter()
+                .filter(|span| {
+                    crate::core::incident_card::belongs_to_incident(
+                        span,
+                        workspace_id,
+                        &session.id,
+                        &arc.failure_id,
+                    )
+                })
+                .map(|span| &span.id)
+                .collect::<Vec<_>>();
             for diagnostic in &arc.diagnostics {
                 let targets = native
                     .claims
                     .entry(diagnostic.layered_key().key)
                     .or_default();
-                for target in candidate.source_ids.iter().chain(std::iter::once(&card_id)) {
+                for target in candidate
+                    .source_ids
+                    .iter()
+                    .chain(std::iter::once(&card_id))
+                    .chain(card_revisions.iter().copied())
+                {
                     targets
                         .entry(target.clone())
                         .or_default()

@@ -227,6 +227,120 @@ impl Fixture {
 }
 
 #[test]
+fn unchanged_import_refreshes_old_derivation_and_publishes_one_immutable_revision() {
+    let fixture = Fixture::new();
+    fixture.import_source_without_derivation();
+    let source_job = fixture.source_job();
+    let session = fixture
+        .db
+        .get_session(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    let sources = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session_id)
+        .unwrap();
+    let arcs = crate::core::cass_error_recall::session_failure_arcs(
+        &fixture.workspace_id,
+        &session,
+        &sources,
+    );
+    assert_eq!(arcs.len(), 1);
+    let current = crate::core::incident_card::draft_incident_card(
+        &fixture.workspace_id,
+        &fixture.session_id,
+        &sources,
+        &arcs[0],
+    )
+    .unwrap();
+    let revision = current.revision_draft();
+    let mut previous = current.input.clone();
+    previous.excerpt.push_str("\nEarlier incident rendering.");
+    previous.content_hash = format!(
+        "blake3:{}",
+        blake3::hash(previous.excerpt.as_bytes()).to_hex()
+    );
+    fixture
+        .db
+        .insert_evidence_span(&current.id, &previous)
+        .unwrap();
+    let old_card = fixture.db.get_evidence_span(&current.id).unwrap().unwrap();
+    // Reproduce the durable marker from the prior extractor revision. The
+    // transcript and its publication identity stay unchanged during retry.
+    let old_derivation = AuditId::from_uuid(stable_uuid(&format!(
+        "audit:{}:cass_error_recall.v19:{}:{}",
+        crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE,
+        crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+        fixture.session_id,
+    )))
+    .to_string();
+    let old_marker_id = AuditId::from_uuid(stable_uuid(&format!(
+        "audit:cass-error-recall-snapshot:{old_derivation}:{source_job}"
+    )))
+    .to_string();
+    fixture
+        .db
+        .insert_audit(
+            &old_marker_id,
+            &CreateAuditInput {
+                workspace_id: Some(fixture.workspace_id.clone()),
+                actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                target_type: Some("session".to_owned()),
+                target_id: Some(fixture.session_id.clone()),
+                details: Some(
+                    json!({
+                        "committedPublicationId":source_job,
+                        "fingerprintsRecorded":0,
+                        "repairLinksRecorded":0,
+                        "incidentCardsRecorded":1,
+                        "errorRecallDerivation":"cass_error_recall.v19",
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .unwrap();
+    let old_marker = fixture.db.get_audit(&old_marker_id).unwrap();
+    fixture.publish();
+    fixture.assert_card_published(&old_card.id);
+
+    let retry = fixture.import(false);
+    assert_eq!(retry.index_jobs_queued, 1);
+    assert_eq!(retry.sessions[0].index_job_id, Some(fixture.derived_job()));
+    assert_eq!(fixture.source_job(), source_job);
+    assert_eq!(fixture.cards().len(), 2);
+    assert_eq!(
+        fixture.db.get_evidence_span(&old_card.id).unwrap().as_ref(),
+        Some(&old_card)
+    );
+    assert_eq!(fixture.db.get_audit(&old_marker_id).unwrap(), old_marker);
+    let new_card = fixture.db.get_evidence_span(&revision.id).unwrap().unwrap();
+    assert!(new_card.matches_screened_input(&revision.input).unwrap());
+    let marker = fixture.db.get_audit(&fixture.marker_id()).unwrap().unwrap();
+    let details: JsonValue = serde_json::from_str(marker.details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["incidentCardsRecorded"], 1);
+    assert_eq!(
+        details["errorRecallDerivation"],
+        crate::core::cass_error_recall::CASS_ERROR_RECALL_DERIVATION
+    );
+    fixture.publish();
+    fixture.assert_card_published(&new_card.id);
+    let mut checks = crate::core::incident_card::proof::CardChecks::default();
+    checks.observe(&old_card).unwrap();
+    checks.observe(&new_card).unwrap();
+    assert_eq!(
+        checks.withheld(&fixture.db, &fixture.workspace_id).unwrap(),
+        BTreeSet::from([old_card.id])
+    );
+
+    let generation = fixture.generation();
+    assert_eq!(fixture.import(false).index_jobs_queued, 0);
+    assert_eq!(fixture.generation(), generation);
+    assert_eq!(fixture.cards().len(), 2);
+}
+
+#[test]
 fn completed_source_publication_does_not_hide_recovered_recall_evidence() {
     for include_spans in [true, false] {
         let fixture = Fixture::new();

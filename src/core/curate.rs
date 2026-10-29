@@ -3178,7 +3178,7 @@ fn list_workspace_cass_evidence_spans(
 fn transcript_spans(spans: Vec<StoredEvidenceSpan>) -> Vec<StoredEvidenceSpan> {
     spans
         .into_iter()
-        .filter(|span| !span.is_derived_incident_card())
+        .filter(|span| !crate::core::incident_card::proof::requires_proof(span))
         .collect()
 }
 
@@ -3379,6 +3379,12 @@ fn review_file_path_from_provenance_uri(raw: &str) -> Option<PathBuf> {
 /// show summaries and omit reasoning blocks, which must not supply lessons or
 /// supporting provenance. Other producers keep their existing body semantics.
 fn review_learning_text(span: &StoredEvidenceSpan) -> Option<Cow<'_, str>> {
+    // A damaged native card must not become an original lesson merely by
+    // changing its displayed shape. Retained revisions are feedback targets,
+    // never another independent transcript observation.
+    if crate::core::incident_card::proof::requires_proof(span) {
+        return None;
+    }
     if EvidenceProducerKind::parse(&span.producer_kind) == Some(EvidenceProducerKind::CassImport) {
         crate::cass::transcript::message_text(&span.excerpt)
     } else {

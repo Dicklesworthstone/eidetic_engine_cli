@@ -392,7 +392,23 @@ fn incident_card_substitution_preserves_interleaved_user_and_assistant_facts() {
     assert_eq!((card.start_line, card.end_line), (1, 7));
     let metadata: serde_json::Value =
         serde_json::from_str(card.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["repairSpanIds"], json!([repair_id]));
+    assert_eq!(
+        metadata["schema"],
+        crate::db::EVIDENCE_SECURITY_METADATA_SCHEMA_V1,
+    );
+    assert!(
+        metadata["sourceMetadataHash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty())
+    );
+    for field in [
+        "attemptSpanId",
+        "failureSpanId",
+        "proofSpanId",
+        "repairSpanIds",
+    ] {
+        assert!(metadata.get(field).is_none());
+    }
     assert!(!card.reader_text().contains("invoice"));
 
     let user = fixture.candidate(&facts[0], 0.95);
@@ -490,6 +506,123 @@ fn directly_matched_incident_card_preserves_other_turns_inside_its_range() {
             .iter()
             .all(|candidate| candidate.item.evidence_id != repair_id)
     );
+}
+
+#[test]
+fn current_incident_revision_replaces_sources_without_reusing_or_counting_its_history() {
+    use crate::core::cass_error_recall::{record_session_error_recall, session_failure_arcs};
+    use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair_links};
+    use crate::core::incident_card::proof::tests::{Fixture as ProofFixture, WS};
+    use crate::core::incident_card::{INCIDENT_CARD_ACTOR, draft_incident_card};
+
+    let fixture = ProofFixture::new_public(true).unwrap();
+    let session = fixture.db.get_session(&fixture.session).unwrap().unwrap();
+    let sources = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)
+        .unwrap();
+    let arc = session_failure_arcs(WS, &session, &sources)
+        .into_iter()
+        .next()
+        .expect("resolved incident");
+    let draft = draft_incident_card(WS, &fixture.session, &sources, &arc).unwrap();
+    let mut old_input = draft.input.clone();
+    old_input.excerpt.push_str("\nEarlier rendering.");
+    old_input.content_hash = format!(
+        "blake3:{}",
+        blake3::hash(old_input.excerpt.as_bytes()).to_hex()
+    );
+    fixture
+        .db
+        .insert_evidence_span(&draft.id, &old_input)
+        .unwrap();
+    let old = fixture.db.get_evidence_span(&draft.id).unwrap().unwrap();
+    for diagnostic in &arc.diagnostics {
+        record_error_repair_links(
+            &fixture.db,
+            WS,
+            diagnostic,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![old.id.clone()],
+                created_by: Some(INCIDENT_CARD_ACTOR.to_owned()),
+                evidence_ref: Some(fixture.failure.clone()),
+                ..ErrorRepairLinkRecording::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session).unwrap();
+    assert_eq!(report.incident_cards_recorded, 1);
+    let current = fixture
+        .db
+        .get_evidence_span(&draft.revision_draft().id)
+        .unwrap()
+        .expect("current revision");
+    assert_ne!(current.id, old.id);
+    assert_eq!(
+        fixture.db.get_evidence_span(&old.id).unwrap(),
+        Some(old.clone())
+    );
+    let found = fixture
+        .db
+        .incident_card_spans_for_sessions(&[&fixture.session])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.span.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(found, BTreeSet::from([old.id.clone(), current.id.clone()]));
+    let (classes, counts) = fixture
+        .db
+        .incident_card_error_classes(WS, &[&current.id])
+        .unwrap();
+    let current_classes = classes.get(&current.id).expect("current error classes");
+    assert!(!current_classes.is_empty());
+    for class in current_classes {
+        assert_eq!(counts.get(class), Some(&1));
+    }
+
+    let candidate = |id: &str, relevance| {
+        direct_evidence_pack_candidate(
+            fixture.db.get_evidence_span(id).unwrap().unwrap(),
+            relevance,
+            "lexical",
+            "cache repair",
+            None,
+        )
+        .unwrap()
+    };
+    for directly_matched in [false, true] {
+        let mut candidates = vec![candidate(&old.id, 0.95), candidate(&fixture.repair, 0.9)];
+        if directly_matched {
+            candidates.push(candidate(&current.id, 0.7));
+        }
+        let mut degraded = Vec::new();
+        let preferred = prefer_incident_cards(
+            &fixture.db,
+            &[WS.to_owned()],
+            &crate::models::QueryFilters::default(),
+            "cache repair",
+            candidates,
+            &mut degraded,
+        );
+        assert_eq!(preferred.len(), 1);
+        assert_eq!(preferred[0].item.evidence_id, current.id);
+        assert!(preferred[0].incident_card);
+        assert_eq!(
+            preferred[0].item.relevance.into_inner(),
+            if directly_matched { 0.7 } else { 0.9 },
+        );
+        assert_eq!(
+            preferred[0].item.why.contains("through its source turn"),
+            !directly_matched,
+        );
+        assert!(!preferred[0].item.why.contains("was seen in"));
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_evidence_hit_unhydrated"
+                && entry.message.contains("Withheld 1 derived incident card")
+        }));
+    }
 }
 
 #[test]
@@ -935,6 +1068,63 @@ fn obsolete_incident_card_proof_is_withheld_without_hiding_the_observed_turn() {
         entry.code == "context_evidence_hit_unhydrated"
             && entry.message.contains("current failure/repair/retry proof")
     }));
+}
+
+#[test]
+fn withdrawn_card_or_proof_cannot_consume_its_matched_source_turns() {
+    for withdraw_card in [false, true] {
+        let fixture = Fixture::new();
+        let (repair_id, card_id, facts) = fixture.incident_with_interleaved_turns(
+            0x59_0503,
+            "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+            &[("user", "Retain invoice history for 90 days.")],
+        );
+        let card = fixture.db.get_evidence_span(&card_id).unwrap().unwrap();
+        let proof_id = fixture
+            .db
+            .list_evidence_spans_for_session(&card.session_id)
+            .unwrap()
+            .into_iter()
+            .find(|span| {
+                !crate::core::incident_card::proof::requires_proof(span)
+                    && span.end_line == card.end_line
+            })
+            .expect("verifying result")
+            .id;
+        let direct_card = fixture.candidate(&card_id, 0.95);
+        let repair = fixture.candidate(&repair_id, 0.9);
+        let fact = fixture.candidate(&facts[0], 0.85);
+        let withdrawn_id = if withdraw_card { &card_id } else { &proof_id };
+        fixture
+            .db
+            .with_transaction_error(|| {
+                fixture.db.withdraw_cass_evidence_in_current_snapshot(
+                    &fixture.workspace_id,
+                    withdrawn_id,
+                    "This evidence must no longer authorize guidance.",
+                    None,
+                    false,
+                )
+            })
+            .unwrap();
+
+        let mut degraded = Vec::new();
+        let preferred = prefer_incident_cards(
+            &fixture.db,
+            std::slice::from_ref(&fixture.workspace_id),
+            &crate::models::QueryFilters::default(),
+            "widget serialize",
+            vec![direct_card, repair.clone(), fact.clone()],
+            &mut degraded,
+        );
+        assert_eq!(preferred.len(), 2);
+        assert_eq!(preferred[0].item, repair.item);
+        assert_eq!(preferred[1].item, fact.item);
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_evidence_hit_unhydrated"
+                && entry.message.contains("current failure/repair/retry proof")
+        }));
+    }
 }
 
 #[test]

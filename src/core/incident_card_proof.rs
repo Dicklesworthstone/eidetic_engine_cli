@@ -46,6 +46,7 @@ pub(crate) struct Claim {
 pub(crate) struct SessionProofs {
     pub(crate) claims: BTreeSet<Claim>,
     cards: BTreeMap<String, CardSignature>,
+    card_sources: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The reserved locator survives an altered prefix, kind or role. Such a row
@@ -145,6 +146,31 @@ impl CardChecks {
         workspace: &str,
     ) -> Result<BTreeSet<String>> {
         self.withheld_with(|session| session_proofs(connection, workspace, None, session))
+    }
+
+    /// Exact source membership for observed cards that still match the current
+    /// interpreter and feedback. Stored metadata contains only a commitment;
+    /// derive these IDs from the verified arc in the same session read instead
+    /// of treating a card's enclosing line range as source membership.
+    pub(crate) fn verified_source_ids(
+        self,
+        connection: &DbConnection,
+        workspace: &str,
+    ) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        let mut verified = BTreeMap::new();
+        for (session, pending) in self.sessions {
+            let mut known = session_proofs(connection, workspace, None, &session)?;
+            for (id, signature) in pending {
+                if self.refused.contains(&id) || known.cards.get(&id) != Some(&signature) {
+                    continue;
+                }
+                verified.insert(
+                    id.clone(),
+                    known.card_sources.remove(&id).ok_or_else(unavailable)?,
+                );
+            }
+        }
+        Ok(verified)
     }
 
     /// Feed a bounded reducer only exact, previously admitted candidates whose
@@ -301,20 +327,53 @@ fn load_session_proofs(
                 card: false,
             });
         }
-        // The complete interpreter still establishes ordinary repair claims.
-        // A nonexistent stored card needs no tokenization or facet rendering.
-        let card_id = super::incident_card_id(workspace, &arc.failure_id);
-        if let Some(card) = cards.get(&card_id)
-            && let Some(draft) = card_sources.draft(workspace, session_id, &arc)
-            && matches_draft(card, &draft)
+        // Historical revisions remain immutable. A withdrawal or attachment
+        // on any retained member cannot be bypassed by a new rendering's ID.
+        let family = cards
+            .values()
+            .filter(|card| super::belongs_to_incident(card, workspace, session_id, &arc.failure_id))
+            .collect::<Vec<_>>();
+        if !family.is_empty()
+            && family.iter().all(|card| {
+                card.memory_id.is_none()
+                    && card.start_byte.is_none()
+                    && card.end_byte.is_none()
+                    && card.is_derived_incident_card()
+                    && card.has_screened_upstream_reference(&format!(
+                        "ee-incident-card:{}:{}",
+                        super::INCIDENT_CARD_DERIVATION,
+                        card.id,
+                    ))
+                    && card.is_direct_pack_admitted_for_session(workspace, &session)
+            })
+            && let Some(mut draft) = card_sources.draft(workspace, session_id, &arc)
         {
-            feedback.observe(&arc, &draft.id);
-            proofs.cards.insert(draft.id.clone(), card_signature(card)?);
-            proofs.claims.insert(Claim {
-                failure: arc.failure_id,
-                target: draft.id,
-                card: true,
-            });
+            if cards
+                .get(&draft.id)
+                .is_none_or(|card| !matches_draft(card, &draft))
+            {
+                draft = draft.revision_draft();
+            }
+            if let Some(card) = cards.get(&draft.id)
+                && matches_draft(card, &draft)
+            {
+                feedback.observe(&arc, &draft.id);
+                feedback.observe_family(&arc, &draft.id, &family);
+                proofs.cards.insert(draft.id.clone(), card_signature(card)?);
+                proofs.card_sources.insert(
+                    draft.id.clone(),
+                    [&arc.attempt_id, &arc.failure_id, &resolution.proof_id]
+                        .into_iter()
+                        .chain(&resolution.repair_ids)
+                        .cloned()
+                        .collect(),
+                );
+                proofs.claims.insert(Claim {
+                    failure: arc.failure_id,
+                    target: draft.id,
+                    card: true,
+                });
+            }
         }
         if proofs.claims.len() > MAX_CLAIMS {
             return Ok(LoadedSessionProofs::default());
@@ -325,6 +384,7 @@ fn load_session_proofs(
     // cannot revoke a transcript observation or successful execution proof.
     let withheld = feedback.withheld(connection, workspace)?;
     proofs.cards.retain(|id, _| !withheld.contains(id));
+    proofs.card_sources.retain(|id, _| !withheld.contains(id));
     proofs
         .claims
         .retain(|claim| !claim.card || !withheld.contains(&claim.target));
@@ -354,6 +414,21 @@ impl CardFeedback {
             {
                 targets
                     .entry(target.to_owned())
+                    .or_default()
+                    .insert(card.to_owned());
+            }
+        }
+    }
+
+    fn observe_family(&mut self, arc: &FailureArc, card: &str, family: &[&StoredEvidenceSpan]) {
+        for diagnostic in &arc.diagnostics {
+            let targets = self
+                .by_fingerprint
+                .entry(diagnostic.layered_key().key)
+                .or_default();
+            for prior in family {
+                targets
+                    .entry(prior.id.clone())
                     .or_default()
                     .insert(card.to_owned());
             }

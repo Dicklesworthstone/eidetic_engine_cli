@@ -13,8 +13,9 @@
 //!   transcript lines from the failing command to its verifying run, so it is
 //!   searched, admitted, packed, replayed and explained exactly like any other
 //!   imported evidence, under the fixed `cass_evidence` trust class.
-//! - Its identity is deterministic over the derivation version, workspace and
-//!   failing span, so re-deriving a session never duplicates a card.
+//! - Its original identity binds the derivation version, workspace and failing
+//!   span. Changed derived text or provenance receives a deterministic revision
+//!   identity; neither transcript sources nor older cards are overwritten.
 //! - Text comes only from sources the derivation policy allows: the fix facet
 //!   from retrieval-admitted assistant turns; the symptom from a class-A tool
 //!   result, secret-redacted and instruction-screened, falling back to the
@@ -81,6 +82,104 @@ pub fn is_incident_card_row(
 pub(crate) struct IncidentCardDraft {
     pub id: String,
     pub input: CreateEvidenceSpanInput,
+}
+
+impl IncidentCardDraft {
+    /// A replacement for an older rendering of this logical incident. The
+    /// original draft retains its historical ID; a changed rendering binds
+    /// both its exact text and complete source metadata without rewriting it.
+    pub(crate) fn revision_draft(&self) -> Self {
+        let metadata_hash = self.input.metadata_json.as_deref().map(card_text_hash);
+        let id = revision_card_id(
+            &self.id,
+            &self.input.session_id,
+            &self.input.content_hash,
+            metadata_hash.as_deref(),
+            self.input.start_line,
+            self.input.end_line,
+        );
+        let mut input = self.input.clone();
+        input.cass_span_id = format!("ee-incident-card:{INCIDENT_CARD_DERIVATION}:{id}");
+        Self { id, input }
+    }
+}
+
+fn card_text_hash(text: &str) -> String {
+    format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
+}
+
+fn revision_card_id(
+    original_id: &str,
+    session_id: &str,
+    content_hash: &str,
+    metadata_hash: Option<&str>,
+    start_line: u32,
+    end_line: u32,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.incident_card.revision.v1\0");
+    for value in [
+        original_id,
+        session_id,
+        content_hash,
+        metadata_hash.unwrap_or(""),
+    ] {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update(&start_line.to_le_bytes());
+    hasher.update(&end_line.to_le_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    crate::models::EvidenceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+/// Identify retained revisions from their native identity and committed
+/// derivation inputs. This grants no admission: denied, attached or malformed
+/// family members must still prevent automatic recovery of the same incident.
+/// Eligibility is deliberately absent, so withdrawal cannot sever lineage.
+pub(crate) fn belongs_to_incident(
+    card: &StoredEvidenceSpan,
+    workspace: &str,
+    session: &str,
+    failure: &str,
+) -> bool {
+    if card.workspace_id != workspace || card.session_id != session {
+        return false;
+    }
+    let original_id = incident_card_id(workspace, failure);
+    if card.id == original_id {
+        return true;
+    }
+    if !card.has_screened_upstream_reference(&format!(
+        "ee-incident-card:{INCIDENT_CARD_DERIVATION}:{}",
+        card.id,
+    )) {
+        return false;
+    }
+    let Some(metadata) = card
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    else {
+        return false;
+    };
+    let Some(source_hash) = metadata
+        .get("sourceMetadataHash")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    crate::db::is_canonical_blake3_hash(source_hash)
+        && card.id
+            == revision_card_id(
+                &original_id,
+                session,
+                &card_text_hash(&card.excerpt),
+                Some(source_hash),
+                card.start_line,
+                card.end_line,
+            )
 }
 
 /// Borrowed lookup shared by every card derived from one source-row slice.

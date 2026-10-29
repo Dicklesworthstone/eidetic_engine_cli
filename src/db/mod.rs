@@ -28092,8 +28092,10 @@ impl DbConnection {
     }
 
     /// For each derived incident card id, the error classes it was recorded as
-    /// a repair of, and how many cards each of those classes has in the
-    /// workspace. Both read only links written by the card derivation.
+    /// a repair of, and how many distinct incidents each of those classes has
+    /// in the workspace. Immutable revisions share their failing source, so
+    /// retaining a prior card must not inflate the occurrence count. Both
+    /// reads use only links written by the card derivation.
     pub fn incident_card_error_classes(
         &self,
         workspace_id: &str,
@@ -28127,7 +28129,7 @@ impl DbConnection {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let mut cards_per_class: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut incidents_per_class: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for chunk in keys.chunks(128) {
             let placeholders = (3..chunk.len() + 3)
                 .map(|index| format!("?{index}"))
@@ -28136,20 +28138,22 @@ impl DbConnection {
             let mut params = vec![Value::Text(workspace_id.to_owned()), actor.clone()];
             params.extend(chunk.iter().map(|key| Value::Text(key.clone())));
             let sql = format!(
-                "SELECT fingerprint_key, target_id FROM error_repair_links WHERE workspace_id = ?1 AND link_kind = 'repair' AND created_by = ?2 AND fingerprint_key IN ({placeholders})"
+                "SELECT fingerprint_key, COALESCE(evidence_ref, target_id) FROM error_repair_links WHERE workspace_id = ?1 AND link_kind = 'repair' AND created_by = ?2 AND fingerprint_key IN ({placeholders})"
             );
             for row in self.query_for(DbOperation::Query, &sql, &params)? {
-                cards_per_class
+                incidents_per_class
                     .entry(
                         required_text(&row, 0, DbOperation::Query, "fingerprint_key")?.to_owned(),
                     )
                     .or_default()
-                    .insert(required_text(&row, 1, DbOperation::Query, "target_id")?.to_owned());
+                    .insert(
+                        required_text(&row, 1, DbOperation::Query, "incident_source")?.to_owned(),
+                    );
             }
         }
-        let counts = cards_per_class
+        let counts = incidents_per_class
             .into_iter()
-            .map(|(key, cards)| (key, cards.len()))
+            .map(|(key, incidents)| (key, incidents.len()))
             .collect();
         Ok((classes, counts))
     }

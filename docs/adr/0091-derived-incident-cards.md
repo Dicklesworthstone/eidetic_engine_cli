@@ -30,9 +30,12 @@ An incident card is written as an evidence span of the session it summarizes:
   `cass-session://<session>#L<start>-<end>`;
 - the excerpt is plain text beginning with the fixed header
   `Incident card (derived by ee from lines <start>-<end>):`;
-- its id is an `ev_` id derived from
+- its original id is an `ev_` id derived from
   `blake3(incident_card.v1 ‖ workspace ‖ failing span id)`, so re-deriving a
-  session never duplicates or rewrites a card.
+  session with the same current text and provenance never duplicates or
+  rewrites a card. A changed rendering receives a deterministic revision id
+  committed to that original identity, session, excerpt, source metadata and
+  line range. Older rows and their links remain intact.
 
 A card therefore passes the unchanged ADR 0085 evidence admission boundary
 (recognized producer, indexable kind and role, excerpt-hash verification,
@@ -75,12 +78,12 @@ list the failing span, error classes, repair turns and verifying run.
 In the direct evidence lane:
 
 - a matched transcript turn is replaced by the narrowest currently verified
-  card whose line range contains it and whose exact source metadata names its
-  evidence id (`attemptSpanId`, `failureSpanId`, `proofSpanId`, or
-  `repairSpanIds`), at the turn's rank; that source turn is dropped when its
+  card whose line range contains it and whose current verified failure arc
+  names its evidence id as the attempt, failure, proof or repair, at the turn's
+  rank; that source turn is dropped when its
   card is already a candidate. Interleaved facts and task instructions absent
   from those sources remain eligible, even when the card matched directly;
-- each card's `why` states how many incident cards of its error class the
+- each card's `why` states how many distinct incidents of its error class the
   workspace holds; sharing an error class does not establish that repairs are
   equivalent, so distinct cards remain eligible for ranking and budgeting;
 - duplicate compression retains the first ranked representative only when
@@ -94,8 +97,11 @@ identities, recorded derivations, or historical pack ledgers.
 
 The 2026-10-19 amendment requires exact source membership for substitution.
 Temporal proximity alone does not mean a card represents an intervening user
-constraint or unrelated assistant observation. The existing live source-proof
-check verifies the metadata before it is used; no card regeneration is needed.
+constraint or unrelated assistant observation. The 2026-10-29 correction obtains
+membership from the live source-proof check itself: canonical storage keeps a
+hash of the source metadata, not its original fields. The check reinterprets
+the complete transcript and matches the exact screened card before returning
+source identities. A successful retry's tool call is not itself a card source.
 
 ### Lifecycle
 
@@ -106,6 +112,29 @@ next import. CASS refresh and backfill reconcile only transcript lines and skip
 cards; curation, session review and focus suggestions read transcript turns
 only. Cards are never memories: they become durable knowledge only through the
 existing review → curate path.
+
+The 2026-10-29 amendment (`cass_error_recall.v20`) repairs stale renderings on
+the next import. If the original admitted native card differs from the current
+draft, the recorder inserts the deterministic current revision through the
+ordinary evidence screening boundary. An unchanged retry reuses that revision;
+an occupied revision id with different bytes is refused rather than overwritten.
+The recorder reads sources and writes the card and recall links in one
+transaction. Newly inserted revisions count in `incidentCardsRecorded`, so the
+existing import completion marker queues their session's index publication.
+Only the currently proved rendering can supply derived guidance, even while
+the index still contains a retained historical row.
+Occurrence counts use the shared failing source, so retained revisions do not
+make one incident appear to have happened repeatedly.
+
+Regeneration is not re-admission. Withdrawal, quarantine, stale screening
+versions, malformed native ownership and memory attachments on a recognized
+member hold the incident family. Exact harmful feedback on an earlier member
+also withholds its current summary and its native repair-learning candidate,
+under the existing workspace and error-fingerprint scope. Original source
+observations and successful executions remain history. All reserved native
+card identities stay outside transcript interpretation and learning, including
+rows whose displayed kind or text was damaged. Retained revisions count toward
+the existing bounded proof-input limits; those limits are unchanged.
 
 The `cass_error_recall.v2` extractor also recognizes complete `ee.error.v2`
 errors and failed `ee.rch.verify.v1` reports with a typed known blocker or a
@@ -148,3 +177,8 @@ the additional error classes on their next import.
   persisted ledger verification, replay and repeated-import source preservation.
 - `cass::refresh::canonical_reference_tests::derived_incident_cards_neither_block_nor_join_transcript_refresh`.
 - `core::incident_card::tests` — extraction and recognition.
+- `core::incident_card::repair::store_tests` — immutable refresh, exact current
+  source membership, idempotence, withdrawal, revision collisions, atomic
+  failure and exclusion of reserved identities from transcript interpretation.
+- `core::curate::corroboration::verified_repair` — harmful feedback on retained
+  revisions blocks native proposals and revalidation without rewriting history.

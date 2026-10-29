@@ -16178,51 +16178,7 @@ fn direct_evidence_pack_candidate(
     })
 }
 
-/// Exact source identities of an already verified incident card. Its enclosing
-/// line range can include unrelated observations; only the recorded sources
-/// may be replaced. Missing or malformed metadata never consumes a matched
-/// turn. This helper grants no admission authority: callers must retain the
-/// current-source proof check before using these identities.
-fn incident_card_source_ids(card: &crate::db::StoredEvidenceSpan) -> BTreeSet<String> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Sources {
-        derivation: String,
-        attempt_span_id: String,
-        failure_span_id: String,
-        proof_span_id: String,
-        repair_span_ids: Vec<String>,
-    }
-
-    let Some(metadata) = card.metadata_json.as_deref() else {
-        return BTreeSet::new();
-    };
-    let Ok(sources) = serde_json::from_str::<Sources>(metadata) else {
-        return BTreeSet::new();
-    };
-    if sources.derivation != crate::core::incident_card::INCIDENT_CARD_DERIVATION {
-        return BTreeSet::new();
-    }
-    let ids = [
-        sources.attempt_span_id,
-        sources.failure_span_id,
-        sources.proof_span_id,
-    ]
-    .into_iter()
-    .chain(sources.repair_span_ids)
-    .collect::<BTreeSet<_>>();
-    if ids.iter().all(|source| {
-        source
-            .parse::<EvidenceId>()
-            .is_ok_and(|id| id.to_string() == *source)
-    }) {
-        ids
-    } else {
-        BTreeSet::new()
-    }
-}
-
-/// Incident cards (ADR 0091) replace only their exact recorded source turns:
+/// Incident cards (ADR 0091) replace only their exact verified source turns:
 /// a matched source inside a verified card's line range brings the card at
 /// the turn's rank, or is dropped when its card is already a candidate.
 /// Interleaved observations remain eligible. Error classes add occurrence
@@ -16324,9 +16280,20 @@ fn prefer_incident_cards(
             refused.insert(span.id.clone());
         }
     }
+    let mut verified_sources = BTreeMap::new();
     for (workspace, check) in checks {
-        match check.withheld(connection, &workspace) {
-            Ok(withheld) => refused.extend(withheld),
+        match check.verified_source_ids(connection, &workspace) {
+            Ok(sources) => {
+                refused.extend(
+                    ids_by_workspace
+                        .get(&workspace)
+                        .into_iter()
+                        .flat_map(|ids| ids.iter())
+                        .filter(|id| !sources.contains_key(*id))
+                        .cloned(),
+                );
+                verified_sources.extend(sources);
+            }
             Err(_) => {
                 refused.extend(
                     ids_by_workspace
@@ -16363,14 +16330,15 @@ fn prefer_incident_cards(
             .cmp(&(right.end_line - right.start_line))
             .then_with(|| left.id.cmp(&right.id))
     });
-    // Parse each proved card once, without any additional source reads. Range
-    // containment alone cannot establish that a retrieved fact is represented
-    // by the card's failure, repair or verification.
+    // Security screening stores a commitment to source metadata, not the raw
+    // source IDs. Reuse membership from the same current-source proof instead
+    // of parsing metadata or treating an enclosing range as membership.
     let cards = cards
         .into_iter()
-        .map(|card| {
-            let source_ids = incident_card_source_ids(&card);
-            (card, source_ids)
+        .filter_map(|card| {
+            verified_sources
+                .remove(&card.id)
+                .map(|source_ids| (card, source_ids))
         })
         .collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
