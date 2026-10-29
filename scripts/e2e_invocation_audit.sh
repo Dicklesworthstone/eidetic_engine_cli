@@ -209,10 +209,47 @@ e2e_orphans() {
         #     orphan. The rule being asserted is "a scanner describes, it does
         #     not run"; a check-* that runs things has the wrong name, and the
         #     blast-radius measurement above is the thing to re-run.
+        # (f) PROSE INSIDE A PYTHON DOCSTRING IS THE SIXTH SPELLING, and it
+        #     arrived 2026-10-28 through `scripts/audit-*.py`, the one scanner
+        #     family (e) did not name. Both filters miss it for the same reason
+        #     (e) gives: a line inside a `"""..."""` block carries no `#` and no
+        #     `//`, so `^[^#]*` passes it and the awk arm passes it.
+        #
+        #     The two lines were explanatory text in
+        #     audit-set-e-dead-handlers.py naming `e2e_rerank.sh:154` as an
+        #     EXAMPLE OF ITS OWN OUTPUT. The effect was the (e) effect exactly:
+        #     a STALE-baseline failure telling the operator to delete a CORRECT
+        #     baseline line, which would have reclassified a genuine orphan as
+        #     wired. `e2e_rerank.sh` is not invoked by anything.
+        #
+        #     Blast radius measured before landing, as (e) requires: of the 106
+        #     scripts this audit enumerates, EXACTLY ONE changes classification
+        #     -- e2e_rerank.sh -- and the only lines it loses are those two.
+        #     Three scripts/audit-*.py exist; one uses subprocess
+        #     (audit-vanished-tests.py) and NONE references an e2e script in a
+        #     run position. Same shape of answer as (e), same risk: an audit-*
+        #     that runs things has the wrong name.
+        #
+        #     AND A LINE-LEVEL "INVOCATION SHAPE" PREDICATE IS NOT THE FIX,
+        #     which is worth recording because it is the obvious next idea and
+        #     bd-coik3 carries it as a proposal. Measured 2026-10-28 with a
+        #     deliberately generous shape rule (interpreter, ./path,
+        #     Command::new, subprocess, `run:`, command substitution): it called
+        #     14 scripts mention-only, and at least 13 were FALSE -- because in
+        #     this tree an invocation is MULTI-LINE. tests/hotset_prewarm_e2e.rs
+        #     builds the path at :26 and executes it at :27-28 via
+        #     `Command::new("bash").arg(&script)`;
+        #     scripts/e2e_lib/run_agent_ergonomics_e2e.sh lists five basenames
+        #     in a `SCRIPTS=(...)` array at :32-38 and runs them at :73. A
+        #     line-level rule sees the list, not the loop, so it would newly
+        #     orphan 13 covered scripts -- growing a baseline with fiction,
+        #     which is the worse direction. A shape predicate needs multi-line
+        #     or per-language analysis, not a regex.
         if ! rg --no-require-git --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!**/tests/fixtures/**' \
             --glob '!**/scripts/check-*.py' \
+            --glob '!**/scripts/audit-*.py' \
             --glob '!**/*.md' --glob '!**/docs/**' 2>/dev/null \
             | awk 'BEGIN { found = 0 }
                    { body = $0; sub(/^[^:]*:/, "", body)
