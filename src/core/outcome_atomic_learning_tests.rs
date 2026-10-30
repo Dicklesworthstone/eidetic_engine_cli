@@ -344,6 +344,26 @@ impl Fixture {
         state
     }
 
+    fn assert_no_feedback_relearning(&self) {
+        let before = self.persisted_feedback_state();
+        let mut options = crate::steward::ScoreDecayJobOptions::new(self.workspace_id);
+        // Freeze at the last memory write so this observes feedback processing,
+        // independently of the separate time-decay policy.
+        options.as_of = Some(before.memory.as_ref().unwrap().updated_at.clone());
+        let maintenance = DbConnection::open_file(&self.database).unwrap();
+        let report = crate::steward::run_score_decay_job(&maintenance, &options).unwrap();
+        maintenance.close().unwrap();
+        assert_eq!(report.scanned_count, 1);
+        assert_eq!(report.changed_count, 0, "{report:?}");
+        assert_eq!(report.applied_count, 0, "{report:?}");
+        assert!(!report.durable_mutation, "{report:?}");
+        assert_eq!(
+            self.persisted_feedback_state(),
+            before,
+            "maintenance must not learn already-applied outcomes a second time"
+        );
+    }
+
     fn feedback_state_for(db: &DbConnection, workspace_id: &str) -> FeedbackState {
         let mut audits = db.list_audit_entries(None, None).unwrap();
         audits.sort_by(|left, right| left.id.cmp(&right.id));
@@ -799,6 +819,107 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
 }
 
 #[test]
+fn memory_feedback_marker_failure_rolls_back_learning_and_quarantine_review() {
+    for quarantined in [false, true] {
+        let fixture = Fixture::new();
+        let quarantine_id =
+            quarantined.then(|| fixture.queue_harmful_feedback("outcome_observed"));
+        fixture.seed_verified_provenance();
+        let before = fixture.persisted_feedback_state();
+        let injection = DbConnection::open_file(&fixture.database).unwrap();
+        injection
+            .execute_raw(
+                "CREATE TRIGGER reject_memory_feedback_marker BEFORE UPDATE ON feedback_events \
+                 WHEN NEW.target_type = 'memory' AND OLD.applied_at IS NULL \
+                 AND NEW.applied_at IS NOT NULL \
+                 BEGIN SELECT RAISE(ABORT, 'memory feedback marker failure'); END;",
+            )
+            .unwrap();
+        injection.close().unwrap();
+        let apply = || {
+            if let Some(quarantine_id) = quarantine_id.as_deref() {
+                review_feedback_quarantine(&fixture.release_options(quarantine_id)).map(|report| {
+                    assert_eq!(report.status, "released");
+                })
+            } else {
+                record_outcome(&fixture.options()).map(|report| {
+                    assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+                })
+            }
+        };
+        let error = apply().expect_err("unacknowledged learning must not commit");
+        assert!(matches!(&error, DomainError::Storage { .. }));
+        assert!(
+            error.message().contains("memory feedback marker failure"),
+            "{error:?}"
+        );
+        assert_eq!(
+            fixture.persisted_feedback_state(),
+            before,
+            "marker failure must roll back evidence, learning, trust, index work and review"
+        );
+        let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+        cleanup
+            .execute_raw("DROP TRIGGER reject_memory_feedback_marker")
+            .unwrap();
+        cleanup.close().unwrap();
+        apply().unwrap();
+        let learned = fixture.persisted_feedback_state();
+        let expected_posterior = if quarantined {
+            (
+                before.posterior.0,
+                before.posterior.1 + DEFAULT_HARMFUL_WEIGHT,
+            )
+        } else {
+            (before.posterior.0 + 1.0, before.posterior.1)
+        };
+        assert_eq!(learned.posterior, expected_posterior);
+        assert_eq!(learned.events.len(), before.events.len() + 1);
+        assert!(learned.events.iter().all(|event| event.applied_at.is_some()));
+        assert_eq!(learned.index_jobs.len(), before.index_jobs.len() + 1);
+        assert_eq!(
+            learned.workspace_generation,
+            before
+                .workspace_generation
+                .map(|generation| generation + if quarantined { 2 } else { 1 })
+        );
+        let memory = learned.memory.as_ref().unwrap();
+        assert_eq!(
+            memory.confidence,
+            (expected_posterior.0 / (expected_posterior.0 + expected_posterior.1)) as f32
+        );
+        assert_eq!(
+            memory.provenance_chain_hash,
+            Some(crate::db::compute_memory_provenance_chain_hash(memory))
+        );
+        assert_eq!(memory.provenance_verification_status, "unverified");
+        assert_eq!(
+            memory.trust_class,
+            if quarantined {
+                "cass_evidence"
+            } else {
+                "agent_assertion"
+            }
+        );
+        if let Some(quarantine_id) = quarantine_id.as_deref() {
+            assert_eq!(
+                review_feedback_quarantine(&fixture.release_options(quarantine_id))
+                    .unwrap()
+                    .status,
+                "already_reviewed"
+            );
+        } else {
+            assert_eq!(
+                record_outcome(&fixture.options()).unwrap().status,
+                OutcomeRecordStatus::AlreadyRecorded
+            );
+        }
+        assert_eq!(fixture.persisted_feedback_state(), learned);
+        fixture.assert_no_feedback_relearning();
+    }
+}
+
+#[test]
 fn posterior_audit_failure_rolls_back_the_feedback_idempotency_key() {
     let fixture = Fixture::new();
     fixture.collide_audit(2);
@@ -1023,7 +1144,8 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
             report.confidence_after.unwrap(),
             "{signal}: retrieval confidence must follow the learned posterior"
         );
-        assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
+        let event = get_existing_event(&fixture.db, EVENT).unwrap().unwrap();
+        assert!(event.applied_at.is_some(), "{signal}");
         if expected == prior {
             fixture.assert_pending_memory_jobs(0);
             assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
@@ -1202,6 +1324,12 @@ fn published_memory_feedback_confidence_reaches_retrieval_scoring() {
             OutcomeRecordStatus::AlreadyRecorded
         );
         assert_eq!(fixture.persisted_feedback_state(), published);
+        fixture.assert_no_feedback_relearning();
+        let ready = get_index_status(&status_options).unwrap();
+        assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+        assert_eq!(ready.index_generation, published.workspace_generation);
+        assert_eq!(ready.db_generation, published.workspace_generation);
+        assert_retrieval_confidence(memory.confidence);
     }
 }
 
@@ -1218,7 +1346,15 @@ fn neutral_feedback_does_not_promote_or_queue_index_work() {
         let report = record_outcome(&options).unwrap();
         assert_eq!(report.status, OutcomeRecordStatus::Recorded);
         assert_eq!(report.confidence_before, report.confidence_after);
-        assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_some());
+        assert!(
+            fixture
+                .db
+                .get_feedback_event(EVENT)
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_some()
+        );
         assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
         assert_eq!(
             fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
@@ -1395,6 +1531,7 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
         direct.db.get_memory_trust_class(MEMORY).unwrap()
     );
     let event = fixture.db.get_feedback_event(HELD_EVENT).unwrap().unwrap();
+    assert!(event.applied_at.is_some());
     assert_eq!(event.signal, "harmful");
     assert_eq!(event.weight, 0.25);
     assert_eq!(event.source_type, direct_options.source_type);
@@ -1436,6 +1573,8 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
     assert_eq!(fixture.audit_count(), audits);
     assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 2);
     assert_eq!(fixture.index_jobs(), jobs);
+    direct.assert_no_feedback_relearning();
+    fixture.assert_no_feedback_relearning();
 }
 
 #[test]
@@ -1583,12 +1722,15 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
             before.posterior.1 + DEFAULT_HARMFUL_WEIGHT
         )
     );
+    assert_eq!(before.memory.as_ref().unwrap().trust_class, "agent_assertion");
     assert_eq!(
         fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
-        before.workspace_generation.map(|generation| generation + 1)
+        before.workspace_generation.map(|generation| generation + 2),
+        "the second harmful observation updates its posterior and demotes trust"
     );
     fixture.assert_pending_memory_jobs(2);
     let memory = fixture.assert_posterior_confidence();
+    assert_eq!(memory.trust_class, "cass_evidence");
     assert_eq!(memory.provenance_verification_status, "unverified");
     assert!(memory.provenance_verified_at.is_none());
     assert!(memory.provenance_verification_note.is_none());

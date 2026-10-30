@@ -1780,6 +1780,16 @@ fn apply_memory_outcome_in_txn(
             },
         )?;
     }
+    // The live confidence already includes this observation. A later score
+    // decay pass must not apply the legacy scalar adjustment to it again.
+    // Neutral observations are consumed too, without changing the memory or
+    // queuing publication. Keep the marker inside the evidence transaction.
+    if !connection.apply_feedback_event(event_id)? {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Execute,
+            message: "Memory outcome learning lost its unapplied feedback event".to_owned(),
+        });
+    }
     Ok(Some((prior.mean() as f32, posterior.mean() as f32)))
 }
 
