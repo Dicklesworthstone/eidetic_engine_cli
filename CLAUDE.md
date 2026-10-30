@@ -92,6 +92,21 @@ repo-wide, and nobody pays for a pinned dispatch to check a markdown table
 (bd-no-compile-gate-before-a-commit-lands-qdxc0). Run the family before a commit
 that touches docs or the CLI surface; it is the cheapest gate in the repository.
 
+**AND ONE OF THEM NOW CATCHES A COMPILE ERROR, which is worth knowing because
+the rest of this file says no local gate can.**
+`check-deleted-symbol-orphans.py` inspects `HEAD~1..HEAD` by default — so the
+loop above grades the last commit — and reports a `fn` the commit deleted whose
+callers survive, i.e. `error[E0425]`. It is a narrow class and not a substitute
+for a build: no type, borrow or trait error is visible to it. But it is the
+class `#[path]` + `use super::*` hides from review, and it is what left main
+uncompilable for 24 hours on 2026-10-29 (bd-1ks7e). Validated in both
+directions against real history — it fires on `f9ecec213^..f9ecec213` naming
+`src/core/context_why_not.rs:772`, and one fire in 120 commits of src/ history.
+0.066 s when the range deletes nothing; it skips the 1563-file tree read and
+says so rather than reporting a count it never looked at. `--self-test` is 16
+arms, three of them controls on its comment stripper's failure DIRECTION, since
+over-stripping would be a silent false pass. Exit 3 is cannot-answer, not red.
+
 **THE FAMILY IS NOT THE WHOLE LOCALLY-RUNNABLE SET, and the gap is where the
 red was hiding.** Of verify.sh's 135 `run_stage` lines (134 distinct names; one
 stage is invoked twice and shares a single budget row), **31** match the grep
