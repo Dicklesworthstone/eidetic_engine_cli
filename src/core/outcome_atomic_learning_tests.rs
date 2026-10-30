@@ -5,7 +5,7 @@ use super::*;
 use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 use std::path::PathBuf;
 
-const WORKSPACE: &str = "wsp_00000000000000000000000071";
+const WORKSPACE: &str = "wsp_00000000000000000000000771";
 const MEMORY: &str = "mem_00000000000000000000000071";
 const EVENT: &str = "fb_00000000000000000000000071";
 const HELD_EVENT: &str = "fb_00000000000000000000000072";
@@ -108,6 +108,7 @@ fn concurrent_outcome_results(
 
 struct Fixture {
     _root: tempfile::TempDir,
+    workspace_id: &'static str,
     database: PathBuf,
     db: DbConnection,
     /// The trust class the memory was seeded with; a rolled-back outcome must
@@ -131,6 +132,10 @@ struct FeedbackState {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_workspace(WORKSPACE)
+    }
+
+    fn with_workspace(workspace_id: &'static str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().canonicalize().unwrap();
         std::fs::create_dir_all(workspace.join(".ee")).unwrap();
@@ -138,7 +143,7 @@ impl Fixture {
         let db = DbConnection::open_file(&database).unwrap();
         db.migrate().unwrap();
         db.insert_workspace(
-            WORKSPACE,
+            workspace_id,
             &CreateWorkspaceInput {
                 path: workspace.to_string_lossy().into_owned(),
                 name: None,
@@ -148,7 +153,7 @@ impl Fixture {
         db.insert_memory(
             MEMORY,
             &CreateMemoryInput {
-                workspace_id: WORKSPACE.to_owned(),
+                workspace_id: workspace_id.to_owned(),
                 level: "semantic".to_owned(),
                 kind: "note".to_owned(),
                 content: "Release validation requires the integration test suite.".to_owned(),
@@ -167,6 +172,7 @@ impl Fixture {
         .unwrap();
         Self {
             _root: root,
+            workspace_id,
             database,
             db,
             seeded_trust: std::cell::Cell::new("agent_assertion"),
@@ -192,7 +198,7 @@ impl Fixture {
             database_path: &self.database,
             target_type: "memory".to_owned(),
             target_id: MEMORY.to_owned(),
-            workspace_id: Some(WORKSPACE.to_owned()),
+            workspace_id: Some(self.workspace_id.to_owned()),
             signal: "helpful".to_owned(),
             weight: None,
             source_type: "outcome_observed".to_owned(),
@@ -216,8 +222,44 @@ impl Fixture {
         self.db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap()
     }
 
+    fn assert_posterior_confidence(&self) -> crate::db::StoredMemory {
+        let posterior = self.posterior();
+        let memory = self.db.get_memory(MEMORY).unwrap().unwrap();
+        assert_eq!(
+            memory.confidence,
+            (posterior.0 / (posterior.0 + posterior.1)) as f32
+        );
+        assert_eq!(
+            memory.provenance_chain_hash,
+            Some(crate::db::compute_memory_provenance_chain_hash(&memory)),
+            "learning must leave the retrieval source's provenance hash valid"
+        );
+        assert_eq!(
+            memory.provenance_chain_hash_version,
+            crate::db::PROVENANCE_CHAIN_HASH_VERSION
+        );
+        memory
+    }
+
+    fn seed_verified_provenance(&self) {
+        let memory = self.assert_posterior_confidence();
+        assert!(
+            self.db
+                .update_memory_provenance_verification(
+                    MEMORY,
+                    "verified",
+                    &memory.updated_at,
+                    "Verified fixture source before learning.",
+                )
+                .unwrap()
+        );
+    }
+
     fn index_jobs(&self) -> Vec<crate::db::StoredSearchIndexJob> {
-        let mut jobs = self.db.list_search_index_jobs(WORKSPACE, None).unwrap();
+        let mut jobs = self
+            .db
+            .list_search_index_jobs(self.workspace_id, None)
+            .unwrap();
         jobs.sort_by(|left, right| left.id.cmp(&right.id));
         jobs
     }
@@ -226,7 +268,7 @@ impl Fixture {
         let jobs = self.index_jobs();
         assert_eq!(jobs.len(), count);
         for job in &jobs {
-            assert_eq!(job.workspace_id, WORKSPACE);
+            assert_eq!(job.workspace_id, self.workspace_id);
             assert_eq!(
                 job.job_type_enum(),
                 Some(crate::db::SearchIndexJobType::SingleDocument)
@@ -289,7 +331,7 @@ impl Fixture {
     }
 
     fn feedback_state(&self) -> FeedbackState {
-        Self::feedback_state_for(&self.db)
+        Self::feedback_state_for(&self.db, self.workspace_id)
     }
 
     fn persisted_feedback_state(&self) -> FeedbackState {
@@ -297,29 +339,29 @@ impl Fixture {
         // result through a fresh reader so an old snapshot cannot make a
         // partial commit look like a successful rollback.
         let observer = DbConnection::open_file_read_only(&self.database).unwrap();
-        let state = Self::feedback_state_for(&observer);
+        let state = Self::feedback_state_for(&observer, self.workspace_id);
         observer.close().unwrap();
         state
     }
 
-    fn feedback_state_for(db: &DbConnection) -> FeedbackState {
+    fn feedback_state_for(db: &DbConnection, workspace_id: &str) -> FeedbackState {
         let mut audits = db.list_audit_entries(None, None).unwrap();
         audits.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut index_jobs = db.list_search_index_jobs(WORKSPACE, None).unwrap();
+        let mut index_jobs = db.list_search_index_jobs(workspace_id, None).unwrap();
         index_jobs.sort_by(|left, right| left.id.cmp(&right.id));
         FeedbackState {
-            events: db.list_feedback_events(WORKSPACE).unwrap(),
-            quarantine: db.list_feedback_quarantine(WORKSPACE, None).unwrap(),
+            events: db.list_feedback_events(workspace_id).unwrap(),
+            quarantine: db.list_feedback_quarantine(workspace_id, None).unwrap(),
             quarantine_rows: db.count_table_rows("feedback_quarantine").unwrap(),
             memory: db.get_memory(MEMORY).unwrap(),
             posterior: db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap(),
             profile: db
-                .get_agent_context_profile(WORKSPACE, REPLAY_AGENT, MEMORY)
+                .get_agent_context_profile(workspace_id, REPLAY_AGENT, MEMORY)
                 .unwrap(),
             profile_rows: db.count_table_rows("agent_context_profiles").unwrap(),
             audits,
             index_jobs,
-            workspace_generation: db.get_workspace_generation(WORKSPACE).unwrap(),
+            workspace_generation: db.get_workspace_generation(workspace_id).unwrap(),
         }
     }
 
@@ -349,7 +391,7 @@ impl Fixture {
             .insert_audit(
                 &id,
                 &CreateAuditInput {
-                    workspace_id: Some(WORKSPACE.to_owned()),
+                    workspace_id: Some(self.workspace_id.to_owned()),
                     actor: Some("atomic-learning-test".to_owned()),
                     action: "atomic_learning_failure_control".to_owned(),
                     target_type: Some("memory".to_owned()),
@@ -595,7 +637,8 @@ fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
     let report = with_admission_observer(
         move |stage, connection| {
             if stage == OutcomeAdmissionTestStage::BeforeAntiPatternProposal {
-                *observed_feedback.borrow_mut() = Some(Fixture::feedback_state_for(connection));
+                *observed_feedback.borrow_mut() =
+                    Some(Fixture::feedback_state_for(connection, WORKSPACE));
             }
         },
         || record_outcome(&options),
@@ -703,6 +746,7 @@ fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
 fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
     let fixture = Fixture::new();
     fixture.seed_agent_validated();
+    fixture.seed_verified_provenance();
     let mut options = fixture.options();
     options.source_type = "human_explicit".to_owned();
     let before = fixture.feedback_state();
@@ -740,6 +784,10 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
         Some("human_explicit")
     );
     fixture.assert_pending_memory_jobs(1);
+    let memory = fixture.assert_posterior_confidence();
+    assert_eq!(memory.provenance_verification_status, "unverified");
+    assert!(memory.provenance_verified_at.is_none());
+    assert!(memory.provenance_verification_note.is_none());
     let learned = fixture.feedback_state();
     assert_eq!(fixture.persisted_feedback_state(), learned);
     assert_eq!(
@@ -951,6 +999,7 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
         "stale",
     ] {
         let fixture = Fixture::new();
+        fixture.seed_verified_provenance();
         let prior = fixture.posterior();
         let memory = fixture.db.get_memory(MEMORY).unwrap();
         let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
@@ -968,6 +1017,12 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
             report.confidence_after,
             Some((expected.0 / (expected.0 + expected.1)) as f32)
         );
+        let learned_memory = fixture.assert_posterior_confidence();
+        assert_eq!(
+            learned_memory.confidence,
+            report.confidence_after.unwrap(),
+            "{signal}: retrieval confidence must follow the learned posterior"
+        );
         assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
         if expected == prior {
             fixture.assert_pending_memory_jobs(0);
@@ -978,8 +1033,175 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
             );
         } else {
             fixture.assert_pending_memory_jobs(1);
-            assert!(fixture.db.get_workspace_generation(WORKSPACE).unwrap() > generation);
+            assert_eq!(learned_memory.provenance_verification_status, "unverified");
+            assert!(learned_memory.provenance_verified_at.is_none());
+            assert!(learned_memory.provenance_verification_note.is_none());
+            assert_eq!(
+                fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+                generation.map(|value| value + 1),
+                "posterior and confidence must publish as one memory update"
+            );
         }
+    }
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn published_memory_feedback_confidence_reaches_retrieval_scoring() {
+    use crate::core::index::{
+        IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexRebuildOptions,
+        IndexRebuildStatus, IndexStatusOptions, get_index_status, process_index_jobs_coalesced,
+        rebuild_index,
+    };
+    use crate::core::search::{
+        SearchDedupMode, SearchOptions, SearchSourceMode, run_search_with_embedder,
+    };
+
+    // Workspace embedder overrides are process-global. This test must not
+    // share the anti-pattern coalescer fixture's key when tests run in parallel.
+    let fixture = Fixture::with_workspace("wsp_00000000000000000000000772");
+    fixture.seed_verified_provenance();
+    std::fs::write(
+        fixture._root.path().join(".ee/config.toml"),
+        "[memory]\ninclude_global = false\n",
+    )
+    .unwrap();
+    let _embedder = crate::core::index::install_test_hash_workspace_embedder(fixture.workspace_id);
+    let index_dir = fixture._root.path().join("index");
+    let rebuild = IndexRebuildOptions {
+        workspace_path: fixture._root.path().to_path_buf(),
+        database_path: Some(fixture.database.clone()),
+        index_dir: Some(index_dir.clone()),
+        dry_run: false,
+    };
+    let built = rebuild_index(&rebuild).unwrap();
+    assert_eq!(built.status, IndexRebuildStatus::Success, "{built:?}");
+    assert_eq!(built.memories_indexed, 1);
+    let processing = IndexProcessingOptions {
+        workspace_path: rebuild.workspace_path.clone(),
+        database_path: rebuild.database_path.clone(),
+        index_dir: rebuild.index_dir.clone(),
+        dry_run: false,
+        job_limit: None,
+    };
+    let status_options = IndexStatusOptions {
+        workspace_path: rebuild.workspace_path.clone(),
+        database_path: rebuild.database_path.clone(),
+        index_dir: rebuild.index_dir.clone(),
+    };
+    let search = SearchOptions {
+        workspace_path: rebuild.workspace_path,
+        database_path: rebuild.database_path,
+        index_dir: Some(index_dir),
+        query: "Release validation integration test suite".to_owned(),
+        limit: 5,
+        speed: crate::search::SpeedMode::Instant,
+        explain: true,
+        as_of: None,
+        include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: Some(0.0),
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: true,
+        memory_scope: crate::models::MemoryScope::Workspace,
+        strict_scope: false,
+    };
+    let assert_retrieval_confidence = |expected: f32| {
+        let report = run_search_with_embedder(
+            &search,
+            std::sync::Arc::new(crate::search::HashEmbedder::default_256()),
+        )
+        .unwrap();
+        let data = report.data_json();
+        let hit = data["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["memoryId"] == MEMORY)
+            .unwrap_or_else(|| panic!("learned memory must remain retrievable: {data}"));
+        let scoring = &hit["metadata"]["qualityScoring"];
+        assert_eq!(scoring["observedSignals"]["confidence"], true);
+        for section in ["inputs", "components"] {
+            let actual = scoring[section]["confidence"].as_f64().unwrap();
+            assert!((actual - f64::from(expected)).abs() < 1e-6, "{scoring}");
+        }
+    };
+    let ready = get_index_status(&status_options).unwrap();
+    assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+    assert_eq!(ready.index_generation, ready.db_generation);
+    assert_retrieval_confidence(0.5);
+
+    for (signal, event_id, expected_posterior) in [
+        ("helpful", EVENT, (1.5, 0.5)),
+        ("harmful", HELD_EVENT, (1.5, 0.5 + DEFAULT_HARMFUL_WEIGHT)),
+        (
+            "neutral",
+            "fb_00000000000000000000000073",
+            (1.5, 0.5 + DEFAULT_HARMFUL_WEIGHT),
+        ),
+    ] {
+        let before = fixture.persisted_feedback_state();
+        let mut options = fixture.options();
+        options.signal = signal.to_owned();
+        options.event_id = Some(event_id.to_owned());
+        let report = record_outcome(&options).unwrap();
+        assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(fixture.posterior(), expected_posterior);
+        let memory = fixture.assert_posterior_confidence();
+        assert_eq!(report.confidence_after, Some(memory.confidence));
+        let learned = fixture.persisted_feedback_state();
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.persisted_feedback_state(), learned);
+        if signal == "neutral" {
+            assert_eq!(learned.memory, before.memory);
+            assert_eq!(learned.workspace_generation, before.workspace_generation);
+            assert_eq!(learned.index_jobs, before.index_jobs);
+        } else {
+            assert_eq!(learned.index_jobs.len(), before.index_jobs.len() + 1);
+            let pending: Vec<_> = learned
+                .index_jobs
+                .iter()
+                .filter(|job| job.status == "pending")
+                .collect();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(
+                pending[0].job_type_enum(),
+                Some(crate::db::SearchIndexJobType::SingleDocument)
+            );
+            assert_eq!(pending[0].document_source.as_deref(), Some("memory"));
+            assert_eq!(pending[0].document_id.as_deref(), Some(MEMORY));
+            assert_eq!(pending[0].documents_total, 1);
+            assert_eq!(
+                learned.workspace_generation,
+                before.workspace_generation.map(|value| value + 1)
+            );
+            let repaired = process_index_jobs_coalesced(&processing).unwrap();
+            assert_eq!(
+                repaired.status,
+                IndexProcessingStatus::Success,
+                "{repaired:?}"
+            );
+            assert_eq!(repaired.processed_jobs, 1);
+            assert_eq!(repaired.completed_jobs, 1);
+            assert_eq!(repaired.failed_jobs, 0);
+        }
+        let ready = get_index_status(&status_options).unwrap();
+        assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+        assert_eq!(ready.index_generation, learned.workspace_generation);
+        assert_eq!(ready.db_generation, learned.workspace_generation);
+        assert_retrieval_confidence(memory.confidence);
+        let published = fixture.persisted_feedback_state();
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.persisted_feedback_state(), published);
     }
 }
 
@@ -1163,6 +1385,11 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
         (prior.0, prior.1 + DEFAULT_HARMFUL_WEIGHT)
     );
     assert_eq!(fixture.posterior(), direct.posterior());
+    let confidence = fixture.assert_posterior_confidence().confidence;
+    assert_eq!(
+        confidence,
+        direct.db.get_memory(MEMORY).unwrap().unwrap().confidence
+    );
     assert_eq!(
         fixture.db.get_memory_trust_class(MEMORY).unwrap(),
         direct.db.get_memory_trust_class(MEMORY).unwrap()
@@ -1319,6 +1546,7 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
 fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
     let fixture = Fixture::new();
     let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+    fixture.seed_verified_provenance();
     let before = fixture.feedback_state();
     fixture.db.execute_raw(
         "CREATE TRIGGER reject_released_memory_index BEFORE INSERT ON search_index_jobs \
@@ -1360,6 +1588,10 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
         before.workspace_generation.map(|generation| generation + 1)
     );
     fixture.assert_pending_memory_jobs(2);
+    let memory = fixture.assert_posterior_confidence();
+    assert_eq!(memory.provenance_verification_status, "unverified");
+    assert!(memory.provenance_verified_at.is_none());
+    assert!(memory.provenance_verification_note.is_none());
     let learned = fixture.feedback_state();
     assert_eq!(fixture.persisted_feedback_state(), learned);
     assert_eq!(

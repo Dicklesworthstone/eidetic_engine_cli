@@ -30400,8 +30400,12 @@ impl DbConnection {
         }
     }
 
-    /// Update the Beta-Bernoulli posterior for a memory
-    /// (N7.1 / ADR 0032). Returns `true` if a row was updated, `false`
+    /// Persist raw Beta-Bernoulli parameters for a memory without changing its
+    /// scalar confidence. Snapshot restoration and other score policies may
+    /// intentionally manage confidence separately; live outcome learning must
+    /// use [`Self::update_memory_learning_posterior`] instead.
+    ///
+    /// Returns `true` if a row was updated, `false`
     /// if the memory does not exist or is tombstoned. The caller is
     /// responsible for emitting the matching
     /// `audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED` audit entry —
@@ -30422,6 +30426,54 @@ impl DbConnection {
                 Value::Double(alpha),
                 Value::Double(beta),
                 Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Apply live outcome learning to a memory's posterior and derived
+    /// confidence (N7.1 / ADR 0032). Retrieval hydrates the scalar confidence
+    /// from this row, so it must advance with the posterior in one update and
+    /// one workspace-generation change. Confidence is also part of the sealed
+    /// provenance payload: refresh its hash and invalidate prior verification
+    /// in that same update.
+    ///
+    /// Returns `false` for a missing or tombstoned memory. As with the raw
+    /// parameter setter, parameters must be finite and positive; storage
+    /// constraints enforce that contract. The caller owns the transaction,
+    /// audit entries, trust transition, and matching index publication job.
+    pub fn update_memory_learning_posterior(
+        &self,
+        id: &str,
+        alpha: f64,
+        beta: f64,
+    ) -> Result<bool> {
+        let Some(mut updated) = self.get_memory(id)? else {
+            return Ok(false);
+        };
+        if updated.tombstoned_at.is_some() {
+            return Ok(false);
+        }
+        updated.confidence = (alpha / (alpha + beta)) as f32;
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET bayes_alpha = ?1, bayes_beta = ?2, \
+             confidence = ?3, updated_at = ?4, \
+             provenance_chain_hash = ?5, provenance_chain_hash_version = ?6, \
+             provenance_verification_status = ?7, provenance_verified_at = NULL, \
+             provenance_verification_note = NULL \
+             WHERE id = ?8 AND tombstoned_at IS NULL",
+            &[
+                Value::Double(alpha),
+                Value::Double(beta),
+                Value::Float(updated.confidence),
+                Value::Text(now),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(id.to_string()),
             ],
         )?;

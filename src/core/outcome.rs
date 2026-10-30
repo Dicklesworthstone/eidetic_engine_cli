@@ -1712,7 +1712,7 @@ fn apply_memory_outcome_in_txn(
             applied_weight,
             "applying Bayesian posterior outcome update"
         );
-        if !connection.update_memory_bayes_posterior(
+        if !connection.update_memory_learning_posterior(
             &feedback.target_id,
             posterior.alpha(),
             posterior.beta(),

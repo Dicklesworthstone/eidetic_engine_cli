@@ -3396,6 +3396,7 @@ fn helpful_outcome_index_coalesce_restores_neural_hybrid_in_existing_explicit_st
 struct OutcomeIndexState {
     generation: u64,
     posterior: (f64, f64),
+    confidence: f32,
     trust_class: String,
     feedback_count: usize,
     jobs: Vec<ee::db::StoredSearchIndexJob>,
@@ -3428,6 +3429,7 @@ fn outcome_index_state(database: &Path, memory_id: &str) -> TestResult<OutcomeIn
     Ok(OutcomeIndexState {
         generation,
         posterior,
+        confidence: memory.confidence,
         trust_class: memory.trust_class,
         feedback_count,
         jobs,
@@ -3476,7 +3478,12 @@ fn ensure_outcome_index_ready(value: &Value, generation: u64) -> TestResult {
 }
 
 #[cfg(unix)]
-fn ensure_outcome_index_search(value: &Value, memory_id: &str, neural: bool) -> TestResult {
+fn ensure_outcome_index_search(
+    value: &Value,
+    memory_id: &str,
+    neural: bool,
+    expected_confidence: f64,
+) -> TestResult {
     let data = response_data(value, "outcome search")?;
     let results = data
         .get("results")
@@ -3486,6 +3493,17 @@ fn ensure_outcome_index_search(value: &Value, memory_id: &str, neural: bool) -> 
         .iter()
         .find(|hit| hit.get("memoryId").and_then(Value::as_str) == Some(memory_id))
         .ok_or_else(|| format!("outcome search omitted {memory_id}: {value}"))?;
+    let quality = &hit["metadata"]["qualityScoring"];
+    assert_eq!(quality["observedSignals"]["confidence"], true, "{hit}");
+    for field in ["inputs", "components"] {
+        let confidence = quality[field]["confidence"]
+            .as_f64()
+            .ok_or_else(|| format!("outcome search omitted {field} confidence: {hit}"))?;
+        assert!(
+            (confidence - expected_confidence).abs() <= 1e-6,
+            "outcome search {field} confidence {confidence} differs from committed confidence {expected_confidence}: {hit}"
+        );
+    }
     let degraded = value
         .get("degraded")
         .and_then(Value::as_array)
@@ -3627,7 +3645,12 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         &run("outcome_before_index", &["index", "status"])?,
         original_state.generation,
     )?;
-    ensure_outcome_index_search(&run("outcome_before_search", &query)?, memory_id, neural)?;
+    ensure_outcome_index_search(
+        &run("outcome_before_search", &query)?,
+        memory_id,
+        neural,
+        f64::from(original_state.confidence),
+    )?;
 
     let dry_run = run(
         "outcome_dry_run",
@@ -3643,6 +3666,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     let mut before = outcome_index_state(&database, memory_id)?;
     assert_eq!(before.generation, original_state.generation);
     assert_eq!(before.posterior, original_state.posterior);
+    assert_eq!(before.confidence, original_state.confidence);
     assert_eq!(before.trust_class, original_state.trust_class);
     assert_eq!(before.feedback_count, original_state.feedback_count + 1);
     assert_eq!(before.jobs, original_state.jobs);
@@ -3650,12 +3674,18 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         &run("outcome_neutral_index", &["index", "status"])?,
         before.generation,
     )?;
-    ensure_outcome_index_search(&run("outcome_neutral_search", &query)?, memory_id, neural)?;
+    ensure_outcome_index_search(
+        &run("outcome_neutral_search", &query)?,
+        memory_id,
+        neural,
+        f64::from(before.confidence),
+    )?;
 
     // The second round reopens an already updated store, queues two new events
     // for the same document, and must retain each event's independent job.
     for (round, events) in [(0, &[86_u64][..]), (1, &[87_u64, 88][..])] {
         let mut job_ids = Vec::new();
+        let mut expected_posterior = before.posterior;
         for event in events {
             let event_id = format!("fb_{event:026}");
             let args = [
@@ -3670,6 +3700,31 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             assert_eq!(recorded["data"]["status"], "recorded", "{recorded}");
             let state = outcome_index_state(&database, memory_id)?;
             assert!(state.generation > before.generation);
+            let confidence_before =
+                expected_posterior.0 / (expected_posterior.0 + expected_posterior.1);
+            expected_posterior.0 += 1.0;
+            assert_eq!(state.posterior, expected_posterior);
+            let expected_confidence =
+                expected_posterior.0 / (expected_posterior.0 + expected_posterior.1);
+            assert!(
+                (f64::from(state.confidence) - expected_confidence).abs() <= 1e-6,
+                "helpful feedback left stored scoring confidence behind its posterior: {state:?}"
+            );
+            // The public outcome report rounds confidence to four decimal
+            // places; stored and retrieved f32 values retain finer precision.
+            for (field, expected) in [
+                ("before", confidence_before),
+                ("after", expected_confidence),
+            ] {
+                let reported = recorded["data"]["confidence"][field]
+                    .as_f64()
+                    .ok_or_else(|| format!("outcome omitted {field} confidence: {recorded}"))?;
+                let rounded = (expected * 10_000.0).round() / 10_000.0;
+                assert!(
+                    (reported - rounded).abs() <= 1e-6,
+                    "reported {field} confidence does not match its posterior: {recorded}"
+                );
+            }
             let new_jobs: Vec<_> = state
                 .jobs
                 .iter()
@@ -3774,6 +3829,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         let completed = outcome_index_state(&database, memory_id)?;
         assert_eq!(completed.generation, pending.generation);
         assert_eq!(completed.posterior, pending.posterior);
+        assert_eq!(completed.confidence, pending.confidence);
         assert_eq!(completed.feedback_count, pending.feedback_count);
         assert_eq!(completed.jobs.len(), pending.jobs.len());
         for id in &job_ids {
@@ -3796,6 +3852,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             &run(&format!("outcome_repaired_search_{round}"), &query)?,
             memory_id,
             neural,
+            expected_posterior.0 / (expected_posterior.0 + expected_posterior.1),
         )?;
         let event_id = format!("fb_{:026}", events[0]);
         let replay = run(
@@ -3827,7 +3884,12 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         &run("outcome_idle_index", &["index", "status"])?,
         before.generation,
     )?;
-    ensure_outcome_index_search(&run("outcome_idle_search", &query)?, memory_id, neural)?;
+    ensure_outcome_index_search(
+        &run("outcome_idle_search", &query)?,
+        memory_id,
+        neural,
+        f64::from(before.confidence),
+    )?;
     if copied_store {
         let implicit_index_arg = path_string(&implicit_index);
         let implicit_status = run_ee_with_env(
