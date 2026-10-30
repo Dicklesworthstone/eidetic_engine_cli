@@ -19,7 +19,7 @@ use super::{
     StoredSearchIndexJob, UnpublishedIndexStage, append_failed_index_job_transition,
     artifact_to_document, checked_document_counts, complete_running_index_job_in_txn, delta,
     embedder_fingerprint_for_index_metadata, embedder_reports_pending_model2vec_download,
-    evidence_span_to_document, finalize_coalesced_claimed_jobs, index_checkpoint,
+    evidence_span_to_document, finalize_coalesced_claimed_jobs, index_operation_checkpoint,
     memory_documents_with_anchors_with_cx, path_exists_no_follow,
     persist_index_embedding_registry_input, prepare_index_embedder_stack,
     prepare_index_embedding_registry_input, publish_staged_generation,
@@ -57,30 +57,30 @@ pub(super) async fn prepare(
     index_dir: &Path,
 ) -> Result<Option<PreparedDelta>, IndexRebuildError> {
     let cx = publish_lock.cx;
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     // Initial builds and recovery of an absent active generation stay on the
     // existing full-source path, without an unnecessary model/source load.
     if !path_exists_no_follow(&index_dir.join(super::INDEX_METADATA_FILE)) {
         return Ok(None);
     }
     let generation_hint = db.get_workspace_generation(workspace_id);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let generation_hint = generation_hint?.unwrap_or(0);
     let recovered = publish_lock
         .with_generation_fence(index_dir, || {
             recover_interrupted_publish_for_snapshot(index_dir, generation_hint)
         })
         .await;
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     recovered?;
     let eligible = validate_incremental_index_metadata(index_dir, generation_hint, u64::MAX);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
         return Ok(None);
     }
     let selected = IndexModelSelection::resolve_stack(db, workspace_id);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let (model_selection, stack) = selected?;
     if embedder_reports_pending_model2vec_download(stack.fast())
         && workspace_index_source_rows_fit(db, workspace_id, 0)?
@@ -89,9 +89,11 @@ pub(super) async fn prepare(
         // acquiring a model for a corpus that has no possible documents.
         return Ok(None);
     }
+    publish_lock.checkpoint()?;
     let stack = prepare_index_embedder_stack(cx, stack).await?;
+    publish_lock.checkpoint()?;
     let reconciler = delta::SourceReconciler::read(index_dir, &stack);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let reconciler = match reconciler {
         Ok(reconciler) => reconciler,
         Err(refusal) => {
@@ -99,13 +101,15 @@ pub(super) async fn prepare(
             return Ok(None);
         }
     };
-    let Some(snapshot) = capture(cx, db, workspace_id, reconciler)? else {
+    let Some(snapshot) =
+        capture_with_control(cx, db, workspace_id, reconciler, publish_lock.control)?
+    else {
         return Ok(None);
     };
     // Check the actual captured generation as well as the earlier hint. The
     // complete source set, never a queued job or generation count, owns the diff.
     let eligible = validate_incremental_index_metadata(index_dir, snapshot.generation, u64::MAX);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
         return Ok(None);
@@ -118,7 +122,7 @@ pub(super) async fn prepare(
         reconciliation,
     } = snapshot;
     let staged = stage_planned_index_delta(
-        cx,
+        publish_lock,
         index_dir,
         &stack,
         reconciliation.delta,
@@ -126,7 +130,7 @@ pub(super) async fn prepare(
         document_counts,
     )
     .await;
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     match staged {
         Ok((stage, applied)) => {
             tracing::info!(
@@ -165,23 +169,34 @@ pub(super) async fn prepare(
     }
 }
 
+#[cfg(test)]
 fn capture(
     cx: &asupersync::Cx,
     db: &DbConnection,
     workspace_id: &str,
+    reconciler: delta::SourceReconciler,
+) -> Result<Option<SourceDeltaSnapshot>, IndexRebuildError> {
+    capture_with_control(cx, db, workspace_id, reconciler, None)
+}
+
+fn capture_with_control(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
     mut reconciler: delta::SourceReconciler,
+    control: Option<&super::IndexOperationControl>,
 ) -> Result<Option<SourceDeltaSnapshot>, IndexRebuildError> {
     let mut refused = None;
     let captured = source_snapshot::capture(db, || {
-        index_checkpoint(cx)?;
+        index_operation_checkpoint(cx, control)?;
         let generation = db.get_workspace_generation(workspace_id)?;
         let mut counts = [0_usize; 5];
         db.visit_index_memory_batches_in_current_snapshot::<IndexRebuildError>(
             workspace_id,
             |page| {
-                index_checkpoint(cx)?;
+                index_operation_checkpoint(cx, control)?;
                 for document in memory_documents_with_anchors_with_cx(Some(cx), db, page)? {
-                    observe(cx, &mut reconciler, &mut refused, document)?;
+                    observe(cx, &mut reconciler, &mut refused, document, control)?;
                     counts[0] += 1;
                 }
                 Ok(())
@@ -193,6 +208,7 @@ fn capture(
                 &mut reconciler,
                 &mut refused,
                 session_to_document(&session),
+                control,
             )?;
             counts[1] += 1;
             Ok(())
@@ -205,6 +221,7 @@ fn capture(
                     &mut reconciler,
                     &mut refused,
                     artifact_to_document(&artifact),
+                    control,
                 )?;
                 counts[2] += 1;
                 Ok(())
@@ -226,6 +243,7 @@ fn capture(
                         &mut reconciler,
                         &mut refused,
                         rule_to_document(&projection),
+                        control,
                     )?;
                     counts[3] += 1;
                 }
@@ -238,11 +256,12 @@ fn capture(
                 &mut reconciler,
                 &mut refused,
                 evidence_span_to_document(&span),
+                control,
             )?;
             counts[4] += 1;
             Ok(())
         })?;
-        index_checkpoint(cx)?;
+        index_operation_checkpoint(cx, control)?;
         let document_counts =
             checked_document_counts(counts[0], counts[1], counts[2], counts[3], counts[4])?;
         let open_job_ids = db
@@ -277,7 +296,7 @@ fn capture(
             ("rule", Some("updated_at")),
             ("import", None),
         ] {
-            index_checkpoint(cx)?;
+            index_operation_checkpoint(cx, control)?;
             let belongs = |document: &crate::search::IndexableDocument| {
                 document
                     .metadata
@@ -312,7 +331,7 @@ fn capture(
                 changes.sort_by(|left, right| left.id.cmp(&right.id));
             }
         }
-        index_checkpoint(cx)?;
+        index_operation_checkpoint(cx, control)?;
         Ok(SourceDeltaSnapshot {
             generation: generation.unwrap_or_else(|| u64::from(document_counts.total())),
             document_counts,
@@ -323,7 +342,7 @@ fn capture(
     });
     // Storage may report interruption as a DB error; retain the request's
     // cancellation before interpreting an intentional collector refusal.
-    index_checkpoint(cx)?;
+    index_operation_checkpoint(cx, control)?;
     if let Some(refusal) = refused {
         log_refusal(&refusal);
         return Ok(None);
@@ -336,8 +355,9 @@ fn observe(
     reconciler: &mut delta::SourceReconciler,
     refused: &mut Option<IncrementalFallback>,
     document: CanonicalSearchDocument,
+    control: Option<&super::IndexOperationControl>,
 ) -> Result<(), DbError> {
-    if index_checkpoint(cx).is_err() {
+    if index_operation_checkpoint(cx, control).is_err() {
         return Err(source_refused());
     }
     reconciler
@@ -378,16 +398,15 @@ pub(super) async fn publish<F>(
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
-    let cx = publish_lock.cx;
     let after_capture = after_snapshot();
-    if let Err(error) = index_checkpoint(cx).and(after_capture) {
+    if let Err(error) = publish_lock.checkpoint().and(after_capture) {
         finalize_coalesced_claimed_jobs(db, jobs, finalizers, &error);
         return Err(error);
     }
     let documents_total = prepared.document_counts.total();
     for job in jobs {
         let updated = update_running_index_job_total(db, &job.id, documents_total);
-        if let Err(error) = index_checkpoint(cx).and(updated) {
+        if let Err(error) = publish_lock.checkpoint().and(updated) {
             finalize_coalesced_claimed_jobs(db, jobs, finalizers, &error);
             return Err(error);
         }

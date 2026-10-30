@@ -330,7 +330,8 @@ jobs:
           remember-dedup-transaction core::memory::tests::store_remembered_memory_persists_simhash_and_dedup_link
           outcome-atomic core::outcome::atomic_learning_tests::
           outcome-native-rule core::outcome::tests::native_rule_outcome_
-          index-repair-destination steward::implementation::tests::background_index_rebuild_preserves_request_for_custom_database_or_index
+          index-repair-requests steward::implementation::tests::background_index_rebuild_
+          index-coalesce-control steward::implementation::tests::background_index_coalesce_
           CASES
           exit "$failed"
       - name: Exercise repair identity, search freshness, and diagnostics serially

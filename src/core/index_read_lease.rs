@@ -14,7 +14,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{IndexRebuildError, ensure_index_path_has_no_symlinks, index_checkpoint, index_parent};
+use super::{
+    IndexOperationControl, IndexRebuildError, ensure_index_path_has_no_symlinks, index_checkpoint,
+    index_operation_checkpoint, index_parent,
+};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use rustix::io::Errno;
 
@@ -398,11 +401,19 @@ impl IndexGenerationLease {
         cx: &asupersync::Cx,
         index_dir: &Path,
     ) -> Result<Self, IndexRebuildError> {
-        index_checkpoint(cx)?;
+        Self::publish_with_control(cx, index_dir, None).await
+    }
+
+    pub(super) async fn publish_with_control(
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        control: Option<&IndexOperationControl>,
+    ) -> Result<Self, IndexRebuildError> {
+        index_operation_checkpoint(cx, control)?;
         let parent = index_parent(index_dir);
         ensure_index_path_has_no_symlinks(parent, "prepare index publication lease")?;
         std::fs::create_dir_all(parent).map_err(|error| lease_error("prepare", error))?;
-        Self::acquire(cx, index_dir, true, MAX_WAIT).await
+        Self::acquire_with_control(cx, index_dir, true, MAX_WAIT, control).await
     }
 
     async fn acquire(
@@ -411,13 +422,23 @@ impl IndexGenerationLease {
         exclusive: bool,
         max_wait: Duration,
     ) -> Result<Self, IndexRebuildError> {
-        index_checkpoint(cx)?;
+        Self::acquire_with_control(cx, index_dir, exclusive, max_wait, None).await
+    }
+
+    async fn acquire_with_control(
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        exclusive: bool,
+        max_wait: Duration,
+        control: Option<&IndexOperationControl>,
+    ) -> Result<Self, IndexRebuildError> {
+        index_operation_checkpoint(cx, control)?;
         let parent = index_parent(index_dir);
         let directory = open_directory(parent)?;
         let started = Instant::now();
         let mut attempted = false;
         loop {
-            index_checkpoint(cx)?;
+            index_operation_checkpoint(cx, control)?;
             // Always permit the first nonblocking attempt (including prefetch's
             // zero wait), but never acquire on a retry after an overdue timer.
             if attempted && started.elapsed() >= max_wait {
@@ -428,7 +449,7 @@ impl IndexGenerationLease {
                 // Opening and then waiting must not let a replaced parent
                 // redirect subsequent pathname reads outside the leased inode.
                 verify_parent_identity(parent, &directory)?;
-                index_checkpoint(cx)?;
+                index_operation_checkpoint(cx, control)?;
                 return Ok(Self {
                     _directory: directory,
                 });

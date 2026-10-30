@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -206,7 +206,7 @@ pub(crate) fn install_test_workspace_embedder(
 }
 
 #[cfg(test)]
-fn install_before_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
+pub(crate) fn install_before_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
     BEFORE_INDEX_PUBLISH_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
     });
@@ -233,7 +233,7 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-fn install_after_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
+pub(crate) fn install_after_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
     AFTER_INDEX_PUBLISH_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
     });
@@ -270,6 +270,7 @@ fn acquire_index_publish_lock(
     db: &DbConnection,
     workspace_id: &str,
     holder_id: &str,
+    control: Option<&IndexOperationControl>,
 ) -> Result<(), IndexRebuildError> {
     acquire_index_publish_lock_with_retry(
         cx,
@@ -278,6 +279,7 @@ fn acquire_index_publish_lock(
         holder_id,
         index_publish_lock_retry_attempts(),
         index_publish_lock_retry_delay,
+        control,
     )
 }
 
@@ -317,6 +319,7 @@ fn acquire_index_publish_lock_with_retry<F>(
     holder_id: &str,
     attempts: usize,
     retry_delay: F,
+    control: Option<&IndexOperationControl>,
 ) -> Result<(), IndexRebuildError>
 where
     F: Fn(usize) -> Duration,
@@ -330,7 +333,7 @@ where
     let mut waited = Duration::ZERO;
     let mut last_holder = None;
     for attempt in 0..attempts {
-        index_checkpoint(cx)?;
+        index_operation_checkpoint(cx, control)?;
         let acquisition = match db.acquire_advisory_lock(
             &lock_id,
             holder_id,
@@ -339,9 +342,7 @@ where
         ) {
             Ok(acquisition) => acquisition,
             Err(error) => {
-                if cx.checkpoint().is_err() {
-                    return index_checkpoint(cx);
-                }
+                index_operation_checkpoint(cx, control)?;
                 return Err(IndexRebuildError::Database(error));
             }
         };
@@ -373,7 +374,7 @@ where
                             let chunk = remaining.min(Duration::from_millis(5));
                             std::thread::sleep(chunk);
                             remaining = remaining.saturating_sub(chunk);
-                            index_checkpoint(cx)?;
+                            index_operation_checkpoint(cx, control)?;
                         }
                     }
                 }
@@ -443,6 +444,79 @@ fn index_checkpoint(cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
     })
 }
 
+/// Controls a synchronous maintenance invocation without detaching its work.
+///
+/// The operation retains a runtime-owned context and observes external shutdown
+/// at its existing cooperative checkpoints, including the last publication
+/// fence. A synchronous backend call is not preempted; its staged output cannot
+/// publish after cancellation is observed, and cleanup finishes before return.
+pub(crate) struct IndexOperationControl {
+    pub timeout: Duration,
+    pub cancellation_flag: Option<Arc<AtomicBool>>,
+    pub cancellation_cx: Option<asupersync::Cx>,
+    queued_jobs_changed: AtomicBool,
+}
+
+impl IndexOperationControl {
+    pub(crate) fn new(
+        timeout: Duration,
+        cancellation_flag: Option<Arc<AtomicBool>>,
+        cancellation_cx: Option<asupersync::Cx>,
+    ) -> Self {
+        Self {
+            timeout,
+            cancellation_flag,
+            cancellation_cx,
+            queued_jobs_changed: AtomicBool::new(false),
+        }
+    }
+
+    /// Confirmed queue transitions survive an error return. In particular,
+    /// cancellation after claiming work is not a storage-pure dry run.
+    pub(crate) fn queued_jobs_changed(&self) -> bool {
+        self.queued_jobs_changed.load(Ordering::SeqCst)
+    }
+
+    fn record_queue_change(&self) {
+        self.queued_jobs_changed.store(true, Ordering::SeqCst);
+    }
+}
+
+fn index_operation_checkpoint(
+    cx: &asupersync::Cx,
+    control: Option<&IndexOperationControl>,
+) -> Result<(), IndexRebuildError> {
+    if let Some(control) = control {
+        if let Some(parent) = &control.cancellation_cx {
+            // A parent deadline can expire while synchronous work prevents its
+            // runtime from polling. Observe its own clock and retain its exact
+            // reason rather than substituting the child's fresh timeout.
+            if parent.checkpoint().is_err() || parent.is_cancel_requested() {
+                cx.set_cancel_reason(parent.cancel_reason().unwrap_or_else(|| {
+                    crate::core::outcome::attributed_cancel_reason(
+                        parent,
+                        asupersync::CancelKind::ParentCancelled,
+                        "maintenance parent cancelled without a recorded reason",
+                    )
+                }));
+            }
+        }
+        if !cx.is_cancel_requested()
+            && control
+                .cancellation_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            cx.set_cancel_reason(crate::core::outcome::attributed_cancel_reason(
+                cx,
+                asupersync::CancelKind::Shutdown,
+                "Daemon shutdown requested during index maintenance",
+            ));
+        }
+    }
+    index_checkpoint(cx)
+}
+
 fn map_index_search_error(
     cx: &asupersync::Cx,
     phase: &str,
@@ -472,6 +546,7 @@ fn map_index_search_error(
 /// Owns one advisory index-publish lease and releases it on every exit path.
 struct IndexPublishLockOwner<'a> {
     cx: &'a asupersync::Cx,
+    control: Option<&'a IndexOperationControl>,
     db: &'a DbConnection,
     workspace_id: &'a str,
     holder_id: String,
@@ -483,17 +558,31 @@ impl<'a> IndexPublishLockOwner<'a> {
         db: &'a DbConnection,
         workspace_id: &'a str,
     ) -> Result<Self, IndexRebuildError> {
-        index_checkpoint(cx)?;
+        Self::acquire_with_control(cx, db, workspace_id, None)
+    }
+
+    fn acquire_with_control(
+        cx: &'a asupersync::Cx,
+        db: &'a DbConnection,
+        workspace_id: &'a str,
+        control: Option<&'a IndexOperationControl>,
+    ) -> Result<Self, IndexRebuildError> {
+        index_operation_checkpoint(cx, control)?;
         let holder_id = generate_index_holder_id();
-        acquire_index_publish_lock(cx, db, workspace_id, &holder_id)?;
+        acquire_index_publish_lock(cx, db, workspace_id, &holder_id, control)?;
         let owner = Self {
             cx,
+            control,
             db,
             workspace_id,
             holder_id,
         };
-        index_checkpoint(cx)?;
+        owner.checkpoint()?;
         Ok(owner)
+    }
+
+    fn checkpoint(&self) -> Result<(), IndexRebuildError> {
+        index_operation_checkpoint(self.cx, self.control)
     }
 
     /// Drain generation readers before taking the database writer fence. A
@@ -505,7 +594,8 @@ impl<'a> IndexPublishLockOwner<'a> {
         publish: impl FnOnce() -> Result<T, IndexRebuildError>,
     ) -> Result<T, IndexRebuildError> {
         #[cfg(unix)]
-        let _generation = IndexGenerationLease::publish(self.cx, index_dir).await?;
+        let _generation =
+            IndexGenerationLease::publish_with_control(self.cx, index_dir, self.control).await?;
         #[cfg(not(unix))]
         let _ = index_dir;
         self.with_publication_fence(publish)
@@ -518,9 +608,9 @@ impl<'a> IndexPublishLockOwner<'a> {
         &self,
         publish: impl FnOnce() -> Result<T, IndexRebuildError>,
     ) -> Result<T, IndexRebuildError> {
-        index_checkpoint(self.cx)?;
+        self.checkpoint()?;
         self.db.with_write_owner_fence(IndexRebuildError::Database, || {
-            index_checkpoint(self.cx)?;
+            self.checkpoint()?;
             let lock_id = AdvisoryLockId::index(self.workspace_id);
             let rows = self.db.query(
                 "SELECT holder_id, expires_at FROM ee_advisory_locks
@@ -1770,11 +1860,29 @@ pub fn rebuild_index(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+pub(crate) fn rebuild_index_controlled(
+    options: &IndexRebuildOptions,
+    control: &IndexOperationControl,
+) -> Result<IndexRebuildReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(control.timeout, |cx| async move {
+        rebuild_index_with_cx_and_control(&cx, options, Some(control)).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
 pub async fn rebuild_index_with_cx(
     cx: &asupersync::Cx,
     options: &IndexRebuildOptions,
 ) -> Result<IndexRebuildReport, IndexRebuildError> {
-    index_checkpoint(cx)?;
+    rebuild_index_with_cx_and_control(cx, options, None).await
+}
+
+async fn rebuild_index_with_cx_and_control(
+    cx: &asupersync::Cx,
+    options: &IndexRebuildOptions,
+    control: Option<&IndexOperationControl>,
+) -> Result<IndexRebuildReport, IndexRebuildError> {
+    index_operation_checkpoint(cx, control)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -1794,7 +1902,7 @@ pub async fn rebuild_index_with_cx(
             current_index_corpus_counts_in_current_snapshot(&db, &workspace_id)
                 .map_err(IndexRebuildError::Database)
         });
-        index_checkpoint(cx)?;
+        index_operation_checkpoint(cx, control)?;
         let (counts, evidence_admission) = planned?;
         return Ok(IndexRebuildReport {
             status: IndexRebuildStatus::DryRun,
@@ -1812,9 +1920,10 @@ pub async fn rebuild_index_with_cx(
             runtime_profile,
         });
     }
-    let publish_lock = IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?;
+    let publish_lock =
+        IndexPublishLockOwner::acquire_with_control(cx, &db, &workspace_id, control)?;
     prepare_evidence_counts_for_rebuild(&db, &workspace_id);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,
@@ -1832,16 +1941,17 @@ pub async fn rebuild_index_with_cx(
         // Source reads can observe ambient cancellation as a database error.
         // Preserve the request's cancellation kind instead of reporting that
         // its integrity failed or publishing a partial source snapshot.
-        index_checkpoint(cx)?;
+        publish_lock.checkpoint()?;
         snapshot?
     };
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
 
     let _recovery_action = publish_lock
         .with_generation_fence(&index_dir, || {
             recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
         })
         .await?;
+    publish_lock.checkpoint()?;
     // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
     // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
     // (`default_search_embedder_stack_with_provenance`, :5631) to pay ~2 GB of
@@ -1870,6 +1980,7 @@ pub async fn rebuild_index_with_cx(
     } else {
         prepare_index_embedder_stack(cx, workspace_embedder_stack(&db, &workspace_id)?.0).await?
     };
+    publish_lock.checkpoint()?;
     let registration = prepare_index_embedding_registry_input(
         &db,
         &workspace_id,
@@ -2275,15 +2386,11 @@ pub async fn process_index_jobs_with_cx(
     cx: &asupersync::Cx,
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
-    process_index_jobs_with_drain(cx, options, IndexJobDrain::Ordinary).await
+    process_index_jobs_with_drain(cx, options, IndexJobDrain::Ordinary, None).await
 }
 
-/// Process the bounded pending-job set with one source snapshot and one publish.
-///
-/// Unlike [`process_index_jobs`], this is the production report surface for the
-/// steward's `index_coalesce` job. Dry-run reports remain selection-only and
-/// retain ordinary per-job planning labels; they do not claim that a coalesced
-/// snapshot was built, and they neither claim nor publish any job.
+/// Test convenience for coalesced processing without a steward cancellation source.
+#[cfg(test)]
 pub(crate) fn process_index_jobs_coalesced(
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
@@ -2294,6 +2401,31 @@ pub(crate) fn process_index_jobs_coalesced(
             IndexJobDrain::Coalesced {
                 max_corpus_documents: None,
             },
+            None,
+        )
+        .await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+/// Process the bounded pending-job set with one source snapshot and one publish.
+///
+/// This is the steward's production `index_coalesce` report surface, carrying
+/// its remaining timeout and cancellation source through publication. Dry-run
+/// reports remain selection-only and retain ordinary per-job planning labels;
+/// they neither claim jobs nor claim that a coalesced snapshot was published.
+pub(crate) fn process_index_jobs_coalesced_controlled(
+    options: &IndexProcessingOptions,
+    control: &IndexOperationControl,
+) -> Result<IndexProcessingReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(control.timeout, |cx| async move {
+        process_index_jobs_with_drain(
+            &cx,
+            options,
+            IndexJobDrain::Coalesced {
+                max_corpus_documents: None,
+            },
+            Some(control),
         )
         .await
     })
@@ -2317,6 +2449,7 @@ pub(crate) async fn process_index_jobs_coalesced_with_cx_bounded(
         IndexJobDrain::Coalesced {
             max_corpus_documents: Some(max_corpus_documents),
         },
+        None,
     )
     .await
 }
@@ -2331,8 +2464,9 @@ async fn process_index_jobs_with_drain(
     cx: &asupersync::Cx,
     options: &IndexProcessingOptions,
     drain: IndexJobDrain,
+    control: Option<&IndexOperationControl>,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
-    index_checkpoint(cx)?;
+    index_operation_checkpoint(cx, control)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -2346,13 +2480,18 @@ async fn process_index_jobs_with_drain(
         DbConnection::open_file(&database_path)?
     };
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
-    if !options.dry_run {
-        requeue_cancelled_search_index_jobs(&db, &workspace_id)?;
+    index_operation_checkpoint(cx, control)?;
+    if !options.dry_run
+        && requeue_cancelled_search_index_jobs(&db, &workspace_id)? > 0
+        && let Some(control) = control
+    {
+        control.record_queue_change();
     }
     let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, effective_job_limit)?;
     let pending_count = u32::try_from(pending_jobs.len()).map_err(|_| {
         IndexRebuildError::Index("Pending search index job count exceeds u32".to_owned())
     })?;
+    index_operation_checkpoint(cx, control)?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -2435,6 +2574,7 @@ async fn process_index_jobs_with_drain(
                 &index_dir,
                 pending_jobs,
                 max_corpus_documents,
+                control,
             )
             .await?
         }
@@ -2556,6 +2696,7 @@ fn process_selected_index_jobs_coalesced(
             index_dir,
             selected,
             None,
+            None,
         )
         .await
     })
@@ -2578,6 +2719,7 @@ fn process_selected_index_jobs_coalesced_bounded(
             index_dir,
             selected,
             Some(max_corpus_documents),
+            None,
         )
         .await
     })
@@ -2631,6 +2773,7 @@ async fn process_selected_index_jobs_coalesced_with_cx(
     index_dir: &Path,
     selected: Vec<StoredSearchIndexJob>,
     max_corpus_documents: Option<u32>,
+    control: Option<&IndexOperationControl>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
     process_selected_index_jobs_coalesced_after_snapshot_with_cx(
         cx,
@@ -2639,6 +2782,7 @@ async fn process_selected_index_jobs_coalesced_with_cx(
         index_dir,
         selected,
         max_corpus_documents,
+        control,
         || Ok(()),
     )
     .await
@@ -2664,11 +2808,13 @@ where
         index_dir,
         selected,
         None,
+        None,
         after_snapshot,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_selected_index_jobs_coalesced_after_snapshot_with_cx<F>(
     cx: &asupersync::Cx,
     db: &DbConnection,
@@ -2676,12 +2822,13 @@ async fn process_selected_index_jobs_coalesced_after_snapshot_with_cx<F>(
     index_dir: &Path,
     selected: Vec<StoredSearchIndexJob>,
     max_corpus_documents: Option<u32>,
+    control: Option<&IndexOperationControl>,
     after_snapshot: F,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
-    index_checkpoint(cx)?;
+    index_operation_checkpoint(cx, control)?;
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
     let mut claimed = Vec::new();
     let mut job_finalizers = Vec::new();
@@ -2696,9 +2843,13 @@ where
     // `RunningIndexJobFinalizer` mark every selected row failed when another
     // process legitimately held the publish lock, leaving no pending work for
     // the next remember-side drain election to recover.
-    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, workspace_id)?;
+    let _publish_lock = IndexPublishLockOwner::acquire_with_control(cx, db, workspace_id, control)?;
     for job in selected {
+        _publish_lock.checkpoint()?;
         if db.start_search_index_job(&job.id)? {
+            if let Some(control) = control {
+                control.record_queue_change();
+            }
             job_finalizers.push(RunningIndexJobFinalizer {
                 cx,
                 db,
@@ -2758,11 +2909,12 @@ where
     // The ceiling belongs inside source capture, before bodies, anchors and
     // evidence projections are hydrated. The collector checks it in the same
     // database snapshot as generation capture, closing the preflight/write race.
+    _publish_lock.checkpoint()?;
     let captured =
         collect_workspace_index_source_snapshot_with_limit(db, workspace_id, max_corpus_documents);
     // An interrupted source operation can return a database error. Preserve
     // the caller's cancellation reason before interpreting that result.
-    let snapshot = match index_checkpoint(cx).and(captured) {
+    let snapshot = match _publish_lock.checkpoint().and(captured) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
@@ -2824,7 +2976,7 @@ where
         finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
         return Err(error);
     }
-    if let Err(error) = index_checkpoint(cx) {
+    if let Err(error) = _publish_lock.checkpoint() {
         finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
         return Err(error);
     }
@@ -3373,25 +3525,27 @@ where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
     let cx = publish_lock.cx;
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let stack = if indexable_docs.is_empty() {
         stack
     } else {
         prepare_index_embedder_stack(cx, stack).await?
     };
+    publish_lock.checkpoint()?;
     let staging = UnpublishedIndexStage::create(index_dir)?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     // Record what this generation indexes so the next write can publish only
     // its delta (bd-reality-core-convergence-1azkt.57).
     let digests = delta::DocDigests::new(&stack, &indexable_docs);
     let stats = build_index_generation(cx, staging.path(), stack, indexable_docs).await?;
+    publish_lock.checkpoint()?;
     let stats = validate_built_generation(staging.path(), stats, document_counts)
         .map_err(IndexRebuildError::Index)?;
     digests.write(staging.path())?;
     // Flush large payloads while cancellation is still available and before
     // taking the writer fence. Metadata is the recoverability marker; publish
     // it only after the final lease check below.
-    sync_index_generation(staging.path(), || index_checkpoint(cx))?;
+    sync_index_generation(staging.path(), || publish_lock.checkpoint())?;
     publish_staged_generation(
         publish_lock,
         index_dir,
@@ -3422,7 +3576,7 @@ where
 {
     let cx = publish_lock.cx;
     run_before_index_publish_hook(cx);
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     publish_lock
         .with_generation_fence(index_dir, || {
             cx.masked(|| {
@@ -3482,12 +3636,13 @@ where
     F: FnOnce(Option<&crate::db::CreateEmbeddingMetadataInput>) -> Result<(), IndexRebuildError>,
 {
     let cx = publish_lock.cx;
-    index_checkpoint(cx)?;
+    publish_lock.checkpoint()?;
     let stack = if indexable_docs.is_empty() {
         stack
     } else {
         prepare_index_embedder_stack(cx, stack).await?
     };
+    publish_lock.checkpoint()?;
     // Carry the concrete producer's source into the caller-owned job transaction.
     // Preparing this input performs model-file verification before the publication
     // fence; no registry write occurs until the generation has been exchanged.
@@ -3499,7 +3654,7 @@ where
     )?;
     let commit_tail = || commit_tail(registration.as_ref());
     match stage_delta_generation(
-        cx,
+        publish_lock,
         index_dir,
         &stack,
         &indexable_docs,
@@ -3572,7 +3727,7 @@ enum DeltaStageError {
 }
 
 async fn stage_delta_generation(
-    cx: &asupersync::Cx,
+    publish_lock: &IndexPublishLockOwner<'_>,
     index_dir: &Path,
     stack: &EmbedderStack,
     documents: &[crate::search::IndexableDocument],
@@ -3588,17 +3743,26 @@ async fn stage_delta_generation(
     validate_incremental_index_metadata(index_dir, generation, u64::MAX).map_err(refused)?;
     let applied = delta::plan(index_dir, stack, documents).map_err(refused)?;
     let digests = delta::DocDigests::new(stack, documents);
-    stage_planned_index_delta(cx, index_dir, stack, applied, digests, document_counts).await
+    stage_planned_index_delta(
+        publish_lock,
+        index_dir,
+        stack,
+        applied,
+        digests,
+        document_counts,
+    )
+    .await
 }
 
 async fn stage_planned_index_delta(
-    cx: &asupersync::Cx,
+    publish_lock: &IndexPublishLockOwner<'_>,
     index_dir: &Path,
     stack: &EmbedderStack,
     applied: delta::Delta,
     digests: delta::DocDigests,
     document_counts: IndexDocumentCounts,
 ) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
+    let cx = publish_lock.cx;
     // Digest metadata alone cannot prove that the native vector tiers belong
     // to this producer. In particular, older empty generations omitted their
     // producer revision; appending into them kept that empty header forever.
@@ -3611,7 +3775,7 @@ async fn stage_planned_index_delta(
         .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
     let staged = async {
         delta::copy_generation(index_dir, staging.path())?;
-        index_checkpoint(cx)?;
+        publish_lock.checkpoint()?;
         delta::apply(cx, staging.path(), stack, &applied)
             .await
             .map_err(|fallback| {
@@ -3621,7 +3785,7 @@ async fn stage_planned_index_delta(
                     fallback.detail
                 ))
             })?;
-        index_checkpoint(cx)?;
+        publish_lock.checkpoint()?;
         verify_published_tier_counts(
             staging.path(),
             document_counts.total(),
@@ -3634,7 +3798,7 @@ async fn stage_planned_index_delta(
             ));
         }
         digests.write(staging.path())?;
-        sync_index_generation(staging.path(), || index_checkpoint(cx))?;
+        sync_index_generation(staging.path(), || publish_lock.checkpoint())?;
         Ok::<(), IndexRebuildError>(())
     }
     .await;
@@ -12607,7 +12771,7 @@ pub fn mark_index_rebuild_request_satisfied(
     mark_index_rebuild_request_satisfied_matching(workspace_path, satisfied_at, None)
 }
 
-fn mark_index_rebuild_request_satisfied_matching(
+pub(crate) fn mark_index_rebuild_request_satisfied_matching(
     workspace_path: &Path,
     satisfied_at: &str,
     expected: Option<&IndexRebuildRequest>,
@@ -16072,7 +16236,7 @@ mod tests {
                         if let Some(hook) = hook {
                             install_before_index_publish_hook(hook);
                         }
-                        process_index_jobs_with_drain(&cx, options, drain).await
+                        process_index_jobs_with_drain(&cx, options, drain, None).await
                     })
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())
@@ -16665,7 +16829,7 @@ mod tests {
             let options = &options;
             let process = || -> Result<IndexProcessingReport, String> {
                 crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
-                    process_index_jobs_with_drain(&cx, options, drain).await
+                    process_index_jobs_with_drain(&cx, options, drain, None).await
                 })
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())
@@ -19411,6 +19575,7 @@ mod tests {
             "agent_waiting",
             3,
             |_| Duration::ZERO,
+            None,
         ) {
             Ok(_) => return Err("held lock should exhaust retries".to_owned()),
             Err(e) => e,

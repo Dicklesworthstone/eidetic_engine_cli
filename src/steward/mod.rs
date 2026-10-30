@@ -3317,6 +3317,48 @@ impl ManualRunner {
                 .is_some_and(Cx::is_cancel_requested)
     }
 
+    fn index_admission_cancellation_reason(&self) -> Option<CancelReason> {
+        if let Some(parent) = &self.options.cancellation_cx {
+            if parent.checkpoint().is_err() || parent.is_cancel_requested() {
+                return Some(parent.cancel_reason().unwrap_or_else(|| {
+                    crate::core::outcome::attributed_cancel_reason(
+                        parent,
+                        asupersync::CancelKind::ParentCancelled,
+                        "maintenance parent cancelled without a recorded reason",
+                    )
+                }));
+            }
+        }
+        None
+    }
+
+    fn index_operation_control(
+        &self,
+        budget: &JobBudgetState,
+        default_timeout: Duration,
+    ) -> crate::core::index::IndexOperationControl {
+        let consumed = budget
+            .consumption
+            .get(&ResourceType::TimeMs)
+            .map_or(0, |resource| resource.consumed);
+        let timeout = budget
+            .budgets
+            .iter()
+            .filter(|limit| {
+                limit.resource == ResourceType::TimeMs
+                    && limit.on_exceed == BudgetExceedAction::Cancel
+            })
+            .map(|limit| Duration::from_millis(limit.limit.saturating_sub(consumed)))
+            .min()
+            .unwrap_or(default_timeout)
+            .min(default_timeout);
+        crate::core::index::IndexOperationControl::new(
+            timeout,
+            self.options.cancellation_flag.clone(),
+            self.options.cancellation_cx.clone(),
+        )
+    }
+
     /// Schedule a job for execution.
     pub fn schedule(
         &mut self,
@@ -3366,7 +3408,15 @@ impl ManualRunner {
                 dry_run: self.options.dry_run,
             });
         }
-        if cancellation_requested {
+        // A real index parent reason reaches execute_job_work's typed gate
+        // before store validation. A flag alone has no runtime attribution at
+        // admission, so preserve its existing generic shutdown report.
+        if cancellation_requested
+            && !(matches!(job_type, JobType::IndexRebuild | JobType::IndexCoalesce)
+                && self.options.cancellation_cx.as_ref().is_some_and(|parent| {
+                    parent.checkpoint().is_err() || parent.is_cancel_requested()
+                }))
+        {
             job.start(now);
             let completion_time = chrono::Utc::now().to_rfc3339();
             job.cancel(&completion_time);
@@ -3448,6 +3498,19 @@ impl ManualRunner {
         job_type: JobType,
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        if matches!(job_type, JobType::IndexRebuild | JobType::IndexCoalesce) {
+            if let Some(reason) = self.index_admission_cancellation_reason() {
+                let control =
+                    crate::core::index::IndexOperationControl::new(Duration::ZERO, None, None);
+                return steward_index_cancelled(
+                    job_type,
+                    reason,
+                    self.options.dry_run,
+                    &control,
+                    "admission",
+                );
+            }
+        }
         if self.cancellation_requested() {
             return (
                 RunOutcome::Cancelled,
@@ -3520,14 +3583,30 @@ impl ManualRunner {
 
         let started = Instant::now();
         let workspace_path = self.normalized_workspace_path();
+        let rebuild_request = crate::core::index::pending_index_rebuild_request(&workspace_path);
         let mut preflight_options = crate::core::index::IndexRebuildOptions {
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path.clone()),
             index_dir: self.options.index_dir.clone(),
             dry_run: true,
         };
-        let preflight = match crate::core::index::rebuild_index(&preflight_options) {
+        let preflight_control =
+            self.index_operation_control(budget, crate::core::index::index_rebuild_timeout());
+        let preflight_result =
+            crate::core::index::rebuild_index_controlled(&preflight_options, &preflight_control);
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+        let preflight = match preflight_result {
             Ok(report) => report,
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
+                return steward_index_cancelled(
+                    JobType::IndexRebuild,
+                    reason,
+                    self.options.dry_run,
+                    &preflight_control,
+                    "preflight",
+                );
+            }
             Err(error) => {
                 let message = format!("Index rebuild preflight failed: {error}");
                 return steward_job_failure(
@@ -3543,14 +3622,24 @@ impl ManualRunner {
 
         let planned_documents = u64::from(preflight.documents_total);
         budget.record(ResourceType::Items, planned_documents);
-        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
-        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
 
         if budget_cancels_before_mutation(budget) {
+            let timed_out = budget_times_out_before_mutation(budget);
             return (
-                RunOutcome::Cancelled,
+                if timed_out {
+                    RunOutcome::TimedOut
+                } else {
+                    RunOutcome::Cancelled
+                },
                 Some(planned_documents),
-                Some("Budget exceeded before durable index rebuild".to_owned()),
+                Some(
+                    if timed_out {
+                        "Timed out before durable index rebuild"
+                    } else {
+                        "Budget exceeded before durable index rebuild"
+                    }
+                    .to_owned(),
+                ),
                 Some(index_rebuild_job_details(
                     &database_path,
                     &preflight,
@@ -3577,8 +3666,29 @@ impl ManualRunner {
         }
 
         preflight_options.dry_run = false;
-        let report = match crate::core::index::rebuild_index(&preflight_options) {
+        let processing_started_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            processing_started_ms.saturating_sub(preflight_elapsed_ms),
+        );
+        let control =
+            self.index_operation_control(budget, crate::core::index::index_rebuild_timeout());
+        let processed = crate::core::index::rebuild_index_controlled(&preflight_options, &control);
+        budget.record(
+            ResourceType::TimeMs,
+            millis_to_u64(started.elapsed()).saturating_sub(processing_started_ms),
+        );
+        let report = match processed {
             Ok(report) => report,
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
+                return steward_index_cancelled(
+                    JobType::IndexRebuild,
+                    reason,
+                    false,
+                    &control,
+                    "processing",
+                );
+            }
             Err(error) => {
                 let message = format!("Index rebuild failed: {error}");
                 return steward_job_failure(
@@ -3591,11 +3701,6 @@ impl ManualRunner {
                 );
             }
         };
-        let total_elapsed_ms = millis_to_u64(started.elapsed());
-        budget.record(
-            ResourceType::TimeMs,
-            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
-        );
         let durable_mutation = matches!(
             report.status,
             crate::core::index::IndexRebuildStatus::Success
@@ -3610,12 +3715,16 @@ impl ManualRunner {
         // rebuild into a reported failure. The marker carries no store/index
         // identity, so publishing an explicitly selected alternate destination
         // must not acknowledge the default workspace's outstanding repair.
+        // A request recorded during this operation belongs to a later attempt;
+        // acknowledge only the exact request observed before source capture.
         if durable_mutation
             && rebuilt_default_workspace_index(&workspace_path, &database_path, &report.index_dir)
+            && let Some(request) = rebuild_request.as_ref()
         {
-            if let Err(reason) = crate::core::index::mark_index_rebuild_request_satisfied(
+            if let Err(reason) = crate::core::index::mark_index_rebuild_request_satisfied_matching(
                 &workspace_path,
                 &chrono::Utc::now().to_rfc3339(),
+                Some(request),
             ) {
                 tracing::debug!(
                     target: "ee::steward::index_rebuild",
@@ -3718,8 +3827,24 @@ impl ManualRunner {
             dry_run: true,
             job_limit,
         };
-        let preflight = match crate::core::index::process_index_jobs(&options) {
+        let preflight_control = self.index_operation_control(budget, Duration::from_secs(300));
+        let preflight_result = crate::core::index::process_index_jobs_coalesced_controlled(
+            &options,
+            &preflight_control,
+        );
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+        let preflight = match preflight_result {
             Ok(report) => report,
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
+                return steward_index_cancelled(
+                    JobType::IndexCoalesce,
+                    reason,
+                    self.options.dry_run,
+                    &preflight_control,
+                    "preflight",
+                );
+            }
             Err(error) => {
                 let message = format!("Index coalesce preflight failed: {error}");
                 return steward_job_failure(
@@ -3734,17 +3859,19 @@ impl ManualRunner {
         };
 
         budget.record(ResourceType::Items, u64::from(preflight.pending_jobs));
-        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
-        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
 
-        let cancellation_requested = self.cancellation_requested();
-        if cancellation_requested || budget_cancels_before_mutation(budget) {
+        if budget_cancels_before_mutation(budget) {
+            let timed_out = budget_times_out_before_mutation(budget);
             return (
-                RunOutcome::Cancelled,
+                if timed_out {
+                    RunOutcome::TimedOut
+                } else {
+                    RunOutcome::Cancelled
+                },
                 Some(u64::from(preflight.pending_jobs)),
                 Some(
-                    if cancellation_requested {
-                        "Daemon shutdown requested before durable index job processing"
+                    if timed_out {
+                        "Timed out before durable index job processing"
                     } else {
                         "Budget exceeded before durable index job processing"
                     }
@@ -3782,8 +3909,29 @@ impl ManualRunner {
         }
 
         options.dry_run = false;
-        let report = match crate::core::index::process_index_jobs_coalesced(&options) {
+        let processing_started_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            processing_started_ms.saturating_sub(preflight_elapsed_ms),
+        );
+        let control = self.index_operation_control(budget, Duration::from_secs(300));
+        let processed =
+            crate::core::index::process_index_jobs_coalesced_controlled(&options, &control);
+        budget.record(
+            ResourceType::TimeMs,
+            millis_to_u64(started.elapsed()).saturating_sub(processing_started_ms),
+        );
+        let report = match processed {
             Ok(report) => report,
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
+                return steward_index_cancelled(
+                    JobType::IndexCoalesce,
+                    reason,
+                    false,
+                    &control,
+                    "processing",
+                );
+            }
             Err(error) => {
                 let message = format!("Index coalesce failed: {error}");
                 let repair = if self.options.database_path.is_some()
@@ -3801,7 +3949,7 @@ impl ManualRunner {
                 } else {
                     INDEX_COALESCE_REPAIR_COMMAND.to_owned()
                 };
-                return steward_job_failure(
+                let mut failure = steward_job_failure(
                     "ee.steward.index_coalesce.error.v1",
                     "index_coalesce_failed",
                     message,
@@ -3809,13 +3957,14 @@ impl ManualRunner {
                     Some(&database_path),
                     &repair,
                 );
+                if let Some(details) = failure.3.as_mut() {
+                    details["durableMutation"] = json!(control.queued_jobs_changed());
+                    details["queuedJobsChanged"] = json!(control.queued_jobs_changed());
+                    details["indexPublished"] = json!(false);
+                }
+                return failure;
             }
         };
-        let total_elapsed_ms = millis_to_u64(started.elapsed());
-        budget.record(
-            ResourceType::TimeMs,
-            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
-        );
         let outcome = if matches!(
             report.status,
             crate::core::index::IndexProcessingStatus::Success
@@ -3843,7 +3992,7 @@ impl ManualRunner {
                     &preflight,
                     Some(&report),
                     false,
-                    report.durable_mutation(),
+                    report.durable_mutation() || control.queued_jobs_changed(),
                 ),
                 &qos_decision,
             )),
@@ -7267,6 +7416,43 @@ fn graph_algorithm_result_counts_for_prune_candidates(
         .collect()
 }
 
+fn steward_index_cancelled(
+    job_type: JobType,
+    reason: CancelReason,
+    dry_run: bool,
+    control: &crate::core::index::IndexOperationControl,
+    phase: &str,
+) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+    let timed_out = reason.chain().any(|cause| {
+        matches!(
+            cause.kind,
+            asupersync::CancelKind::Deadline | asupersync::CancelKind::Timeout
+        )
+    });
+    let message = format!("Index maintenance {phase} cancelled: {reason}");
+    let queued_jobs_changed = control.queued_jobs_changed();
+    (
+        if timed_out {
+            RunOutcome::TimedOut
+        } else {
+            RunOutcome::Cancelled
+        },
+        Some(0),
+        Some(message.clone()),
+        Some(json!({
+            "schema": "ee.steward.index_cancelled.v1",
+            "jobType": job_type.as_str(),
+            "phase": phase,
+            "cancelReason": reason,
+            "dryRun": dry_run,
+            "indexPublished": false,
+            "queuedJobsChanged": queued_jobs_changed,
+            "durableMutation": queued_jobs_changed,
+            "message": message,
+        })),
+    )
+}
+
 fn steward_job_failure(
     schema: &'static str,
     code: &str,
@@ -8530,6 +8716,144 @@ mod tests {
         fn scheduled(&self) -> Vec<JobType> {
             background_scheduler_job_types(&self.workspace.to_string_lossy())
         }
+
+        fn jobs(&self) -> Result<Vec<crate::db::StoredSearchIndexJob>, String> {
+            let connection =
+                DbConnection::open_file_read_only(&self.database).map_err(|e| e.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&self.workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            connection.close().map_err(|e| e.to_string())?;
+            Ok(jobs)
+        }
+
+        fn index_files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+            let index = self.workspace.join(".ee/index");
+            let mut files = BTreeMap::new();
+            let mut pending = vec![index.clone()];
+            while let Some(directory) = pending.pop() {
+                for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    let kind = entry.file_type().map_err(|e| e.to_string())?;
+                    if kind.is_dir() {
+                        pending.push(entry.path());
+                    } else {
+                        assert!(kind.is_file(), "index fixture must contain regular files");
+                        files.insert(
+                            entry
+                                .path()
+                                .strip_prefix(&index)
+                                .map_err(|e| e.to_string())?
+                                .to_path_buf(),
+                            fs::read(entry.path()).map_err(|e| e.to_string())?,
+                        );
+                    }
+                }
+            }
+            Ok(files)
+        }
+
+        fn seed_feedback_repair(&self, memory_count: usize) -> TestResult {
+            let connection = DbConnection::open_file(&self.database).map_err(|e| e.to_string())?;
+            let mut memories = Vec::new();
+            for number in 0..memory_count {
+                let id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+                connection
+                    .insert_memory(
+                        &id,
+                        &CreateMemoryInput {
+                            workspace_id: self.workspace_id.clone(),
+                            level: "semantic".to_owned(),
+                            kind: "fact".to_owned(),
+                            content: format!("Cancellation recovery memory {number}."),
+                            workflow_id: None,
+                            confidence: 0.5,
+                            utility: 0.5,
+                            importance: 0.5,
+                            provenance_uri: Some("manual://index-cancellation-test".to_owned()),
+                            trust_class: "human_explicit".to_owned(),
+                            trust_subclass: None,
+                            tags: Vec::new(),
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                memories.push(id);
+            }
+            connection.close().map_err(|e| e.to_string())?;
+            let baseline =
+                crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                    workspace_path: self.workspace.clone(),
+                    database_path: Some(self.database.clone()),
+                    index_dir: None,
+                    dry_run: false,
+                })
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                baseline.status,
+                crate::core::index::IndexRebuildStatus::Success
+            );
+            if memory_count > 1 {
+                // Supported legacy v2 digests lack embedding-input reuse
+                // proofs. Two feedback updates must take the full-build
+                // fallback there; modern v3 metadata changes reuse vectors.
+                let digest_path = self.workspace.join(".ee/index/doc_digests.json");
+                let mut digests: JsonValue =
+                    serde_json::from_slice(&fs::read(&digest_path).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
+                assert_eq!(digests["schema"], "ee.index.doc_digests.v3");
+                digests["schema"] = json!("ee.index.doc_digests.v2");
+                let removed = digests
+                    .as_object_mut()
+                    .ok_or_else(|| "index digests are not an object".to_owned())?
+                    .remove("embeddingInputs");
+                assert!(removed.is_some(), "v3 baseline must prove input reuse");
+                fs::write(
+                    digest_path,
+                    serde_json::to_vec(&digests).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            for (number, memory) in memories.into_iter().enumerate() {
+                let feedback = crate::core::outcome::record_outcome(
+                    &crate::core::outcome::OutcomeRecordOptions {
+                        database_path: &self.database,
+                        target_type: "memory".to_owned(),
+                        target_id: memory,
+                        workspace_id: Some(self.workspace_id.clone()),
+                        signal: "helpful".to_owned(),
+                        weight: None,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: None,
+                        reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        event_id: Some(format!("fb_{number:026}")),
+                        actor: Some("index-cancellation-test".to_owned()),
+                        agent_name: None,
+                        dry_run: false,
+                        harmful_per_source_per_hour:
+                            crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                        harmful_burst_window_seconds:
+                            crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                        prompt_injection_guard: true,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                assert_eq!(
+                    feedback.status,
+                    crate::core::outcome::OutcomeRecordStatus::Recorded
+                );
+            }
+            let jobs = self.jobs()?;
+            assert_eq!(jobs.len(), memory_count);
+            assert!(
+                jobs.iter().all(|job| job.status == "pending"
+                    && job.document_source.as_deref() == Some("memory"))
+            );
+            Ok(())
+        }
     }
 
     #[test]
@@ -8666,6 +8990,94 @@ mod tests {
             assert_eq!(status.health, crate::core::index::IndexHealth::Ready);
             assert_eq!(status.index_generation, status.db_generation);
             assert!(!fixture.scheduled().contains(&JobType::IndexRebuild));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_rebuild_preserves_newer_request_during_publication() -> TestResult {
+        for initially_pending in [false, true] {
+            let fixture = BackgroundIndexFixture::new()?;
+            let _embedder =
+                crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+            let connection =
+                DbConnection::open_file(&fixture.database).map_err(|error| error.to_string())?;
+            connection
+                .insert_memory(
+                    &crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string(),
+                    &CreateMemoryInput {
+                        workspace_id: fixture.workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: "A newer index repair request needs its own acknowledgement."
+                            .to_owned(),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("manual://index-request-race".to_owned()),
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            if initially_pending {
+                assert!(
+                    crate::core::index::record_index_rebuild_request(
+                        &fixture.workspace,
+                        crate::core::index::IndexRebuildTrigger::IndexMissing,
+                        "initial_request",
+                        "2026-10-30T12:00:00Z",
+                        0,
+                    )
+                    .was_recorded()
+                );
+            }
+            let workspace = fixture.workspace.clone();
+            crate::core::index::install_after_index_publish_hook(move |_| {
+                // Publication is already durable, but the steward has not yet
+                // acknowledged its captured request. A fresh observation in
+                // this interval must remain pending even if no request existed
+                // when the rebuild started.
+                assert!(
+                    crate::core::index::record_index_rebuild_request(
+                        &workspace,
+                        crate::core::index::IndexRebuildTrigger::IndexError,
+                        "newer_request_after_publication",
+                        "2026-10-30T12:01:00Z",
+                        0,
+                    )
+                    .was_recorded()
+                );
+            });
+            let mut runner =
+                ManualRunner::new(RunnerOptions::new().with_workspace_path(&fixture.workspace));
+            let result = runner.run_job_type(JobType::IndexRebuild, None);
+            assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+            let pending = crate::core::index::pending_index_rebuild_request(&fixture.workspace)
+                .ok_or("rebuild consumed a newer repair request")?;
+            assert_eq!(pending.requested_at, "2026-10-30T12:01:00Z");
+            assert_eq!(pending.degraded_code, "newer_request_after_publication");
+            assert_eq!(pending.request_count, if initially_pending { 2 } else { 1 });
+            assert!(fixture.scheduled().contains(&JobType::IndexRebuild));
+
+            // A subsequent attempt captures and satisfies that exact request.
+            let result = runner.run_job_type(JobType::IndexRebuild, None);
+            assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+            assert!(
+                crate::core::index::pending_index_rebuild_request(&fixture.workspace).is_none()
+            );
+            assert!(!fixture.scheduled().contains(&JobType::IndexRebuild));
+            let recorded = crate::core::index::read_index_rebuild_request(&fixture.workspace)?
+                .ok_or("request history disappeared after acknowledgement")?;
+            let mut expected = pending;
+            expected.satisfied_at.clone_from(&recorded.satisfied_at);
+            assert!(recorded.satisfied_at.is_some());
+            assert_eq!(recorded, expected);
         }
         Ok(())
     }
@@ -8832,7 +9244,7 @@ mod tests {
     }
 
     #[test]
-    fn background_index_coalesce_checks_shutdown_after_preflight_before_claiming() -> TestResult {
+    fn background_index_coalesce_checks_shutdown_before_preflight_or_claiming() -> TestResult {
         let fixture = BackgroundIndexFixture::new()?;
         fixture.queue("sidx_background_shutdown0000000", &fixture.workspace_id)?;
         let shutdown = Arc::new(AtomicBool::new(true));
@@ -8843,20 +9255,20 @@ mod tests {
         );
         let mut budget = JobBudgetState::new("cancelled-index", "2026-09-25T12:00:00Z");
         budget.add_budget(ResourceBudget::item_limit(1));
-        // Exercise the handler's own checkpoint, independently of run_job's
-        // earlier cancellation check. A cancellation observed here must not
-        // claim any of the preflight-selected durable jobs.
+        // Exercise the handler's own checkpoint independently of run_job's
+        // earlier check. Cancelled read-only planning must not claim a job.
         let (outcome, items, error, details) = runner.execute_index_coalesce(&mut budget);
         assert_eq!(outcome, RunOutcome::Cancelled);
-        assert_eq!(items, Some(1));
-        assert_eq!(
-            error.as_deref(),
-            Some("Daemon shutdown requested before durable index job processing")
+        assert_eq!(items, Some(0));
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("Daemon shutdown"))
         );
-        assert_eq!(
-            details.ok_or_else(|| "missing cancellation details".to_owned())?["durableMutation"],
-            false
-        );
+        let details = details.ok_or_else(|| "missing cancellation details".to_owned())?;
+        assert_eq!(details["phase"], "preflight");
+        assert_eq!(details["durableMutation"], false);
+        assert_eq!(details["queuedJobsChanged"], false);
         let connection =
             DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
         let pending = connection
@@ -8865,6 +9277,297 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].started_at.is_none());
         assert!(!fixture.workspace.join(".ee/index").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_cancellation_preserves_generation_and_retries() -> TestResult {
+        // Modern input-reuse metadata uses streamed delta; the legacy v2
+        // fixture cannot reuse vectors and exceeds its full-build ceiling.
+        for memory_count in [1, 2] {
+            for parent_cancellation in [false, true] {
+                let fixture = BackgroundIndexFixture::new()?;
+                let _embedder =
+                    crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+                fixture.seed_feedback_repair(memory_count)?;
+                let before = fixture.index_files()?;
+                let job_ids = fixture
+                    .jobs()?
+                    .into_iter()
+                    .map(|job| job.id)
+                    .collect::<BTreeSet<_>>();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let parent = Cx::for_testing();
+                let expected_reason =
+                    CancelReason::user("cancel feedback repair before publication");
+                let mut options = RunnerOptions::new().with_workspace_path(&fixture.workspace);
+                if parent_cancellation {
+                    options = options.with_cancellation_cx(&parent);
+                } else {
+                    options = options.with_cancellation_flag(Arc::clone(&shutdown));
+                }
+                let parent_for_hook = parent.clone();
+                let reason_for_hook = expected_reason.clone();
+                let shutdown_for_hook = Arc::clone(&shutdown);
+                crate::core::index::install_before_index_publish_hook(move |cx| {
+                    let remaining = cx
+                        .remaining_budget()
+                        .deadline
+                        .expect("bounded maintenance Cx");
+                    assert!(
+                        remaining <= Duration::from_secs(60),
+                        "remaining runner budget was lost"
+                    );
+                    if parent_cancellation {
+                        parent_for_hook.set_cancel_reason(reason_for_hook);
+                    } else {
+                        shutdown_for_hook.store(true, Ordering::SeqCst);
+                    }
+                });
+                let runner = ManualRunner::new(options);
+                let mut budget = JobBudgetState::new("feedback-cancel", "2026-10-30T00:00:00Z");
+                budget.add_budget(ResourceBudget::time_soft_limit_ms(1));
+                budget.add_budget(ResourceBudget::time_limit_ms(120_000));
+                budget.record(ResourceType::TimeMs, 60_000);
+                let (outcome, _, error, details) = runner.execute_index_coalesce(&mut budget);
+                assert_eq!(outcome, RunOutcome::Cancelled, "{error:?}");
+                let details =
+                    details.ok_or_else(|| "missing active cancellation details".to_owned())?;
+                assert_eq!(details["phase"], "processing");
+                assert_eq!(details["indexPublished"], false);
+                assert_eq!(details["queuedJobsChanged"], true);
+                assert_eq!(details["durableMutation"], true);
+                if parent_cancellation {
+                    assert_eq!(
+                        details["cancelReason"],
+                        serde_json::to_value(&expected_reason).map_err(|e| e.to_string())?
+                    );
+                }
+                assert_eq!(fixture.index_files()?, before);
+                let cancelled = fixture.jobs()?;
+                assert_eq!(
+                    cancelled
+                        .iter()
+                        .map(|job| job.id.clone())
+                        .collect::<BTreeSet<_>>(),
+                    job_ids
+                );
+                assert!(
+                    cancelled
+                        .iter()
+                        .all(|job| job.status == "cancelled" && job.started_at.is_some())
+                );
+                assert!(fixture.scheduled().contains(&JobType::IndexCoalesce));
+
+                let after_commit = Arc::new(AtomicBool::new(false));
+                let after_commit_hook = Arc::clone(&after_commit);
+                crate::core::index::install_after_index_publish_hook(move |_| {
+                    after_commit_hook.store(true, Ordering::SeqCst);
+                });
+                let mut retry = ManualRunner::new(
+                    RunnerOptions::new()
+                        .with_workspace_path(&fixture.workspace)
+                        .with_cancellation_flag(Arc::clone(&after_commit)),
+                );
+                let repaired = retry.run_job_type(JobType::IndexCoalesce, None);
+                assert!(
+                    after_commit.load(Ordering::SeqCst),
+                    "postpublication seam was not reached"
+                );
+                assert_eq!(repaired.outcome, RunOutcome::Success, "{repaired:?}");
+                assert_eq!(repaired.items_processed, Some(memory_count as u64));
+                let details = repaired
+                    .details
+                    .ok_or_else(|| "missing retry details".to_owned())?;
+                let reports = details["result"]["jobs"]
+                    .as_array()
+                    .ok_or_else(|| "missing completed job reports".to_owned())?;
+                assert_eq!(reports.len(), memory_count);
+                assert!(reports.iter().all(|job| {
+                    job["processing_mode"]
+                        .as_str()
+                        .is_some_and(|mode| mode.ends_with("_staged_delta") == (memory_count == 1))
+                }));
+                let completed = fixture.jobs()?;
+                assert_eq!(
+                    completed
+                        .iter()
+                        .map(|job| job.id.clone())
+                        .collect::<BTreeSet<_>>(),
+                    job_ids
+                );
+                assert!(completed.iter().all(|job| job.status == "completed"));
+                let status =
+                    crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                        workspace_path: fixture.workspace.clone(),
+                        database_path: Some(fixture.database.clone()),
+                        index_dir: None,
+                    })
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(
+                    status.health,
+                    crate::core::index::IndexHealth::Ready,
+                    "{status:?}"
+                );
+                assert_eq!(status.index_generation, status.db_generation);
+                assert_ne!(fixture.index_files()?, before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_admission_preserves_cancellation_before_store_validation()
+    -> TestResult {
+        let temporary = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let missing_workspace = temporary.path().join("missing-workspace");
+        for job_type in [JobType::IndexCoalesce, JobType::IndexRebuild] {
+            for (parent_reason, expected_outcome) in [
+                (
+                    Some(CancelReason::deadline().with_message("parent deadline expired")),
+                    RunOutcome::TimedOut,
+                ),
+                (
+                    Some(CancelReason::timeout().with_message("parent timeout expired")),
+                    RunOutcome::TimedOut,
+                ),
+                (
+                    Some(CancelReason::shutdown().with_message("parent shutdown requested")),
+                    RunOutcome::Cancelled,
+                ),
+                (
+                    Some(CancelReason::parent_cancelled().with_cause(CancelReason::deadline())),
+                    RunOutcome::TimedOut,
+                ),
+                (None, RunOutcome::Cancelled),
+            ] {
+                for through_ledger in [false, true] {
+                    let parent = Cx::for_testing();
+                    let mut options = RunnerOptions::new()
+                        .with_workspace_path(&missing_workspace)
+                        .with_cancellation_flag(Arc::new(AtomicBool::new(true)));
+                    if let Some(reason) = &parent_reason {
+                        parent.set_cancel_reason(reason.clone());
+                        options = options.with_cancellation_cx(&parent);
+                    }
+                    let mut runner = ManualRunner::new(options);
+                    let (outcome, items, error, details) = if through_ledger {
+                        let result = runner.run_job_type(job_type, None);
+                        let stored = runner
+                            .ledger()
+                            .get_job(&result.job_id)
+                            .ok_or_else(|| "cancelled admission lost its job record".to_owned())?;
+                        assert_eq!(
+                            stored.status,
+                            if expected_outcome == RunOutcome::TimedOut {
+                                JobStatus::Failed
+                            } else {
+                                JobStatus::Cancelled
+                            }
+                        );
+                        (
+                            result.outcome,
+                            result.items_processed,
+                            result.error,
+                            result.details,
+                        )
+                    } else {
+                        let mut budget =
+                            JobBudgetState::new("cancelled-admission", "2026-10-30T00:00:00Z");
+                        let result = runner.execute_job_work(job_type, &mut budget);
+                        assert!(budget.consumption.is_empty());
+                        result
+                    };
+                    assert_eq!(outcome, expected_outcome, "{error:?}");
+                    assert_eq!(items, Some(0));
+                    let details =
+                        details.ok_or_else(|| "missing typed admission details".to_owned())?;
+                    if let Some(reason) = &parent_reason {
+                        assert_eq!(details["phase"], "admission");
+                        assert_eq!(
+                            details["cancelReason"],
+                            serde_json::to_value(reason).map_err(|e| e.to_string())?
+                        );
+                        assert_eq!(details["indexPublished"], false);
+                        assert_eq!(details["queuedJobsChanged"], false);
+                    } else {
+                        assert_eq!(details["schema"], "ee.steward.job_cancelled.v1");
+                        assert_eq!(details["reason"], "daemon_shutdown");
+                        assert!(details["cancelReason"].is_null());
+                    }
+                    assert_eq!(details["durableMutation"], false);
+                    assert!(!missing_workspace.exists());
+                }
+            }
+        }
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .map_err(|e| e.to_string())?
+                .count(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_coalesce_zero_remaining_time_preserves_queue() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        fixture.queue("sidx_background_deadline0000000", &fixture.workspace_id)?;
+        let before = fixture.jobs()?;
+        for job_type in [JobType::IndexCoalesce, JobType::IndexRebuild] {
+            let mut runner = ManualRunner::new(
+                RunnerOptions::new()
+                    .with_workspace_path(&fixture.workspace)
+                    .with_time_limit(0),
+            );
+            let result = runner.run_job_type(job_type, None);
+            assert_eq!(result.outcome, RunOutcome::TimedOut, "{result:?}");
+            let details = result
+                .details
+                .ok_or_else(|| "missing timeout details".to_owned())?;
+            assert_eq!(details["phase"], "preflight");
+            assert_eq!(details["indexPublished"], false);
+            assert_eq!(details["queuedJobsChanged"], false);
+            assert_eq!(details["durableMutation"], false);
+            assert_eq!(fixture.jobs()?, before);
+            assert!(!fixture.workspace.join(".ee/index").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_rebuild_cancellation_preserves_generation() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        let _embedder =
+            crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+        fixture.seed_feedback_repair(1)?;
+        let before = fixture.index_files()?;
+        let jobs = fixture.jobs()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let hook_flag = Arc::clone(&shutdown);
+        crate::core::index::install_before_index_publish_hook(move |_| {
+            hook_flag.store(true, Ordering::SeqCst);
+        });
+        let mut runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(&fixture.workspace)
+                .with_cancellation_flag(shutdown),
+        );
+        let result = runner.run_job_type(JobType::IndexRebuild, None);
+        assert_eq!(result.outcome, RunOutcome::Cancelled, "{result:?}");
+        let details = result
+            .details
+            .ok_or_else(|| "missing rebuild cancellation details".to_owned())?;
+        assert_eq!(details["phase"], "processing");
+        assert_eq!(details["indexPublished"], false);
+        assert_eq!(details["queuedJobsChanged"], false);
+        assert_eq!(fixture.index_files()?, before);
+        assert_eq!(fixture.jobs()?, jobs);
+        let mut retry =
+            ManualRunner::new(RunnerOptions::new().with_workspace_path(&fixture.workspace));
+        let result = retry.run_job_type(JobType::IndexRebuild, None);
+        assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+        assert_ne!(fixture.index_files()?, before);
         Ok(())
     }
 
