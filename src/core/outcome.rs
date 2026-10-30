@@ -497,6 +497,7 @@ impl OutcomeQuarantineSummary {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
+        let index_repair_job_id = self.queued_memory_index_job_id();
         let reason = redact_outcome_public_source_ref(&self.reason);
         let mut data = serde_json::json!({
             "id": &self.id,
@@ -769,6 +770,17 @@ enum OutcomeQuarantineCause {
 }
 
 impl OutcomeRecordReport {
+    fn queued_memory_index_job_id(&self) -> Option<String> {
+        if self.status != OutcomeRecordStatus::Recorded || self.target_type != "memory" {
+            return None;
+        }
+        let (before, after) = self.confidence_before.zip(self.confidence_after)?;
+        if before == after {
+            return None;
+        }
+        self.event_id.as_deref().map(memory_outcome_index_job_id)
+    }
+
     #[must_use]
     pub fn human_summary(&self) -> String {
         let action = match self.status {
@@ -825,6 +837,9 @@ impl OutcomeRecordReport {
                 "  Confidence: {before:.4} → {after:.4} ({arrow})\n"
             ));
         }
+        if let Some(job_id) = self.queued_memory_index_job_id() {
+            output.push_str(&format!("  Index repair: queued ({job_id})\n"));
+        }
         output
     }
 
@@ -863,6 +878,13 @@ impl OutcomeRecordReport {
                 "delta": score_json_value(after - before),
             })),
             "feedback": self.feedback.data_json(),
+            "indexRepair": index_repair_job_id.as_ref().map(|job_id| serde_json::json!({
+                "queued": true,
+                "jobId": job_id,
+                "jobType": "single_document",
+                "documentSource": "memory",
+                "documentId": &self.target_id,
+            })),
             // bd-3qs2i.3.1: surface response-level degraded entries
             // (currently: harmful_burst_quarantine) so agents can branch
             // on a stable code rather than parsing the human summary.
@@ -1649,6 +1671,13 @@ fn apply_native_rule_outcome_in_txn(
 /// feedback event must never survive without its posterior, trust changes and
 /// index work: retries use that event as their idempotency key and will not
 /// learn it again.
+fn memory_outcome_index_job_id(event_id: &str) -> String {
+    let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("sidx_{}", &hash[..26])
+}
+
 fn apply_memory_outcome_in_txn(
     connection: &DbConnection,
     feedback: &CreateFeedbackEventInput,
@@ -1755,10 +1784,7 @@ fn apply_memory_outcome_in_txn(
         // Even unchanged text needs publication after learning invalidates the
         // workspace generation. Commit the repair with the observation so a
         // replay cannot leave learning permanently separated from index work.
-        let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
-            .to_hex()
-            .to_string();
-        let index_job_id = format!("sidx_{}", &hash[..26]);
+        let index_job_id = memory_outcome_index_job_id(event_id);
         connection.insert_search_index_job(
             &index_job_id,
             &crate::db::CreateSearchIndexJobInput {
