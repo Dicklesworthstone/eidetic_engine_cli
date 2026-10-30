@@ -256,7 +256,13 @@ def find_orphans(
         defined |= defined_names(clean)
     orphans = []
     for name in sorted(removed - defined):
-        word = re.compile(rf"\b{re.escape(name)}\b")
+        # A CALL SHAPE, not the bare word. `(?<![.\w])` drops `.name(` method
+        # calls, which live in a different namespace, and drops `_name(`;
+        # `\s*\(` drops every non-call occurrence -- a local binding, a match
+        # arm, a struct field, an enum variant, a `vec![name, ..]` element.
+        # `::name(` still matches, because a qualified path to a deleted free
+        # function is an orphan.
+        word = re.compile(rf"(?<![.\w]){re.escape(name)}\s*\(")
         hits = []
         for path in sorted(stripped):
             for lineno, line in enumerate(stripped[path].splitlines(), 1):
@@ -582,6 +588,60 @@ def self_test() -> int:
         orphan_names(
             ["card_sources"], {"src/a.rs": "fn k() { verified_card_sources(); }\n"}
         )
+        == set(),
+    )
+
+    # 16. MEASURED FALSE POSITIVE, src/pack/mod.rs:16557. A name that used to be
+    #     a function and is now a LOCAL BINDING is not a call.
+    arm(
+        "local_binding_is_not_a_call",
+        orphan_names(
+            ["near_duplicate"],
+            {
+                "src/pack/mod.rs": (
+                    "fn k() {\n"
+                    "    let near_duplicate = candidate_with_content(1);\n"
+                    "    let v = vec![near_duplicate, diverse, first];\n"
+                    "}\n"
+                )
+            },
+        )
+        == set(),
+    )
+
+    # 17. A method call is a different namespace from a free function, and for
+    #     a generic name (`len`, `get`, `name`) the method is often on a foreign
+    #     type, so no definition exists in this tree to clear it.
+    arm(
+        "method_call_is_not_a_free_function",
+        orphan_names(["gone_fn"], {"src/a.rs": "fn k(x: T) { x.gone_fn(); }\n"})
+        == set(),
+    )
+
+    # 18. But a QUALIFIED path call to a deleted free function is an orphan --
+    #     excluding `::` as well would be a fail-open.
+    arm(
+        "qualified_path_call_still_fires",
+        orphan_names(
+            ["gone_fn"], {"src/a.rs": "fn k() { crate::core::gone_fn(1); }\n"}
+        )
+        == {"gone_fn"},
+    )
+
+    # 19. Whitespace or a newline between the name and its argument list is
+    #     still a call -- rustfmt produces this on a long call.
+    arm(
+        "call_with_space_before_paren_fires",
+        orphan_names(["gone_fn"], {"src/a.rs": "fn k() {\n    gone_fn (\n    );\n}\n"})
+        == {"gone_fn"},
+    )
+
+    # 20. A name passed as a VALUE rather than called is a known fail-open:
+    #     `.map(gone_fn)` has no paren after the name. Pinned so the limit is
+    #     visible and a future tightening cannot claim it silently.
+    arm(
+        "function_as_value_is_a_known_fail_open",
+        orphan_names(["gone_fn"], {"src/a.rs": "fn k() { xs.map(gone_fn); }\n"})
         == set(),
     )
 
