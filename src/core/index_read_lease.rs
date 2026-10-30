@@ -75,6 +75,21 @@ pub(crate) struct IndexGenerationLease {
     _directory: File,
 }
 
+/// Producer refusal has a rebuild remedy, unlike an unsafe path, corrupt
+/// generation, cancellation or lease failure. Preserve that distinction when
+/// no retained candidate can satisfy the selected query producer.
+#[derive(Debug)]
+pub(crate) enum IndexGenerationSelectionError {
+    Generation(IndexRebuildError),
+    ProducerIncompatible(String),
+}
+
+impl From<IndexRebuildError> for IndexGenerationSelectionError {
+    fn from(error: IndexRebuildError) -> Self {
+        Self::Generation(error)
+    }
+}
+
 impl IndexGenerationLease {
     /// Select a complete generation no newer than the pinned source snapshot.
     ///
@@ -107,8 +122,64 @@ impl IndexGenerationLease {
         maximum_generation: u64,
         identity: Option<(&str, u32)>,
     ) -> Result<PathBuf, IndexRebuildError> {
+        self.index_for_snapshot_with_selection(cx, index_dir, maximum_generation, identity, None)
+            .map_err(|error| match error {
+                IndexGenerationSelectionError::Generation(error) => error,
+                IndexGenerationSelectionError::ProducerIncompatible(reason) => {
+                    IndexRebuildError::Index(reason)
+                }
+            })
+    }
+
+    /// Select against the actual query producer, not just its model label and
+    /// dimension. An incompatible live or retained producer must not conceal
+    /// an older complete generation that the selected embedder can still read.
+    pub(crate) fn index_for_snapshot_with_embedder(
+        &self,
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        maximum_generation: u64,
+        embedder: &dyn crate::search::Embedder,
+    ) -> Result<PathBuf, IndexGenerationSelectionError> {
+        let dimension = u32::try_from(embedder.dimension())
+            .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+        let selected = (super::EmbedderDescriptor::from_embedder(embedder), None);
+        self.index_for_snapshot_with_selection(
+            cx,
+            index_dir,
+            maximum_generation,
+            Some((embedder.id(), dimension)),
+            Some(&selected),
+        )
+    }
+
+    fn index_for_snapshot_with_selection(
+        &self,
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        maximum_generation: u64,
+        identity: Option<(&str, u32)>,
+        selected: Option<&(super::EmbedderDescriptor, Option<super::EmbedderDescriptor>)>,
+    ) -> Result<PathBuf, IndexGenerationSelectionError> {
         let mut inspection = InspectionBudget::new();
         inspection.checkpoint(cx)?;
+        let validate = |candidate: &Path| -> Result<u64, IndexGenerationSelectionError> {
+            let generation = super::validated_index_generation_with_identity(candidate, identity)
+                .map_err(IndexRebuildError::Index)?;
+            if let Some(selected) = selected {
+                // Reuse canonical native producer admission and its verified-
+                // empty exception after validating every persisted tier. The
+                // lease keeps these reads in the same published generation.
+                let empty = super::index_generation_is_verified_empty(candidate)
+                    .map_err(IndexRebuildError::Index)?;
+                if !empty {
+                    super::verify_index_vector_producers(candidate, selected)
+                        .map_err(IndexGenerationSelectionError::ProducerIncompatible)?;
+                }
+            }
+            Ok(generation)
+        };
+        let mut producer_rejection = None;
         let parent = index_parent(index_dir);
         verify_parent_identity(parent, &self._directory)?;
         ensure_index_path_has_no_symlinks(index_dir, "select snapshot index")?;
@@ -138,8 +209,11 @@ impl IndexGenerationLease {
         inspection.checkpoint(cx)?;
         if let Some(generation) = current.filter(|generation| *generation <= maximum_generation) {
             inspect_generation_entries(cx, index_dir, &mut inspection)?;
-            let valid = super::validated_index_generation_with_identity(index_dir, identity).ok()
-                == Some(generation);
+            let validated = validate(index_dir);
+            if let Err(IndexGenerationSelectionError::ProducerIncompatible(reason)) = &validated {
+                producer_rejection = Some(reason.clone());
+            }
+            let valid = validated.ok() == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(index_dir.to_path_buf());
@@ -206,8 +280,13 @@ impl IndexGenerationLease {
         for (generation, _, path) in candidates.into_iter().rev() {
             inspection.checkpoint(cx)?;
             inspect_generation_entries(cx, &path, &mut inspection)?;
-            let valid = super::validated_index_generation_with_identity(&path, identity).ok()
-                == Some(generation);
+            let validated = validate(&path);
+            if producer_rejection.is_none()
+                && let Err(IndexGenerationSelectionError::ProducerIncompatible(reason)) = &validated
+            {
+                producer_rejection = Some(reason.clone());
+            }
+            let valid = validated.ok() == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(path);
@@ -215,14 +294,17 @@ impl IndexGenerationLease {
             inspection.checkpoint(cx)?;
         }
         inspection.checkpoint(cx)?;
-        Err(IndexRebuildError::Index(
-            if current.is_some_and(|generation| generation > maximum_generation) {
-                "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot"
-            } else {
-                "No complete index generation is available for the source snapshot; rebuild the index"
-            }
-            .to_owned(),
-        ))
+        let reason = if current.is_some_and(|generation| generation > maximum_generation) {
+            "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot"
+        } else {
+            "No complete index generation is available for the source snapshot; rebuild the index"
+        };
+        Err(match producer_rejection {
+            Some(rejection) => IndexGenerationSelectionError::ProducerIncompatible(format!(
+                "{reason}: {rejection}"
+            )),
+            None => IndexRebuildError::Index(reason.to_owned()).into(),
+        })
     }
 
     /// Preserve the ordinary NoIndex result when neither a live directory nor

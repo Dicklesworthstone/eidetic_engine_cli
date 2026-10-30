@@ -8578,6 +8578,22 @@ fn map_index_generation_error(error: crate::core::index::IndexRebuildError) -> S
     }
 }
 
+#[cfg(unix)]
+fn map_index_generation_selection_error(
+    error: crate::core::index::IndexGenerationSelectionError,
+) -> SearchError {
+    match error {
+        crate::core::index::IndexGenerationSelectionError::Generation(error) => {
+            map_index_generation_error(error)
+        }
+        crate::core::index::IndexGenerationSelectionError::ProducerIncompatible(reason) => {
+            SearchError::IndexIncompatible(format!(
+                "search_activation.fast.producer_revision: {reason}"
+            ))
+        }
+    }
+}
+
 fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
 where
     F: FnOnce(asupersync::Cx) -> Fut,
@@ -9898,7 +9914,7 @@ async fn run_search_inner_with_performance(
     // Prefer an admitted published/retained generation. Only a genuine
     // NoIndex result may use source-only retrieval; corruption, incompatible
     // bytes, symlinks, lease failures and cancellation keep their typed error.
-    let selected_index: Result<PathBuf, SearchError> = async {
+    let selected_index: Result<(PathBuf, Option<SearchError>), SearchError> = async {
         if let Some(empty) = empty_generation {
             if source_generation != Some(empty.source_generation) {
                 return Err(SearchError::Index(
@@ -9909,7 +9925,7 @@ async fn run_search_inner_with_performance(
             {
                 generation_lease = Some(empty.lease);
             }
-            return Ok(empty.index_dir);
+            return Ok((empty.index_dir, None));
         }
         if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
             return Err(SearchError::NoIndex);
@@ -9925,28 +9941,40 @@ async fn run_search_inner_with_performance(
             return Err(SearchError::NoIndex);
         }
         #[cfg(unix)]
-        let selected = match source_generation {
-            Some(generation) if !options.source_mode.uses_embeddings() => lease
-                .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
-                .map_err(map_index_generation_error)?,
+        let (selected, producer_selection_error) = match source_generation {
+            Some(generation) if !options.source_mode.uses_embeddings() => (
+                lease
+                    .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+                    .map_err(map_index_generation_error)?,
+                None,
+            ),
             Some(generation) => match fast_embedder_override.as_deref() {
-                Some(embedder) => lease.index_for_snapshot_with_identity(
+                Some(embedder) => match lease.index_for_snapshot_with_embedder(
                     cx,
                     &index_dir,
                     generation,
-                    Some((
-                        embedder.id(),
-                        u32::try_from(embedder.dimension())
-                            .map_err(|error| SearchError::Index(error.to_string()))?,
-                    )),
+                    embedder,
+                ) {
+                    Ok(selected) => (selected, None),
+                    Err(error @ crate::core::index::IndexGenerationSelectionError::ProducerIncompatible(_)) => {
+                        // Keep the live path only for diagnostics. Carry the
+                        // refusal into the established report builder below;
+                        // neither retrieval nor lexical fallback may execute.
+                        (index_dir.clone(), Some(map_index_generation_selection_error(error)))
+                    }
+                    Err(error) => return Err(map_index_generation_selection_error(error)),
+                },
+                None => (
+                    lease
+                        .index_for_snapshot(cx, &index_dir, generation)
+                        .map_err(map_index_generation_error)?,
+                    None,
                 ),
-                None => lease.index_for_snapshot(cx, &index_dir, generation),
-            }
-            .map_err(map_index_generation_error)?,
-            None => index_dir.clone(),
+            },
+            None => (index_dir.clone(), None),
         };
         #[cfg(not(unix))]
-        let selected = index_dir.clone();
+        let (selected, producer_selection_error) = (index_dir.clone(), None);
         // Snapshot selection already validated the complete generation.
         if (!cfg!(unix) || source_generation.is_none())
             && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
@@ -9971,11 +9999,11 @@ async fn run_search_inner_with_performance(
             // as on the ordinary indexed path. Source-only retrieval uses none.
             generation_lease = Some(lease);
         }
-        Ok(selected)
+        Ok((selected, producer_selection_error))
     }
     .await;
-    let (index_dir, unpublished_source) = match selected_index {
-        Ok(selected) => (selected, false),
+    let (index_dir, unpublished_source, producer_selection_error) = match selected_index {
+        Ok((selected, producer_selection_error)) => (selected, false, producer_selection_error),
         Err(SearchError::NoIndex) if source_generation.is_some() => {
             // Includes the missing-parent and non-Unix arms that could not
             // acquire a generation lease. A broken symlink is never absence.
@@ -9984,7 +10012,7 @@ async fn run_search_inner_with_performance(
                 "read unpublished search sources",
             )
             .map_err(|error| SearchError::IndexIncompatible(error.to_string()))?;
-            (index_dir, true)
+            (index_dir, true, None)
         }
         Err(error) => return Err(error),
     };
@@ -10001,6 +10029,12 @@ async fn run_search_inner_with_performance(
         read_connection,
         fast_embedder_override.as_deref(),
     );
+    if producer_selection_error.is_some() {
+        // The stale advisory promises lexical fallback results. A refused
+        // producer runs no retrieval; keep the freshness object and report
+        // the precise index_incompatible remedy without that false promise.
+        degraded.retain(|entry| entry.code != "search_index_stale");
+    }
     let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
     push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);
     if !output_redaction_enabled {
@@ -10016,12 +10050,13 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
     let live_snapshot_start = Instant::now();
-    let live_snapshot_retrieval =
-        if unpublished_source || index_freshness.as_ref().is_some_and(|status| status.stale) {
-            stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
-        } else {
-            None
-        };
+    let live_snapshot_retrieval = if producer_selection_error.is_none()
+        && (unpublished_source || index_freshness.as_ref().is_some_and(|status| status.stale))
+    {
+        stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?
+    } else {
+        None
+    };
     // Never run the indexed engines on absent bytes or present a partial
     // source corpus as complete. Unsupported modes and oversized corpora keep
     // the existing NoIndex contract (and pack's explicitly degraded fallback).
@@ -10029,7 +10064,8 @@ async fn run_search_inner_with_performance(
         return Err(SearchError::NoIndex);
     }
     trace.record_elapsed("search::liveSnapshotRetrieval", live_snapshot_start);
-    let empty_generation = live_snapshot_retrieval.is_none()
+    let empty_generation = producer_selection_error.is_none()
+        && live_snapshot_retrieval.is_none()
         && crate::core::index::index_generation_is_verified_empty(&index_dir)
             .map_err(SearchError::IndexIncompatible)?;
     let source_mode_start = Instant::now();
@@ -10039,10 +10075,12 @@ async fn run_search_inner_with_performance(
             fallback_applied: options.source_mode != SearchSourceMode::LexicalOnly,
             unavailable_no_results: false,
         }
-    } else if empty_generation && model_free_empty_generation {
-        // No local query vector or reranker is needed. In particular, runtime
-        // capability discovery must not initialize a cold model merely to
-        // return an empty set. The ordinary global merge still runs below.
+    } else if producer_selection_error.is_some()
+        || (empty_generation && model_free_empty_generation)
+    {
+        // Neither a producer refusal nor a proven empty generation needs a
+        // query vector or runtime capability probe. A refusal reaches only
+        // the error report; a valid empty generation can still merge globals.
         SourceModeResolution {
             applied: options.source_mode,
             fallback_applied: false,
@@ -10078,7 +10116,10 @@ async fn run_search_inner_with_performance(
     let rerank_resolve_start = Instant::now();
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
-    let rerank_runtime = if live_snapshot_retrieval.is_some() || empty_generation {
+    let rerank_runtime = if producer_selection_error.is_some()
+        || live_snapshot_retrieval.is_some()
+        || empty_generation
+    {
         SearchRerankRuntime::disabled()
     } else {
         resolve_search_rerank_runtime(
@@ -10137,7 +10178,9 @@ async fn run_search_inner_with_performance(
         });
     }
     let retrieve_start = Instant::now();
-    let search_result = if let Some(retrieval) = live_snapshot_retrieval {
+    let search_result = if let Some(error) = producer_selection_error {
+        Err(error)
+    } else if let Some(retrieval) = live_snapshot_retrieval {
         Ok(retrieval)
     } else if empty_generation {
         // Empty init/repair generations use a model-free hash placeholder.
@@ -10829,19 +10872,13 @@ async fn run_diag_search_in_snapshot(
             .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
             .map_err(map_index_generation_error)?,
         (None, Some(generation)) => match fast_embedder_override.as_deref() {
-            Some(embedder) => generation_lease.index_for_snapshot_with_identity(
-                cx,
-                &index_dir,
-                generation,
-                Some((
-                    embedder.id(),
-                    u32::try_from(embedder.dimension())
-                        .map_err(|error| SearchError::Index(error.to_string()))?,
-                )),
-            ),
-            None => generation_lease.index_for_snapshot(cx, &index_dir, generation),
-        }
-        .map_err(map_index_generation_error)?,
+            Some(embedder) => generation_lease
+                .index_for_snapshot_with_embedder(cx, &index_dir, generation, embedder)
+                .map_err(map_index_generation_selection_error)?,
+            None => generation_lease
+                .index_for_snapshot(cx, &index_dir, generation)
+                .map_err(map_index_generation_error)?,
+        },
         (None, None) => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
@@ -15049,7 +15086,7 @@ fn annotate_hit_memory_drift(
         &memory.id,
         &memory.provenance_verification_status,
         memory.provenance_chain_hash.as_deref(),
-    )?;
+    );
     let metadata = hit
         .metadata
         .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -15057,16 +15094,42 @@ fn annotate_hit_memory_drift(
         *metadata = serde_json::Value::Object(serde_json::Map::new());
     }
     if let Some(map) = metadata.as_object_mut() {
-        map.insert("driftHint".to_owned(), hint.compact_json());
+        // The pinned source owns provenance even when no drift warning is
+        // warranted. Feedback can reseal a foreign globally scoped memory
+        // without advancing this index's local workspace generation.
         map.insert(
             "provenanceVerificationStatus".to_owned(),
             serde_json::json!(&memory.provenance_verification_status),
         );
-        if let Some(hash) = &memory.provenance_chain_hash {
-            map.insert("provenanceChainHash".to_owned(), serde_json::json!(hash));
+        map.insert(
+            "provenanceChainHashVersion".to_owned(),
+            serde_json::json!(&memory.provenance_chain_hash_version),
+        );
+        for (key, value) in [
+            (
+                "provenanceChainHash",
+                memory.provenance_chain_hash.as_deref(),
+            ),
+            (
+                "provenanceVerifiedAt",
+                memory.provenance_verified_at.as_deref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                map.insert(key.to_owned(), serde_json::json!(value));
+            } else {
+                map.remove(key);
+            }
+        }
+        // Verification notes are not part of the public search projection.
+        map.remove("provenanceVerificationNote");
+        map.remove("provenance_verification_note");
+        map.remove("driftHint");
+        if let Some(hint) = &hint {
+            map.insert("driftHint".to_owned(), hint.compact_json());
         }
     }
-    Some(hint)
+    hint
 }
 
 fn highest_risk_memory_drift_hint(
@@ -16357,22 +16420,29 @@ mod tests {
                 let diag = run_diag_search_with_embedder(&fixture.options, selected.clone())
                     .expect("selected diag");
                 assert_eq!(diag.final_report.results[0].doc_id, memory_id);
+                #[cfg(unix)]
+                std::fs::rename(
+                    fixture.index().with_file_name("index.previous"),
+                    fixture.index().with_file_name("empty-bootstrap-saved"),
+                )
+                .expect("isolate producer refusal from the stale empty bootstrap");
                 let before = fixture.snapshot();
-                let report = run_search_with_embedder(&fixture.options, foreign.clone())
+                let rejected = run_search_with_embedder(&fixture.options, foreign.clone())
                     .expect("producer refusal report");
-                assert_eq!(report.status, SearchStatus::IndexError);
-                assert!(report.results.is_empty());
+                assert_eq!(rejected.status, SearchStatus::IndexError);
+                assert!(rejected.results.is_empty());
                 assert!(
-                    report
+                    rejected
                         .errors
                         .iter()
                         .any(|error| error.contains("producer_revision"))
                 );
                 assert_eq!(foreign.calls.load(Ordering::Relaxed), 0);
-                // Diagnostics also reject the final producer join. Its
-                // existing pre-fusion probe embeds separately, so do not
-                // confuse that observational probe with ordinary admission.
+                // Snapshot admission rejects before the diagnostic probe can
+                // embed. Non-Unix readers retain the backend's final check.
                 assert!(run_diag_search_with_embedder(&fixture.options, foreign.clone()).is_err());
+                #[cfg(unix)]
+                assert_eq!(foreign.calls.load(Ordering::Relaxed), 0);
                 assert_eq!(fixture.snapshot(), before);
             }
         }
@@ -16507,6 +16577,245 @@ mod tests {
                 );
                 assert!(!crate::core::index::default_search_embedder_resolved());
             }
+            println!("{SENTINEL}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn hybrid_snapshot_recovery_selects_matching_native_producer() {
+            const CHILD: &str = "EE_TEST_NATIVE_PRODUCER_RECOVERY";
+            const SENTINEL: &str = "native producer recovery and refusal verified";
+            if std::env::var_os(CHILD).is_none() {
+                let isolated = tempfile::tempdir().expect("isolated configuration");
+                let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                    .args([
+                        "--exact",
+                        "core::search::tests::empty_generations::hybrid_snapshot_recovery_selects_matching_native_producer",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .env("EE_EMBED_BACKEND", "local")
+                    .env("EE_EMBED_DOWNLOAD", "off")
+                    .env_remove("EE_EMBED_MODEL_DIR")
+                    .env_remove("EE_EMBED_MODEL_PATH")
+                    .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+                    .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+                    .env("XDG_DATA_HOME", isolated.path().join("data"))
+                    .env("XDG_STATE_HOME", isolated.path().join("state"))
+                    .output()
+                    .expect("isolated native producer recovery test");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success() && stdout.contains(SENTINEL),
+                    "{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+            let mut fixture = Fixture::new();
+            fixture.options.source_mode = SearchSourceMode::Hybrid;
+            let selected = Arc::new(SemanticFixture::new(512, "selected-native-producer"));
+            let foreign = Arc::new(SemanticFixture::new(512, "other-native-producer"));
+            assert_eq!(selected.id(), foreign.id());
+            assert_eq!(selected.dimension(), foreign.dimension());
+            assert_ne!(
+                selected
+                    .identity()
+                    .expect("selected identity")
+                    .fingerprint(),
+                foreign.identity().expect("foreign identity").fingerprint()
+            );
+            let _selection = crate::core::index::install_test_workspace_embedder(
+                &fixture.workspace_id,
+                EmbedderStack::from_parts(selected.clone(), None),
+            );
+            let db = DbConnection::open_file(fixture.options.resolve_database_path())
+                .expect("source writer");
+            let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            db.insert_memory(
+                &memory_id,
+                &test_memory_input(&fixture.workspace_id, &fixture.options.query),
+            )
+            .expect("source memory");
+            db.close().expect("close source writer");
+            let first = crate::core::index::rebuild_index(&fixture.rebuild)
+                .expect("publish selected producer");
+            assert_eq!(first.status, IndexRebuildStatus::Success);
+            assert!(first.errors.is_empty(), "{:?}", first.errors);
+            let retained = fixture.index().with_file_name("index.previous");
+            std::fs::rename(
+                &retained,
+                fixture.index().with_file_name("empty-bootstrap-saved"),
+            )
+            .expect("save stale empty bootstrap outside the retained namespace");
+            {
+                let _foreign_selection = crate::core::index::install_test_workspace_embedder(
+                    &fixture.workspace_id,
+                    EmbedderStack::from_parts(foreign.clone(), None),
+                );
+                let second = crate::core::index::rebuild_index(&fixture.rebuild)
+                    .expect("publish same-label producer and retain previous generation");
+                assert_eq!(second.status, IndexRebuildStatus::Success);
+                assert!(second.errors.is_empty(), "{:?}", second.errors);
+            }
+            let status = |index: &Path| {
+                crate::core::index::get_index_status_with_embedder(
+                    &crate::core::index::IndexStatusOptions {
+                        workspace_path: fixture.options.workspace_path.clone(),
+                        database_path: fixture.options.database_path.clone(),
+                        index_dir: Some(index.to_path_buf()),
+                    },
+                    None,
+                    false,
+                    selected.as_ref(),
+                )
+                .expect("producer status")
+            };
+            let live = status(fixture.index());
+            let previous = status(&retained);
+            assert_eq!(live.health, IndexHealth::Stale);
+            assert!(
+                live.last_check_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("producer_revision"))
+            );
+            assert_eq!(previous.health, IndexHealth::Ready);
+            assert_eq!(live.db_generation, live.index_generation);
+            assert_eq!(previous.index_generation, live.db_generation);
+            let generation = live.db_generation.expect("current source generation");
+            assert!(generation > 0);
+            let snapshot = || {
+                let mut files = fixture.snapshot();
+                files.retain(|path, _| !path.to_string_lossy().ends_with("-shm"));
+                files
+            };
+            let before = snapshot();
+            let foreign_calls = foreign.calls.load(Ordering::Relaxed);
+            let assert_hybrid = |report: &SearchReport| {
+                assert_eq!(report.status, SearchStatus::Success);
+                assert_eq!(report.embed_backend, EmbedBackend::NeuralLocal);
+                assert_eq!(report.source_mode_applied, SearchSourceMode::Hybrid);
+                assert!(!report.source_mode_fallback);
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+                assert!(
+                    !report
+                        .index_freshness
+                        .is_some_and(|freshness| freshness.stale)
+                );
+                let hit = report.results.first().expect("retained memory");
+                assert_eq!(hit.doc_id, memory_id);
+                assert!(hit.fast_score.is_some() && hit.lexical_score.is_some());
+            };
+            let query_calls = selected.calls.load(Ordering::Relaxed);
+            let handoff = run_pack_search(&fixture.options).expect("matching retained hybrid read");
+            assert_hybrid(&handoff.report);
+            assert_eq!(handoff.snapshot.generation, generation);
+            let diagnostic =
+                run_diag_search(&fixture.options).expect("matching retained diagnostics");
+            assert_hybrid(&diagnostic.final_report);
+            let freshness = diagnostic
+                .final_report
+                .index_freshness
+                .expect("diagnostic generation");
+            assert_eq!(freshness.db_generation, Some(generation));
+            assert_eq!(freshness.index_generation, Some(generation));
+            assert!(selected.calls.load(Ordering::Relaxed) > query_calls);
+            assert_eq!(foreign.calls.load(Ordering::Relaxed), foreign_calls);
+            assert_eq!(
+                snapshot(),
+                before,
+                "producer recovery must remain read-only"
+            );
+
+            let index = fixture.index();
+            let producer = selected.clone();
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let lease = crate::core::index::IndexGenerationLease::read(&cx, index)
+                    .await
+                    .expect("generation lease");
+                assert!(
+                    lease
+                        .index_for_snapshot_with_embedder(
+                            &cx,
+                            index,
+                            generation - 1,
+                            producer.as_ref(),
+                        )
+                        .is_err(),
+                    "producer recovery cannot read a future source generation"
+                );
+            })
+            .expect("generation ceiling runtime");
+
+            std::fs::rename(
+                &retained,
+                fixture.index().with_file_name("matching-producer-saved"),
+            )
+            .expect("make matching generation unavailable");
+            let before = snapshot();
+            let query_calls = selected.calls.load(Ordering::Relaxed);
+            let rejected = run_pack_search(&fixture.options).expect("producer refusal report");
+            assert_eq!(rejected.report.status, SearchStatus::IndexError);
+            assert!(rejected.report.results.is_empty());
+            assert!(
+                rejected
+                    .report
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("producer_revision"))
+            );
+            assert!(
+                rejected
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "index_incompatible")
+            );
+            assert!(!rejected.report.degraded.iter().any(|entry| matches!(
+                entry.code.as_str(),
+                "index_corrupt" | "search_live_snapshot_lexical" | "source_mode_fallback"
+            )));
+            assert!(
+                !rejected
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.message.contains("lexical fallback"))
+            );
+            let refusal_freshness = rejected
+                .report
+                .index_freshness
+                .expect("refused producer freshness");
+            assert!(refusal_freshness.stale);
+            assert_eq!(refusal_freshness.db_generation, Some(generation));
+            assert_eq!(refusal_freshness.index_generation, Some(generation));
+            assert_eq!(
+                rejected.report.source_mode_applied,
+                SearchSourceMode::Hybrid
+            );
+            assert!(!rejected.report.source_mode_fallback);
+            assert!(matches!(
+                run_diag_search(&fixture.options),
+                Err(SearchError::IndexIncompatible(reason)) if reason.contains("producer_revision")
+            ));
+            assert_eq!(selected.calls.load(Ordering::Relaxed), query_calls);
+            let mut lexical = fixture.options.clone();
+            lexical.source_mode = SearchSourceMode::LexicalOnly;
+            let lexical = run_pack_search(&lexical).expect("independent lexical read");
+            assert_eq!(lexical.report.status, SearchStatus::Success);
+            assert_eq!(
+                lexical.report.source_mode_applied,
+                SearchSourceMode::LexicalOnly
+            );
+            assert_eq!(lexical.report.results[0].doc_id, memory_id);
+            assert_eq!(selected.calls.load(Ordering::Relaxed), query_calls);
+            assert_eq!(foreign.calls.load(Ordering::Relaxed), foreign_calls);
+            assert_eq!(
+                snapshot(),
+                before,
+                "refused producer read must not repair the store"
+            );
             println!("{SENTINEL}");
         }
 
@@ -20895,6 +21204,298 @@ mod tests {
             before
         );
         Ok(())
+    }
+
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn foreign_global_feedback_refreshes_search_provenance_without_local_index_work() {
+        use crate::core::index::{
+            IndexProcessingOptions, IndexProcessingStatus, IndexRebuildOptions, IndexRebuildStatus,
+            get_index_status, install_test_hash_workspace_embedder, process_index_jobs_coalesced,
+            rebuild_index,
+        };
+        use crate::core::outcome::{
+            DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            OutcomeRecordOptions, OutcomeRecordStatus, record_outcome,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let owner_path = workspace.join("owner");
+        std::fs::create_dir_all(workspace.join(".ee")).unwrap();
+        std::fs::create_dir(&owner_path).unwrap();
+        std::fs::write(
+            workspace.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .unwrap();
+        let database = workspace.join(".ee/ee.db");
+        let index = workspace.join(".ee/index");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let owner_id = crate::core::workspace::stable_workspace_id(&owner_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        let content = "Copper kestrel release validation requires integration checks.";
+        let connection = DbConnection::open_file(&database).unwrap();
+        connection.migrate().unwrap();
+        for (id, path) in [(&workspace_id, &workspace), (&owner_id, &owner_path)] {
+            connection
+                .insert_workspace(
+                    id,
+                    &CreateWorkspaceInput {
+                        path: path.display().to_string(),
+                        name: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut input = test_memory_input(&owner_id, content);
+        input.confidence = 0.5;
+        input.trust_class = "agent_assertion".to_owned();
+        input.tags = vec![crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()];
+        connection.insert_memory(&memory_id, &input).unwrap();
+        connection
+            .update_memory_provenance_verification(
+                &memory_id,
+                "verified",
+                "2026-01-01T00:00:00Z",
+                "Verified before feedback.",
+            )
+            .unwrap();
+        let prior = connection.get_memory(&memory_id).unwrap().unwrap();
+        let reader_generation = connection.get_workspace_generation(&workspace_id).unwrap();
+        let owner_generation = connection.get_workspace_generation(&owner_id).unwrap();
+        connection.close().unwrap();
+
+        let _embedder = install_test_hash_workspace_embedder(&workspace_id);
+        let rebuilt = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+        assert_eq!(rebuilt.memories_indexed, 1);
+        let metadata_before = std::fs::read(index.join("meta.json")).unwrap();
+        let vectors_before = std::fs::read(index.join("vector.fast.idx")).unwrap();
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            query: content.to_owned(),
+            limit: 5,
+            speed: SpeedMode::Instant,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: MemoryScope::Global,
+            strict_scope: false,
+        };
+        let search = || {
+            let report = run_search_with_embedder(&options, Arc::new(HashEmbedder::default_256()))
+                .expect("the global memory remains searchable through its unchanged index");
+            assert_eq!(report.status, SearchStatus::Success);
+            let data = report.data_json();
+            assert_eq!(data["results"][0]["memoryId"], memory_id);
+            data
+        };
+        let baseline = search();
+        assert_eq!(
+            baseline["results"][0]["metadata"]["provenanceVerificationStatus"],
+            "verified"
+        );
+        assert_eq!(
+            baseline["results"][0]["metadata"]["provenanceChainHash"],
+            prior.provenance_chain_hash.as_deref().unwrap()
+        );
+        assert_eq!(
+            baseline["results"][0]["metadata"]["provenanceVerifiedAt"],
+            prior.provenance_verified_at.as_deref().unwrap()
+        );
+
+        let outcome = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_owned(),
+            target_id: memory_id.clone(),
+            workspace_id: Some(owner_id.clone()),
+            signal: "helpful".to_owned(),
+            weight: None,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: Some("The release checks passed.".to_owned()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000881".to_owned()),
+            actor: Some("search-provenance-test".to_owned()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .unwrap();
+        assert_eq!(outcome.status, OutcomeRecordStatus::Recorded);
+        let observer = DbConnection::open_file_read_only(&database).unwrap();
+        let learned = observer.get_memory(&memory_id).unwrap().unwrap();
+        assert_eq!(learned.confidence, 0.75);
+        assert_ne!(learned.provenance_chain_hash, prior.provenance_chain_hash);
+        assert_eq!(learned.provenance_verification_status, "unverified");
+        assert_eq!(
+            observer.get_workspace_generation(&workspace_id).unwrap(),
+            reader_generation
+        );
+        assert_eq!(
+            observer.get_workspace_generation(&owner_id).unwrap(),
+            owner_generation.map(|value| value + 1)
+        );
+        assert!(
+            observer
+                .list_search_index_jobs(&workspace_id, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            observer
+                .list_pending_search_index_jobs(&owner_id, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        observer.close().unwrap();
+        let drained = process_index_jobs_coalesced(&IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            dry_run: false,
+            job_limit: None,
+        })
+        .unwrap();
+        assert_eq!(drained.status, IndexProcessingStatus::NoPendingJobs);
+        let status = get_index_status(&IndexStatusOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            index_dir: Some(index.clone()),
+        })
+        .unwrap();
+        assert_eq!(status.health, IndexHealth::Ready);
+        assert_eq!(status.index_generation, reader_generation);
+
+        let current = search();
+        let metadata = &current["results"][0]["metadata"];
+        assert_eq!(metadata["provenanceVerificationStatus"], "unverified");
+        assert_eq!(
+            metadata["provenanceChainHash"],
+            learned.provenance_chain_hash.as_deref().unwrap()
+        );
+        assert_eq!(
+            metadata["provenanceChainHashVersion"],
+            learned.provenance_chain_hash_version
+        );
+        assert!(metadata.get("provenanceVerifiedAt").is_none());
+        assert!(metadata.get("provenanceVerificationNote").is_none());
+        assert!(metadata.get("driftHint").is_none());
+        assert!(current["results"][0].get("driftHint").is_none());
+        assert_eq!(metadata["qualityScoring"]["components"]["confidence"], 0.75);
+        assert_eq!(
+            std::fs::read(index.join("meta.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            std::fs::read(index.join("vector.fast.idx")).unwrap(),
+            vectors_before
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn live_provenance_overlay_clears_stale_optional_fields_and_drift_claims() {
+        let connection = DbConnection::open_memory().unwrap();
+        connection.migrate().unwrap();
+        let workspace_id = "wsp_00000000000000000000000882";
+        let memory_id = "mem_00000000000000000000000882";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/search-provenance-overlay".to_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        connection
+            .insert_memory(
+                memory_id,
+                &test_memory_input(workspace_id, "Current source body."),
+            )
+            .unwrap();
+        let mut memory = connection.get_memory(memory_id).unwrap().unwrap();
+        for status in ["unverified", "verified", "mismatch", "missing", "skipped"] {
+            memory.provenance_verification_status = status.to_owned();
+            memory.provenance_chain_hash =
+                (status != "missing").then(|| "blake3:current".to_owned());
+            memory.provenance_verified_at =
+                (status == "verified").then(|| "2026-02-01T00:00:00Z".to_owned());
+            memory.provenance_verification_note = Some("Source-only diagnostic note.".to_owned());
+            let mut hit = SearchHit {
+                doc_id: memory_id.to_owned(),
+                score: 0.9,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.9),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": "Current source body.",
+                    "provenanceVerificationStatus": "verified",
+                    "provenanceChainHash": "blake3:obsolete",
+                    "provenanceChainHashVersion": "obsolete-version",
+                    "provenanceVerifiedAt": "2026-01-01T00:00:00Z",
+                    "provenanceVerificationNote": "Obsolete verification claim.",
+                    "provenance_verification_note": "Obsolete legacy claim.",
+                    "driftHint": {"topReason": "obsolete_reason"},
+                })),
+                explanation: None,
+            };
+            let hint = annotate_hit_memory_drift(&mut hit, &memory);
+            let (metadata, _) = public_search_metadata(hit.metadata.as_ref().unwrap(), true);
+            assert_eq!(metadata["provenanceVerificationStatus"], status);
+            assert_eq!(
+                metadata["provenanceChainHashVersion"],
+                memory.provenance_chain_hash_version
+            );
+            assert_eq!(
+                metadata
+                    .get("provenanceChainHash")
+                    .and_then(serde_json::Value::as_str),
+                memory.provenance_chain_hash.as_deref()
+            );
+            assert_eq!(
+                metadata
+                    .get("provenanceVerifiedAt")
+                    .and_then(serde_json::Value::as_str),
+                memory.provenance_verified_at.as_deref()
+            );
+            assert!(metadata.get("provenanceVerificationNote").is_none());
+            assert!(metadata.get("provenance_verification_note").is_none());
+            assert_eq!(
+                hint.is_some(),
+                matches!(status, "mismatch" | "missing" | "skipped")
+            );
+            if let Some(hint) = hint {
+                assert_eq!(metadata["driftHint"], hint.compact_json());
+            } else {
+                assert!(metadata.get("driftHint").is_none());
+            }
+            assert_eq!(metadata["content"], "Current source body.");
+        }
     }
 
     #[test]

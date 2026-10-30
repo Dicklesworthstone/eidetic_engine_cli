@@ -82,7 +82,7 @@ pub(crate) use source_snapshot::read_only_documents_in_current_snapshot;
 #[path = "index_read_lease.rs"]
 mod read_lease;
 #[cfg(unix)]
-pub(crate) use read_lease::IndexGenerationLease;
+pub(crate) use read_lease::{IndexGenerationLease, IndexGenerationSelectionError};
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
