@@ -3401,7 +3401,9 @@ struct OutcomeIndexState {
     posterior: (f64, f64),
     confidence: f32,
     trust_class: String,
-    feedback_count: usize,
+    updated_at: String,
+    events: Vec<ee::db::StoredFeedbackEvent>,
+    quarantine: Vec<ee::db::StoredFeedbackQuarantine>,
     jobs: Vec<ee::db::StoredSearchIndexJob>,
 }
 
@@ -3421,21 +3423,57 @@ fn outcome_index_state(database: &Path, memory_id: &str) -> TestResult<OutcomeIn
         .get_memory_bayes_posterior(memory_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "missing outcome posterior".to_string())?;
-    let feedback_count = connection
+    let mut events = connection
         .list_feedback_events_for_target("memory", memory_id)
-        .map_err(|error| error.to_string())?
-        .len();
+        .map_err(|error| error.to_string())?;
+    events.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut quarantine = connection
+        .list_feedback_quarantine(&memory.workspace_id, None)
+        .map_err(|error| error.to_string())?;
+    quarantine.sort_by(|left, right| left.id.cmp(&right.id));
     let mut jobs = connection
         .list_search_index_jobs(&memory.workspace_id, None)
         .map_err(|error| error.to_string())?;
     jobs.sort_by(|left, right| left.id.cmp(&right.id));
+    connection.close().map_err(|error| error.to_string())?;
     Ok(OutcomeIndexState {
         generation,
         posterior,
         confidence: memory.confidence,
         trust_class: memory.trust_class,
-        feedback_count,
+        updated_at: memory.updated_at,
+        events,
+        quarantine,
         jobs,
+    })
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+struct OutcomeIndexArtifactState {
+    metadata: Vec<ModelCacheArtifactState>,
+    content_hashes: Vec<(String, String)>,
+}
+
+#[cfg(unix)]
+fn outcome_index_artifact_state(index_dir: &Path) -> TestResult<OutcomeIndexArtifactState> {
+    let metadata = model_cache_artifact_state(index_dir)?;
+    let content_hashes = metadata
+        .iter()
+        .filter(|entry| entry.kind == "file")
+        .map(|entry| {
+            let path = index_dir.join(&entry.relative_path);
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("read index artifact {}: {error}", path.display()))?;
+            Ok((
+                entry.relative_path.clone(),
+                blake3::hash(&bytes).to_hex().to_string(),
+            ))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    Ok(OutcomeIndexArtifactState {
+        metadata,
+        content_hashes,
     })
 }
 
@@ -3538,6 +3576,208 @@ fn ensure_outcome_index_search(
         assert_eq!(data["embed_backend"], "hash_fallback", "{value}");
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn release_quarantined_outcome_and_coalesce(
+    run: &impl Fn(&str, &[&str]) -> TestResult<Value>,
+    database: &Path,
+    index_dir: &Path,
+    memory_id: &str,
+    source_id: &str,
+    neural: bool,
+    before: OutcomeIndexState,
+) -> TestResult<OutcomeIndexState> {
+    let event_id = format!("fb_{:026}", 90);
+    let record_args = [
+        "outcome",
+        memory_id,
+        "--signal",
+        "harmful",
+        "--event-id",
+        &event_id,
+        "--source-id",
+        source_id,
+        "--harmful-per-source-per-hour",
+        "1",
+    ];
+    let artifacts_before = outcome_index_artifact_state(index_dir)?;
+    let held_report = run("outcome_quarantine_record", &record_args)?;
+    assert_eq!(held_report["data"]["status"], "feedback_quarantined");
+    let quarantine_id = held_report["data"]["quarantine"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("quarantine identifier missing: {held_report}"))?;
+    let held = outcome_index_state(database, memory_id)?;
+    assert_eq!(held.generation, before.generation);
+    assert_eq!(held.posterior, before.posterior);
+    assert_eq!(held.confidence, before.confidence);
+    assert_eq!(held.trust_class, before.trust_class);
+    assert_eq!(held.updated_at, before.updated_at);
+    assert_eq!(held.events, before.events);
+    assert_eq!(held.jobs, before.jobs);
+    assert_eq!(held.quarantine.len(), before.quarantine.len() + 1);
+    let quarantined = held
+        .quarantine
+        .iter()
+        .find(|row| row.id == quarantine_id)
+        .ok_or("quarantined observation was not persisted")?;
+    assert_eq!(
+        quarantined.proposed_event_id.as_deref(),
+        Some(event_id.as_str())
+    );
+    assert_eq!(quarantined.status, "pending");
+    assert!(quarantined.released_feedback_event_id.is_none());
+    ensure_outcome_index_ready(
+        &run("outcome_quarantine_index", &["index", "status"])?,
+        before.generation,
+    )?;
+
+    let held_replay = run("outcome_quarantine_pending_replay", &record_args)?;
+    assert_eq!(held_replay["data"]["status"], "feedback_quarantined");
+    assert_eq!(held_replay["data"]["quarantine"]["id"], quarantine_id);
+    assert_eq!(held_replay["data"]["quarantine"]["replayed"], true);
+    assert_eq!(outcome_index_state(database, memory_id)?, held);
+    let review_args = ["outcome", "quarantine", "release", quarantine_id];
+    let mut preview_args = review_args.to_vec();
+    preview_args.push("--dry-run");
+    let preview = run("outcome_quarantine_release_dry_run", &preview_args)?;
+    assert_eq!(preview["data"]["status"], "dry_run");
+    assert_eq!(preview["data"]["dryRun"], true);
+    assert_eq!(preview["data"]["feedbackEventId"], event_id);
+    assert_eq!(outcome_index_state(database, memory_id)?, held);
+    assert_eq!(
+        outcome_index_artifact_state(index_dir)?,
+        artifacts_before,
+        "held feedback and release previews must not change the published index"
+    );
+
+    let released = run("outcome_quarantine_release", &review_args)?;
+    assert_eq!(released["data"]["status"], "released");
+    assert_eq!(released["data"]["changed"], true);
+    assert_eq!(released["data"]["feedbackEventId"], event_id);
+    let pending = outcome_index_state(database, memory_id)?;
+    assert!(pending.generation > held.generation);
+    assert_eq!(
+        pending.posterior,
+        (
+            held.posterior.0,
+            held.posterior.1 + ee::core::bayes::DEFAULT_HARMFUL_WEIGHT
+        )
+    );
+    let expected_confidence = pending.posterior.0 / (pending.posterior.0 + pending.posterior.1);
+    assert!((f64::from(pending.confidence) - expected_confidence).abs() <= 1e-6);
+    assert_eq!(pending.events.len(), held.events.len() + 1);
+    let event = pending
+        .events
+        .iter()
+        .find(|event| event.id == event_id)
+        .ok_or("released observation did not become live feedback")?;
+    assert_eq!(event.signal, "harmful");
+    assert_eq!(event.source_id.as_deref(), Some(source_id));
+    assert!(event.applied_at.is_some());
+    assert_eq!(pending.quarantine.len(), held.quarantine.len());
+    let reviewed = pending
+        .quarantine
+        .iter()
+        .find(|row| row.id == quarantine_id)
+        .ok_or("released quarantine evidence was lost")?;
+    assert_eq!(reviewed.status, "released");
+    assert_eq!(
+        reviewed.released_feedback_event_id.as_deref(),
+        Some(event_id.as_str())
+    );
+    let new_jobs = pending
+        .jobs
+        .iter()
+        .filter(|job| !held.jobs.iter().any(|old| old.id == job.id))
+        .collect::<Vec<_>>();
+    assert_eq!(pending.jobs.len(), held.jobs.len() + 1);
+    assert_eq!(new_jobs.len(), 1);
+    let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    let job_id = format!("sidx_{}", &hash[..26]);
+    let job = new_jobs[0];
+    assert_eq!(job.id, job_id);
+    assert_eq!(
+        job.job_type_enum(),
+        Some(ee::db::SearchIndexJobType::SingleDocument)
+    );
+    assert_eq!(job.document_source.as_deref(), Some("memory"));
+    assert_eq!(job.document_id.as_deref(), Some(memory_id));
+    assert_eq!(job.status, "pending");
+    assert_eq!(job.documents_total, 1);
+    assert_eq!(job.documents_indexed, 0);
+    let stale = run("outcome_quarantine_released_index", &["index", "status"])?;
+    assert_eq!(stale["data"]["health"], "stale", "{stale}");
+    assert_eq!(stale["data"]["dbGeneration"], pending.generation);
+    assert_eq!(stale["data"]["indexGeneration"], held.generation);
+
+    let assert_replays = |phase: &str, expected: &OutcomeIndexState| -> TestResult {
+        let artifacts = outcome_index_artifact_state(index_dir)?;
+        let review = run(
+            &format!("outcome_quarantine_review_replay_{phase}"),
+            &review_args,
+        )?;
+        assert_eq!(review["data"]["status"], "already_reviewed");
+        assert_eq!(review["data"]["changed"], false);
+        assert_eq!(review["data"]["feedbackEventId"], event_id);
+        let record = run(
+            &format!("outcome_quarantine_record_replay_{phase}"),
+            &record_args,
+        )?;
+        assert_eq!(record["data"]["status"], "already_recorded");
+        assert_eq!(&outcome_index_state(database, memory_id)?, expected);
+        assert_eq!(outcome_index_artifact_state(index_dir)?, artifacts);
+        Ok(())
+    };
+    assert_replays("pending", &pending)?;
+    // No search runs between release and the worker: an opportunistic read
+    // repair cannot supply the publication this regression attributes here.
+    let repaired = run(
+        "outcome_quarantine_coalesce",
+        &["job", "run", "index_coalesce", "--time-limit-ms", "300000"],
+    )?;
+    assert_eq!(repaired["data"]["job"]["outcome"], "success", "{repaired}");
+    assert_eq!(repaired["data"]["job"]["itemsProcessed"], 1, "{repaired}");
+    assert_eq!(
+        repaired["data"]["job"]["durableMutation"], true,
+        "{repaired}"
+    );
+    assert_eq!(
+        repaired["data"]["job"]["details"]["result"]["index_dir"],
+        path_string(index_dir)
+    );
+    let completed = outcome_index_state(database, memory_id)?;
+    assert_eq!(completed.generation, pending.generation);
+    assert_eq!(completed.posterior, pending.posterior);
+    assert_eq!(completed.confidence, pending.confidence);
+    assert_eq!(completed.trust_class, pending.trust_class);
+    assert_eq!(completed.events, pending.events);
+    assert_eq!(completed.quarantine, pending.quarantine);
+    assert_eq!(completed.jobs.len(), pending.jobs.len());
+    let published = completed
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or("coalescer lost the released observation's job")?;
+    assert_eq!(published.status, "completed");
+    assert_eq!(published.documents_indexed, 1);
+    ensure_outcome_index_ready(
+        &run("outcome_quarantine_repaired_index", &["index", "status"])?,
+        completed.generation,
+    )?;
+    ensure_outcome_index_search(
+        &run(
+            "outcome_quarantine_repaired_search",
+            &["search", "staff sign in email code", "--limit", "1"],
+        )?,
+        memory_id,
+        neural,
+        expected_confidence,
+    )?;
+    assert_replays("completed", &completed)?;
+    Ok(completed)
 }
 
 #[cfg(unix)]
@@ -3646,7 +3886,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         implicit_index.clone()
     };
     let untouched_index = copied_store
-        .then(|| model_cache_artifact_state(&implicit_index))
+        .then(|| outcome_index_artifact_state(&implicit_index))
         .transpose()?;
     let index_arg = path_string(&index_dir);
     let run = |phase: &str, command: &[&str]| -> TestResult<Value> {
@@ -3701,7 +3941,8 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     assert_eq!(before.posterior, original_state.posterior);
     assert_eq!(before.confidence, original_state.confidence);
     assert_eq!(before.trust_class, original_state.trust_class);
-    assert_eq!(before.feedback_count, original_state.feedback_count + 1);
+    assert_eq!(before.events.len(), original_state.events.len() + 1);
+    assert!(before.events.iter().all(|event| event.applied_at.is_some()));
     assert_eq!(before.jobs, original_state.jobs);
     ensure_outcome_index_ready(
         &run("outcome_neutral_index", &["index", "status"])?,
@@ -3716,7 +3957,14 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
 
     // The second round reopens an already updated store, queues two new events
     // for the same document, and must retain each event's independent job.
-    for (round, events) in [(0, &[86_u64][..]), (1, &[87_u64, 88][..])] {
+    // A direct harmful observation establishes the burst limit for the later
+    // quarantine-release path while exercising downward confidence repair.
+    let source_id = "outcome-index-regression";
+    for (round, signal, events) in [
+        (0, "helpful", &[86_u64][..]),
+        (1, "helpful", &[87_u64, 88][..]),
+        (2, "harmful", &[89_u64][..]),
+    ] {
         let mut job_ids = Vec::new();
         let mut expected_posterior = before.posterior;
         for event in events {
@@ -3725,9 +3973,13 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
                 "outcome",
                 memory_id,
                 "--signal",
-                "helpful",
+                signal,
                 "--event-id",
                 &event_id,
+                "--source-id",
+                source_id,
+                "--harmful-per-source-per-hour",
+                "1",
             ];
             let recorded = run(&format!("outcome_record_{event}"), &args)?;
             assert_eq!(recorded["data"]["status"], "recorded", "{recorded}");
@@ -3735,13 +3987,17 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             assert!(state.generation > before.generation);
             let confidence_before =
                 expected_posterior.0 / (expected_posterior.0 + expected_posterior.1);
-            expected_posterior.0 += 1.0;
+            if signal == "helpful" {
+                expected_posterior.0 += 1.0;
+            } else {
+                expected_posterior.1 += ee::core::bayes::DEFAULT_HARMFUL_WEIGHT;
+            }
             assert_eq!(state.posterior, expected_posterior);
             let expected_confidence =
                 expected_posterior.0 / (expected_posterior.0 + expected_posterior.1);
             assert!(
                 (f64::from(state.confidence) - expected_confidence).abs() <= 1e-6,
-                "helpful feedback left stored scoring confidence behind its posterior: {state:?}"
+                "feedback left stored scoring confidence behind its posterior: {state:?}"
             );
             // The public outcome report rounds confidence to four decimal
             // places; stored and retrieved f32 values retain finer precision.
@@ -3768,7 +4024,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             assert_eq!(
                 new_jobs.len(),
                 1,
-                "one committed job per helpful event: {state:?}"
+                "one committed job per applied event: {state:?}"
             );
             let job = new_jobs[0];
             assert_eq!(
@@ -3780,6 +4036,11 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             assert_eq!(job.status, "pending");
             assert_eq!(job.documents_total, 1);
             assert_eq!(job.documents_indexed, 0);
+            let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
+                .to_hex()
+                .to_string();
+            assert_eq!(job.id, format!("sidx_{}", &hash[..26]));
+            assert!(state.events.iter().all(|event| event.applied_at.is_some()));
             job_ids.push(job.id.clone());
             let replay = run(&format!("outcome_pending_replay_{event}"), &args)?;
             assert_eq!(replay["data"]["status"], "already_recorded", "{replay}");
@@ -3787,15 +4048,8 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         }
         let pending = outcome_index_state(&database, memory_id)?;
         assert_eq!(pending.jobs.len(), before.jobs.len() + events.len());
-        assert_eq!(pending.feedback_count, before.feedback_count + events.len());
-        let event_count = u32::try_from(events.len()).map_err(|error| error.to_string())?;
-        assert_eq!(
-            pending.posterior,
-            (
-                before.posterior.0 + f64::from(event_count),
-                before.posterior.1
-            )
-        );
+        assert_eq!(pending.events.len(), before.events.len() + events.len());
+        assert_eq!(pending.posterior, expected_posterior);
         let stale = run(
             &format!("outcome_stale_index_{round}"),
             &["index", "status"],
@@ -3804,7 +4058,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         assert_eq!(stale["data"]["dbGeneration"], pending.generation);
         assert_eq!(stale["data"]["indexGeneration"], before.generation);
 
-        let index_before_dry_run = model_cache_artifact_state(&index_dir)?;
+        let index_before_dry_run = outcome_index_artifact_state(&index_dir)?;
         let mut dry_run_command = if copied_store && round == 1 {
             vec!["maintenance", "run", "--job", "index_coalesce"]
         } else {
@@ -3834,7 +4088,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         );
         assert_eq!(outcome_index_state(&database, memory_id)?, pending);
         assert_eq!(
-            model_cache_artifact_state(&index_dir)?,
+            outcome_index_artifact_state(&index_dir)?,
             index_before_dry_run,
             "worker dry-run changed the selected index"
         );
@@ -3863,7 +4117,8 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         assert_eq!(completed.generation, pending.generation);
         assert_eq!(completed.posterior, pending.posterior);
         assert_eq!(completed.confidence, pending.confidence);
-        assert_eq!(completed.feedback_count, pending.feedback_count);
+        assert_eq!(completed.events, pending.events);
+        assert_eq!(completed.quarantine, pending.quarantine);
         assert_eq!(completed.jobs.len(), pending.jobs.len());
         for id in &job_ids {
             let job = completed
@@ -3894,15 +4149,51 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
                 "outcome",
                 memory_id,
                 "--signal",
-                "helpful",
+                signal,
                 "--event-id",
                 &event_id,
+                "--source-id",
+                source_id,
+                "--harmful-per-source-per-hour",
+                "1",
             ],
         )?;
         assert_eq!(replay["data"]["status"], "already_recorded", "{replay}");
         assert_eq!(outcome_index_state(&database, memory_id)?, completed);
         before = completed;
     }
+    before = release_quarantined_outcome_and_coalesce(
+        &run, &database, &index_dir, memory_id, source_id, neural, before,
+    )?;
+    // Freeze the clock at the last learning write. The maintenance pass must
+    // observe the consumed events without applying their scalar effect again.
+    let maintained = run(
+        "outcome_consumed_feedback_maintenance",
+        &[
+            "maintenance",
+            "run",
+            "--job",
+            "decay_sweep",
+            "--as-of",
+            &before.updated_at,
+            "--no-structural-decay",
+            "--time-limit-ms",
+            "300000",
+        ],
+    )?;
+    assert_eq!(
+        maintained["data"]["job"]["outcome"], "success",
+        "{maintained}"
+    );
+    assert_eq!(
+        maintained["data"]["job"]["durableMutation"], false,
+        "{maintained}"
+    );
+    let summary = &maintained["data"]["job"]["details"]["summary"];
+    assert_eq!(summary["scannedCount"], 1, "{maintained}");
+    assert_eq!(summary["changedCount"], 0, "{maintained}");
+    assert_eq!(summary["appliedCount"], 0, "{maintained}");
+    assert_eq!(outcome_index_state(&database, memory_id)?, before);
     // Replaying completed feedback must leave the worker idle, rather than
     // producing an extra repair that happens to end at the same generation.
     let idle = run(
@@ -3953,7 +4244,7 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
             original_state.generation
         );
         assert_eq!(
-            Some(model_cache_artifact_state(&implicit_index)?),
+            Some(outcome_index_artifact_state(&implicit_index)?),
             untouched_index,
             "worker targeting the custom index changed the inferred sibling index"
         );

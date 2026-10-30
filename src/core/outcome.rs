@@ -3313,9 +3313,9 @@ fn existing_feedback_outcome(
         }),
         "released"
             if row.released_feedback_event_id.as_deref() == Some(event_id)
-                && live.as_ref().is_some_and(|event| {
-                    feedback_event_matches(event, input) && event.weight == input.weight
-                }) =>
+                && live
+                    .as_ref()
+                    .is_some_and(|event| feedback_event_matches(event, input)) =>
         {
             Ok(Some(ExistingFeedbackOutcome::Recorded))
         }
@@ -3850,11 +3850,13 @@ fn feedback_event_matches(
     existing: &StoredFeedbackEvent,
     input: &CreateFeedbackEventInput,
 ) -> bool {
+    // Valid f32 weights round-trip through the stored f64 without loss. Event
+    // identity requires numeric equality, including equivalent signed zeros.
     existing.workspace_id == input.workspace_id
         && existing.target_type == input.target_type
         && existing.target_id == input.target_id
         && existing.signal == input.signal
-        && (existing.weight - input.weight).abs() <= f32::EPSILON
+        && existing.weight == input.weight
         && existing.source_type == input.source_type
         && existing.source_id == input.source_id
         && existing.reason == input.reason
@@ -6937,6 +6939,16 @@ mod tests {
             native_rule_feedback_state(&database)?,
             after,
             "retries cannot double-count learning, rewrite audit, or enqueue another index job"
+        );
+        options.weight = Some(f32::from_bits(1.0_f32.to_bits() + 1));
+        assert!(matches!(
+            record_outcome(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        assert_eq!(
+            native_rule_feedback_state(&database)?,
+            after,
+            "a distinct feedback weight must conflict without changing the native rule or its job"
         );
         Ok(())
     }

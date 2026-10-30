@@ -442,6 +442,52 @@ impl Fixture {
 }
 
 #[test]
+fn memory_feedback_replay_requires_the_same_representable_weight() {
+    for weight in [0.0_f32, 0.25, 1.0] {
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
+        options.weight = Some(weight);
+        options.agent_name = Some(REPLAY_AGENT.to_owned());
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        let recorded = fixture.persisted_feedback_state();
+        assert_eq!(recorded.events.len(), 1);
+        assert_eq!(recorded.events[0].weight.to_bits(), weight.to_bits());
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.persisted_feedback_state(), recorded);
+
+        // These are distinct valid f32 inputs that the old absolute-epsilon
+        // comparison accepted. The database preserves the original value.
+        let adjacent_weight = f32::from_bits(weight.to_bits() + 1);
+        assert_ne!(adjacent_weight, weight);
+        assert!((adjacent_weight - weight).abs() <= f32::EPSILON);
+        options.weight = Some(adjacent_weight);
+        assert!(matches!(
+            record_outcome(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        assert_eq!(
+            fixture.persisted_feedback_state(),
+            recorded,
+            "conflicting replay must not change learning, audit, profiles, jobs, or generation"
+        );
+
+        // Numeric equality intentionally preserves the existing ±0 behavior.
+        options.weight = Some(if weight == 0.0 { -0.0 } else { weight });
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.persisted_feedback_state(), recorded);
+    }
+}
+
+#[test]
 fn memory_index_jobs_are_event_stable_and_distinct_after_completed_work() {
     let mut expected_job_id = None;
     for seed in [SEED, SEED + 1] {
