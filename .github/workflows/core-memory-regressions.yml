@@ -142,6 +142,7 @@ jobs:
           model-storage-read-only db::tests::read_only_file_
           model-registered-identity core::index::tests::registered_model2vec_
           model-queued-selection core::index::tests::queued_model_selection_
+          model-manual-selection core::index::tests::manual_model_selection_
           model-workspace-selection core::index::tests::workspace_registry_
           model-read-preparation core::index::ask_model::tests::
           model-fetch-lifecycle core::model::tests::
@@ -211,20 +212,24 @@ jobs:
           memory-outcome-neural-fresh helpful_outcome_index_coalesce_restores_neural_hybrid_in_fresh_workspace
           memory-outcome-neural-existing helpful_outcome_index_coalesce_restores_neural_hybrid_in_existing_explicit_store
           CASES
-          log="$RUNNER_TEMP/core-memory/queued-neural-registration.log"
-          status=0
-          timeout 12m cargo test --locked --lib \
-            core::index::tests::queued_neural_publication_registers_model_atomically \
-            -- --ignored --exact --test-threads=1 > "$log" 2>&1 || status=$?
-          tail -n 150 "$log"
-          printf 'queued-neural-registration exit=%s\n' "$status" >> "$RUNNER_TEMP/core-memory/results.log"
-          if test "$status" -ne 0; then
-            echo "Case 'queued-neural-registration' failed with exit $status."
-            failed=1
-          elif ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
-            echo "Case 'queued-neural-registration' did not execute exactly one passing neural regression."
-            failed=1
-          fi
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --lib "$filter" \
+              -- --ignored --exact --test-threads=1 > "$log" 2>&1 || status=$?
+            tail -n 150 "$log"
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+            if test "$status" -ne 0; then
+              echo "Case '$label' failed with exit $status."
+              failed=1
+            elif ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+              echo "Case '$label' did not execute exactly one passing neural regression."
+              failed=1
+            fi
+          done <<'CASES'
+          queued-neural-registration core::index::tests::queued_neural_publication_registers_model_atomically
+          manual-neural-registration core::index::tests::manual_neural_publication_registers_model_atomically
+          CASES
           exit "$failed"
       - name: Exercise configuration and isolated global hydration
         if: ${{ !cancelled() }}
