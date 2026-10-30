@@ -621,6 +621,30 @@ landed on a different worker, and paid a fresh build of the same tree. The
 export was reused (`pinned_bundle_is_valid`); the compiled artifacts were not,
 because they live in the worker's own target directory.
 
+**MEASURED FROM THE OTHER SIDE ON 2026-10-30, AND THE RATIO IS 23x.** Three
+`cargo check --locked --all-targets -j 2` dispatches, same tree, same day:
+
+| dispatch | worker | elapsed | why |
+|---|---|---|---|
+| 1 | unpinned | 1870 s | cold |
+| 2 | unpinned, landed elsewhere | 1666 s | cold again |
+| 3 | **`--worker <id of dispatch 2>`** | **70 s** | warm |
+
+Dispatch 3 compiled the same 0.18.0 tree with a two-line change and reported
+`Finished \`dev\` profile ... in 1m 05s`. So a pin is not a micro-optimisation
+on this lane: it is the difference between a 28-minute round trip and a
+coffee-free one, and it converts fix-verify-fix from a once-an-hour loop into
+an interactive one. `rch exec` takes `--worker <ID>` directly; read the id from
+the previous run's log line `Remote command finished` context or from
+`rch status`.
+
+**The matching hazard: pin only to a worker whose last run ENDED NORMALLY.** A
+box that has just been SIGKILLed refuses the next dispatch in ~19 s while still
+reporting `circuit=closed status=healthy`, and an unpinned dispatch that dies in
+SSH transport retains build ownership on that worker. Both are above. Dispatch 3
+was safe to pin because dispatch 2 ended with its own `Remote command finished`
+line rather than a kill.
+
 So when you deliberately want the previous run's warmth, read `worker_id` out
 of that run's proof and pass it:
 
@@ -1043,6 +1067,27 @@ the second target is silently never reached, while the command reads as a
 bases: zero `Running` lines for a contracts target hash in every log. That
 voided five certifications in one night. Dispatch the gate target on its own, or
 pass `--no-fail-fast` when you genuinely want both.
+
+**AND THE SAME ORDERING MEANS A RED LIB HIDES AN UNKNOWN NUMBER OF TEST-TARGET
+BREAKS, so the first green lib is not the end of a repair.** Measured
+2026-10-30 across three `cargo check --locked --all-targets` dispatches. While
+the lib was red (bd-1ks7e), no test target was ever reached. The dispatch that
+confirmed the lib fix reported, 36 lines apart:
+
+```text
+warning: `eidetic-engine` (lib) generated 1 warning          <- the lib COMPILES
+error[E0433]: cannot find `MemoryLinkRelation` in `models`
+error: could not compile `eidetic-engine` (test "integration_e_f")
+```
+
+That second break was older than the lib break and completely invisible behind
+it; `cargo check` and `cargo check --lib` do not build test targets at all.
+**Read the lib's own verdict separately from the run's**, because the run exits
+101 with zero `Finished` lines and reads as a total failure while the lib
+succeeded. Then expect to repeat: each repair can expose the next target in
+line. Here it took two rounds to reach a green `--all-targets`, and the second
+round cost 70 s rather than 28 minutes only because it was pinned to the warm
+worker.
 
 **2. `--exact` matches the FULL module path, and a zero-match run says `ok.`**
 A test pulled into a suite by `#[path]` lives under the *including* module, so
