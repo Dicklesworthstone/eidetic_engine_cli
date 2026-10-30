@@ -746,10 +746,15 @@ impl WhyNotSelectionProbe {
         });
     }
 
+    /// `verified_card_sources` is the membership `prefer_incident_cards`
+    /// proved in the pack's own read snapshot, keyed by card ID. A card absent
+    /// from it was never admitted here, so representation is declined rather
+    /// than guessed: stored card metadata holds only a commitment to its
+    /// sources, and an enclosing line range is not source membership.
     pub(super) fn observe_incident_preference(
         &self,
-        connection: &DbConnection,
         evidence: &[DirectEvidencePackCandidate],
+        verified_card_sources: &BTreeMap<String, BTreeSet<String>>,
     ) {
         let PackEntityRef::EvidenceSpan(id) = self.target else {
             return;
@@ -768,9 +773,10 @@ impl WhyNotSelectionProbe {
         // Only inspect cards returned by the real same-snapshot proof gate.
         // A line-range overlap does not establish source membership.
         for candidate in evidence.iter().filter(|candidate| candidate.incident_card) {
-            if let Ok(Some(card)) = connection.get_evidence_span(&candidate.item.evidence_id)
-                && incident_card_source_ids(&card).contains(&id)
-                && let Ok(representative) = EvidenceId::from_str(&card.id)
+            if verified_card_sources
+                .get(&candidate.item.evidence_id)
+                .is_some_and(|sources| sources.contains(&id))
+                && let Ok(representative) = EvidenceId::from_str(&candidate.item.evidence_id)
             {
                 self.represented_by(
                     PackEntityRef::EvidenceSpan(representative),

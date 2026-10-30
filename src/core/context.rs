@@ -15921,7 +15921,7 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     if let Some(probe) = why_not {
         probe.observe_evidence(&candidates, OmissionCause::ScoreFloor);
     }
-    let mut candidates = prefer_incident_cards(
+    let (mut candidates, verified_card_sources) = prefer_incident_cards(
         connection,
         &workspace_ids,
         filters,
@@ -15930,7 +15930,7 @@ fn collect_direct_evidence_pack_candidates_with_probe(
         degraded,
     );
     if let Some(probe) = why_not {
-        probe.observe_incident_preference(connection, &candidates);
+        probe.observe_incident_preference(&candidates, &verified_card_sources);
     }
     collapse_duplicate_evidence(&mut candidates, degraded);
     if let Some(probe) = why_not {
@@ -16234,6 +16234,11 @@ fn direct_evidence_pack_candidate(
 /// Interleaved observations remain eligible. Error classes add occurrence
 /// context without suppressing cards containing different repairs. Order is
 /// the search order throughout, so the result is deterministic.
+///
+/// The second return value is the verified card-to-source membership this
+/// stage proved, keyed by card ID. Read-only explanations must reuse it rather
+/// than re-deriving membership, which is why it leaves with the candidates:
+/// only this call holds the `CardChecks` the proof consumed.
 fn prefer_incident_cards(
     connection: &DbConnection,
     workspace_ids: &[String],
@@ -16241,7 +16246,10 @@ fn prefer_incident_cards(
     query: &str,
     candidates: Vec<DirectEvidencePackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Vec<DirectEvidencePackCandidate> {
+) -> (
+    Vec<DirectEvidencePackCandidate>,
+    BTreeMap<String, BTreeSet<String>>,
+) {
     let sessions = candidates
         .iter()
         .filter(|candidate| !candidate.incident_card)
@@ -16380,6 +16388,14 @@ fn prefer_incident_cards(
             .cmp(&(right.end_line - right.start_line))
             .then_with(|| left.id.cmp(&right.id))
     });
+    // Copy the proof result before the drain below consumes it. `proof_spans`
+    // is `cards` plus the directly matched card hits, and every span missing
+    // from the proof was added to `refused` above, so this map covers exactly
+    // the incident cards that can still reach the returned candidates. The
+    // drain moves each substituted card's membership out, leaving only the
+    // cards this stage did not substitute -- the complement of what a reader
+    // of the returned candidates needs.
+    let verified_card_sources = verified_sources.clone();
     // Security screening stores a commitment to source metadata, not the raw
     // source IDs. Reuse membership from the same current-source proof instead
     // of parsing metadata or treating an enclosing range as membership.
@@ -16439,7 +16455,10 @@ fn prefer_incident_cards(
             }
         }
     }
-    annotate_incident_card_error_counts(connection, preferred)
+    (
+        annotate_incident_card_error_counts(connection, preferred),
+        verified_card_sources,
+    )
 }
 
 fn annotate_incident_card_error_counts(

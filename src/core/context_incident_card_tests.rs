@@ -289,7 +289,7 @@ fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
     );
 
     let mut preference_degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -360,7 +360,7 @@ fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
     assert_ne!(preferred[0].item.content, preferred[2].item.content);
 
     // A card that matched directly keeps its own rank; its turn adds nothing.
-    let direct = prefer_incident_cards(
+    let (direct, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -414,7 +414,7 @@ fn incident_card_substitution_preserves_interleaved_user_and_assistant_facts() {
     let user = fixture.candidate(&facts[0], 0.95);
     let assistant = fixture.candidate(&facts[1], 0.85);
     let mut degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -483,7 +483,7 @@ fn directly_matched_incident_card_preserves_other_turns_inside_its_range() {
     let assistant = fixture.candidate(&facts[1], 0.85);
     let direct_card = fixture.candidate(&card_id, 0.7);
     let mut degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -598,7 +598,7 @@ fn current_incident_revision_replaces_sources_without_reusing_or_counting_its_hi
             candidates.push(candidate(&current.id, 0.7));
         }
         let mut degraded = Vec::new();
-        let preferred = prefer_incident_cards(
+        let (preferred, _) = prefer_incident_cards(
             &fixture.db,
             &[WS.to_owned()],
             &crate::models::QueryFilters::default(),
@@ -647,7 +647,7 @@ fn altered_incident_card_source_membership_cannot_hide_interleaved_facts() {
     let fact = fixture.candidate(&facts[0], 0.95);
     let repair = fixture.candidate(&repair_id, 0.9);
     let mut degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -1050,7 +1050,7 @@ fn obsolete_incident_card_proof_is_withheld_without_hiding_the_observed_turn() {
         .unwrap();
 
     let mut degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
@@ -1109,7 +1109,7 @@ fn withdrawn_card_or_proof_cannot_consume_its_matched_source_turns() {
             .unwrap();
 
         let mut degraded = Vec::new();
-        let preferred = prefer_incident_cards(
+        let (preferred, _) = prefer_incident_cards(
             &fixture.db,
             std::slice::from_ref(&fixture.workspace_id),
             &crate::models::QueryFilters::default(),
@@ -1141,7 +1141,7 @@ fn incident_card_lookup_failure_is_reported_and_keeps_original_transcript_candid
         .unwrap();
 
     let mut degraded = Vec::new();
-    let preferred = prefer_incident_cards(
+    let (preferred, _) = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
         &crate::models::QueryFilters::default(),
