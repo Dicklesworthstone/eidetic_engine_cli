@@ -31,6 +31,8 @@ on:
       - src/db/**
       - src/models/**
       - src/pack/**
+      - src/steward/**
+      - src/steward_api.rs
       - src/mcp*.rs
       - tests/contracts/backup_import_roundtrip.rs
       - tests/contracts/cass_session_info*.rs
@@ -43,6 +45,7 @@ on:
       - tests/mcp_parity.rs
       - tests/mcp_parity/**
       - tests/model_bundled_embedding_cli_e2e.rs
+      - tests/support/isolated_ee.rs
       - tests/model_lifecycle_readiness_integration.rs
       - tests/daemon_uds_rpc_round_trip.rs
       - tests/rule_mark_update_e2e.rs

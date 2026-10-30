@@ -822,8 +822,7 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
 fn memory_feedback_marker_failure_rolls_back_learning_and_quarantine_review() {
     for quarantined in [false, true] {
         let fixture = Fixture::new();
-        let quarantine_id =
-            quarantined.then(|| fixture.queue_harmful_feedback("outcome_observed"));
+        let quarantine_id = quarantined.then(|| fixture.queue_harmful_feedback("outcome_observed"));
         fixture.seed_verified_provenance();
         let before = fixture.persisted_feedback_state();
         let injection = DbConnection::open_file(&fixture.database).unwrap();
@@ -875,7 +874,12 @@ fn memory_feedback_marker_failure_rolls_back_learning_and_quarantine_review() {
         };
         assert_eq!(learned.posterior, expected_posterior);
         assert_eq!(learned.events.len(), before.events.len() + 1);
-        assert!(learned.events.iter().all(|event| event.applied_at.is_some()));
+        assert!(
+            learned
+                .events
+                .iter()
+                .all(|event| event.applied_at.is_some())
+        );
         assert_eq!(learned.index_jobs.len(), before.index_jobs.len() + 1);
         assert_eq!(
             learned.workspace_generation,
@@ -1722,7 +1726,10 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
             before.posterior.1 + DEFAULT_HARMFUL_WEIGHT
         )
     );
-    assert_eq!(before.memory.as_ref().unwrap().trust_class, "agent_assertion");
+    assert_eq!(
+        before.memory.as_ref().unwrap().trust_class,
+        "agent_assertion"
+    );
     assert_eq!(
         fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
         before.workspace_generation.map(|generation| generation + 2),

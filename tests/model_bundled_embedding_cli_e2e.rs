@@ -4,7 +4,9 @@
 mod isolated_ee;
 
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
@@ -22,7 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(unix)]
 use std::thread::{self, JoinHandle};
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 #[cfg(unix)]
