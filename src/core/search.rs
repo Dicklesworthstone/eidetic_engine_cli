@@ -2175,6 +2175,36 @@ impl SearchPerformanceTrace {
         self.timings.push(SearchPerformanceTiming { name, elapsed });
     }
 
+    /// Close the run: attribute a cold-start embedder load, then the total.
+    ///
+    /// The one-time default-embedder resolution is the cost the field report
+    /// behind bd-search-warm-latency-0bh05 blamed for ~3.9 s of a ~3.9 s
+    /// query, and it was the only major component of this command with no
+    /// phase of its own — so a cold-start regression was indistinguishable
+    /// from a query regression in `--explain-performance` output. The duration
+    /// was already measured by
+    /// `crate::core::index::default_search_embedder_load_duration`, whose only
+    /// other caller subtracts it from a pack SLO budget and then discards it;
+    /// nothing reported it to anyone.
+    ///
+    /// `resolved_before` is why this is not simply "read the duration". That
+    /// value is a PROCESS-lifetime fact, not a per-request one: once any query
+    /// has resolved the embedder it stays readable forever, so reporting it
+    /// unconditionally would charge every warm query for a load it did not
+    /// pay. Only the request that observed the embedder unresolved gets the
+    /// phase, and a warm query correctly shows none.
+    ///
+    /// Ordering is encapsulated here rather than left to three call sites, so
+    /// the cold phase cannot drift to after the total it is part of.
+    fn finish_total(&mut self, start: Instant, resolved_before: bool) {
+        if !resolved_before
+            && let Some(elapsed) = crate::core::index::default_search_embedder_load_duration()
+        {
+            self.record_duration("search::embedderColdLoad", elapsed);
+        }
+        self.record_elapsed("search::total", start);
+    }
+
     pub(crate) fn timings(&self) -> impl Iterator<Item = (&'static str, Duration)> + '_ {
         self.timings
             .iter()
@@ -9884,6 +9914,13 @@ async fn run_search_inner_with_performance(
     } else {
         None
     };
+    // The default embedder resolves LAZILY and ONCE per process, so a cold CLI
+    // pays its whole cost inside this call while every later query in the same
+    // process pays nothing. Capture resolution state before timing anything:
+    // the cost belongs only to the request that actually paid it, and charging
+    // it to a warm query would misattribute a process cold start as a query
+    // regression (bd-search-warm-latency-0bh05).
+    let embedder_resolved_before = crate::core::index::default_search_embedder_resolved();
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
@@ -10139,7 +10176,7 @@ async fn run_search_inner_with_performance(
     if source_mode.unavailable_no_results {
         search_checkpoint(cx)?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        trace.record_elapsed("search::total", start);
+        trace.finish_total(start, embedder_resolved_before);
         return Ok(SearchPerformanceRun {
             quality_scoring_policy,
             audit_facts: None,
@@ -10538,7 +10575,7 @@ async fn run_search_inner_with_performance(
             }
 
             search_checkpoint(cx)?;
-            trace.record_elapsed("search::total", start);
+            trace.finish_total(start, embedder_resolved_before);
             Ok(SearchPerformanceRun {
                 quality_scoring_policy,
                 audit_facts,
@@ -10591,7 +10628,7 @@ async fn run_search_inner_with_performance(
                 degraded.push(SearchDegradation::corrupt_index(Some(&e)));
             }
 
-            trace.record_elapsed("search::total", start);
+            trace.finish_total(start, embedder_resolved_before);
             Ok(SearchPerformanceRun {
                 quality_scoring_policy,
                 audit_facts: None,
