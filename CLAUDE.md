@@ -45,15 +45,24 @@ cargo fmt --check                              # the gated stage; fix with `carg
 ./scripts/check-include-fmt.sh                 # and --self-test, 6 arms
 ./scripts/check-forbidden-deps.sh              # needs `cargo metadata`; rc 3 when absent
 ./scripts/package-artifact-leak-check.sh       # needs `cargo package`; rc 1 when absent
+./scripts/verification-drift-guard.sh          # needs `cargo tree`; input-error when absent
 ```
 
-All five were run on 2026-10-30: `cargo fmt --check` red (9 hunks in 3 files,
-fixed), then 7/7, 6/6 + rc 0, rc 0, rc 0. Those last four FAIL CLOSED while the
-volume is absent, which is the correct direction and is why they are easy to
-mistake for permanent environment noise — they are not, they are gates waiting
-for a rail. Note `metadata` and `package` are NOT tripwired subcommands, so
-those two are legitimate locally in either state; they simply cannot answer
-without the toolchain.
+All six were run on 2026-10-30: `cargo fmt --check` red (9 hunks in 3 files,
+fixed), then 7/7, 6/6 + rc 0, rc 0, rc 0 (1026 files), rc 0 ("all red gates have
+tracking beads"). The last five FAIL CLOSED while the volume is absent, which is
+the correct direction and is why they are easy to mistake for permanent
+environment noise — they are not, they are gates waiting for a rail.
+
+`metadata`, `package` and `tree` are NOT tripwired subcommands, so those gates
+are legitimate locally in either state; they simply cannot ANSWER without the
+toolchain, which is a different thing from being forbidden. Conflating the two
+is how they got filed as permanently environment-blocked.
+`verification-drift-guard.sh:205` is worth reading as the model for that
+distinction — it checks `cargo tree`'s own exit status BEFORE grep runs,
+because the old form "conflates two very different zeros: grep finding no
+forbidden dependency (a real verdict) and cargo tree failing so grep read an
+empty stream (no verdict at all)".
 
 **VERIFY.SH IS STILL BLOCKED, AND NOW FOR A DIFFERENT REASON THAN BEFORE.** With
 the toolchain present the remaining obstacle is `ee_require_current_binary`: the
