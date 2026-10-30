@@ -1714,6 +1714,21 @@ impl DbConnection {
     /// `execute_raw` cannot bind parameters. Fixture updates that address a
     /// row by id go through the same owner gate, statement epoch, and
     /// contention retry as every other parameterized write.
+    ///
+    /// TEST-ONLY, which is what `3511c12fa` restored it for: "so fixture
+    /// updates that bind parameters can compile". All twelve callers sit inside
+    /// `#[cfg(test)]` modules, and `dead_code` on the non-test lib target is
+    /// the compiler proving no product code calls it. Ungated it is the lib's
+    /// only warning and therefore the sole thing failing
+    /// `cargo clippy --all-targets -- -D warnings`.
+    ///
+    /// Being `pub(crate)`, it is unreachable from `tests/` either way, so the
+    /// gate costs nothing. **If product code ever needs a parameterized write,
+    /// drop this attribute rather than adding a second raw-SQL path** --
+    /// `src/workspace_rebind.rs` hand-encodes eight values as checked SQL
+    /// literals precisely because no parameter-binding counterpart is available
+    /// to it, and that comment is accurate only while this gate is here.
+    #[cfg(test)]
     pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
         self.execute_for(DbOperation::Execute, sql, params)
     }
