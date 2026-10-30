@@ -14419,38 +14419,8 @@ impl DbConnection {
         audit_id: &str,
         audit_details: &str,
     ) -> Result<StoredModelRegistryEntry> {
-        if input.provider != ModelProvider::Model2Vec
-            || input.status != ModelRegistryStatus::Available
-        {
-            return Err(DbError::MalformedRow {
-                operation: DbOperation::Execute,
-                message: "model selection requires an available Model2Vec embedding".to_owned(),
-            });
-        }
-
         self.with_transaction(|| {
-            self.upsert_embedding_metadata_record(insert_id, input)?;
-            let selected = self
-                .find_model_registry_entry(
-                    &input.workspace_id,
-                    ModelProvider::Model2Vec,
-                    &input.model_name,
-                    ModelPurpose::Embedding,
-                )?
-                .ok_or_else(|| DbError::MalformedRow {
-                    operation: DbOperation::Query,
-                    message: "selected embedding model is missing after registry upsert".to_owned(),
-                })?;
-
-            self.execute_for(
-                DbOperation::Execute,
-                "UPDATE model_registry SET status = 'disabled', updated_at = ?1 WHERE workspace_id = ?2 AND provider = 'model2vec' AND purpose = 'embedding' AND id != ?3 AND status != 'disabled'",
-                &[
-                    Value::Text(Utc::now().to_rfc3339()),
-                    Value::Text(input.workspace_id.clone()),
-                    Value::Text(selected.id.clone()),
-                ],
-            )?;
+            let selected = self.select_model2vec_embedding_in_txn(insert_id, input)?;
             self.insert_audit(
                 audit_id,
                 &CreateAuditInput {
@@ -14464,6 +14434,51 @@ impl DbConnection {
             )?;
             Ok(selected)
         })
+    }
+
+    /// Select a loaded local producer inside the caller's existing transaction.
+    ///
+    /// Both explicit fetch and index publication must leave exactly one active
+    /// local embedding model. Publication supplies its own transaction and must
+    /// roll this selection back together with job completion; it is not a fetch
+    /// and must not emit a `model.fetched` audit or start a nested transaction.
+    pub(crate) fn select_model2vec_embedding_in_txn(
+        &self,
+        insert_id: &str,
+        input: &CreateEmbeddingMetadataInput,
+    ) -> Result<StoredModelRegistryEntry> {
+        if input.provider != ModelProvider::Model2Vec
+            || input.status != ModelRegistryStatus::Available
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "model selection requires an available Model2Vec embedding".to_owned(),
+            });
+        }
+
+        self.upsert_embedding_metadata_record(insert_id, input)?;
+        let selected = self
+            .find_model_registry_entry(
+                &input.workspace_id,
+                ModelProvider::Model2Vec,
+                &input.model_name,
+                ModelPurpose::Embedding,
+            )?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "selected embedding model is missing after registry upsert".to_owned(),
+            })?;
+
+        self.execute_for(
+            DbOperation::Execute,
+            "UPDATE model_registry SET status = 'disabled', updated_at = ?1 WHERE workspace_id = ?2 AND provider = 'model2vec' AND purpose = 'embedding' AND id != ?3 AND status != 'disabled'",
+            &[
+                Value::Text(Utc::now().to_rfc3339()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(selected.id.clone()),
+            ],
+        )?;
+        Ok(selected)
     }
 
     /// Get a parsed embedding metadata record by registry ID.

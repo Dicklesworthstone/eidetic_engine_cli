@@ -14,18 +14,18 @@
 use super::{
     BTreeSet, CanonicalSearchDocument, DbConnection, DbError, DbOperation, DeltaStageError,
     EvidenceAdmissionReport, IncrementalFallback, IndexDocumentCounts, IndexEmbedderFingerprint,
-    IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path, RuleIndexProjection,
-    RunningIndexJobFinalizer, SearchIndexJobStatus, SearchIndexJobType, StoredSearchIndexJob,
-    UnpublishedIndexStage, append_failed_index_job_transition, artifact_to_document,
-    checked_document_counts, delta, embedder_fingerprint_for_index_metadata,
-    embedder_reports_pending_model2vec_download, evidence_span_to_document,
-    finalize_coalesced_claimed_jobs, index_checkpoint, memory_documents_with_anchors_with_cx,
-    path_exists_no_follow, persist_index_embedding_registry_input, prepare_index_embedder_stack,
+    IndexModelSelection, IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path,
+    RuleIndexProjection, RunningIndexJobFinalizer, SearchIndexJobStatus, SearchIndexJobType,
+    StoredSearchIndexJob, UnpublishedIndexStage, append_failed_index_job_transition,
+    artifact_to_document, checked_document_counts, complete_running_index_job_in_txn, delta,
+    embedder_fingerprint_for_index_metadata, embedder_reports_pending_model2vec_download,
+    evidence_span_to_document, finalize_coalesced_claimed_jobs, index_checkpoint,
+    memory_documents_with_anchors_with_cx, path_exists_no_follow,
+    persist_index_embedding_registry_input, prepare_index_embedder_stack,
     prepare_index_embedding_registry_input, publish_staged_generation,
-    recover_interrupted_publish_for_snapshot, require_index_job_transition, rule_to_document,
-    session_to_document, source_snapshot, stage_planned_index_delta,
-    update_running_index_job_total, validate_incremental_index_metadata, workspace_embedder_stack,
-    workspace_index_source_rows_fit,
+    recover_interrupted_publish_for_snapshot, rule_to_document, session_to_document,
+    source_snapshot, stage_planned_index_delta, update_running_index_job_total,
+    validate_incremental_index_metadata, workspace_index_source_rows_fit,
 };
 
 #[cfg(test)]
@@ -47,6 +47,7 @@ pub(super) struct PreparedDelta {
     stage: UnpublishedIndexStage,
     embedder_fingerprint: Option<IndexEmbedderFingerprint>,
     embedding_registration: Option<crate::db::CreateEmbeddingMetadataInput>,
+    model_selection: IndexModelSelection,
 }
 
 pub(super) async fn prepare(
@@ -78,9 +79,9 @@ pub(super) async fn prepare(
         log_refusal(&refusal);
         return Ok(None);
     }
-    let stack = workspace_embedder_stack(db, workspace_id);
+    let selected = IndexModelSelection::resolve_stack(db, workspace_id);
     index_checkpoint(cx)?;
-    let (stack, _) = stack?;
+    let (model_selection, stack) = selected?;
     if embedder_reports_pending_model2vec_download(stack.fast())
         && workspace_index_source_rows_fit(db, workspace_id, 0)?
     {
@@ -143,6 +144,7 @@ pub(super) async fn prepare(
                 open_job_ids,
                 stage,
                 embedder_fingerprint: embedder_fingerprint_for_index_metadata(&stack),
+                model_selection,
                 embedding_registration: prepare_index_embedding_registry_input(
                     db,
                     workspace_id,
@@ -421,16 +423,13 @@ where
         prepared.embedder_fingerprint.as_ref(),
         || {
             db.with_transaction_error(|| {
+                prepared.model_selection.verify(db)?;
                 persist_index_embedding_registry_input(
                     db,
                     prepared.embedding_registration.as_ref(),
                 )?;
                 for job in jobs {
-                    let progressed =
-                        db.update_search_index_job_progress(&job.id, documents_total)?;
-                    require_index_job_transition(progressed, &job.id, "running_progress_updated")?;
-                    let completed = db.complete_search_index_job(&job.id, documents_total)?;
-                    require_index_job_transition(completed, &job.id, "running_completed")?;
+                    complete_running_index_job_in_txn(db, &job.id, documents_total)?;
                 }
                 Ok(())
             })

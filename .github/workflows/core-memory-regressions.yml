@@ -141,6 +141,7 @@ jobs:
           model-selection-atomic db::tests::select_model2vec_embedding_
           model-storage-read-only db::tests::read_only_file_
           model-registered-identity core::index::tests::registered_model2vec_
+          model-queued-selection core::index::tests::queued_model_selection_
           model-workspace-selection core::index::tests::workspace_registry_
           model-read-preparation core::index::ask_model::tests::
           model-fetch-lifecycle core::model::tests::
