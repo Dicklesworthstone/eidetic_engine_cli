@@ -8245,8 +8245,20 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && empty_generation.is_none()
         && options.source_mode.uses_embeddings()
-        && index_dir.exists()
-        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+        // Read-only snapshot selection can recover a retained generation even
+        // when the live directory is missing or incompatible. Resolve the
+        // workspace's cached local model before that selection; leaving it
+        // unset would consult the process default, which can select another
+        // producer or initialize a lazy downloader on this read-only path.
+        && (retrieval_only
+            || (index_dir.exists()
+                // Validate corpus/security before model acquisition, without
+                // comparing against an unrelated warmed process default.
+                // The selected workspace producer is checked before retrieval.
+                && crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                    &index_dir,
+                )
+                .is_ok()))
     {
         let preparation = if retrieval_only {
             crate::core::index::prepare_read_only_search_embedder_for_workspace(
@@ -10641,7 +10653,10 @@ pub async fn run_diag_search_with_cx(
     }
     let fast_embedder = if options.source_mode.uses_embeddings()
         && index_dir.exists()
-        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+        // Producer admission follows workspace model selection. A warmed
+        // process default must not prevent selecting the workspace's model.
+        && crate::core::index::validate_index_corpus_compatibility_for_lexical_search(&index_dir)
+            .is_ok()
     {
         Some(
             prepare_search_embedder_for_workspace(
@@ -16360,6 +16375,139 @@ mod tests {
                 assert!(run_diag_search_with_embedder(&fixture.options, foreign.clone()).is_err());
                 assert_eq!(fixture.snapshot(), before);
             }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn read_only_search_prepares_workspace_model_before_retained_generation_selection() {
+            const CHILD: &str = "EE_TEST_RETAINED_SEARCH_PREPARATION";
+            const SENTINEL: &str = "retained hybrid read preserved cold default and durable store";
+            if std::env::var_os(CHILD).is_none() {
+                let isolated = tempfile::tempdir().expect("isolated configuration");
+                let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                    .args([
+                        "--exact",
+                        "core::search::tests::empty_generations::read_only_search_prepares_workspace_model_before_retained_generation_selection",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .env("EE_EMBED_BACKEND", "local")
+                    .env("EE_EMBED_DOWNLOAD", "off")
+                    .env_remove("EE_EMBED_MODEL_DIR")
+                    .env_remove("EE_EMBED_MODEL_PATH")
+                    .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+                    .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+                    .env("XDG_DATA_HOME", isolated.path().join("data"))
+                    .env("XDG_STATE_HOME", isolated.path().join("state"))
+                    .output()
+                    .expect("isolated retained-generation test");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success() && stdout.contains(SENTINEL),
+                    "{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+            let mut fixture = Fixture::new();
+            fixture.options.source_mode = SearchSourceMode::Hybrid;
+            // A different dimension and producer make accidental reuse of the
+            // process-default model observable without a network/model fixture.
+            let producer = Arc::new(SemanticFixture::new(512, "retained-workspace-producer"));
+            let _selection = crate::core::index::install_test_workspace_embedder(
+                &fixture.workspace_id,
+                EmbedderStack::from_parts(producer.clone(), None),
+            );
+            let database = fixture.options.resolve_database_path();
+            let db = DbConnection::open_file(&database).expect("source writer");
+            let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            db.insert_memory(
+                &memory_id,
+                &test_memory_input(&fixture.workspace_id, &fixture.options.query),
+            )
+            .expect("first source memory");
+            db.close().expect("close source writer");
+            let rebuilt = crate::core::index::rebuild_index(&fixture.rebuild)
+                .expect("publish workspace producer");
+            assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+            assert!(rebuilt.errors.is_empty(), "{:?}", rebuilt.errors);
+            let status = crate::core::index::get_index_status_with_embedder(
+                &crate::core::index::IndexStatusOptions {
+                    workspace_path: fixture.options.workspace_path.clone(),
+                    database_path: fixture.options.database_path.clone(),
+                    index_dir: fixture.options.index_dir.clone(),
+                },
+                None,
+                false,
+                producer.as_ref(),
+            )
+            .expect("healthy initial generation");
+            assert_eq!(status.health, IndexHealth::Ready);
+            assert_eq!(status.index_generation, status.db_generation);
+            let generation = status.db_generation.expect("source generation");
+            assert!(!crate::core::index::default_search_embedder_resolved());
+
+            // Publication already retained the empty bootstrap at .previous.
+            // Simulate a missing live directory after retaining the complete
+            // populated generation, before any read can warm a default model.
+            let retained = fixture.index().with_file_name("index.previous.001");
+            std::fs::rename(fixture.index(), &retained).expect("retain populated generation");
+            let durable_snapshot = || {
+                let mut files = fixture.snapshot();
+                // WAL readers can change volatile reader slots, but must not
+                // mutate source, registry, vector, lexical or metadata bytes.
+                files.retain(|path, _| !path.to_string_lossy().ends_with("-shm"));
+                files
+            };
+            for live_state in ["missing", "incompatible"] {
+                if live_state == "incompatible" {
+                    std::fs::create_dir(fixture.index()).expect("partial live directory");
+                    std::fs::write(fixture.index().join("meta.json"), b"{}")
+                        .expect("incompatible live metadata");
+                }
+                let before = durable_snapshot();
+                let calls_before = producer.calls.load(Ordering::Relaxed);
+                // Supply no prepared embedder: exercise the same workspace
+                // resolution and retained admission used by a cold daemon.
+                let handoff = run_pack_search(&fixture.options).expect("retained hybrid read");
+                let report = &handoff.report;
+                assert_eq!(report.status, SearchStatus::Success, "{live_state}");
+                assert_eq!(
+                    report.embed_backend,
+                    EmbedBackend::NeuralLocal,
+                    "{live_state}"
+                );
+                assert_eq!(report.source_mode_applied, SearchSourceMode::Hybrid);
+                assert!(!report.source_mode_fallback, "{live_state}");
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+                assert!(report.index_freshness.is_none(), "{live_state}");
+                assert_eq!(handoff.snapshot.workspace_id, fixture.workspace_id);
+                assert_eq!(handoff.snapshot.generation, generation);
+                let hit = report.results.first().expect("indexed memory");
+                assert_eq!(hit.doc_id, memory_id);
+                assert!(hit.fast_score.is_some(), "semantic arm did not contribute");
+                assert!(
+                    hit.lexical_score.is_some(),
+                    "lexical arm did not contribute"
+                );
+                assert!(producer.calls.load(Ordering::Relaxed) > calls_before);
+                assert!(
+                    !report.degraded.iter().any(|entry| matches!(
+                        entry.code.as_str(),
+                        "search_live_snapshot_lexical" | "index_stale" | "source_mode_fallback"
+                    )),
+                    "{:?}",
+                    report.degraded
+                );
+                assert_eq!(
+                    durable_snapshot(),
+                    before,
+                    "{live_state} read mutated store"
+                );
+                assert!(!crate::core::index::default_search_embedder_resolved());
+            }
+            println!("{SENTINEL}");
         }
 
         #[cfg(unix)]

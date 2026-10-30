@@ -382,6 +382,328 @@ mod tests {
         assert!(semantic_only(hash_fallback_embedder_stack().fast_arc()).is_none());
     }
 
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    fn workspace_model_preparation_ignores_unrelated_process_default() {
+        use crate::core::search::{
+            SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode, SearchStatus,
+            run_diag_search, run_search,
+        };
+        use crate::models::MemoryScope;
+        use frankensearch::Embedder;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CHILD: &str = "EE_TEST_WORKSPACE_MODEL_PREPARATION";
+        const SENTINEL: &str = "workspace-selected search, diagnostic and pack verified";
+        if std::env::var_os(CHILD).is_none() {
+            // Only the isolated child installs a process-wide default. It must
+            // not contaminate other tests or inherit a configured model path.
+            let isolated = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::index::ask_model::tests::workspace_model_preparation_ignores_unrelated_process_default",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env("EE_EMBED_BACKEND", "local")
+                .env("EE_EMBED_DOWNLOAD", "off")
+                .env_remove("EE_EMBED_MODEL_DIR")
+                .env_remove("EE_EMBED_MODEL_PATH")
+                .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+                .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+                .env("XDG_DATA_HOME", isolated.path().join("data"))
+                .env("XDG_STATE_HOME", isolated.path().join("state"))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(SENTINEL),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct LocalModel {
+            hash: HashEmbedder,
+            identity: EmbeddingIdentityBundleV1,
+            calls: AtomicUsize,
+        }
+        impl LocalModel {
+            fn new(dimension: usize, producer: &str) -> Self {
+                let hash = HashEmbedder::new(dimension, frankensearch::HashAlgorithm::FnvModular);
+                let mut identity = hash.identity().unwrap().clone();
+                producer.clone_into(&mut identity.producer.backend);
+                identity.validate().unwrap();
+                Self {
+                    hash,
+                    identity,
+                    calls: AtomicUsize::new(0),
+                }
+            }
+        }
+        impl Embedder for LocalModel {
+            fn embed<'a>(
+                &'a self,
+                cx: &'a asupersync::Cx,
+                text: &'a str,
+            ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.hash.embed(cx, text)
+            }
+            fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+                Ok(&self.identity)
+            }
+            fn id(&self) -> &str {
+                self.hash.id()
+            }
+            fn model_name(&self) -> &str {
+                self.hash.model_name()
+            }
+            fn dimension(&self) -> usize {
+                self.hash.dimension()
+            }
+            fn is_ready(&self) -> bool {
+                true
+            }
+            fn is_semantic(&self) -> bool {
+                true
+            }
+            fn category(&self) -> ModelCategory {
+                ModelCategory::StaticEmbedder
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        std::fs::create_dir(workspace.join(".ee")).unwrap();
+        std::fs::write(
+            workspace.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .unwrap();
+        let database = workspace.join("selected.db");
+        let index = workspace.join("selected-index");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        let query = "Preserve the copper kestrel release producer identity.";
+        let connection = DbConnection::open_file(&database).unwrap();
+        connection.migrate().unwrap();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        connection
+            .insert_memory(
+                &memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: query.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.8,
+                    provenance_uri: Some("manual://workspace-model".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        connection.close().unwrap();
+        let selected = Arc::new(LocalModel::new(512, "workspace-model"));
+        let _workspace_selection = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(selected.clone(), None),
+        );
+        let rebuild = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(rebuild.status, IndexRebuildStatus::Success);
+        assert!(rebuild.errors.is_empty(), "{:?}", rebuild.errors);
+
+        let unrelated = Arc::new(LocalModel::new(256, "unrelated-default"));
+        assert!(
+            DEFAULT_SEARCH_EMBEDDER
+                .set(DefaultSearchEmbedder::ready(
+                    EmbedderStack::from_parts(unrelated.clone(), None),
+                    EmbedModelResolution::ready(EmbedModelSource::Cache),
+                ))
+                .is_ok()
+        );
+        // The old preparation gate rejects this healthy index against the
+        // unrelated default. Corpus/security admission can authorize model
+        // preparation; only the selected producer can authorize vector use.
+        assert!(validate_index_corpus_compatibility(&index).is_err());
+        assert!(validate_index_corpus_compatibility_for_lexical_search(&index).is_ok());
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+        };
+        let initial =
+            get_index_status_with_embedder(&status_options, None, false, selected.as_ref())
+                .unwrap();
+        assert_eq!(initial.health, IndexHealth::Ready);
+        assert_eq!(initial.db_generation, initial.index_generation);
+        let metadata_before = std::fs::read(index.join("meta.json")).unwrap();
+        let vector_before = std::fs::read(index.join("vector.fast.idx")).unwrap();
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            query: query.to_owned(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Instant,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: true,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+        let assert_hybrid = |report: &SearchReport| {
+            assert_eq!(report.status, SearchStatus::Success);
+            assert_eq!(report.embed_backend, EmbedBackend::NeuralLocal);
+            assert_eq!(report.source_mode_applied, SearchSourceMode::Hybrid);
+            assert!(!report.source_mode_fallback);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert!(
+                !report
+                    .index_freshness
+                    .is_some_and(|freshness| freshness.stale)
+            );
+            let hit = report.results.first().unwrap();
+            assert_eq!(hit.doc_id, memory_id);
+            assert!(hit.fast_score.is_some() && hit.lexical_score.is_some());
+        };
+        let before_search = selected.calls.load(Ordering::Relaxed);
+        assert_hybrid(&run_search(&options).expect("workspace-selected ordinary search"));
+        assert!(selected.calls.load(Ordering::Relaxed) > before_search);
+        let before_diag = selected.calls.load(Ordering::Relaxed);
+        let diagnostic = run_diag_search(&options).expect("workspace-selected diagnostics");
+        assert_hybrid(&diagnostic.final_report);
+        assert!(selected.calls.load(Ordering::Relaxed) > before_diag);
+        let freshness = diagnostic.final_report.index_freshness.unwrap();
+        assert_eq!(freshness.db_generation, initial.db_generation);
+        assert_eq!(freshness.index_generation, initial.index_generation);
+
+        let before_pack = selected.calls.load(Ordering::Relaxed);
+        let pack =
+            crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                task_paths: Vec::new(),
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index.clone()),
+                query: query.to_owned(),
+                bead_id: None,
+                speed: crate::search::SpeedMode::Instant,
+                source_mode: SearchSourceMode::Hybrid,
+                strict_source_mode: true,
+                filters: crate::models::QueryFilters::default(),
+                profile: Some(crate::pack::ContextPackProfile::Balanced),
+                max_tokens: Some(800),
+                candidate_pool: Some(10),
+                max_results: Some(10),
+                include_tombstoned: false,
+                as_of: None,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                redaction_level: crate::models::RedactionLevel::Minimal,
+                memory_scope: MemoryScope::Workspace,
+                strict_scope: false,
+                ppr_weight: None,
+                changed_symbols: Vec::new(),
+                changed_symbols_from_git: false,
+                pagination: None,
+                coordination_snapshot_path: None,
+                coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                task_lens: None,
+                require_fresh_sentinels: false,
+                output_options: Default::default(),
+                persist_pack: true,
+                baseline_write: None,
+                no_lod: false,
+            })
+            .expect("workspace-selected persisted context pack");
+        assert!(pack.success);
+        assert_eq!(pack.data.embed_backend, EmbedBackend::NeuralLocal);
+        assert!(
+            pack.data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory_id)
+        );
+        assert!(selected.calls.load(Ordering::Relaxed) > before_pack);
+        assert_eq!(unrelated.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            std::fs::read(index.join("meta.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            std::fs::read(index.join("vector.fast.idx")).unwrap(),
+            vector_before
+        );
+        let current =
+            get_index_status_with_embedder(&status_options, None, false, selected.as_ref())
+                .unwrap();
+        assert_eq!(current.health, IndexHealth::Ready);
+        assert_eq!(current.db_generation, initial.db_generation);
+        assert_eq!(current.index_generation, initial.index_generation);
+
+        // Equal labels/dimensions cannot disguise a different selected native
+        // producer. Moving the preparation gate must preserve this refusal.
+        let wrong = Arc::new(LocalModel::new(512, "wrong-workspace-producer"));
+        let _wrong_selection = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(wrong.clone(), None),
+        );
+        let rejected = run_search(&options).expect("wrong producer refusal report");
+        assert_eq!(rejected.status, SearchStatus::IndexError);
+        assert!(rejected.results.is_empty());
+        assert!(
+            rejected
+                .errors
+                .iter()
+                .any(|error| error.contains("producer_revision"))
+        );
+        assert_eq!(wrong.calls.load(Ordering::Relaxed), 0);
+        assert!(run_diag_search(&options).is_err());
+        assert_eq!(
+            std::fs::read(index.join("meta.json")).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            std::fs::read(index.join("vector.fast.idx")).unwrap(),
+            vector_before
+        );
+        println!("{SENTINEL}");
+    }
+
     #[test]
     fn already_loaded_probe_does_not_initialize_either_cache() {
         let root = tempfile::tempdir().unwrap();

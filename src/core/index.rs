@@ -8834,9 +8834,20 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                 .ok()
                 .and_then(|overrides| overrides.get(&workspace_id).cloned())
             {
+                let (backend, model_resolution) = if stack.fast().is_semantic() {
+                    (
+                        EmbedBackend::NeuralLocal,
+                        EmbedModelResolution::ready(EmbedModelSource::Registered),
+                    )
+                } else {
+                    (
+                        EmbedBackend::HashFallback,
+                        EmbedModelResolution::deterministic_hash(),
+                    )
+                };
                 return Ok(EmbedderPreparation::new(
-                    EmbedBackend::HashFallback,
-                    EmbedModelResolution::deterministic_hash(),
+                    backend,
+                    model_resolution,
                     started.elapsed(),
                     stack.fast_arc(),
                 ));

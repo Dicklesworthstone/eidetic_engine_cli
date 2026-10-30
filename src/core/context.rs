@@ -59,8 +59,8 @@ use crate::config::{
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::index::{
-    index_corpus_compatibility_is_current, prepare_read_only_search_embedder_for_workspace,
-    prepare_search_embedder_for_workspace,
+    prepare_read_only_search_embedder_for_workspace, prepare_search_embedder_for_workspace,
+    validate_index_corpus_compatibility_for_lexical_search,
 };
 use crate::core::memory_drift::{
     GitDriftProbe, MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory,
@@ -3034,7 +3034,10 @@ async fn run_context_pack_with_performance_inner(
         // live directory is absent or incompatible. Always provide a safe
         // concrete model for read-only embedding requests on that path too.
         && (!options.persist_pack
-            || (index_dir.exists() && index_corpus_compatibility_is_current(&index_dir)))
+            || (index_dir.exists()
+                // Resolve the workspace model before comparing producer
+                // identity; an ambient default can belong to another model.
+                && validate_index_corpus_compatibility_for_lexical_search(&index_dir).is_ok()))
     {
         let preparation = if options.persist_pack {
             prepare_search_embedder_for_workspace(
