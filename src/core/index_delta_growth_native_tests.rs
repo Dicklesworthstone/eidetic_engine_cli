@@ -315,7 +315,7 @@ fn publish_case(two_tiers: bool, fail_commit: bool) -> TestResult {
                 current.clone(),
                 2,
                 counts,
-                || {
+                |_| {
                     commit_calls += 1;
                     Err(index::IndexRebuildError::Index(
                         "injected growth commit refusal".to_owned(),
@@ -339,7 +339,7 @@ fn publish_case(two_tiers: bool, fail_commit: bool) -> TestResult {
             current.clone(),
             2,
             counts,
-            || Ok(()),
+            |_| Ok(()),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -364,7 +364,7 @@ fn publish_case(two_tiers: bool, fail_commit: bool) -> TestResult {
             current.clone(),
             3,
             counts,
-            || Ok(()),
+            |_| Ok(()),
         )
         .await
         .map_err(|error| error.to_string())?;

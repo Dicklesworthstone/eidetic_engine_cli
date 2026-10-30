@@ -1124,7 +1124,7 @@ mod tests {
                     current.clone(),
                     8,
                     count,
-                    || {
+                    |_| {
                         commit_calls += 1;
                         Err(index::IndexRebuildError::Index(
                             "injected commit refusal".to_owned(),
@@ -1156,7 +1156,7 @@ mod tests {
                 current.clone(),
                 8,
                 count,
-                || {
+                |_| {
                     commit_calls += 1;
                     Ok(())
                 },
@@ -1187,7 +1187,7 @@ mod tests {
                 current.clone(),
                 9,
                 count,
-                || Ok(()),
+                |_| Ok(()),
             )
             .await
             .map_err(|error| error.to_string())?;

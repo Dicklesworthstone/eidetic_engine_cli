@@ -160,7 +160,7 @@ fn publish_mixed_maintenance(
                 current.clone(),
                 2,
                 counts,
-                || {
+                |_| {
                     commits += 1;
                     Err(index::IndexRebuildError::Index(
                         "injected maintenance commit refusal".to_owned(),
@@ -189,7 +189,7 @@ fn publish_mixed_maintenance(
             current.clone(),
             2,
             counts,
-            || Ok(()),
+            |_| Ok(()),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -261,7 +261,7 @@ fn publish_mixed_maintenance(
             current.clone(),
             3,
             counts,
-            || Ok(()),
+            |_| Ok(()),
         )
         .await
         .map_err(|error| error.to_string())?;

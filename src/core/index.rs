@@ -655,8 +655,10 @@ fn commit_running_index_job_success(
     db: &DbConnection,
     job_id: &str,
     documents_total: u32,
+    registration: Option<&crate::db::CreateEmbeddingMetadataInput>,
 ) -> Result<(), IndexRebuildError> {
     db.with_transaction_error(|| {
+        persist_index_embedding_registry_input(db, registration)?;
         let progressed = db.update_search_index_job_progress(job_id, documents_total)?;
         require_index_job_transition(progressed, job_id, "running_progress_updated")?;
         let completed = db.complete_search_index_job(job_id, documents_total)?;
@@ -2116,7 +2118,7 @@ async fn reembed_index_with_cx_and_stack(
         indexable_docs,
         source_generation,
         document_counts,
-        || commit_running_index_job_success(&db, &job_id, documents_total),
+        || commit_running_index_job_success(&db, &job_id, documents_total, None),
     )
     .await;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -2872,8 +2874,9 @@ where
         indexable_docs,
         published_generation,
         document_counts,
-        || {
+        |registration| {
             db.with_transaction_error(|| {
+                persist_index_embedding_registry_input(db, registration)?;
                 for job in &claimed {
                     let progressed =
                         db.update_search_index_job_progress(&job.id, documents_total)?;
@@ -3151,7 +3154,9 @@ where
             indexable_docs,
             published_generation,
             document_counts,
-            || commit_running_index_job_success(db, &job.id, documents_total),
+            |registration| {
+                commit_running_index_job_success(db, &job.id, documents_total, registration)
+            },
         )
         .await;
 
@@ -3440,7 +3445,7 @@ async fn publish_index_generation_preferring_delta<F>(
     commit_tail: F,
 ) -> Result<(BuildStats, PublishedGenerationKind), IndexRebuildError>
 where
-    F: FnOnce() -> Result<(), IndexRebuildError>,
+    F: FnOnce(Option<&crate::db::CreateEmbeddingMetadataInput>) -> Result<(), IndexRebuildError>,
 {
     let cx = publish_lock.cx;
     index_checkpoint(cx)?;
@@ -3449,6 +3454,16 @@ where
     } else {
         prepare_index_embedder_stack(cx, stack).await?
     };
+    // Carry the concrete producer's source into the caller-owned job transaction.
+    // Preparing this input performs model-file verification before the publication
+    // fence; no registry write occurs until the generation has been exchanged.
+    let registration = prepare_index_embedding_registry_input(
+        publish_lock.db,
+        publish_lock.workspace_id,
+        &stack,
+        document_counts.total(),
+    )?;
+    let commit_tail = || commit_tail(registration.as_ref());
     match stage_delta_generation(
         cx,
         index_dir,
@@ -9150,6 +9165,45 @@ fn process_env_map() -> BTreeMap<String, OsString> {
     std::env::vars_os()
         .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
         .collect()
+}
+
+/// Prepare durable model selection metadata only for a populated generation
+/// whose concrete producer has loaded and exposes a complete native identity.
+/// The caller persists it in the same transaction that completes index work.
+fn prepare_index_embedding_registry_input(
+    db: &DbConnection,
+    workspace_id: &str,
+    stack: &EmbedderStack,
+    documents_total: u32,
+) -> Result<Option<crate::db::CreateEmbeddingMetadataInput>, IndexRebuildError> {
+    let fast = stack.fast();
+    if documents_total == 0
+        || !fast.is_semantic()
+        || !fast.is_ready()
+        || delta::verified_embedder_identity(fast).is_none()
+    {
+        return Ok(None);
+    }
+    let source_dir = active_embedding_model_source_dir(db, workspace_id, fast)?;
+    // An Available local registration must remain loadable by the next CLI
+    // process. A loaded allocation without verified source files cannot supply
+    // that promise; never replace its source with a synthetic URI.
+    if provider_for_embedder(fast) == ModelProvider::Model2Vec && source_dir.is_none() {
+        return Ok(None);
+    }
+    active_embedding_registry_input_with_source(workspace_id, fast, source_dir.as_deref())
+}
+
+/// Called only inside the publication tail's existing job-completion
+/// transaction. An index or job failure must roll the registry change back too.
+fn persist_index_embedding_registry_input(
+    db: &DbConnection,
+    registration: Option<&crate::db::CreateEmbeddingMetadataInput>,
+) -> Result<(), IndexRebuildError> {
+    if let Some(input) = registration {
+        db.upsert_embedding_metadata_record(&generate_model_registry_id(), input)?;
+    }
+    Ok(())
 }
 
 fn ensure_active_embedding_registry_record(
@@ -15498,6 +15552,280 @@ mod tests {
             "resolved execution failure must remain authoritative during inspection",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    #[ignore = "requires the pinned real Potion fixture in EE_EMBED_MODEL_FIXTURE_DIR"]
+    fn queued_neural_publication_registers_model_atomically() -> TestResult {
+        const CHILD: &str = "EE_TEST_QUEUED_MODEL_REGISTRATION";
+        const SENTINEL: &str = "queued neural registration rollback and retry completed";
+        if std::env::var_os(CHILD).is_none() {
+            let isolated = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .args([
+                "--exact",
+                "core::index::tests::queued_neural_publication_registers_model_atomically",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("EE_EMBED_BACKEND", "local")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env_remove("EE_EMBED_MODEL_DIR")
+            .env_remove("EE_EMBED_MODEL_PATH")
+            .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+            .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+            .env("XDG_DATA_HOME", isolated.path().join("data"))
+            .env("XDG_STATE_HOME", isolated.path().join("state"))
+            .output()
+            .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return ensure(
+                output.status.success()
+                    && stdout.contains(SENTINEL)
+                    && stdout.contains("1 passed"),
+                format!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr)),
+            );
+        }
+        let fixture_root = crate::config::env_registry::read_os(
+            crate::config::env_registry::EnvVar::EmbedModelFixtureDir,
+        )
+        .map(PathBuf::from)
+        .ok_or("EE_EMBED_MODEL_FIXTURE_DIR must name the real model")?;
+        let directory = verified_default_model_dir(&EeEmbedderSettings {
+            model_root: fixture_root,
+            download_mode: EeEmbedDownloadMode::Off,
+            local_source: EmbedModelSource::Configured,
+        })
+        .ok_or("real model fixture failed pinned verification")?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+        let loaded = Model2VecEmbedder::load_shared_with_name(&directory, POTION_MODEL_NAME)
+            .map_err(|error| error.to_string())?;
+        let stack = EmbedderStack::from_parts(loaded, None);
+        for (coalesced, streamed) in [(false, false), (true, false), (false, true), (true, true)] {
+            let fixture = RequestedIndexRepairFixture::new()?;
+            fixture.set_stack(stack.clone())?;
+            let selection =
+                install_test_workspace_embedder(&fixture.workspace_id, stack.clone());
+            let mut registered = active_embedding_registry_input_with_source(
+                &fixture.workspace_id,
+                stack.fast(),
+                Some(&directory),
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("real loaded model must supply registry metadata")?;
+            registered.status = ModelRegistryStatus::Unavailable;
+            fixture
+                .db
+                .insert_embedding_metadata_record(&generate_model_registry_id(), &registered)
+                .map_err(|error| error.to_string())?;
+            // Empty, hash, pending, and unbound local fixtures cannot invent
+            // an Available model registration as a side effect of indexing.
+            for (candidate, documents) in [
+                (stack.clone(), 0),
+                (hash_fallback_embedder_stack(), 1),
+                (
+                    ee_auto_download_embedder(
+                        fixture.options.workspace_path.join("absent-model"),
+                    )
+                    .stack,
+                    1,
+                ),
+                (
+                    EmbedderStack::from_parts(
+                        Arc::new(RequestedRepairEmbedder::new(7)),
+                        None,
+                    ),
+                    1,
+                ),
+            ] {
+                assert!(
+                    prepare_index_embedding_registry_input(
+                        &fixture.db,
+                        &fixture.workspace_id,
+                        &candidate,
+                        documents,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+                );
+            }
+            let snapshot =
+                collect_workspace_index_source_snapshot(&fixture.db, &fixture.workspace_id)
+                    .map_err(|error| error.to_string())?;
+            let initial_stack = if streamed {
+                stack.clone()
+            } else {
+                hash_fallback_embedder_stack()
+            };
+            let index = fixture.options.resolve_index_dir();
+            let digests = delta::DocDigests::new(&initial_stack, &snapshot.documents);
+            let fingerprint = embedder_fingerprint_for_index_metadata(&initial_stack);
+            let stats = build_index_generation_sync(&index, initial_stack, snapshot.documents)?;
+            validate_built_generation(&index, stats, snapshot.document_counts)?;
+            digests
+                .write(&index)
+                .map_err(|error| error.to_string())?;
+            write_index_metadata(
+                &index,
+                snapshot.generation,
+                snapshot.document_counts,
+                fingerprint.as_ref(),
+            )
+            .map_err(|error| error.to_string())?;
+            let jobs = if coalesced {
+                vec![fixture.queue(1)?, fixture.queue(2)?]
+            } else {
+                vec![fixture.queue(1)?]
+            };
+            let options = IndexProcessingOptions {
+                workspace_path: fixture.options.workspace_path.clone(),
+                database_path: fixture.options.database_path.clone(),
+                index_dir: fixture.options.index_dir.clone(),
+                dry_run: false,
+                job_limit: None,
+            };
+            let drain = if coalesced {
+                IndexJobDrain::Coalesced {
+                    max_corpus_documents: None,
+                }
+            } else {
+                IndexJobDrain::Ordinary
+            };
+            let options = &options;
+            let process = || -> Result<IndexProcessingReport, String> {
+                crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                    process_index_jobs_with_drain(&cx, options, drain).await
+                })
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+            };
+            let observe = || -> Result<_, String> {
+                let reader =
+                    DbConnection::open_file_read_only(&fixture.options.resolve_database_path())
+                        .map_err(|error| error.to_string())?;
+                let registry = reader
+                    .list_model_registry_entries(&fixture.workspace_id)
+                    .map_err(|error| error.to_string())?;
+                let generation = reader
+                    .get_workspace_generation(&fixture.workspace_id)
+                    .map_err(|error| error.to_string())?;
+                let states = jobs
+                    .iter()
+                    .map(|id| {
+                        reader
+                            .get_search_index_job(id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| format!("queued job {id} disappeared"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                reader.close().map_err(|error| error.to_string())?;
+                Ok((registry, generation, states))
+            };
+            let before = observe()?;
+            let old_index = index_regular_file_snapshot(&index)?;
+            fixture
+                .db
+                .execute_raw(
+                    "CREATE TRIGGER reject_queued_model_completion BEFORE UPDATE ON search_index_jobs
+                     WHEN NEW.status = 'completed'
+                     BEGIN SELECT RAISE(ABORT, 'injected registry publication failure'); END;",
+                )
+                .map_err(|error| error.to_string())?;
+            let failed = process()?;
+            assert_eq!(failed.status, IndexProcessingStatus::Failed);
+            assert_eq!(failed.failed_jobs, if coalesced { 2 } else { 1 });
+            assert_eq!(failed.completed_jobs, 0);
+            assert!(failed.jobs.iter().all(|job| {
+                job.error.as_deref().is_some_and(|error| {
+                    error.contains("injected registry publication failure")
+                })
+            }));
+            let rolled_back = observe()?;
+            assert_eq!(rolled_back.0, before.0);
+            assert_eq!(rolled_back.1, before.1);
+            assert!(rolled_back.2.iter().all(|job| {
+                job.status_enum() == Some(SearchIndexJobStatus::Failed)
+            }));
+            assert_eq!(index_regular_file_snapshot(&index)?, old_index);
+            // A fresh writer removes the deliberate failure after all observer
+            // snapshots have closed; a failed worker must not own cleanup.
+            let cleanup = DbConnection::open_file(&fixture.options.resolve_database_path())
+                .map_err(|error| error.to_string())?;
+            cleanup
+                .execute_raw("DROP TRIGGER reject_queued_model_completion")
+                .map_err(|error| error.to_string())?;
+            cleanup.close().map_err(|error| error.to_string())?;
+            // The public worker re-arms failed jobs in place. No replacement
+            // job, manual status update, or full rebuild command is needed.
+            let completed = process()?;
+            assert_eq!(completed.status, IndexProcessingStatus::Success);
+            assert_eq!(completed.completed_jobs, if coalesced { 2 } else { 1 });
+            assert_eq!(completed.failed_jobs, 0);
+            assert!(completed.jobs.iter().all(|job| {
+                job.processing_mode.contains("_staged_delta") == streamed
+            }));
+            let persisted = observe()?;
+            assert_eq!(persisted.0.len(), 1);
+            let entry = &persisted.0[0];
+            assert_eq!(entry.id, before.0[0].id);
+            assert_eq!(entry.status, ModelRegistryStatus::Available);
+            assert_eq!(
+                entry.source_uri,
+                Some(directory.to_string_lossy().into_owned())
+            );
+            assert_eq!(entry.content_hash, registered.content_hash);
+            assert_eq!(persisted.1, Some(snapshot.generation));
+            assert_eq!(
+                persisted
+                    .2
+                    .iter()
+                    .map(|job| job.id.clone())
+                    .collect::<Vec<_>>(),
+                jobs
+            );
+            assert!(persisted.2.iter().all(|job| {
+                job.status_enum() == Some(SearchIndexJobStatus::Completed)
+            }));
+            fixture.validate(&index)?;
+            assert_eq!(
+                parse_index_metadata(&index)?
+                    .ok_or("published metadata missing")?
+                    .generation,
+                persisted.1
+            );
+            drop(selection);
+            #[cfg(feature = "lexical-bm25")]
+            {
+                let mut search = fixture.search_options();
+                search.source_mode = crate::core::search::SearchSourceMode::Hybrid;
+                let report = crate::core::search::run_search_unaudited(&search)
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(report.status, crate::core::search::SearchStatus::Success);
+                assert_eq!(report.embed_backend, EmbedBackend::NeuralLocal);
+                assert_eq!(
+                    report.source_mode_applied,
+                    crate::core::search::SearchSourceMode::Hybrid
+                );
+                assert!(!report.source_mode_fallback);
+                assert!(report.errors.is_empty());
+                assert!(report.index_freshness.is_none_or(|status| !status.stale));
+                let hit = report
+                    .results
+                    .first()
+                    .ok_or("registered model did not retrieve memory")?;
+                assert_eq!(hit.doc_id, format!("mem_{:026}", 1));
+                assert!(hit.fast_score.is_some() && hit.lexical_score.is_some());
+            }
+            assert_eq!(process()?.status, IndexProcessingStatus::NoPendingJobs);
+            assert_eq!(observe()?, persisted);
+        }
+        println!("{SENTINEL}");
+        Ok(())
     }
 
     #[test]

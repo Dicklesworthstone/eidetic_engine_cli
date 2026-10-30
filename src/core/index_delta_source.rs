@@ -20,7 +20,8 @@ use super::{
     checked_document_counts, delta, embedder_fingerprint_for_index_metadata,
     embedder_reports_pending_model2vec_download, evidence_span_to_document,
     finalize_coalesced_claimed_jobs, index_checkpoint, memory_documents_with_anchors_with_cx,
-    path_exists_no_follow, prepare_index_embedder_stack, publish_staged_generation,
+    path_exists_no_follow, persist_index_embedding_registry_input, prepare_index_embedder_stack,
+    prepare_index_embedding_registry_input, publish_staged_generation,
     recover_interrupted_publish_for_snapshot, require_index_job_transition, rule_to_document,
     session_to_document, source_snapshot, stage_planned_index_delta,
     update_running_index_job_total, validate_incremental_index_metadata, workspace_embedder_stack,
@@ -45,6 +46,7 @@ pub(super) struct PreparedDelta {
     open_job_ids: BTreeSet<String>,
     stage: UnpublishedIndexStage,
     embedder_fingerprint: Option<IndexEmbedderFingerprint>,
+    embedding_registration: Option<crate::db::CreateEmbeddingMetadataInput>,
 }
 
 pub(super) async fn prepare(
@@ -141,6 +143,12 @@ pub(super) async fn prepare(
                 open_job_ids,
                 stage,
                 embedder_fingerprint: embedder_fingerprint_for_index_metadata(&stack),
+                embedding_registration: prepare_index_embedding_registry_input(
+                    db,
+                    workspace_id,
+                    &stack,
+                    document_counts.total(),
+                )?,
             }))
         }
         Err(DeltaStageError::Cancelled(error)) => Err(error),
@@ -413,6 +421,10 @@ where
         prepared.embedder_fingerprint.as_ref(),
         || {
             db.with_transaction_error(|| {
+                persist_index_embedding_registry_input(
+                    db,
+                    prepared.embedding_registration.as_ref(),
+                )?;
                 for job in jobs {
                     let progressed =
                         db.update_search_index_job_progress(&job.id, documents_total)?;
