@@ -3860,12 +3860,12 @@ fn default_model_store_root() -> Result<PathBuf, DomainError> {
 // NO operator action — the discoverability fix the 12 West analyst asked for.
 //
 // Honesty (epic HARD CONSTRAINT — no silent fallback): the declared entry is
-// registered as `Unavailable` until the artifact is actually present. The
-// download→`Available` flip is performed by the index-build path
-// (`ensure_active_embedding_registry_record`, src/core/index.rs) and by the
-// explicit `ee model fetch embedding-default` pre-download path, both through
-// the registry upsert keyed by `(Model2Vec, potion-multilingual-128M,
-// Embedding)`.
+// registered as `Unavailable` until verification succeeds. Automatic
+// selection is committed by the index publication tail together with the
+// published generation and any completed jobs. Explicit `ee model fetch`
+// selects its verified artifacts through the same Model2Vec selector. Both
+// retain the row keyed by `(Model2Vec, potion-multilingual-128M, Embedding)`
+// and retire competing local embedding selections in that transaction.
 // ---------------------------------------------------------------------------
 
 /// Registry id of the bundled default embedding model (ADR 0080).
