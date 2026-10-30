@@ -497,7 +497,6 @@ impl OutcomeQuarantineSummary {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
-        let index_repair_job_id = self.queued_memory_index_job_id();
         let reason = redact_outcome_public_source_ref(&self.reason);
         let mut data = serde_json::json!({
             "id": &self.id,
@@ -846,6 +845,7 @@ impl OutcomeRecordReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
+        let index_repair_job_id = self.queued_memory_index_job_id();
         serde_json::json!({
             "command": "outcome",
             "version": self.version,
