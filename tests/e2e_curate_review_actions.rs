@@ -1060,8 +1060,8 @@ fn reviewed_conflict_merge_creates_one_searchable_summary_with_both_sources() ->
             )?;
         }
         for relation in [
-            ee::models::MemoryLinkRelation::DerivedFrom,
-            ee::models::MemoryLinkRelation::Supersedes,
+            ee::db::MemoryLinkRelation::DerivedFrom,
+            ee::db::MemoryLinkRelation::Supersedes,
         ] {
             let links = db
                 .list_memory_links_for_memory(merged_id, Some(relation))
