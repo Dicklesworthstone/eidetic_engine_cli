@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A commit deleted a `fn NAME` and left NAME called somewhere else. (bd-1ks7e)
+r"""A commit deleted a `fn NAME` and left NAME called somewhere else. (bd-1ks7e)
 
 WHY THIS EXISTS. On 2026-10-29 18:57 `f9ecec213` removed
 `fn incident_card_source_ids` from `src/core/context.rs` and -- correctly --
@@ -24,10 +24,27 @@ definition the commit removed whose name is still referenced in code and is
 defined nowhere. That class is worth its own gate because it is the class
 `#[path]` + `use super::*` makes invisible to review.
 
-MEASURED BLAST RADIUS, 120 commits of history touching `src/` (2026-10-30):
+MEASURED BLAST RADIUS, 120 commits of history touching `src/` (2026-10-30),
+re-measured through THIS code path after the call-shape tightening below rather
+than inherited from the looser predicate that produced the first number:
 
-    fires                                                    1
+    fires                                                    1 of 120
     f9ecec213  incident_card_source_ids  -> context_why_not.rs   TRUE (the P0)
+
+AND NOTHING OF THIS CLASS IS LIVE AT HEAD. The same script answers that as a
+whole-tree audit rather than a per-commit check, by widening the range so the
+diff reports every definition removed across it:
+
+    --range HEAD~50..HEAD      25 removed   clean
+    --range HEAD~200..HEAD    178 removed   clean
+    --range HEAD~600..HEAD    161 removed   clean
+    --range HEAD~1200..HEAD   236 removed   clean
+
+(A wider range reports FEWER removals, because a definition removed and
+restored inside the range nets out of an endpoint diff. That is why the spans
+are reported separately instead of quoting the widest one.) So bd-1ks7e's was
+the only orphan in the tree, established locally in seconds -- which is a thing
+this repository otherwise cannot know without a ~30-minute dispatch.
 
 A SECOND COMMIT FIRED BEFORE PROSE WAS EXCLUDED, and it is the reason this
 script strips comments and string literals rather than running `git grep`:
@@ -40,7 +57,32 @@ That is a doc comment deliberately naming a test that commit deleted. A `git
 grep` for the symbol cannot tell it from a call, so the naive predicate reports
 a healthy commit as broken -- the same mention-read-as-invocation defect that
 put `scripts/e2e_invocation_audit.sh` into a stale-baseline red earlier the same
-week. One true fire in 120 commits is a usable signal; two with one of them
+week.
+
+A THIRD FALSE-POSITIVE CLASS SURVIVED THAT FIX, AND IS WHY A BARE WORD IS NOT
+ENOUGH. With prose stripped, `--range HEAD~600..HEAD` still reported
+
+    near_duplicate -- defined nowhere, referenced in code:
+      src/pack/mod.rs:16557  let near_duplicate = candidate_with_content(
+      src/pack/mod.rs:16578  vec![near_duplicate, diverse, first],
+
+a name that used to be a function and is now a LOCAL BINDING. Both occurrences
+are real code, so no amount of comment stripping separates them. The predicate
+therefore requires a CALL SHAPE -- `(?<![.\w])NAME\s*\(` -- which additionally
+drops `.name(` method calls, a different namespace, while still matching
+`::name(`, since a qualified path to a deleted free function is a real orphan.
+The cost is one accepted fail-open, pinned by the
+`function_as_value_is_a_known_fail_open` arm: `xs.map(gone_fn)` passes a
+function without calling it and is not seen.
+
+Two false-positive classes found within an hour, each by widening the
+measurement rather than by reasoning, is also why the pre-commit front end at
+`.git/hooks/hooks.d/pre-commit/45-symbol-orphans.py` REPORTS and does not block.
+`.git/hooks` is shared by every agent in this checkout, and a predicate still
+discovering its own false positives does not belong anywhere it can stop a swarm
+from committing.
+
+One true fire in 120 commits is a usable signal; two with one of them
 prose is not.
 
 WHAT THE STRIPPER'S FAILURE DIRECTIONS ARE, because they are not symmetric.
