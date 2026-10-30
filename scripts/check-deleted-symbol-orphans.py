@@ -72,6 +72,37 @@ It is not a substitute for a build and must not be cited as one. bd-g3obb tracks
 the missing TEST-target build gate; this closes one named class inside it and
 leaves the rest open.
 
+WHY IT STAYS `fn`-ONLY -- MEASURED, AND DECLINED. Removing a `struct`, `enum`,
+`trait`, `type`, `const` or `static` whose users survive is the same
+name-resolution class (E0412/E0422), so widening looks free. It is not. Measured
+over 60 commits with every kind enabled:
+
+    fn 1 fire   struct 1 fire   enum/trait/type/const/static/macro 0
+
+and the struct fire is a FALSE POSITIVE on the same commit. `f9ecec213` deleted
+a function-LOCAL `struct Sources` declared inside the removed function body, and
+`Sources` survives in `src/cli/mod.rs:1560` as
+
+    Sources(AgentSourcesArgs),
+
+an enum VARIANT of `AgentCommand`, unrelated in every way. Rust keeps types,
+variants, fields, modules and methods in separate namespaces; a word-level grep
+collides them, and no amount of comment stripping separates them because both
+occurrences are real code. Distinguishing them needs actual name resolution,
+which is a compiler. Function-local declarations make it worse: their scope is
+one body, so "defined somewhere in the tree" is simply the wrong question for
+them, and their names are generic (`Sources`, `Row`, `Args`) and collide often.
+
+Snake_case free functions are the one population where the flat predicate is
+accurate enough to be worth running. Do not widen this gate; dispatch a build.
+
+THE KNOWN FAIL-OPEN, stated so it is not mistaken for coverage. Resolution here
+is tree-wide, so a top-level `fn foo` removed from one file while an unrelated
+function-LOCAL `fn foo` exists in another is reported clean. That is a false
+PASS. It is accepted because the alternative is scope analysis, and because the
+shape is rare: a nested helper and its caller live in the same body, so a commit
+removing one normally removes both in the same diff.
+
 EXIT CODES
     0  no orphan
     1  an orphan: a removed definition is still called
