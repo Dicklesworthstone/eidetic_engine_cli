@@ -180,7 +180,7 @@ fn index_jobs_need_processing(workspace: &Path) -> Result<bool, String> {
         return Ok(false);
     };
     connection.query(
-        "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'failed', 'cancelled') LIMIT 1",
+        "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'cancelled') LIMIT 1",
         &[sqlmodel_core::Value::Text(workspace.id)],
     ).map(|jobs| !jobs.is_empty())
         .map_err(|error| format!("Inspect pending background index jobs: {error}"))
