@@ -2177,12 +2177,17 @@ impl SearchPerformanceTrace {
 
     /// Close the run: attribute a cold-start embedder load, then the total.
     ///
-    /// The one-time default-embedder resolution is the cost the field report
-    /// behind bd-search-warm-latency-0bh05 blamed for ~3.9 s of a ~3.9 s
-    /// query, and it was the only major component of this command with no
-    /// phase of its own — so a cold-start regression was indistinguishable
-    /// from a query regression in `--explain-performance` output. The duration
-    /// was already measured by
+    /// THERE ARE TWO EMBEDDER COSTS HERE AND THEY ARE NOT THE SAME ONE.
+    /// `search::embedderPrepare` already times
+    /// `prepare_search_embedder_for_workspace`, the per-request WORKSPACE
+    /// embedder, and it is recorded only when
+    /// `options.source_mode.uses_embeddings()` — so a lexical query correctly
+    /// has no such phase. This phase is the other one: the PROCESS-DEFAULT
+    /// `DEFAULT_SEARCH_EMBEDDER` resolution, paid once per process by whichever
+    /// request happens to force the `OnceLock`. That one had no phase at all,
+    /// so a cold-start regression was indistinguishable from a query
+    /// regression in `--explain-performance` output. The duration was already
+    /// measured by
     /// `crate::core::index::default_search_embedder_load_duration`, whose only
     /// other caller subtracts it from a pack SLO budget and then discards it;
     /// nothing reported it to anyone.
