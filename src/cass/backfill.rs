@@ -56,12 +56,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{CreateAuditInput, SearchIndexJobStatus, StoredEvidenceSpan};
 use crate::models::AuditId;
+use crate::policy::store_auth::StoreAuthRoot;
 
+#[cfg(test)]
+use super::evidence_input;
 use super::{
     CassSessionInfo, CassViewSpanForImport, DbConnection, DbError, DbOperation,
-    cass_redaction_audit_input, evidence_input, saturating_len, search_index_job_input,
-    stable_cass_redaction_audit_id, stable_evidence_id, stable_search_index_job_id, stable_uuid,
-    with_import_session_transaction,
+    cass_redaction_audit_input, evidence_input_with_source_key, saturating_len,
+    search_index_job_input, stable_cass_redaction_audit_id, stable_evidence_id,
+    stable_search_index_job_id, stable_uuid, with_import_session_transaction,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -72,12 +75,13 @@ pub(super) struct BackfillResult {
     pub index_job_id: Option<String>,
 }
 
-pub(super) fn backfill_session(
+fn backfill_session_with_source_key(
     connection: &DbConnection,
     workspace_id: &str,
     session_id: &str,
     session: &CassSessionInfo,
     spans: &[CassViewSpanForImport],
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<BackfillResult, DbError> {
     let mut incoming = BTreeMap::new();
     for span in spans {
@@ -187,7 +191,7 @@ pub(super) fn backfill_session(
             let evidence_id = stable_evidence_id(session_id, &span.cass_span_id);
             connection.insert_evidence_span(
                 &evidence_id,
-                &evidence_input(workspace_id, session_id, span),
+                &evidence_input_with_source_key(workspace_id, session_id, span, source_root)?,
             )?;
             if span.redacted {
                 connection.insert_audit(
@@ -234,6 +238,24 @@ pub(super) fn backfill_session(
             index_job_id: Some(index_job_id.clone()),
         })
     })
+}
+
+#[cfg(test)]
+fn backfill_session(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    session: &CassSessionInfo,
+    spans: &[CassViewSpanForImport],
+) -> Result<BackfillResult, DbError> {
+    backfill_session_with_source_key(
+        connection,
+        workspace_id,
+        session_id,
+        session,
+        spans,
+        Some(&super::test_source_root()),
+    )
 }
 
 fn same_upstream_reference(stored: &StoredEvidenceSpan, span: &CassViewSpanForImport) -> bool {

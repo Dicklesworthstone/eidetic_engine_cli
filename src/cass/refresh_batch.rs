@@ -8,10 +8,13 @@
 use crate::db::{
     CreateEvidenceSpanInput, DbConnection, DbError, EvidenceAdmissionTally, StoredSession,
 };
+use crate::policy::store_auth::StoreAuthRoot;
 use sqlmodel_core::Value;
 
+#[cfg(test)]
+use super::evidence_input;
 use super::{
-    CassViewSpanForImport, cass_redaction_audit_input, evidence_input, refusal,
+    CassViewSpanForImport, cass_redaction_audit_input, evidence_input_with_source_key, refusal,
     stable_cass_redaction_audit_id, stable_evidence_id,
 };
 
@@ -47,12 +50,13 @@ pub(in crate::cass::import) fn insert_initial_spans(
     workspace_id: &str,
     session: &StoredSession,
     spans: &[CassViewSpanForImport],
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<EvidenceAdmissionTally, DbError> {
     let rows = spans.iter().map(|span| {
-        (
+        Ok((
             stable_evidence_id(&session.id, &span.cass_span_id),
-            evidence_input(workspace_id, &session.id, span),
-        )
+            evidence_input_with_source_key(workspace_id, &session.id, span, source_root)?,
+        ))
     });
     let admission = write_prepared_batches(rows, REFRESH_PREPARED_HEAP_BYTES, |rows| {
         connection.insert_evidence_spans_in_session(rows, session)
@@ -72,6 +76,7 @@ pub(super) fn insert_additions(
     workspace_id: &str,
     session: &StoredSession,
     additions: &[&CassViewSpanForImport],
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<(Vec<u32>, EvidenceAdmissionTally), DbError> {
     let mut added_lines = Vec::with_capacity(additions.len());
     let mut admission = EvidenceAdmissionTally::default();
@@ -100,10 +105,12 @@ pub(super) fn insert_additions(
         }
         // Prepare owned inputs lazily, after the global identity probe. A row
         // count alone does not bound their excerpts, metadata or spare capacity.
-        let rows = batch
-            .iter()
-            .zip(&identities)
-            .map(|(span, id)| (id.clone(), evidence_input(workspace_id, &session.id, span)));
+        let rows = batch.iter().zip(&identities).map(|(span, id)| {
+            Ok((
+                id.clone(),
+                evidence_input_with_source_key(workspace_id, &session.id, span, source_root)?,
+            ))
+        });
         admission.merge(&write_prepared_batches(
             rows,
             REFRESH_PREPARED_HEAP_BYTES,
@@ -171,7 +178,7 @@ fn exceeds_heap_limit(retained: usize, additional: usize, limit: usize) -> bool 
 /// row. The first writer error stops iteration and propagates to the refresh
 /// transaction; no group commits independently or bypasses normal screening.
 fn write_prepared_batches(
-    rows: impl IntoIterator<Item = PreparedRow>,
+    rows: impl IntoIterator<Item = Result<PreparedRow, DbError>>,
     max_heap_bytes: usize,
     mut write: impl FnMut(&[PreparedRow]) -> Result<EvidenceAdmissionTally, DbError>,
 ) -> Result<EvidenceAdmissionTally, DbError> {
@@ -179,6 +186,7 @@ fn write_prepared_batches(
     let mut heap_bytes = 0_usize;
     let mut admission = EvidenceAdmissionTally::default();
     for row in rows {
+        let row = row?;
         let row_bytes = prepared_heap_bytes(&row);
         if !batch.is_empty() && exceeds_heap_limit(heap_bytes, row_bytes, max_heap_bytes) {
             #[cfg(test)]
@@ -247,7 +255,7 @@ mod preparation_tests {
         let mut observed = Vec::new();
         let mut sizes = Vec::new();
         let actual = write_prepared_batches(
-            (0..5).map(|index| row(index, "資料".to_owned())),
+            (0..5).map(|index| Ok(row(index, "資料".to_owned()))),
             limit,
             |batch| {
                 assert!(batch.iter().map(prepared_heap_bytes).sum::<usize>() <= limit);
@@ -289,7 +297,7 @@ mod preparation_tests {
     fn row_cap_is_independent_of_the_heap_budget() {
         let mut sizes = Vec::new();
         write_prepared_batches(
-            (0..260).map(|index| row(index, "small".to_owned())),
+            (0..260).map(|index| Ok(row(index, "small".to_owned()))),
             usize::MAX,
             |batch| {
                 sizes.push(batch.len());
@@ -331,7 +339,7 @@ mod preparation_tests {
             write_prepared_batches(
                 (0..3).map(|index| {
                     prepared.set(prepared.get() + 1);
-                    row(index, text.clone())
+                    Ok(row(index, text.clone()))
                 }),
                 limit,
                 |batch| {
@@ -356,7 +364,7 @@ mod preparation_tests {
             let error = write_prepared_batches(
                 (0..260).map(|index| {
                     prepared.set(prepared.get() + 1);
-                    row(index, "small".to_owned())
+                    Ok(row(index, "small".to_owned()))
                 }),
                 limit,
                 |_| {
@@ -493,10 +501,15 @@ mod preparation_tests {
                     .unwrap()
                     .unwrap();
             assert_eq!(
-                source.content_hash,
-                format!("blake3:{}", span.source_hash.to_hex())
+                source,
+                super::super::super::capture_source_commitment(
+                    Some(&super::super::super::test_source_root()),
+                    &session_id,
+                    span,
+                )
+                .unwrap(),
             );
-            assert_eq!(source.byte_length, span.source_bytes as u64);
+            assert_eq!(source.byte_length(), span.source_bytes as u64);
             assert!(!row.excerpt.contains(&"Q".repeat(36)));
             if span.redacted {
                 assert!(
@@ -741,10 +754,10 @@ mod preparation_tests {
         let mut groups = Vec::new();
         write_prepared_batches(
             additions.into_iter().map(|span| {
-                (
+                Ok((
                     stable_evidence_id(&fixture.session_id, &span.cass_span_id),
                     evidence_input(&fixture.workspace, &fixture.session_id, span),
-                )
+                ))
             }),
             REFRESH_PREPARED_HEAP_BYTES,
             |rows| {
@@ -809,10 +822,15 @@ mod preparation_tests {
                     .unwrap()
                     .unwrap();
             assert_eq!(
-                source.content_hash,
-                format!("blake3:{}", span.source_hash.to_hex())
+                source,
+                super::super::super::capture_source_commitment(
+                    Some(&super::super::super::test_source_root()),
+                    &fixture.session_id,
+                    span,
+                )
+                .unwrap(),
             );
-            assert_eq!(source.byte_length, span.source_bytes as u64);
+            assert_eq!(source.byte_length(), span.source_bytes as u64);
             assert!(!row.excerpt.contains(&"Q".repeat(36)));
             if span.redacted {
                 assert!(

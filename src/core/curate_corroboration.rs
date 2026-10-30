@@ -163,7 +163,7 @@ fn complete_source(span: &StoredEvidenceSpan) -> bool {
         && !span.excerpt.contains("[REDACTED:truncated_source]")
         && !span.excerpt.contains("external_ingestion_withheld")
         && CassSourceCommitment::from_metadata(span.metadata_json.as_deref()).is_ok_and(|source| {
-            source.is_none_or(|source| source.byte_length < (LEGACY_EXCERPT_CAP - 3) as u64)
+            source.is_none_or(|source| source.byte_length() < (LEGACY_EXCERPT_CAP - 3) as u64)
         })
 }
 

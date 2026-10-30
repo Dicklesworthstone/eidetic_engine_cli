@@ -5240,6 +5240,12 @@ impl ManualRunner {
             );
         }
 
+        // Preview never creates a replacement key or a lock-file sibling.
+        // Resolve the root from the trusted runner workspace, never from
+        // evidence metadata or a stored source path.
+        let source_keys_dir =
+            crate::policy::store_auth::workspace_keys_dir(&self.normalized_workspace_path());
+        let source_key = crate::policy::store_auth::StoreAuthRoot::open(&source_keys_dir).ok();
         let details = |report: &crate::db::EvidenceSecurityRescreenReport, status: &str| {
             let mut value = serde_json::to_value(report).unwrap_or_else(|error| {
                 json!({
@@ -5257,6 +5263,28 @@ impl ManualRunner {
                     "databasePath".to_owned(),
                     JsonValue::String(opened.database_path.display().to_string()),
                 );
+                let retryable_key_failures = report
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        item.reason_codes
+                            .iter()
+                            .any(|reason| reason == "source_commitment_key_unavailable")
+                    })
+                    .count();
+                if retryable_key_failures > 0 {
+                    object.insert(
+                        "retryableKeyFailures".to_owned(),
+                        json!(retryable_key_failures),
+                    );
+                    object.insert(
+                        "repair".to_owned(),
+                        JsonValue::String(
+                            "Recover the original protected authentication keys with ee backup keys import, then rerun evidence_rescreen. Ordinary data backups do not contain these keys; a new key cannot authenticate historical source bytes."
+                                .to_owned(),
+                        ),
+                    );
+                }
                 object.insert(
                     "nextCommand".to_owned(),
                     JsonValue::String(if report.pending_after > 0 {
@@ -5275,12 +5303,15 @@ impl ManualRunner {
         };
 
         let started = Instant::now();
-        let preview = match opened.connection.rescreen_evidence_for_workspace(
-            &opened.workspace_id,
-            limit,
-            false,
-            self.options.actor.as_deref(),
-        ) {
+        let preview = match opened
+            .connection
+            .rescreen_evidence_for_workspace_with_source_key(
+                &opened.workspace_id,
+                limit,
+                false,
+                self.options.actor.as_deref(),
+                source_key.as_ref(),
+            ) {
             Ok(report) => report,
             Err(error) => {
                 let message = format!("Failed to preview evidence rescreen: {error}");
@@ -5315,12 +5346,20 @@ impl ManualRunner {
         }
 
         let apply_started = Instant::now();
-        let applied = match opened.connection.rescreen_evidence_for_workspace(
-            &opened.workspace_id,
-            limit,
-            true,
-            Some(self.options.actor.as_deref().unwrap_or("ee-maintenance")),
-        ) {
+        // Re-read the live verification window under its shared lock. Rotation
+        // must not evict a key between authentication and the admission write.
+        // Missing/unusable keys remain retryable and are never replaced here.
+        let source_key_guard =
+            crate::policy::store_auth::StoreAuthRoot::open_read_locked(&source_keys_dir).ok();
+        let applied = match opened
+            .connection
+            .rescreen_evidence_for_workspace_with_source_key(
+                &opened.workspace_id,
+                limit,
+                true,
+                Some(self.options.actor.as_deref().unwrap_or("ee-maintenance")),
+                source_key_guard.as_deref(),
+            ) {
             Ok(report) => report,
             Err(error) => {
                 let message = format!("Failed to apply evidence rescreen: {error}");
@@ -12034,7 +12073,8 @@ mod tests {
     }
 
     #[test]
-    fn manual_runner_evidence_rescreen_applies_legacy_and_mixed_cass_batches() -> TestResult {
+    fn manual_runner_evidence_rescreen_applies_legacy_mixed_and_key_recovery_batches() -> TestResult
+    {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
         let session_id =
@@ -12096,6 +12136,7 @@ mod tests {
         }
 
         let preview_options = RunnerOptions::new()
+            .with_workspace_path(temp.path())
             .with_database_path(database_path.clone())
             .with_workspace_id(SCORE_WORKSPACE_ID)
             .with_item_limit(1)
@@ -12126,6 +12167,7 @@ mod tests {
         )?;
 
         let apply_options = RunnerOptions::new()
+            .with_workspace_path(temp.path())
             .with_database_path(database_path.clone())
             .with_workspace_id(SCORE_WORKSPACE_ID)
             .with_item_limit(1)
@@ -12253,6 +12295,7 @@ mod tests {
 
         let mut runner = ManualRunner::new(
             RunnerOptions::new()
+                .with_workspace_path(temp.path())
                 .with_database_path(database_path.clone())
                 .with_workspace_id(SCORE_WORKSPACE_ID)
                 .with_item_limit(1),
@@ -12288,6 +12331,193 @@ mod tests {
         assert_eq!(
             details["nextCommand"],
             json!("ee index status --workspace . --json")
+        );
+
+        // A missing keyed proof must remain retryable, even after this sweep
+        // has written terminal receipts for other CASS rows.
+        use crate::policy::cass_source::{CassSourceCommitment, CassSourceIdentity};
+        use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
+
+        let keys_dir = workspace_keys_dir(temp.path());
+        let original_key = StoreAuthRoot::create(&keys_dir).map_err(|error| error.to_string())?;
+        let keyed_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x85_904)).to_string();
+        let raw_locator = "runner-source:key-recovery:4";
+        let locator_hash = format!("blake3:{}", blake3::hash(raw_locator.as_bytes()).to_hex());
+        let excerpt = json!({
+            "role": "assistant",
+            "content": "The release verification passed with complete retained evidence.",
+        })
+        .to_string();
+        let source = CassSourceCommitment::capture(
+            &original_key,
+            CassSourceIdentity {
+                session_id: &session_id,
+                upstream_ref_hash: &locator_hash,
+            },
+            &blake3::hash(excerpt.as_bytes()),
+            excerpt.len() as u64,
+            5,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &keyed_id,
+                &crate::db::CreateEvidenceSpanInput {
+                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                    session_id: session_id.clone(),
+                    memory_id: None,
+                    producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                    cass_span_id: raw_locator.to_owned(),
+                    span_kind: "message".to_owned(),
+                    start_line: 4,
+                    end_line: 4,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt,
+                    metadata_json: Some(
+                        json!({
+                            "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                            "cassSource": source,
+                        })
+                        .to_string(),
+                    ),
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let seeded = connection
+            .get_evidence_span(&keyed_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("keyed CASS evidence missing")?;
+        let mut metadata: JsonValue = serde_json::from_str(
+            seeded
+                .metadata_json
+                .as_deref()
+                .ok_or("keyed CASS metadata missing")?,
+        )
+        .map_err(|error| error.to_string())?;
+        metadata["instructionRisk"] = json!("high");
+        metadata["searchEligibility"] = json!("quarantined");
+        metadata["packEligibility"] = json!("quarantined");
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET instruction_risk = 'high', \
+             search_eligibility = 'quarantined', pack_eligibility = 'quarantined', \
+             metadata_json = '{}' WHERE id = '{keyed_id}'",
+                metadata.to_string().replace('\'', "''"),
+            ))
+            .map_err(|error| error.to_string())?;
+        let quarantined = connection
+            .get_evidence_span(&keyed_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("quarantined keyed CASS evidence missing")?;
+        let audits_before = connection
+            .list_audit_by_action(audit_actions::EVIDENCE_SECURITY_RESCREEN, None)
+            .map_err(|error| error.to_string())?
+            .len();
+        connection.close().map_err(|error| error.to_string())?;
+        drop(original_key);
+
+        // Preserve the original key material while simulating its loss from
+        // the active workspace. A dry run must not recreate a key or lock.
+        let recovery_keys = temp.path().join("source-key-recovery-backup");
+        std::fs::rename(&keys_dir, &recovery_keys).map_err(|error| error.to_string())?;
+        let mut preview_runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(temp.path())
+                .with_database_path(database_path.clone())
+                .with_workspace_id(SCORE_WORKSPACE_ID)
+                .with_item_limit(1)
+                .with_dry_run(true),
+        );
+        let preview = preview_runner.run_job_type(JobType::EvidenceRescreen, None);
+        assert_eq!(preview.outcome, RunOutcome::Success);
+        let preview = preview.details.ok_or("keyless preview details missing")?;
+        assert_eq!(preview["retryableKeyFailures"], json!(1));
+        assert_eq!(preview["durableMutation"], json!(false));
+        assert!(
+            !keys_dir.exists(),
+            "preview must not create the workspace key directory"
+        );
+        assert!(
+            !keys_dir.join("store_auth_root.lock").exists(),
+            "preview must not create a key lock"
+        );
+
+        let blocked = runner.run_job_type(JobType::EvidenceRescreen, None);
+        assert_eq!(blocked.outcome, RunOutcome::Success);
+        let blocked = blocked.details.ok_or("keyless apply details missing")?;
+        assert_eq!(blocked["retryableKeyFailures"], json!(1));
+        assert_eq!(blocked["pendingAfter"], json!(1));
+        assert_eq!(blocked["updated"], json!(0));
+        assert_eq!(blocked["durableMutation"], json!(false));
+        assert_eq!(blocked["auditIds"], json!([]));
+        assert!(
+            blocked["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("ee backup keys import"))
+        );
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_evidence_span(&keyed_id)
+                .map_err(|error| error.to_string())?,
+            Some(quarantined.clone())
+        );
+        assert_eq!(
+            connection
+                .list_audit_by_action(audit_actions::EVIDENCE_SECURITY_RESCREEN, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before,
+            "missing key must not write a terminal receipt"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Restore the original key window, retaining any keyless-attempt lock
+        // files separately. The same runner must reconsider the pending row.
+        if keys_dir.exists() {
+            std::fs::rename(&keys_dir, temp.path().join("keyless-attempt-files"))
+                .map_err(|error| error.to_string())?;
+        }
+        std::fs::rename(&recovery_keys, &keys_dir).map_err(|error| error.to_string())?;
+        let recovered = runner.run_job_type(JobType::EvidenceRescreen, None);
+        assert_eq!(recovered.outcome, RunOutcome::Success);
+        let recovered = recovered.details.ok_or("recovered apply details missing")?;
+        assert_eq!(recovered["updated"], json!(1));
+        assert_eq!(recovered["pendingAfter"], json!(0));
+        assert_eq!(recovered["indexRebuildRequired"], json!(true));
+        assert!(recovered.get("retryableKeyFailures").is_none());
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let admitted = connection
+            .get_evidence_span(&keyed_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("recovered CASS evidence missing")?;
+        assert_eq!(admitted.search_eligibility, "admitted");
+        assert_eq!(admitted.pack_eligibility, "admitted");
+        assert_eq!(admitted.excerpt, quarantined.excerpt);
+        assert_eq!(admitted.cass_span_id, quarantined.cass_span_id);
+        let admitted_metadata: JsonValue = serde_json::from_str(
+            admitted
+                .metadata_json
+                .as_deref()
+                .ok_or("recovered metadata missing")?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(admitted_metadata["cassSource"], metadata["cassSource"]);
+        assert_eq!(
+            connection
+                .list_audit_by_action(audit_actions::EVIDENCE_SECURITY_RESCREEN, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before + 1
         );
         Ok(())
     }

@@ -29,12 +29,15 @@ subprocess cleanup.
 
 A screened excerpt is a representation of source evidence. Its content hash
 authenticates that representation, not the bytes removed by screening. New CASS
-imports therefore compute a BLAKE3 commitment and byte length over the complete
-`cass view` line before decoding, redaction, or bounding. The storage boundary
-retains these fixed-shape values and the excerpt-producer version in the optional
-`cassSource` member of canonical evidence security metadata. It validates the
-producer, schema, field types, digest and bounds, and copies no raw source or
-source path. Existing 13-field security metadata remains valid.
+imports compute a transient BLAKE3 digest and byte length over the complete
+`cass view` line before decoding, redaction, or bounding, then authenticate them
+with the store's protected key. The optional `cassSource` member of canonical
+evidence security metadata retains a versioned keyed commitment, its key ID,
+the complete byte length and the excerpt-producer version. It does not retain
+the unkeyed complete-line digest. The storage boundary validates the producer,
+schema, field types, commitment and bounds, and copies no raw source or source
+path into this member. Existing 13-field security metadata and historical V1
+source commitments remain readable without rewriting them.
 
 Refresh still requires the same session, source locator, line range, kind, and
 role, and verifies the retained excerpt's own hash. If an import-time source
@@ -44,9 +47,12 @@ text truncation. A matching source may have a different screened representation;
 refresh preserves the original evidence identity, excerpt, security posture,
 links, timestamps, and provenance. It adds a stable
 `cass.evidence.screening_reconciled` audit naming both representation hashes and
-the actual basis of the source proof. This audit, added evidence, session
-checkpoint and publication job commit atomically. Repeated imports reuse the
-same audit and pending publication work.
+the actual basis of the source proof. New reconciliation records use
+`ee.cass.screening_reconciliation.v2` with a keyed `sourceCommitment`, rather
+than a public complete-line hash. The checkpoint's source-snapshot fingerprint
+also incorporates keyed proof under `ee.cass.refresh_snapshot.v3`. This audit,
+added evidence, session checkpoint and publication job commit atomically.
+Repeated imports reuse the same audit and pending publication work.
 
 v0.17.0 did not retain complete-source commitments for ordinary rows. A clean
 excerpt can prove the complete retained source only when it cannot be an old
@@ -57,13 +63,14 @@ oversized object containing insignificant whitespace or escaped characters
 into a short canonical object without adding a truncation marker; later
 producers on main could do the same for JSONL windows. A source that was
 originally canonical has the same stored representation and cannot be
-distinguished after the fact. Malformed
-or noncanonical JSON and ordinary text below the ambiguous byte interval can
-still provide a complete-source proof when clean and unmarked. A strict
-importer-generated withholding envelope with its matching redaction class can
-also retain a complete-source digest. These are the only legacy reconciliation
-exceptions. The audit distinguishes these recovered proofs from an import-time
-commitment; neither is written back into historical provenance.
+distinguished after the fact. Malformed or noncanonical JSON and ordinary text
+below the ambiguous byte interval can still provide a complete-source proof
+when clean and unmarked. A strict historical importer-generated withholding
+envelope with its matching redaction class can also retain a complete-source
+digest. A byte-identical current canonical source may be retained without
+claiming proof about older, potentially normalized bytes. The audit distinguishes
+these legacy cases from an import-time commitment; no recovered proof is written
+back into historical provenance.
 
 Old redacted excerpts and truncated prefixes cannot prove discarded bytes.
 Replaying the old screener, comparing normalized JSON, trusting a session hash
@@ -83,14 +90,63 @@ with the first refusal and records the successfully committed counts. Other
 storage failures remain fatal. Review original source backups before retrying
 unverifiable history; `--since` can scope subsequent work to newer sessions.
 
-The malformed encoded-JSON withholding envelope carries an explicit
-`[REDACTED:<reason>]` marker alongside its reason and source digest. This satisfies
-the inherited-class storage contract without restoring any rejected content.
+New malformed encoded-JSON withholding envelopes carry an explicit
+`[REDACTED:<reason>]` marker alongside their reason, without a `sourceDigest`
+field. Their complete-source proof resides in keyed `cassSource` metadata.
+Historical digest-bearing envelopes remain immutable and retain their legacy
+verification rules. Both forms preserve the inherited redaction-class contract
+without restoring rejected content.
 
 Verification lives in `policy::ingestion::store_tests`, the CASS import and
 refresh library tests, and `db::tests::cass_source_commitment_*`: real database
 and subprocess imports cover old/new representations, subsequent sessions,
 hidden source edits, duplicate-free retries, privacy and transaction rollback.
+
+## Private source commitments and key recovery (issue #71)
+
+A public hash of a complete line can let someone who has the screened excerpt
+test guesses for a removed email address, credential or other low-entropy
+value. New imports use `ee.cass.source.v2`: `contentHash` contains
+`blake3-keyed:<64 lowercase hexadecimal characters>`, `keyId` identifies the
+verification key, and `byteLength` and `excerptProducerVersion` retain their
+bounded source/projection meanings. The unchanged field name `contentHash`
+does not make the V2 value a public digest.
+
+The MAC uses the existing `StoreAuthRoot` with the separate
+`ee.store_auth.cass_source.commitment.v2` purpose domain. Its message binds the
+stable original session ID, canonical upstream-locator hash, transient full-line
+digest and exact byte length. It deliberately omits the mutable workspace ID:
+an authorized restore can remap the workspace while preserving the session and
+locator. Import and rescreen callers must still validate the evidence row's
+current workspace/session relationship. Possessing another store's key, changing
+the locator, or changing any complete-source byte cannot authenticate the
+original claim.
+
+Verification accepts the current key and up to four retained retired keys. An
+absent root or a commitment key ID outside that window produces
+`cass_source_commitment_key_unavailable`; it is not evidence of a matching
+source. An established V2 import never silently creates a replacement root to
+repair that condition. Rescreening a V2 claim likewise requires the original
+proof and key, and can be retried after authorized key recovery. Neither
+operation may install today's observation as a replacement historical commitment.
+
+Ordinary backups exclude secret key material. Use the existing encrypted
+`ee backup keys export` and `ee backup keys import` operations separately when
+preserving or recovering the source store's authentication keys, then retry the
+failed import or rescreen operation. The recovered key set must contain the
+commitment's `keyId`; creating a fresh root or rotating again cannot recover an
+evicted key. Preserve an appropriate key export before rotation moves required
+historical keys outside the verification window.
+
+This change prevents new per-line source proofs from exposing unkeyed digests
+through CASS evidence metadata, reconciliation audits, importer-generated
+withholding markers or checkpoint source proofs. It does **not** remove the
+public commitments already present in immutable V1 evidence, old audits,
+historical `sourceMetadataHash` values or existing exports. Those require a
+separate, explicit migration/export strategy. The pre-existing CASS-provided
+whole-session `content_hash` contract also remains unchanged; issue #71
+acknowledges that weaker guessing oracle. This is a repair to new per-line
+proofs and their verification paths, not a claim that all of issue #71 is closed.
 
 ## Derivation and search publication recovery
 
@@ -124,9 +180,10 @@ syntax and escaping. The ordinary streaming decoder remains capped at 1 MiB.
 
 The larger capture window does not enlarge the ingestion scan budget. Complete
 decoded content over **1 MiB** still becomes an
-`external_ingestion_oversized` quarantine marker, with its line identity,
-complete-source BLAKE3 hash and byte length preserved. Subsequent valid records
-in the same session remain eligible for search and packs. Stored source
+`external_ingestion_oversized` quarantine marker. New CASS markers contain no
+public complete-source hash. Line identity remains on the evidence row; keyed
+complete-source proof and byte length live in its metadata. Subsequent valid
+records in the same session remain eligible for search and packs. Stored source
 commitments and refresh validation accept up to 8 MiB so a retry can prove the
 same source without restoring rejected content.
 
@@ -193,7 +250,7 @@ of an unrelated value. Provider-specific placeholders produced before generic
 key/value screening retain their class, while URL passwords require the exact
 URL-password placeholder.
 
-Newly captured CASS excerpts use producer version 4;
+Newly captured CASS excerpts use producer version 5;
 refresh preserves older retained evidence and its original producer version.
 The evidence admission verdict revision also advances, invalidating old
 positive verdicts and the reader projections bound to them. Existing rows

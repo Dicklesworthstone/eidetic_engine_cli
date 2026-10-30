@@ -15,6 +15,7 @@ const TRUNCATED_TAIL: &str = "\n[TRUNCATED]";
 
 pub(super) fn screen_excerpt(content: &str) -> ExternalIngestionScreenReport {
     let mut screen = screen_external_text_for_ingestion(content);
+    remove_public_withholding_digest(&mut screen, content);
     if screen.content.len() > MAX_EXCERPT_BYTES {
         if let Some(projected) = bounded_record(&screen) {
             return projected;
@@ -24,12 +25,12 @@ pub(super) fn screen_excerpt(content: &str) -> ExternalIngestionScreenReport {
             // A raw prefix can end exactly after a valid JSONL record, dropping
             // an unsafe neighbor from the complete screened window. Preserve
             // refusal explicitly whenever structured bounding is unavailable.
-            // The fixed marker also carries inherited redaction classes across
-            // the DB boundary; diagnostics retain only the complete-source hash.
+            // The fixed marker carries inherited redaction classes across the
+            // DB boundary. The separate keyed source commitment authenticates
+            // discarded bytes without an offline guessing oracle in the marker.
             screen.content = serde_json::json!({
                 "type": "external_ingestion_withheld",
                 "reason": "external_ingestion_oversized",
-                "sourceDigest": format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
                 "redaction": "[REDACTED:external_ingestion_oversized]",
             })
             .to_string();
@@ -50,6 +51,49 @@ pub(super) fn screen_excerpt(content: &str) -> ExternalIngestionScreenReport {
         }
     }
     screen
+}
+
+/// The general ingestion screener still recognizes legacy public-digest
+/// withholding markers. A new CASS row has a private complete-source proof in
+/// its metadata, so its excerpt must not retain a second public proof. Match
+/// only exact producer envelopes; never edit arbitrary transcript JSON fields.
+fn remove_public_withholding_digest(screen: &mut ExternalIngestionScreenReport, raw: &str) {
+    if !screen.redacted {
+        return;
+    }
+    let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
+    let oversized = "external_ingestion_oversized";
+    if screen
+        .redacted_reasons
+        .iter()
+        .any(|reason| reason == oversized)
+        && screen.content == format!("[REDACTED:{oversized}:{digest}]")
+    {
+        screen.content = format!("[REDACTED:{oversized}]");
+        return;
+    }
+    for reason in [
+        oversized,
+        "external_ingestion_encoded_json_unreadable",
+        "external_ingestion_encoded_json_redaction_invalid",
+    ] {
+        if !screen.redacted_reasons.iter().any(|class| class == reason) {
+            continue;
+        }
+        let mut marker = serde_json::json!({
+            "type": "external_ingestion_withheld",
+            "reason": reason,
+            "sourceDigest": format!("blake3:{digest}"),
+            "redaction": format!("[REDACTED:{reason}]"),
+        });
+        if screen.content == marker.to_string() {
+            if let Some(object) = marker.as_object_mut() {
+                object.remove("sourceDigest");
+            }
+            screen.content = marker.to_string();
+            return;
+        }
+    }
 }
 
 /// Preserve existing message text, including typed blocks and CASS wrappers.
@@ -780,7 +824,6 @@ mod tests {
                 json!({
                     "type": "external_ingestion_withheld",
                     "reason": "external_ingestion_oversized",
-                    "sourceDigest": format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex()),
                     "redaction": "[REDACTED:external_ingestion_oversized]",
                 })
             );

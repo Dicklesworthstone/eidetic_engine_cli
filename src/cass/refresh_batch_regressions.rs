@@ -189,10 +189,15 @@ fn growing_session_batches_match_single_row_screening_and_preserve_history() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            proof.content_hash,
-            format!("blake3:{}", source.source_hash.to_hex()),
+            proof,
+            super::super::super::capture_source_commitment(
+                Some(&super::super::super::test_source_root()),
+                &id,
+                source,
+            )
+            .unwrap(),
         );
-        assert_eq!(proof.byte_length, source.source_bytes as u64);
+        assert_eq!(proof.byte_length(), source.source_bytes as u64);
         if source.redacted {
             assert!(
                 db.get_audit(&stable_cass_redaction_audit_id(&evidence_id))

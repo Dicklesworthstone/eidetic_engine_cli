@@ -15057,35 +15057,17 @@ const EVIDENCE_SOURCE_READ_PAGE_SIZE: u32 = 512;
 pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
+pub(crate) use crate::policy::cass_source::CassSourceCommitment;
+#[cfg(test)]
 pub(crate) const CASS_SOURCE_COMMITMENT_SCHEMA_V1: &str = "ee.cass.source.v1";
 // Complete transcripts above the 1 MiB screening budget are quarantined, but
 // their hashes and lengths must survive import and refresh. This finite bound
 // matches the 8 MiB CASS view capture budget; it never authorizes retaining the
 // original oversized content in an evidence excerpt.
+#[cfg(test)]
 const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-/// A commitment captured from a complete CASS source line before screening.
-///
-/// This is distinct from the excerpt hash and upstream locator hash. It carries
-/// no source text or path, grants no admission authority, and is never inferred
-/// for historical evidence that did not retain its complete source bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct CassSourceCommitment {
-    pub(crate) schema: String,
-    pub(crate) content_hash: String,
-    pub(crate) byte_length: u64,
-    pub(crate) excerpt_producer_version: u32,
-}
-
 impl CassSourceCommitment {
-    pub(crate) fn is_valid(&self) -> bool {
-        self.schema == CASS_SOURCE_COMMITMENT_SCHEMA_V1
-            && is_canonical_blake3_hash(&self.content_hash)
-            && (1..=CASS_SOURCE_COMMITMENT_MAX_BYTES).contains(&self.byte_length)
-            && self.excerpt_producer_version > 0
-    }
-
     /// Read an optional commitment without treating a malformed claim as an
     /// older row. Decode the typed object from the original JSON so duplicate
     /// fields are refused rather than erased by `Value`'s last-key-wins parser.
@@ -16341,6 +16323,7 @@ fn cass_evidence_rescreen_decision(
     connection: &DbConnection,
     workspace_id: &str,
     span: &StoredEvidenceSpan,
+    source_key: Option<&crate::policy::store_auth::StoreAuthRoot>,
 ) -> Result<CassEvidenceRescreenDecision> {
     if span.producer_kind != EvidenceProducerKind::CassImport.as_str()
         || span.search_eligibility == "denied"
@@ -16418,15 +16401,32 @@ fn cass_evidence_rescreen_decision(
             "complete_source_commitment_missing",
         ));
     };
-    if source.content_hash != excerpt_hash
-        || source.byte_length != u64::try_from(span.excerpt.len()).unwrap_or(u64::MAX)
-    {
-        // A safe retained prefix cannot disprove an instruction in the
-        // omitted suffix. Recover those rows only by verifying original CASS
-        // source bytes through import, never by trusting the shorter excerpt.
-        return Ok(CassEvidenceRescreenDecision::retained(
-            "complete_source_not_retained",
-        ));
+    use crate::policy::cass_source::{CassSourceIdentity, CassSourceVerification};
+    match source.verify(
+        source_key,
+        CassSourceIdentity {
+            session_id: &span.session_id,
+            upstream_ref_hash: &span.cass_span_id,
+        },
+        &blake3::hash(span.excerpt.as_bytes()),
+        u64::try_from(span.excerpt.len()).unwrap_or(u64::MAX),
+    ) {
+        Ok(CassSourceVerification::Match) => {}
+        Ok(CassSourceVerification::Mismatch) => {
+            // A safe retained prefix cannot disprove an instruction in the
+            // omitted suffix. Recover those rows only by verifying original
+            // CASS source bytes through import, never the shorter excerpt.
+            return Ok(CassEvidenceRescreenDecision::retained(
+                "complete_source_not_retained",
+            ));
+        }
+        Ok(CassSourceVerification::KeyUnavailable) | Err(_) => {
+            // Missing or unusable authentication is retryable after recovery.
+            // Never manufacture a new proof or cache a terminal refusal.
+            return Ok(CassEvidenceRescreenDecision::retained(
+                "source_commitment_key_unavailable",
+            ));
+        }
     }
 
     let input = CreateEvidenceSpanInput {
@@ -17731,6 +17731,27 @@ impl DbConnection {
         apply: bool,
         actor: Option<&str>,
     ) -> Result<EvidenceSecurityRescreenReport> {
+        self.rescreen_evidence_for_workspace_with_source_key(
+            workspace_id,
+            limit,
+            apply,
+            actor,
+            None,
+        )
+    }
+
+    /// Re-screen with an authentication root resolved by a trusted caller.
+    /// Database metadata never selects a key path. Keyless callers retain
+    /// keyed evidence without writing a terminal refusal receipt, so recovery
+    /// of the original root can authenticate the same pending row later.
+    pub(crate) fn rescreen_evidence_for_workspace_with_source_key(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+        apply: bool,
+        actor: Option<&str>,
+        source_key: Option<&crate::policy::store_auth::StoreAuthRoot>,
+    ) -> Result<EvidenceSecurityRescreenReport> {
         if limit == 0 || limit > EVIDENCE_SECURITY_RESCREEN_MAX_BATCH {
             return Err(malformed_evidence_input(format!(
                 "evidence rescreen limit must be between 1 and \
@@ -17760,7 +17781,7 @@ impl DbConnection {
 
             for span in spans {
                 let decision = if span.producer_kind == EvidenceProducerKind::CassImport.as_str() {
-                    cass_evidence_rescreen_decision(self, workspace_id, &span)?
+                    cass_evidence_rescreen_decision(self, workspace_id, &span, source_key)?
                 } else {
                     let legacy = legacy_evidence_rescreen_decision(self, workspace_id, &span)?;
                     CassEvidenceRescreenDecision {
@@ -17794,7 +17815,11 @@ impl DbConnection {
                 }
                 admission.record(&producer, eligibility, disposition == "admitted");
 
-                let audit_id = if apply {
+                let retryable_key_failure = decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason == "source_commitment_key_unavailable");
+                let audit_id = if apply && !retryable_key_failure {
                     let audit_id = if let Some(prepared) = decision.prepared {
                         let rewrite = EvidenceRescreenDecision {
                             prepared,
@@ -17828,14 +17853,12 @@ impl DbConnection {
 
             let selected = u64::try_from(items.len()).unwrap_or(u64::MAX);
             let pending_after = if apply {
-                // This entire apply owns one transaction. Every selected row
-                // either leaves its pending predicate or receives a matching
-                // current-source audit receipt, including legacy rows that
-                // become quarantined CASS. Ownership cannot change between
-                // the selection and these writes, so no second corpus scan
-                // is needed to compute the exact remaining count.
-                pending_before.checked_sub(selected).ok_or_else(|| {
-                    malformed_evidence_input("evidence rescreen selected more rows than pending")
+                // Successful updates and terminal refusals receive receipts.
+                // Authentication failures stay pending without a receipt;
+                // restoring the key must allow the same source to be retried.
+                let completed = u64::try_from(audit_ids.len()).unwrap_or(u64::MAX);
+                pending_before.checked_sub(completed).ok_or_else(|| {
+                    malformed_evidence_input("evidence rescreen completed more rows than pending")
                 })?
             } else {
                 pending_before
@@ -17850,7 +17873,7 @@ impl DbConnection {
                 pending_after,
                 complete: pending_after == 0,
                 dry_run: !apply,
-                durable_mutation: apply && selected > 0,
+                durable_mutation: apply && !audit_ids.is_empty(),
                 index_rebuild_required: apply && updated > 0,
                 rebuild_would_be_required,
                 redacted_count,
@@ -55683,6 +55706,36 @@ UPDATE memories
         input
     }
 
+    fn keyed_source_committed_rescreen_input(
+        source_key: &crate::policy::store_auth::StoreAuthRoot,
+        session_id: &str,
+        slot: &str,
+        excerpt: &str,
+        original: &str,
+    ) -> super::CreateEvidenceSpanInput {
+        let mut input = source_committed_rescreen_input(session_id, slot, excerpt, None);
+        let locator = super::canonical_evidence_hash(&input.cass_span_id);
+        let source = super::CassSourceCommitment::capture(
+            source_key,
+            crate::policy::cass_source::CassSourceIdentity {
+                session_id,
+                upstream_ref_hash: &locator,
+            },
+            &blake3::hash(original.as_bytes()),
+            original.len() as u64,
+            5,
+        )
+        .expect("keyed rescreen fixture");
+        input.metadata_json = Some(
+            serde_json::json!({
+                "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                "cassSource": source,
+            })
+            .to_string(),
+        );
+        input
+    }
+
     /// Recreate an older, internally consistent risk decision while keeping
     /// the current insertion's cached verdict, so the rescreen must detect
     /// its stale binding rather than relying on an absent cache entry.
@@ -55839,6 +55892,213 @@ UPDATE memories
             connection.rescreen_evidence_for_workspace(WORKSPACE, 1, true, None)?;
         assert_eq!(recovered_again.updated, 1);
         assert_eq!(connection.count_table_rows("audit_log")?, audit_count + 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cass_keyed_rescreen_keeps_key_loss_retryable_until_original_key_recovers() -> TestResult {
+        use crate::policy::store_auth::StoreAuthRoot;
+
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let keys = tempfile::tempdir().unwrap();
+        let mut source_key = StoreAuthRoot::create(keys.path().join("original")).unwrap();
+        let unrelated_key = StoreAuthRoot::create(keys.path().join("unrelated")).unwrap();
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8567_0020)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8567_0021)).to_string();
+        connection.insert_session(&session_id, &session_input("rescreen-private-source"))?;
+        let original =
+            r#"{"role":"assistant","content":"The release check completed successfully."}"#;
+        connection.insert_evidence_span(
+            &evidence_id,
+            &keyed_source_committed_rescreen_input(
+                &source_key,
+                &session_id,
+                "rescreen-private-slot",
+                original,
+                original,
+            ),
+        )?;
+        mark_historical_cass_quarantine(&connection, &evidence_id)?;
+        let before = connection.get_evidence_span(&evidence_id)?.unwrap();
+        connection.record_evidence_admission_verdict(&before)?;
+        let verdict_before = connection.recorded_admission_verdicts(&[&evidence_id])?;
+        let audit_count = connection.count_table_rows("audit_log")?;
+        let generation = connection.get_workspace_generation(WORKSPACE)?;
+
+        for key in [None, Some(&unrelated_key)] {
+            for apply in [false, true] {
+                let report = connection.rescreen_evidence_for_workspace_with_source_key(
+                    WORKSPACE, 1, apply, None, key,
+                )?;
+                assert_eq!(
+                    (
+                        report.pending_before,
+                        report.selected,
+                        report.updated,
+                        report.pending_after
+                    ),
+                    (1, 1, 0, 1)
+                );
+                assert!(!report.complete && !report.durable_mutation);
+                assert!(!report.index_rebuild_required && !report.rebuild_would_be_required);
+                assert_eq!(report.items[0].disposition, "retained");
+                assert_eq!(
+                    report.items[0].reason_codes,
+                    ["source_commitment_key_unavailable"]
+                );
+                assert!(report.items[0].audit_id.is_none() && report.audit_ids.is_empty());
+                assert_eq!(
+                    connection.get_evidence_span(&evidence_id)?,
+                    Some(before.clone())
+                );
+                assert_eq!(
+                    connection.recorded_admission_verdicts(&[&evidence_id])?,
+                    verdict_before
+                );
+                assert_eq!(connection.count_table_rows("audit_log")?, audit_count);
+                assert_eq!(connection.get_workspace_generation(WORKSPACE)?, generation);
+            }
+        }
+
+        // Recovery may restore a retained verification key after rotation.
+        // Prior refusals must not have made this source permanently invisible.
+        source_key.rotate().unwrap();
+        let recovered = StoreAuthRoot::open_read_locked(keys.path().join("original")).unwrap();
+        let applied = connection.rescreen_evidence_for_workspace_with_source_key(
+            WORKSPACE,
+            1,
+            true,
+            Some("key-recovery-test"),
+            Some(&recovered),
+        )?;
+        assert_eq!(
+            (applied.selected, applied.updated, applied.pending_after),
+            (1, 1, 0)
+        );
+        assert!(applied.complete && applied.durable_mutation && applied.index_rebuild_required);
+        let after = connection.get_evidence_span(&evidence_id)?.unwrap();
+        assert_eq!(after.excerpt, before.excerpt);
+        assert_eq!(after.cass_span_id, before.cass_span_id);
+        let before_metadata: serde_json::Value =
+            serde_json::from_str(before.metadata_json.as_deref().unwrap()).unwrap();
+        let after_metadata: serde_json::Value =
+            serde_json::from_str(after.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(after_metadata["cassSource"], before_metadata["cassSource"]);
+        assert!(
+            connection
+                .get_search_admitted_evidence_span(&evidence_id, WORKSPACE)?
+                .is_some()
+        );
+        assert_eq!(connection.count_table_rows("audit_log")?, audit_count + 1);
+        Ok(())
+    }
+
+    #[test]
+    fn cass_keyed_rescreen_preserves_proof_across_workspace_remap_and_rejects_partial_source()
+    -> TestResult {
+        use crate::policy::store_auth::StoreAuthRoot;
+
+        const RESTORED_WORKSPACE: &str = "wsp_99999999999999999999999999";
+        let keys = tempfile::tempdir().unwrap();
+        let source_key = StoreAuthRoot::create(keys.path()).unwrap();
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            RESTORED_WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/tmp/rescreen-keyed-restored-workspace".to_owned(),
+                name: None,
+            },
+        )?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8567_0030)).to_string();
+        connection.insert_session(&session_id, &session_input("rescreen-private-restore"))?;
+        let retained = r#"{"role":"assistant","content":"Release check completed."}"#;
+        let complete = format!("{retained}\nOmitted source suffix.");
+        let changed = retained.replace("completed", "cancelled");
+        assert_eq!(changed.len(), retained.len());
+        let mut ids = Vec::new();
+        for (index, original) in [retained, complete.as_str(), changed.as_str()]
+            .iter()
+            .enumerate()
+        {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x8567_0031 + index as u128,
+            ))
+            .to_string();
+            connection.insert_evidence_span(
+                &id,
+                &keyed_source_committed_rescreen_input(
+                    &source_key,
+                    &session_id,
+                    &format!("rescreen-private-restore-{index}"),
+                    retained,
+                    original,
+                ),
+            )?;
+            mark_historical_cass_quarantine(&connection, &id)?;
+            ids.push(id);
+        }
+        // Backup restoration rebinds both owners while preserving the stable
+        // session and locator identities. The recovered original key remains
+        // valid only after those current ownership checks also pass.
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE sessions SET workspace_id = ?1 WHERE id = ?2",
+            &[
+                Value::Text(RESTORED_WORKSPACE.to_owned()),
+                Value::Text(session_id.clone()),
+            ],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET workspace_id = ?1 WHERE session_id = ?2",
+            &[
+                Value::Text(RESTORED_WORKSPACE.to_owned()),
+                Value::Text(session_id),
+            ],
+        )?;
+        let before = ids
+            .iter()
+            .map(|id| connection.get_evidence_span(id))
+            .collect::<super::Result<Vec<_>>>()?;
+        let report = connection.rescreen_evidence_for_workspace_with_source_key(
+            RESTORED_WORKSPACE,
+            3,
+            true,
+            None,
+            Some(&source_key),
+        )?;
+        assert_eq!(
+            (report.selected, report.updated, report.pending_after),
+            (3, 1, 0)
+        );
+        assert!(
+            connection
+                .get_search_admitted_evidence_span(&ids[0], RESTORED_WORKSPACE)?
+                .is_some()
+        );
+        for index in [1, 2] {
+            let item = report
+                .items
+                .iter()
+                .find(|item| item.evidence_id == ids[index])
+                .unwrap();
+            assert_eq!(item.disposition, "retained");
+            assert_eq!(item.reason_codes, ["complete_source_not_retained"]);
+            assert_eq!(connection.get_evidence_span(&ids[index])?, before[index]);
+            assert!(
+                connection
+                    .get_search_admitted_evidence_span(&ids[index], RESTORED_WORKSPACE)?
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
@@ -56111,8 +56371,7 @@ UPDATE memories
         let raw = "Build passed; api_key=PRIVATE_SOURCE_SENTINEL_123456789.";
         let screened = crate::policy::screen_external_text_for_ingestion(raw);
         assert!(screened.redacted);
-        let source = super::CassSourceCommitment {
-            schema: super::CASS_SOURCE_COMMITMENT_SCHEMA_V1.to_owned(),
+        let source = super::CassSourceCommitment::Legacy {
             content_hash: super::canonical_evidence_hash(raw),
             byte_length: raw.len() as u64,
             excerpt_producer_version: 1,
@@ -56136,7 +56395,7 @@ UPDATE memories
             super::CassSourceCommitment::from_metadata(stored.metadata_json.as_deref())?,
             Some(source.clone()),
         );
-        assert_ne!(stored.content_hash, source.content_hash);
+        assert_ne!(stored.content_hash, source.content_hash());
         assert_eq!(stored.excerpt, input.excerpt);
         let metadata_text = stored.metadata_json.as_deref().unwrap();
         assert!(!metadata_text.contains("PRIVATE_SOURCE_SENTINEL"));
@@ -56225,12 +56484,6 @@ UPDATE memories
 
     #[test]
     fn cass_source_commitment_bounds_quarantined_transcript_lengths() {
-        let mut source = super::CassSourceCommitment {
-            schema: super::CASS_SOURCE_COMMITMENT_SCHEMA_V1.to_owned(),
-            content_hash: super::canonical_evidence_hash("quarantined source"),
-            byte_length: 1,
-            excerpt_producer_version: 1,
-        };
         for (byte_length, valid) in [
             (0, false),
             (1_136_663, true),
@@ -56238,7 +56491,11 @@ UPDATE memories
             (8 * 1024 * 1024 + 1, false),
             (u64::MAX, false),
         ] {
-            source.byte_length = byte_length;
+            let source = super::CassSourceCommitment::Legacy {
+                content_hash: super::canonical_evidence_hash("quarantined source"),
+                byte_length,
+                excerpt_producer_version: 1,
+            };
             assert_eq!(source.is_valid(), valid, "source byte length {byte_length}");
         }
     }

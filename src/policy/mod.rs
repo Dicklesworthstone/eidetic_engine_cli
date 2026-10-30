@@ -4,6 +4,7 @@
 //! and import sources. Includes security profiles and file-permission
 //! diagnostics.
 
+pub(crate) mod cass_source;
 pub mod import_auth;
 mod ingestion;
 #[cfg(all(test, unix))]

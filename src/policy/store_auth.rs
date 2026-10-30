@@ -382,6 +382,8 @@ pub enum MacDomain {
     PlaybookImportRecordsRoot,
     /// Explicit workspace relocation preview/apply commitment.
     WorkspaceRebindPlan,
+    /// Complete CASS source commitment without a public raw-content digest.
+    CassSourceCommitment,
     /// T1.4 lane-approval canonical snapshot tag.
     LaneApprovalSnapshotTag,
     /// T1.4 lane-approval envelope MAC.
@@ -404,6 +406,7 @@ impl MacDomain {
             Self::NativeImportRecordsRoot => "ee.store_auth.native_import.records_root.v1",
             Self::PlaybookImportRecordsRoot => "ee.store_auth.playbook_import.records_root.v1",
             Self::WorkspaceRebindPlan => "ee.store_auth.workspace_rebind.plan.v1",
+            Self::CassSourceCommitment => "ee.store_auth.cass_source.commitment.v2",
             Self::LaneApprovalSnapshotTag => "ee.store_auth.lane_approval.snapshot_tag.v1",
             Self::LaneApprovalEnvelopeMac => "ee.store_auth.lane_approval.envelope_mac.v1",
             Self::LaneApprovalAuditId => "ee.store_auth.lane_approval.audit_id.v1",

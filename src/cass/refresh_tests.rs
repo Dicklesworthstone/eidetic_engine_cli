@@ -130,6 +130,131 @@ fn source_commitment_reconciles_encoded_screening_without_rewriting_provenance()
 }
 
 #[test]
+fn missing_source_keys_refuse_the_whole_refresh_and_recovery_retries_cleanly() {
+    let raw = format!("Release passed; label-ghp_{}.", "Q".repeat(36));
+    let (db, workspace, id, _, mut spans) = fixture(1, &[&raw]);
+    let latest = discovered(2);
+    spans.push(span(&latest, 2, "The follow-up verification passed."));
+    let original = db.get_session(&id).unwrap().unwrap();
+    let evidence = db.list_evidence_spans_for_session(&id).unwrap();
+    let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+    let jobs = db.count_table_rows("search_index_jobs").unwrap();
+    let generation = db.get_workspace_generation(&workspace).unwrap();
+    let other_keys = tempfile::tempdir().unwrap();
+    let other_root = StoreAuthRoot::create(other_keys.path()).unwrap();
+    for root in [None, Some(&other_root)] {
+        let error = refresh_session_with_source_key(&db, &workspace, &id, &latest, &spans, root)
+            .err()
+            .expect("unavailable source key must refuse");
+        assert_eq!(
+            super::super::CassHistoryRefusal::from_db_error(&error),
+            Some(super::super::CassHistoryRefusal::SourceKeyUnavailable),
+        );
+        assert_eq!(db.get_session(&id).unwrap().unwrap(), original);
+        assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), evidence);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+        assert_eq!(db.count_table_rows("search_index_jobs").unwrap(), jobs);
+        assert_eq!(db.get_workspace_generation(&workspace).unwrap(), generation);
+    }
+    // An ordinary import must not create a new root when the source DB already
+    // refers to the lost one. Recovery remains an explicit key-store action.
+    let missing_workspace = tempfile::tempdir().unwrap();
+    assert!(super::super::open_cass_source_key(&db, &workspace, missing_workspace.path()).is_err());
+    assert!(!crate::policy::store_auth::workspace_keys_dir(missing_workspace.path()).exists());
+    let original_metadata = evidence[0].metadata_json.as_deref().unwrap();
+    let escaped_metadata =
+        original_metadata.replace("ee.cass.source.v2", "ee.cass.source.\\u00762");
+    assert_ne!(escaped_metadata, original_metadata);
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET metadata_json = {} WHERE id = {}",
+        sql_text(&escaped_metadata),
+        sql_text(&evidence[0].id),
+    ))
+    .unwrap();
+    assert!(super::super::open_cass_source_key(&db, &workspace, missing_workspace.path()).is_err());
+    assert!(!crate::policy::store_auth::workspace_keys_dir(missing_workspace.path()).exists());
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET metadata_json = {} WHERE id = {}",
+        sql_text(original_metadata),
+        sql_text(&evidence[0].id),
+    ))
+    .unwrap();
+
+    let root = super::super::test_source_root();
+    let recovered =
+        refresh_session_with_source_key(&db, &workspace, &id, &latest, &spans, Some(&root))
+            .unwrap();
+    assert_eq!(recovered.added_lines, [2]);
+    assert_eq!(
+        db.get_evidence_span(&evidence[0].id).unwrap().unwrap(),
+        evidence[0]
+    );
+    assert!(
+        !refresh_session_with_source_key(&db, &workspace, &id, &latest, &spans, Some(&root),)
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn legacy_public_commitment_verifies_without_rewriting_and_new_tail_is_private() {
+    let raw = format!("Release passed; label-ghp_{}.", "Q".repeat(36));
+    let (db, workspace, id, _, mut spans) = fixture(1, &[&raw]);
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let original = db.get_evidence_span(&evidence_id).unwrap().unwrap();
+    let legacy_source = CassSourceCommitment::Legacy {
+        content_hash: format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex()),
+        byte_length: raw.len() as u64,
+        excerpt_producer_version: 4,
+    };
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(original.metadata_json.as_deref().unwrap()).unwrap();
+    metadata["cassSource"] = serde_json::to_value(&legacy_source).unwrap();
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET metadata_json = {} WHERE id = {}",
+        sql_text(&metadata.to_string()),
+        sql_text(&evidence_id),
+    ))
+    .unwrap();
+    let retained = db.get_evidence_span(&evidence_id).unwrap().unwrap();
+    let latest = discovered(2);
+    spans.push(span(&latest, 2, "The follow-up verification passed."));
+    assert_eq!(
+        refresh_session(&db, &workspace, &id, &latest, &spans)
+            .unwrap()
+            .added_lines,
+        [2]
+    );
+    assert_eq!(
+        db.get_evidence_span(&evidence_id).unwrap().unwrap(),
+        retained
+    );
+    let added_id = stable_evidence_id(&id, &spans[1].cass_span_id);
+    let added = db.get_evidence_span(&added_id).unwrap().unwrap();
+    assert!(
+        CassSourceCommitment::from_metadata(added.metadata_json.as_deref())
+            .unwrap()
+            .unwrap()
+            .is_keyed()
+    );
+
+    let changed = format!("Release passed; label-ghp_{}.", "R".repeat(36));
+    spans[0] = span(&latest, 1, &changed);
+    assert_eq!(spans[0].excerpt, retained.excerpt);
+    let failure = refresh_session(&db, &workspace, &id, &latest, &spans)
+        .err()
+        .unwrap();
+    assert!(failure.to_string().contains("cass_refresh_history_changed"));
+    assert_eq!(
+        db.get_evidence_span(&evidence_id).unwrap().unwrap(),
+        retained
+    );
+}
+
+#[test]
 fn v017_complete_clean_source_can_reconcile_a_new_withholding_representation() {
     let source = r#"{"type":"assistant","content":"Historical notation \uD800"}"#;
     let (db, workspace, id, session, spans) = fixture(1, &[source]);
@@ -207,7 +332,9 @@ fn legacy_withholding_digest_reconciles_once_and_rejects_untrusted_markers() {
     let details: serde_json::Value =
         serde_json::from_str(reconciliations[0].details.as_deref().unwrap()).unwrap();
     assert_eq!(details["sourceProof"], "retained_withholding_digest");
-    assert_eq!(details["sourceContentHash"], digest);
+    assert!(details.get("sourceContentHash").is_none());
+    assert_eq!(details["sourceCommitment"]["schema"], "ee.cass.source.v2");
+    assert_ne!(details["sourceCommitment"]["contentHash"], digest);
     assert_eq!(details["historicalEvidenceRewritten"], false);
     assert!(
         !reconciliations[0]
@@ -936,6 +1063,20 @@ fn refresh_revision_is_input_order_independent_and_binds_metadata() {
         revision,
         snapshot_revision("workspace", "other-session", &input, &ordered)
     );
+    let independent_keys = tempfile::tempdir().unwrap();
+    let independent_root = StoreAuthRoot::create(independent_keys.path()).unwrap();
+    assert_ne!(
+        revision,
+        snapshot_revision_with_source_key(
+            "workspace",
+            "session",
+            &input,
+            &ordered,
+            Some(&independent_root),
+        )
+        .unwrap(),
+        "a checkpoint must not be an unkeyed second-order source oracle",
+    );
     let mut changed = session.clone();
     changed.ended_at = Some("2026-09-20T02:00:00Z".to_owned());
     assert_ne!(
@@ -1216,16 +1357,25 @@ esac
         fn session_id(&self, name: &str) -> String {
             stable_session_id(&self.workspace_id(), &self.source(name))
         }
-    }
 
-    fn assert_source_commitment(row: &StoredEvidenceSpan, source: &str) {
-        let metadata: Value = serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["cassSource"]["schema"], "ee.cass.source.v1");
-        assert_eq!(metadata["cassSource"]["byteLength"], json!(source.len()));
-        assert_eq!(
-            metadata["cassSource"]["contentHash"],
-            format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex())
-        );
+        fn assert_source_commitment(&self, row: &StoredEvidenceSpan, source: &str) {
+            let root = crate::policy::store_auth::StoreAuthRoot::open(
+                crate::policy::store_auth::workspace_keys_dir(&self.workspace),
+            )
+            .unwrap();
+            assert!(super::super::super::stored_source_commitment_matches(
+                &root, row, source
+            ));
+            let metadata: Value =
+                serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
+            assert_eq!(metadata["cassSource"]["schema"], "ee.cass.source.v2");
+            assert_eq!(metadata["cassSource"]["byteLength"], json!(source.len()));
+            assert!(
+                !metadata["cassSource"]
+                    .to_string()
+                    .contains(&blake3::hash(source.as_bytes()).to_hex().to_string())
+            );
+        }
     }
 
     fn recoverable_import(pretty: bool, assistant_message: bool) {
@@ -1294,14 +1444,14 @@ esac
                 .redaction_classes_json
                 .contains("external_ingestion_oversized")
         );
-        assert_source_commitment(withheld, &oversized);
+        fixture.assert_source_commitment(withheld, &oversized);
         assert!(!withheld.is_search_admitted_for_session(&fixture.workspace_id(), &session));
         assert!(!withheld.is_direct_pack_admitted_for_session(&fixture.workspace_id(), &session));
         let valid = rows.iter().find(|row| row.start_line == 2).unwrap();
         assert!(valid.excerpt.contains("quartzoversizerecovery"));
         assert!(valid.is_search_admitted_for_session(&fixture.workspace_id(), &session));
         assert!(valid.is_direct_pack_admitted_for_session(&fixture.workspace_id(), &session));
-        assert_source_commitment(valid, VALID_RECORD);
+        fixture.assert_source_commitment(valid, VALID_RECORD);
         let later_id = fixture.session_id("later");
         let later = db.get_session(&later_id).unwrap().unwrap();
         let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
@@ -1431,7 +1581,7 @@ esac
                 assert!(!row.excerpt.contains("-----END"));
                 assert_eq!(row.secret_redaction_status, "redacted");
                 assert_eq!(row.redaction_classes_json, "[\"pem_block\"]");
-                assert_source_commitment(row, source);
+                fixture.assert_source_commitment(row, source);
                 let metadata: Value =
                     serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
                 assert_eq!(
@@ -1463,7 +1613,7 @@ esac
             assert!(valid.reader_text().contains("quartzoversizerecovery"));
             assert!(valid.is_search_admitted_for_session(&workspace_id, &session));
             assert!(valid.is_direct_pack_admitted_for_session(&workspace_id, &session));
-            assert_source_commitment(valid, VALID_RECORD);
+            fixture.assert_source_commitment(valid, VALID_RECORD);
             let later_id = fixture.session_id("later");
             let later = db.get_session(&later_id).unwrap().unwrap();
             let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
@@ -1472,7 +1622,7 @@ esac
             assert!(later_rows[0].reader_text().contains("quartzlaterrecovery"));
             assert!(later_rows[0].is_search_admitted_for_session(&workspace_id, &later));
             assert!(later_rows[0].is_direct_pack_admitted_for_session(&workspace_id, &later));
-            assert_source_commitment(&later_rows[0], LATER_RECORD);
+            fixture.assert_source_commitment(&later_rows[0], LATER_RECORD);
             let audits = db
                 .list_audit_by_action("cass.evidence.redacted", None)
                 .unwrap();
@@ -1596,7 +1746,7 @@ esac
                 }
                 assert!(!row.excerpt.contains(PRIVATE_SUFFIX));
                 assert!(!row.excerpt.contains(&opaque_credential));
-                assert_source_commitment(row, source);
+                fixture.assert_source_commitment(row, source);
                 let metadata: Value =
                     serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
                 assert_eq!(
@@ -1744,7 +1894,7 @@ esac
                 assert!(!row.excerpt.contains("amber-metadata-value"));
                 assert!(!row.excerpt.contains("ops@example.test"));
                 assert_eq!(row.excerpt.contains("[REDACTED:truncated_source]"), long);
-                assert_source_commitment(row, source);
+                fixture.assert_source_commitment(row, source);
                 let metadata: Value =
                     serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
                 assert_eq!(
@@ -1764,14 +1914,14 @@ esac
             let valid = rows.iter().find(|row| row.start_line == 5).unwrap();
             assert_eq!(valid.secret_redaction_status, "clean");
             assert!(valid.is_direct_pack_admitted_for_session(&workspace_id, &session));
-            assert_source_commitment(valid, VALID_RECORD);
+            fixture.assert_source_commitment(valid, VALID_RECORD);
             let later_id = fixture.session_id("later");
             let later = db.get_session(&later_id).unwrap().unwrap();
             let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
             assert_eq!(later_rows.len(), 1);
             assert_eq!(later_rows[0].secret_redaction_status, "clean");
             assert!(later_rows[0].is_direct_pack_admitted_for_session(&workspace_id, &later));
-            assert_source_commitment(&later_rows[0], LATER_RECORD);
+            fixture.assert_source_commitment(&later_rows[0], LATER_RECORD);
             let audits = db
                 .list_audit_by_action("cass.evidence.redacted", None)
                 .unwrap();

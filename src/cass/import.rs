@@ -32,6 +32,10 @@ use crate::models::{
     AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
     IMPORT_CASS_SCHEMA_V1, IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId,
 };
+use crate::policy::cass_source::{CassSourceCommitment, CassSourceIdentity};
+use crate::policy::store_auth::{
+    StoreAuthError, StoreAuthReadGuard, StoreAuthRoot, workspace_keys_dir,
+};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_VIEW_CONTEXT: u32 = 4;
@@ -39,7 +43,7 @@ const PAGED_VIEW_CONTEXT: u32 = 64;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
-const CASS_EXCERPT_PRODUCER_VERSION: u32 = 4;
+const CASS_EXCERPT_PRODUCER_VERSION: u32 = 5;
 const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
 /// Upper bound on the total `cass view --json` stdout we will buffer before
 /// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`
@@ -144,6 +148,7 @@ pub enum CassHistoryRefusal {
     Changed,
     Missing,
     Unverifiable,
+    SourceKeyUnavailable,
     Unstable,
     Oversized,
 }
@@ -155,6 +160,7 @@ impl CassHistoryRefusal {
             Self::Changed => "cass_refresh_history_changed",
             Self::Missing => "cass_refresh_history_missing",
             Self::Unverifiable => "cass_refresh_history_unverifiable",
+            Self::SourceKeyUnavailable => "cass_source_commitment_key_unavailable",
             Self::Unstable => "cass_source_changed_during_import",
             Self::Oversized => "cass_view_oversized",
         }
@@ -168,6 +174,9 @@ impl CassHistoryRefusal {
             }
             Self::Unverifiable => {
                 "Inspect the original import and source backup: this legacy excerpt has no complete-source commitment. Retain its historical evidence; use --since to exclude it when importing newer sessions."
+            }
+            Self::SourceKeyUnavailable => {
+                "Recover the original workspace authentication key with ee backup keys before retrying. A replacement or evicted key cannot verify historical CASS source; retained evidence was not rewritten."
             }
             Self::Unstable => {
                 "Retry after the live session stops changing. No evidence from this incomplete snapshot was written."
@@ -186,9 +195,14 @@ impl CassHistoryRefusal {
         else {
             return None;
         };
-        [Self::Changed, Self::Missing, Self::Unverifiable]
-            .into_iter()
-            .find(|reason| message.starts_with(&format!("{}:", reason.code())))
+        [
+            Self::Changed,
+            Self::Missing,
+            Self::Unverifiable,
+            Self::SourceKeyUnavailable,
+        ]
+        .into_iter()
+        .find(|reason| message.starts_with(&format!("{}:", reason.code())))
     }
 }
 
@@ -869,18 +883,38 @@ pub fn import_cass_sessions(
                 Vec::new()
             };
 
-            match persist_session_import_if_absent(&connection, &workspace_id, &session, &spans)? {
+            // CASS subprocesses run before this bounded key lease. Keep one
+            // durable key window through the session transaction so rotation
+            // cannot evict the key between source verification and commit.
+            let source_key = if spans.is_empty() {
+                None
+            } else {
+                Some(open_cass_source_key(
+                    &connection,
+                    &workspace_id,
+                    &workspace_path,
+                )?)
+            };
+            let source_root = source_key.as_deref();
+            match persist_session_import_with_source_key(
+                &connection,
+                &workspace_id,
+                &session,
+                &spans,
+                source_root,
+            )? {
                 SessionImportPersistResult::Skipped { session_id } => {
                     // A known session may have grown, or its first import may
                     // have omitted evidence. Revisit only when the caller has
                     // explicitly requested spans and obtained a complete view.
                     let refreshed = if options.include_spans {
-                        match refresh::refresh_session(
+                        match refresh::refresh_session_with_source_key(
                             &connection,
                             &workspace_id,
                             &session_id,
                             &session,
                             &spans,
+                            source_root,
                         ) {
                             Ok(report) => Some(report),
                             Err(error) => {
@@ -906,6 +940,7 @@ pub fn import_cass_sessions(
                     } else {
                         None
                     };
+                    drop(source_key);
                     let changed = refreshed.as_ref().is_some_and(|report| report.changed);
                     let mut session_spans = 0;
                     let index_job_id = if let Some(report) = refreshed {
@@ -960,6 +995,7 @@ pub fn import_cass_sessions(
                     index_job_id,
                     admission,
                 } => {
+                    drop(source_key);
                     evidence_admission.merge(&admission);
                     for span in &spans {
                         cursor.record_span(&session.source_path, span.end_line);
@@ -1046,11 +1082,12 @@ enum SessionImportPersistResult {
     },
 }
 
-fn persist_session_import_if_absent(
+fn persist_session_import_with_source_key(
     connection: &DbConnection,
     workspace_id: &str,
     session: &CassSessionInfo,
     spans: &[CassViewSpanForImport],
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<SessionImportPersistResult, DbError> {
     let session_id = stable_session_id(workspace_id, &session.source_path);
     let index_job_id = stable_search_index_job_id(workspace_id, &session_id);
@@ -1077,8 +1114,13 @@ fn persist_session_import_if_absent(
         // another session-sized copy (then another in the DB writer) defeats
         // the streaming capture's memory bound. Initial and growing imports
         // share bounded preparation inside this one session transaction.
-        let admission =
-            refresh::insert_initial_spans(connection, workspace_id, &stored_session, spans)?;
+        let admission = refresh::insert_initial_spans(
+            connection,
+            workspace_id,
+            &stored_session,
+            spans,
+            source_root,
+        )?;
         connection.insert_search_index_job(
             &index_job_id,
             &search_index_job_input(workspace_id, &session_id),
@@ -2360,12 +2402,14 @@ fn session_input(workspace_id: &str, session: &CassSessionInfo) -> CreateSession
     }
 }
 
-fn evidence_input(
+fn evidence_input_with_source_key(
     workspace_id: &str,
     session_id: &str,
     span: &CassViewSpanForImport,
-) -> CreateEvidenceSpanInput {
-    CreateEvidenceSpanInput {
+    source_root: Option<&StoreAuthRoot>,
+) -> Result<CreateEvidenceSpanInput, DbError> {
+    let source = capture_source_commitment(source_root, session_id, span)?;
+    Ok(CreateEvidenceSpanInput {
         workspace_id: workspace_id.to_string(),
         session_id: session_id.to_string(),
         memory_id: None,
@@ -2384,17 +2428,173 @@ fn evidence_input(
                 "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
                 "redactionStatus": if span.redacted { "redacted" } else { "clean" },
                 "redactionClasses": span.redacted_reasons,
-                "cassSource": {
-                    "schema": "ee.cass.source.v1",
-                    "contentHash": format!("blake3:{}", span.source_hash.to_hex()),
-                    "byteLength": span.source_bytes,
-                    "excerptProducerVersion": CASS_EXCERPT_PRODUCER_VERSION,
-                },
+                "cassSource": source,
             })
             .to_string(),
         ),
         inherited_redaction_classes: span.redacted_reasons.clone(),
+    })
+}
+
+fn source_key_unavailable() -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: "cass_source_commitment_key_unavailable: restore the original workspace authentication key before retrying".to_owned(),
     }
+}
+
+fn open_cass_source_key(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+) -> Result<StoreAuthReadGuard, DbError> {
+    let keys = workspace_keys_dir(workspace_path);
+    match StoreAuthRoot::open(&keys) {
+        Ok(_) => {}
+        Err(StoreAuthError::NotInitialized { .. }) => {
+            // Do not silently replace a lost key for an established V2 store.
+            // Decode claims, including escaped schema names; a textual LIKE
+            // hint cannot prove that no historical private commitment exists.
+            if workspace_has_private_source_commitments(connection, workspace_id)? {
+                return Err(source_key_unavailable());
+            }
+            StoreAuthRoot::open_or_create(&keys).map_err(|_| source_key_unavailable())?;
+        }
+        Err(_) => return Err(source_key_unavailable()),
+    }
+    StoreAuthRoot::open_read_locked(&keys).map_err(|_| source_key_unavailable())
+}
+
+fn workspace_has_private_source_commitments(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<bool, DbError> {
+    connection.begin_read_snapshot()?;
+    let scanned = (|| {
+        let mut cursor = String::new();
+        loop {
+            // Only bounded metadata pages are read; no transcript excerpts
+            // enter this key-loss check. Malformed claims fail closed too.
+            let rows = connection.query(
+                "SELECT id, metadata_json FROM evidence_spans WHERE workspace_id = ?1 AND id > ?2 AND metadata_json IS NOT NULL ORDER BY id ASC LIMIT 128",
+                &[
+                    sqlmodel_core::Value::Text(workspace_id.to_owned()),
+                    sqlmodel_core::Value::Text(cursor.clone()),
+                ],
+            )?;
+            if rows.is_empty() {
+                return Ok(false);
+            }
+            for row in &rows {
+                cursor = row
+                    .get(0)
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(source_key_unavailable)?
+                    .to_owned();
+                let metadata = row
+                    .get(1)
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(source_key_unavailable)?;
+                if CassSourceCommitment::from_metadata(Some(metadata))
+                    .map_err(|_| source_key_unavailable())?
+                    .is_some_and(|source| source.is_keyed())
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    })();
+    match scanned {
+        Ok(found) => {
+            if let Err(error) = connection.commit_read_snapshot() {
+                let _ = connection.rollback_read_snapshot();
+                return Err(error);
+            }
+            Ok(found)
+        }
+        Err(error) => {
+            let _ = connection.rollback_read_snapshot();
+            Err(error)
+        }
+    }
+}
+
+fn capture_source_commitment(
+    source_root: Option<&StoreAuthRoot>,
+    session_id: &str,
+    span: &CassViewSpanForImport,
+) -> Result<CassSourceCommitment, DbError> {
+    let root = source_root.ok_or_else(source_key_unavailable)?;
+    let reference = format!(
+        "blake3:{}",
+        blake3::hash(span.cass_span_id.as_bytes()).to_hex()
+    );
+    CassSourceCommitment::capture(
+        root,
+        CassSourceIdentity {
+            session_id,
+            upstream_ref_hash: &reference,
+        },
+        &span.source_hash,
+        span.source_bytes as u64,
+        CASS_EXCERPT_PRODUCER_VERSION,
+    )
+    .map_err(|_| source_key_unavailable())
+}
+
+#[cfg(test)]
+fn test_source_root() -> StoreAuthRoot {
+    static KEYS: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| tempfile::tempdir().expect("CASS fixture key directory"));
+    StoreAuthRoot::open_or_create(keys.path()).expect("protected CASS fixture root")
+}
+
+#[cfg(test)]
+fn stored_source_commitment_matches(
+    root: &StoreAuthRoot,
+    row: &crate::db::StoredEvidenceSpan,
+    source: &str,
+) -> bool {
+    CassSourceCommitment::from_metadata(row.metadata_json.as_deref()).is_ok_and(|claim| {
+        claim.is_some_and(|claim| {
+            claim.is_keyed()
+                && claim.verify(
+                    Some(root),
+                    CassSourceIdentity {
+                        session_id: &row.session_id,
+                        upstream_ref_hash: &row.cass_span_id,
+                    },
+                    &blake3::hash(source.as_bytes()),
+                    source.len() as u64,
+                ) == Ok(crate::policy::cass_source::CassSourceVerification::Match)
+        })
+    })
+}
+
+#[cfg(test)]
+fn evidence_input(
+    workspace_id: &str,
+    session_id: &str,
+    span: &CassViewSpanForImport,
+) -> CreateEvidenceSpanInput {
+    evidence_input_with_source_key(workspace_id, session_id, span, Some(&test_source_root()))
+        .expect("CASS fixture evidence")
+}
+
+#[cfg(test)]
+fn persist_session_import_if_absent(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session: &CassSessionInfo,
+    spans: &[CassViewSpanForImport],
+) -> Result<SessionImportPersistResult, DbError> {
+    persist_session_import_with_source_key(
+        connection,
+        workspace_id,
+        session,
+        spans,
+        Some(&test_source_root()),
+    )
 }
 
 fn cass_redaction_audit_input(
@@ -6275,8 +6475,14 @@ mod tests {
                 )?;
                 ensure_equal(
                     &withheld["sourceDigest"],
-                    &json!(format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex())),
-                    "digest binds rejected source",
+                    &JsonValue::Null,
+                    "withholding marker has no public raw-source digest",
+                )?;
+                let root = StoreAuthRoot::open(workspace_keys_dir(&workspace_path))
+                    .map_err(|error| error.to_string())?;
+                ensure(
+                    stored_source_commitment_matches(&root, row, raw),
+                    "private proof binds rejected source",
                 )?;
                 ensure_equal(
                     &row.secret_redaction_status.as_str(),
@@ -6504,13 +6710,16 @@ mod tests {
                             .ok_or("missing source metadata")?,
                     )
                     .map_err(|e| e.to_string())?;
+                    let root = StoreAuthRoot::open(workspace_keys_dir(&options.workspace_path))
+                        .map_err(|error| error.to_string())?;
+                    ensure(
+                        stored_source_commitment_matches(&root, row, &fixtures[index].1),
+                        "private commitment retains complete original source identity",
+                    )?;
                     ensure_equal(
-                        &metadata["cassSource"]["contentHash"],
-                        &json!(format!(
-                            "blake3:{}",
-                            blake3::hash(fixtures[index].1.as_bytes()).to_hex()
-                        )),
-                        "commitment retains complete original source identity",
+                        &metadata["cassSource"]["schema"],
+                        &json!("ee.cass.source.v2"),
+                        "private source schema",
                     )?;
                     if index == 1 {
                         ensure_equal(
@@ -6939,13 +7148,16 @@ mod tests {
                 .ok_or("missing evidence metadata")?,
         )
         .map_err(|e| e.to_string())?;
+        let root = StoreAuthRoot::open(workspace_keys_dir(&options.workspace_path))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            stored_source_commitment_matches(&root, &before.evidence[0], &original),
+            "stored private proof describes original complete source",
+        )?;
         ensure_equal(
-            &metadata["cassSource"]["contentHash"],
-            &json!(format!(
-                "blake3:{}",
-                blake3::hash(original.as_bytes()).to_hex()
-            )),
-            "stored commitment describes original complete source",
+            &metadata["cassSource"]["schema"],
+            &json!("ee.cass.source.v2"),
+            "private source schema",
         )?;
         db.close().map_err(|e| e.to_string())?;
 

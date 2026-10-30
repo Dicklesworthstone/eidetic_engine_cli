@@ -13,11 +13,16 @@ use crate::db::{
     EvidenceAdmissionTally, SearchIndexJobStatus, StoredEvidenceSpan, StoredSession,
 };
 use crate::models::AuditId;
+use crate::policy::cass_source::{CassSourceIdentity, CassSourceVerification};
+use crate::policy::store_auth::StoreAuthRoot;
 
+#[cfg(test)]
+use super::evidence_input;
 use super::{
-    CassSessionInfo, CassViewSpanForImport, cass_redaction_audit_input, evidence_input,
-    search_index_job_input, session_input, stable_cass_redaction_audit_id, stable_evidence_id,
-    stable_search_index_job_id, stable_uuid, with_import_session_transaction,
+    CassSessionInfo, CassViewSpanForImport, capture_source_commitment, cass_redaction_audit_input,
+    evidence_input_with_source_key, search_index_job_input, session_input, source_key_unavailable,
+    stable_cass_redaction_audit_id, stable_evidence_id, stable_search_index_job_id, stable_uuid,
+    with_import_session_transaction,
 };
 
 const CHECKPOINT_KEY: &str = "eeCassImportCheckpoint";
@@ -97,12 +102,13 @@ pub(super) fn committed_session_publication_id(
 /// The caller obtained a complete bounded `cass view` snapshot before entering
 /// here. A failure never partially updates this session; earlier successfully
 /// imported sessions remain committed, as in the ordinary import path.
-pub(super) fn refresh_session(
+pub(super) fn refresh_session_with_source_key(
     connection: &DbConnection,
     workspace_id: &str,
     session_id: &str,
     discovered: &CassSessionInfo,
     spans: &[CassViewSpanForImport],
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<RefreshReport, DbError> {
     with_import_session_transaction(connection, || {
         let stored = connection
@@ -186,9 +192,9 @@ pub(super) fn refresh_session(
             {
                 return Err(refusal("cass_refresh_history_changed"));
             }
-            if let Some(proof) = retained_source_proof(row, span)? {
+            if let Some(proof) = retained_source_proof(row, span, source_root)? {
                 let (audit_id, audit) =
-                    reconciliation_audit(workspace_id, session_id, row, span, proof);
+                    reconciliation_audit(workspace_id, session_id, row, span, proof, source_root)?;
                 if let Some(existing) = connection.get_audit(&audit_id)? {
                     if existing.workspace_id != audit.workspace_id
                         || existing.actor != audit.actor
@@ -215,7 +221,13 @@ pub(super) fn refresh_session(
             .copied()
             .filter(|span| !retained.contains(span.cass_span_id.as_str()))
             .collect();
-        let revision = snapshot_revision(workspace_id, session_id, &input, &incoming);
+        let revision = snapshot_revision_with_source_key(
+            workspace_id,
+            session_id,
+            &input,
+            &incoming,
+            source_root,
+        )?;
         let changed = metadata_changed
             || !additions.is_empty()
             || !reconciliations.is_empty()
@@ -261,7 +273,7 @@ pub(super) fn refresh_session(
         input.metadata_json = Some(serde_json::Value::Object(metadata).to_string());
 
         let (mut added_lines, admission) =
-            batch::insert_additions(connection, workspace_id, &stored, &additions)?;
+            batch::insert_additions(connection, workspace_id, &stored, &additions, source_root)?;
         for (audit_id, audit) in &reconciliations {
             connection.insert_audit(audit_id, audit)?;
         }
@@ -326,6 +338,7 @@ pub(super) fn refresh_session(
 fn retained_source_proof(
     row: &StoredEvidenceSpan,
     span: &CassViewSpanForImport,
+    source_root: Option<&StoreAuthRoot>,
 ) -> Result<Option<&'static str>, DbError> {
     let retained_hash = format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex());
     if row.content_hash != retained_hash
@@ -351,8 +364,27 @@ fn retained_source_proof(
         {
             return Err(refusal("cass_refresh_history_changed"));
         }
-        if source.content_hash != observed_hash || source.byte_length != span.source_bytes as u64 {
-            return Err(refusal("cass_refresh_history_changed"));
+        let reference = format!(
+            "blake3:{}",
+            blake3::hash(span.cass_span_id.as_bytes()).to_hex()
+        );
+        match source
+            .verify(
+                source_root,
+                CassSourceIdentity {
+                    session_id: &row.session_id,
+                    upstream_ref_hash: &reference,
+                },
+                &span.source_hash,
+                span.source_bytes as u64,
+            )
+            .map_err(|_| source_key_unavailable())?
+        {
+            CassSourceVerification::Match => {}
+            CassSourceVerification::Mismatch => {
+                return Err(refusal("cass_refresh_history_changed"));
+            }
+            CassSourceVerification::KeyUnavailable => return Err(source_key_unavailable()),
         }
         "captured_source_commitment"
     } else if intact_clean_legacy_excerpt(row) {
@@ -451,13 +483,15 @@ fn reconciliation_audit(
     row: &StoredEvidenceSpan,
     span: &CassViewSpanForImport,
     proof: &str,
-) -> (String, CreateAuditInput) {
+    source_root: Option<&StoreAuthRoot>,
+) -> Result<(String, CreateAuditInput), DbError> {
+    let source = capture_source_commitment(source_root, session_id, span)?;
     let details = serde_json::json!({
-        "schema": "ee.cass.screening_reconciliation.v1",
+        "schema": "ee.cass.screening_reconciliation.v2",
         "sessionId": session_id,
         "evidenceId": row.id,
         "sourceProof": proof,
-        "sourceContentHash": format!("blake3:{}", span.source_hash.to_hex()),
+        "sourceCommitment": source,
         "observedSourceByteLength": span.source_bytes,
         "retainedExcerptHash": row.content_hash,
         "observedExcerptHash": span.content_hash,
@@ -471,7 +505,7 @@ fn reconciliation_audit(
         blake3::hash(details.as_bytes()).to_hex()
     )))
     .to_string();
-    (
+    Ok((
         id,
         CreateAuditInput {
             workspace_id: Some(workspace_id.to_owned()),
@@ -481,7 +515,7 @@ fn reconciliation_audit(
             target_id: Some(row.id.clone()),
             details: Some(details),
         },
-    )
+    ))
 }
 
 fn same_metadata(stored: &StoredSession, input: &CreateSessionInput) -> bool {
@@ -622,14 +656,15 @@ fn sql_text(value: &str) -> String {
     format!("CAST(X'{hex}' AS TEXT)")
 }
 
-fn snapshot_revision(
+fn snapshot_revision_with_source_key(
     workspace_id: &str,
     session_id: &str,
     input: &CreateSessionInput,
     spans: &BTreeMap<&str, &CassViewSpanForImport>,
-) -> String {
+    source_root: Option<&StoreAuthRoot>,
+) -> Result<String, DbError> {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"ee.cass.refresh_snapshot.v2\0");
+    hash.update(b"ee.cass.refresh_snapshot.v3\0");
     let metadata = serde_json::json!([
         workspace_id,
         session_id,
@@ -645,6 +680,7 @@ fn snapshot_revision(
     hash.update(&(metadata.len() as u64).to_le_bytes());
     hash.update(metadata.as_bytes());
     for (reference, span) in spans {
+        let source = capture_source_commitment(source_root, session_id, span)?;
         let identity = serde_json::json!([
             reference,
             span.start_line,
@@ -652,7 +688,7 @@ fn snapshot_revision(
             span.span_kind.as_str(),
             span.role.map(|role| role.as_str()),
             span.content_hash,
-            format!("blake3:{}", span.source_hash.to_hex()),
+            source.content_hash(),
             span.source_bytes,
             span.redacted,
             span.redacted_reasons
@@ -661,7 +697,42 @@ fn snapshot_revision(
         hash.update(&(identity.len() as u64).to_le_bytes());
         hash.update(identity.as_bytes());
     }
-    format!("blake3:{}", hash.finalize().to_hex())
+    Ok(format!("blake3:{}", hash.finalize().to_hex()))
+}
+
+#[cfg(test)]
+fn snapshot_revision(
+    workspace_id: &str,
+    session_id: &str,
+    input: &CreateSessionInput,
+    spans: &BTreeMap<&str, &CassViewSpanForImport>,
+) -> String {
+    snapshot_revision_with_source_key(
+        workspace_id,
+        session_id,
+        input,
+        spans,
+        Some(&super::test_source_root()),
+    )
+    .expect("CASS fixture snapshot")
+}
+
+#[cfg(test)]
+pub(super) fn refresh_session(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    discovered: &CassSessionInfo,
+    spans: &[CassViewSpanForImport],
+) -> Result<RefreshReport, DbError> {
+    refresh_session_with_source_key(
+        connection,
+        workspace_id,
+        session_id,
+        discovered,
+        spans,
+        Some(&super::test_source_root()),
+    )
 }
 
 /// Reconcile one validated session publication without changing an existing
