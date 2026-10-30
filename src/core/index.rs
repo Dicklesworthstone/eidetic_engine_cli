@@ -7621,14 +7621,22 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
 }
 
 fn verified_default_model_dir(settings: &EeEmbedderSettings) -> Option<PathBuf> {
-    let destination = potion_model_destination_dir(&settings.model_root);
-    if verified_potion_model_dir(&destination) {
+    let model = RegisteredModel2Vec::potion_128m().ok()?;
+    verified_model2vec_model_dir(&settings.model_root, &model)
+}
+
+/// Resolve the exact selected model from a cache root or a directly named
+/// directory. Execution and registry publication must retain the same strict
+/// nested-then-direct lookup, including directories with an arbitrary basename.
+fn verified_model2vec_model_dir(model_root: &Path, model: &RegisteredModel2Vec) -> Option<PathBuf> {
+    let destination = model2vec_model_destination_dir(model_root, model);
+    if model2vec_model_dir_verification(model, &destination).is_ok() {
         return Some(destination);
     }
     // A verified, explicitly supplied model directory is usable offline too,
     // regardless of whether its basename is the canonical model name.
-    (destination != settings.model_root && verified_potion_model_dir(&settings.model_root))
-        .then(|| settings.model_root.clone())
+    (destination != model_root && model2vec_model_dir_verification(model, model_root).is_ok())
+        .then(|| model_root.to_path_buf())
 }
 
 /// Whether resolving the default embedder now would load local weights: no
@@ -9218,10 +9226,8 @@ fn active_embedding_model_source_dir(
     };
 
     if let Some(model_root) = configured_embedder_model_root()
-        && let Some(canonical) = canonical_verified_model2vec_model_dir(
-            &model2vec_model_destination_dir(&model_root, &model),
-            &model,
-        )
+        && let Some(model_dir) = verified_model2vec_model_dir(&model_root, &model)
+        && let Some(canonical) = canonical_verified_model2vec_model_dir(&model_dir, &model)
     {
         return Ok(Some(canonical));
     }

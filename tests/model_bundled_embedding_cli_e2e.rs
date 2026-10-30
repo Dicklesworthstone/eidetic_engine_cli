@@ -3543,14 +3543,11 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     let network_tripwire = NetworkTripwire::start()?;
     let mut env = network_tripwire.proxy_env();
     env.push(("EE_EMBED_DOWNLOAD".to_owned(), "off".to_owned()));
-    if neural {
+    let model_dir = neural.then(|| workspace.path.join("renamed-model-fixture"));
+    if let Some(model_dir) = model_dir.as_ref() {
         let fixture = resolve_fixture_model_dir(&isolated_ee::model_fixture_root()?)?;
-        let model_dir = workspace
-            .path
-            .join("model-fixture")
-            .join(BUNDLED_EMBEDDING_MODEL_ID);
-        materialize_regular_model_fixture(&fixture, &model_dir, &ModelManifest::potion_128m())?;
-        env.push(("EE_EMBED_MODEL_DIR".to_owned(), path_string(&model_dir)));
+        materialize_regular_model_fixture(&fixture, model_dir, &ModelManifest::potion_128m())?;
+        env.push(("EE_EMBED_MODEL_DIR".to_owned(), path_string(model_dir)));
     }
     let workspace_arg = workspace.workspace_arg()?;
     let init = run_ee_with_env(
@@ -3588,6 +3585,34 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     let remembered = stdout_json(&remember, "outcome fixture remember")?;
     let memory_id = string_member(response_data(&remembered, "remember")?, "memoryId")?;
     let original_database = workspace.path.join(".ee/ee.db");
+    if let Some(model_dir) = model_dir.as_ref() {
+        let connection = DbConnection::open_file_read_only(&original_database)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("remembered outcome target missing")?;
+        let registered = connection
+            .find_model_registry_entry(
+                &memory.workspace_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelPurpose::Embedding,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("remember did not register its loaded neural model")?;
+        assert_eq!(registered.status, ModelRegistryStatus::Available);
+        let canonical_model_dir = fs::canonicalize(model_dir).map_err(|error| error.to_string())?;
+        assert_eq!(
+            registered.source_uri,
+            Some(path_string(&canonical_model_dir)),
+            "automatic registration must retain the verified direct model directory"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        // Every later CLI invocation must resolve the persisted registration;
+        // keeping the override would hide an unusable stored model source.
+        env.retain(|(name, _)| name != "EE_EMBED_MODEL_DIR");
+    }
     let original_state = outcome_index_state(&original_database, memory_id)?;
     assert!(
         !original_state.jobs.is_empty(),
@@ -3641,10 +3666,15 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         stdout_json(&output, phase)
     };
     let query = ["search", "staff sign in email code", "--limit", "1"];
-    ensure_outcome_index_ready(
-        &run("outcome_before_index", &["index", "status"])?,
-        original_state.generation,
-    )?;
+    let baseline_index = run("outcome_before_index", &["index", "status"])?;
+    ensure_outcome_index_ready(&baseline_index, original_state.generation)?;
+    if neural {
+        assert_eq!(
+            baseline_index["data"]["embedding"]["source"],
+            "registry_observed"
+        );
+        assert_eq!(baseline_index["data"]["embedding"]["semantic"], true);
+    }
     ensure_outcome_index_search(
         &run("outcome_before_search", &query)?,
         memory_id,
