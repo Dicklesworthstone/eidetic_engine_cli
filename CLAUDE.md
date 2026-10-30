@@ -32,6 +32,39 @@ every `cargo`, `rustc` and `rustfmt` on PATH is a rustup shim symlinked to
 and `cargo fmt --check` is UNRUN rather than clean or red. Mount the volume, or
 treat Rust edits as unverified and say so.
 
+**WHEN THE VOLUME COMES BACK, FOUR GATES STOP LYING AND ONE OF THEM IS PROBABLY
+RED. RUN THEM FIRST.** The window is rare and nobody had a procedure for it, so
+on 2026-10-30 the volume was mounted and `cargo fmt --check` — a gated verify.sh
+stage — had been RED since 2026-10-27 with nobody able to see it. Check the
+state and then run the family:
+
+```bash
+test -d "$(readlink ~/.rustup/toolchains)" && echo MOUNTED || echo dangling
+cargo fmt --check                              # the gated stage; fix with `cargo fmt`
+./scripts/check-format.sh --self-test          # 7 arms; INCONCLUSIVE (3) when absent
+./scripts/check-include-fmt.sh                 # and --self-test, 6 arms
+./scripts/check-forbidden-deps.sh              # needs `cargo metadata`; rc 3 when absent
+./scripts/package-artifact-leak-check.sh       # needs `cargo package`; rc 1 when absent
+```
+
+All five were run on 2026-10-30: `cargo fmt --check` red (9 hunks in 3 files,
+fixed), then 7/7, 6/6 + rc 0, rc 0, rc 0. Those last four FAIL CLOSED while the
+volume is absent, which is the correct direction and is why they are easy to
+mistake for permanent environment noise — they are not, they are gates waiting
+for a rail. Note `metadata` and `package` are NOT tripwired subcommands, so
+those two are legitimate locally in either state; they simply cannot answer
+without the toolchain.
+
+**VERIFY.SH IS STILL BLOCKED, AND NOW FOR A DIFFERENT REASON THAN BEFORE.** With
+the toolchain present the remaining obstacle is `ee_require_current_binary`: the
+installed `ee` is 0.14.2 against a 0.18.0 tree, and the printed remedy
+(`cargo build --locked --bin ee`) is a tripwired subcommand. The fleet cannot
+supply one either — it is Linux, this is arm64 Darwin, and rch refuses the
+cross-platform artifact return with RCH-E327. So a mounted volume buys the five
+checks above and NOT a verify.sh run; that needs either a macOS builder or an
+explicit operator exception to the local tripwire
+(bd-no-runnable-current-ee-binary-on-the-mac-wu6ay).
+
 **But it is not the only local GATE, and treating it as such is how three
 features shipped past a red assertion.** `scripts/check-*.py` are pure-Python
 checks over tracked files: they need no toolchain, no USB volume and no lane,
