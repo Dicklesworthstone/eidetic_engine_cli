@@ -664,6 +664,48 @@ SSH transport retains build ownership on that worker. Both are above. Dispatch 3
 was safe to pin because dispatch 2 ended with its own `Remote command finished`
 line rather than a kill.
 
+**AND THE WARM DIR YOU JUST PAID FOR CAN BE UNUSABLE BY THE NEXT DISPATCH,
+BECAUSE THE BUILD THAT WARMED IT FILLS THE DISK.** Measured 2026-10-30, same
+worker, minutes apart. `cargo test --locked --no-run --tests -j 2` finished
+green — `Finished \`test\` profile ... in 45m 50s`, 48 `Executable` lines — and
+the very next dispatch to that worker was refused in under two seconds:
+
+```text
+[RCH-I003] requested worker set [worker-01] refused (no_free_slots);
+'worker-01' cannot fit the requested core count; lower the request (-j)
+or request a larger worker) — retryable
+```
+
+`rch status` then reported that box `circuit=closed status=healthy` with
+`total_slots=0`, `used_slots=0`, `pressure_state=critical`. Lowering `-j` cannot
+help — zero total slots fits nothing — so this is the arithmetic class of 103
+and rch's "retryable" label is wrong again. **Budget DISK, not only time:** a
+test-profile build of this tree took that worker to **3.87 GB free**, and those
+46 minutes bought a warm directory nothing could use.
+
+**Its `pressure_policy_rule` NAMES THE WRONG CAUSE, and chasing the name costs
+the diagnosis.** The rule reads
+
+```text
+pressure_policy_rule = disk_threshold_breach_without_telemetry
+```
+
+so the natural reading is a monitoring gap, and the natural next step is to go
+looking for broken telemetry on the worker. Both are wrong. The same record
+carries `pressure_telemetry_fresh = true`, `pressure_disk_free_gb = 3.8688` and
+`pressure_confidence = high`: the telemetry is present and fresh and the disk
+really is nearly full. A second worker carried the identical rule name at
+6.83 GB free, so that spelling is the rule's normal output, not one box's
+oddity.
+
+This is the mirror image of the `disk_pressure_state` trap above. There the
+STATE overstated and the reason corrected it; here the REASON misnames and the
+numbers correct it. So read `pressure_telemetry_fresh` and
+`pressure_disk_free_gb` before trusting either field. **For a long build, rank
+candidates by `pressure_disk_free_gb` descending** — free-slot ranking selects
+for dead workers, and disk is what predicts whether the build can finish at
+all.
+
 So when you deliberately want the previous run's warmth, read `worker_id` out
 of that run's proof and pass it:
 
