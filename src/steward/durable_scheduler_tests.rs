@@ -231,6 +231,63 @@ fn live_execution_owner_excludes_background_recovery_and_handler_admission() -> 
 }
 
 #[test]
+fn terminal_failed_index_jobs_do_not_reschedule_zero_work_coalescing() -> TestResult {
+    use crate::db::{CreateSearchIndexJobInput, CreateWorkspaceInput, SearchIndexJobType};
+
+    let (_temporary, workspace) = fixture()?;
+    std::fs::create_dir_all(workspace.join(".ee"))?;
+    let database = workspace.join(".ee/ee.db");
+    let connection = DbConnection::open_file(&database)?;
+    connection.migrate()?;
+    let workspace_id = "wsp_00000000000000000000000986";
+    connection.insert_workspace(
+        workspace_id,
+        &CreateWorkspaceInput {
+            path: workspace.to_string_lossy().into_owned(),
+            name: None,
+        },
+    )?;
+    let job_id = "sidx_terminal_failed_probe000001";
+    connection.insert_search_index_job(
+        job_id,
+        &CreateSearchIndexJobInput {
+            workspace_id: workspace_id.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some("mem_00000000000000000000000986".to_owned()),
+            documents_total: 1,
+        },
+    )?;
+    assert!(index_jobs_need_processing(&workspace)?);
+
+    assert!(connection.start_search_index_job(job_id)?);
+    assert!(connection.fail_search_index_job(job_id, "fixture terminal failure")?);
+    connection.close()?;
+    assert!(
+        !index_jobs_need_processing(&workspace)?,
+        "terminal failed evidence must not schedule a coalescer that cannot claim it"
+    );
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let options = tick_options(&workspace, shutdown)?;
+    assert!(
+        !options.job_types.contains(&JobType::IndexCoalesce),
+        "terminal failed work must not create a permanent zero-item daemon loop"
+    );
+
+    let connection = DbConnection::open_file(&database)?;
+    assert!(connection.requeue_search_index_job_for_retry(job_id)?);
+    assert!(connection.start_search_index_job(job_id)?);
+    assert!(connection.cancel_search_index_job(job_id)?);
+    connection.close()?;
+    assert!(
+        index_jobs_need_processing(&workspace)?,
+        "cancelled work remains actionable because the processor requeues it"
+    );
+    Ok(())
+}
+
+#[test]
 fn canonical_workspace_rejects_file_and_missing_paths_without_creating_state() -> TestResult {
     let (temporary, workspace) = fixture()?;
     let file = temporary.path().join("not-a-workspace");
