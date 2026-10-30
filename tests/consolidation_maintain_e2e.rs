@@ -1217,6 +1217,183 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     Ok(())
 }
 
+#[test]
+fn consolidation_preserves_sealed_bodies_and_post_approval_tag_scope() -> TestResult {
+    let ws = E2eWorkspace::create()?;
+    ws.run_json("scope_init", &["init"])?;
+    let remember = |label: &str, content: &str, confidence: &str, tags: &str, sealed: bool| {
+        let mut args = vec![
+            "remember",
+            content,
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--confidence",
+            confidence,
+            "--tags",
+            tags,
+            "--valid-from",
+            "2020-01-01T00:00:00Z",
+            "--no-propose-candidates",
+            "--no-auto-link",
+        ];
+        if sealed {
+            args.push("--seal");
+        }
+        memory_id_from_remember(label, &ws.run_json(label, &args)?)
+    };
+    let content = "Copper kestrel review scope: preserve the deployment evidence.";
+    let survivor = remember("scope_survivor", content, "0.9", "shared", false)?;
+    let target = remember(
+        "scope_target",
+        content,
+        "0.4",
+        "shared,scope-exclusive",
+        false,
+    )?;
+    let sealed_a = remember(
+        "scope_sealed_a",
+        "The sealed evaluation predicts a successful deployment.",
+        "0.9",
+        "sealed-review",
+        true,
+    )?;
+    let sealed_b = remember(
+        "scope_sealed_b",
+        "The sealed evaluation predicts a failed deployment.",
+        "0.4",
+        "sealed-review",
+        true,
+    )?;
+    let run_pass = |label| {
+        ws.run_json(
+            label,
+            &[
+                "daemon",
+                "--foreground",
+                "--once",
+                "--job",
+                "consolidation_pass",
+            ],
+        )
+    };
+    let distinct = run_pass("scope_distinct_pass")?;
+    let distinct_result = first_runner_result(&distinct)
+        .ok_or_else(|| format!("scope pass missing runner result: {distinct}"))?;
+    ws.check(
+        "distinct_tag_scope_and_sealed_bodies_are_preserved",
+        json_u64(distinct_result, &["details", "plannedCandidates"]) == Some(0)
+            && json_u64(distinct_result, &["details", "insertedCandidates"]) == Some(0),
+        &format!("distinct retrieval tags and sealed bodies must not be absorbed: {distinct}"),
+    )?;
+
+    // Make only the visible pair compatible, proving the safety guard still
+    // permits a real duplicate. The sealed pair stays ineligible.
+    ws.run_json(
+        "scope_align_tags",
+        &["memory", "tags", &target, "--set", "shared"],
+    )?;
+    let compatible = run_pass("scope_compatible_pass")?;
+    let compatible_result = first_runner_result(&compatible)
+        .ok_or_else(|| format!("compatible pass missing runner result: {compatible}"))?;
+    ws.check(
+        "compatible_duplicate_is_still_proposed",
+        json_u64(compatible_result, &["details", "plannedCandidates"]) == Some(1)
+            && json_u64(compatible_result, &["details", "insertedCandidates"]) == Some(1),
+        &format!("only the visible exact duplicate must be proposed: {compatible}"),
+    )?;
+    let candidate_id = json_str(compatible_result, &["details", "candidateIds", "0"])
+        .ok_or_else(|| format!("compatible pass missing candidate id: {compatible}"))?;
+    let validate = ws.run_json("scope_validate", &["curate", "validate", &candidate_id])?;
+    ws.check(
+        "scope_candidate_is_approved_before_drift",
+        json_str(&validate, &["data", "mutation", "toStatus"]).as_deref() == Some("approved"),
+        &format!("compatible duplicate must pass validation: {validate}"),
+    )?;
+
+    // An approved proposal must not erase a tag introduced after review.
+    ws.run_json(
+        "scope_add_tag_after_approval",
+        &["memory", "tags", &target, "--add", "scope-exclusive"],
+    )?;
+    let before = durable_snapshot(&ws, &ws.workspace, "scope_before_blocked_apply")?;
+    let applies_before =
+        audit_action_count(&ws, "scope_apply_audits_before", "curation_candidate.apply")?;
+    let blocked = ws.run_json("scope_apply", &["curate", "apply", &candidate_id])?;
+    ws.check(
+        "post_approval_tag_drift_blocks_absorption",
+        json_str(&blocked, &["data", "application", "status"]).as_deref() == Some("blocked")
+            && json_bool(&blocked, &["data", "durableMutation"]) == Some(false)
+            && json_at(&blocked, &["data", "application", "errors"])
+                .and_then(JsonValue::as_array)
+                .is_some_and(|errors| {
+                    errors.iter().any(|issue| {
+                        issue.get("code").and_then(JsonValue::as_str)
+                            == Some("consolidate_absorb_metadata_mismatch")
+                    })
+                }),
+        &format!("apply must recheck the live retrieval scope: {blocked}"),
+    )?;
+    let after = durable_snapshot(&ws, &ws.workspace, "scope_after_blocked_apply")?;
+    ws.check(
+        "blocked_scope_apply_has_no_memory_link_or_index_side_effects",
+        after.memory_records == before.memory_records
+            && after.link_records == before.link_records
+            && after.job_records == before.job_records
+            && after.tombstoned_rows == 0
+            && [survivor.as_str(), target.as_str(), sealed_a.as_str(), sealed_b.as_str()]
+                .iter()
+                .all(|id| after.memory_records.iter().any(|row| row.get("id").and_then(JsonValue::as_str) == Some(*id)))
+            && audit_action_count(&ws, "scope_apply_audits_after", "curation_candidate.apply")? == applies_before,
+        "blocked apply must preserve both visible rows, both sealed rows, links, jobs and apply audits",
+    )?;
+
+    // Exercise the public tag-filtered pack surface after the ordinary
+    // indexing job. The distinct target must remain usable as evidence.
+    ws.run_json(
+        "scope_index_coalesce",
+        &[
+            "daemon",
+            "--foreground",
+            "--once",
+            "--job",
+            "index_coalesce",
+        ],
+    )?;
+    let query_path = ws.root.join("scope-query.json");
+    fs::write(
+        &query_path,
+        serde_json::json!({
+            "version": "ee.query.v1",
+            "query": { "text": "copper kestrel review deployment evidence" },
+            "tags": { "require": ["scope-exclusive"] }
+        })
+        .to_string(),
+    )
+    .map_err(|error| format!("write scope query: {error}"))?;
+    let query_path = query_path.to_string_lossy();
+    let pack = ws.run_json(
+        "scope_tag_filtered_pack",
+        &[
+            "pack",
+            "--query-file",
+            &query_path,
+            "--source-mode",
+            "lexical_only",
+            "--max-tokens",
+            "800",
+        ],
+    )?;
+    let packed = item_memory_ids(&pack, &["data", "pack", "items"], "scope tagged pack")?;
+    ws.check(
+        "distinct_tag_scope_remains_retrievable_after_blocked_absorb",
+        packed == vec![target],
+        &format!("tag-filtered context must retain exactly the distinct target: {packed:?}"),
+    )?;
+    Ok(())
+}
+
 /// Strict ee.test_event.v1 line validator: every non-empty line must parse
 /// as JSON with the exact schema id and non-empty ts/test_id/kind. Returns
 /// the validated line count; any defect is an error naming the line.

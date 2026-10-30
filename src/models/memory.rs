@@ -33,6 +33,57 @@ use std::str::FromStr;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+/// Applicability and authority that must survive an exact-memory absorption.
+/// Row identity, quality scores and provenance-chain hashes are deliberately
+/// absent: the survivor retains its scores and lineage preserves the absorbed
+/// row, but neither can replace a distinct retrieval scope.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct MemoryConsolidationScope<'a> {
+    pub workspace_id: &'a str,
+    pub level: &'a str,
+    pub kind: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub trust_class: &'a str,
+    pub trust_subclass: Option<&'a str>,
+    pub provenance_verification_status: &'a str,
+    /// Agent URI schemes are a producer fallback for self/team retrieval.
+    pub agent_provenance_uri: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MemoryConsolidationView<'a> {
+    pub scope: MemoryConsolidationScope<'a>,
+    pub valid_from: Option<&'a str>,
+    pub valid_to: Option<&'a str>,
+}
+
+/// Effective anchor identity without row-local IDs or capture timestamps.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct MemoryConsolidationAnchor {
+    pub kind: String,
+    pub value_hash: String,
+    pub redacted_value: String,
+    pub confidence_bits: u32,
+    pub source: String,
+    pub provenance: String,
+    pub captured_span_hash: String,
+    pub freshness: String,
+    pub generation: i64,
+}
+
+/// Source sidecars that absorption does not copy onto the surviving memory.
+/// Missing hydration is distinct from an explicitly read, empty metadata set.
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct MemoryConsolidationMetadata {
+    pub tags: Vec<String>,
+    pub typed_fields_json: Option<String>,
+    pub anchors: Vec<MemoryConsolidationAnchor>,
+    pub superseded: bool,
+    pub sealed: bool,
+    pub has_sentinels: bool,
+    pub quarantined: bool,
+}
+
 fn normalized_memory_level_token(input: &str) -> String {
     input.trim().to_ascii_lowercase()
 }

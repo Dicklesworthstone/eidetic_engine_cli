@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::db::StoredMemory;
+use crate::models::memory::{MemoryConsolidationMetadata, MemoryConsolidationScope};
 
 const CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES: usize = 64;
 pub(super) const CONSOLIDATION_SIEVE_ALGORITHM: &str = "sieve_streaming_greedy_v1";
@@ -153,7 +154,14 @@ impl<'a> BorrowedConsolidationProposal<'a> {
     }
 }
 
-type ConsolidationGroups<'a> = BTreeMap<(String, String, String), Vec<&'a StoredMemory>>;
+type ConsolidationGroups<'a> = BTreeMap<
+    (
+        MemoryConsolidationScope<'a>,
+        &'a MemoryConsolidationMetadata,
+        String,
+    ),
+    Vec<&'a StoredMemory>,
+>;
 
 struct ConsolidationGroupCursor<'a> {
     next: BorrowedConsolidationProposal<'a>,
@@ -234,20 +242,48 @@ fn normalize_memory_content_for_consolidation(content: &str) -> String {
     crate::curate::normalize_memory_content_for_consolidation(content)
 }
 
-fn prepare_consolidation_groups(memories: &[StoredMemory]) -> ConsolidationGroups<'_> {
+fn prepare_consolidation_groups<'a>(
+    memories: &'a [StoredMemory],
+    metadata: &'a BTreeMap<String, MemoryConsolidationMetadata>,
+) -> ConsolidationGroups<'a> {
     let mut grouped = ConsolidationGroups::new();
     for memory in memories {
+        let Some(memory_metadata) = metadata.get(&memory.id) else {
+            continue;
+        };
         let normalized = normalize_memory_content_for_consolidation(&memory.content);
-        if normalized.is_empty() {
+        let view = memory.consolidation_view();
+        if normalized.is_empty()
+            || memory.tombstoned_at.is_some()
+            || !crate::curate::consolidation_preserves_memory_scope(
+                view,
+                memory_metadata,
+                view,
+                memory_metadata,
+            )
+        {
             continue;
         }
         grouped
-            .entry((memory.level.clone(), memory.kind.clone(), normalized))
+            .entry((view.scope, memory_metadata, normalized))
             .or_default()
             .push(memory);
     }
-    for ((_, _, normalized), group) in &mut grouped {
+    for ((_, memory_metadata, normalized), group) in &mut grouped {
         group.sort_by(|left, right| compare_consolidation_memory_preference(left, right));
+        let Some(source) = group.first().copied() else {
+            continue;
+        };
+        // Keep the quality winner, but never remove an earlier or longer-lived
+        // target whose applicability the unchanged survivor cannot cover.
+        group.retain(|target| {
+            crate::curate::consolidation_preserves_memory_scope(
+                source.consolidation_view(),
+                memory_metadata,
+                target.consolidation_view(),
+                memory_metadata,
+            )
+        });
         let group_size = group.len();
         let Some((source, targets)) = group.split_first_mut() else {
             continue;
@@ -268,9 +304,10 @@ fn prepare_consolidation_groups(memories: &[StoredMemory]) -> ConsolidationGroup
 pub(super) fn plan_consolidation_candidates(
     workspace_id: &str,
     memories: &[StoredMemory],
+    metadata: &BTreeMap<String, MemoryConsolidationMetadata>,
     item_limit: Option<u64>,
 ) -> ConsolidationCandidateSelection {
-    let grouped = prepare_consolidation_groups(memories);
+    let grouped = prepare_consolidation_groups(memories, metadata);
     let selection = sieve_stream_consolidation_candidates(
         ConsolidationCandidateStream::new(&grouped),
         consolidation_sieve_candidate_limit(item_limit),
@@ -878,7 +915,14 @@ mod tests {
         let before = db
             .list_memories(&workspace, None, true)
             .map_err(|error| error.to_string())?;
-        let selection = plan_consolidation_candidates(&workspace, &before, Some(3));
+        let ids = before
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        let metadata = db
+            .memory_consolidation_metadata_in_current_snapshot(&ids)
+            .map_err(|error| error.to_string())?;
+        let selection = plan_consolidation_candidates(&workspace, &before, &metadata, Some(3));
         assert_eq!(selection.considered_candidates, 8);
         assert_eq!(selection.max_candidates, 3);
         assert_eq!(selection.candidates.len(), 3);
@@ -897,7 +941,7 @@ mod tests {
         }
         let mut reversed = before.clone();
         reversed.reverse();
-        let reordered = plan_consolidation_candidates(&workspace, &reversed, Some(3));
+        let reordered = plan_consolidation_candidates(&workspace, &reversed, &metadata, Some(3));
         assert_eq!(format!("{selection:?}"), format!("{reordered:?}"));
         assert_eq!(
             before,
@@ -937,7 +981,11 @@ mod tests {
             memory.content = body.to_owned();
             corpus.push(memory);
         }
-        let grouped = prepare_consolidation_groups(&corpus);
+        let corpus_metadata = corpus
+            .iter()
+            .map(|memory| (memory.id.clone(), MemoryConsolidationMetadata::default()))
+            .collect::<BTreeMap<_, _>>();
+        let grouped = prepare_consolidation_groups(&corpus, &corpus_metadata);
         let expected_stream = original_materialized_plans(&workspace, &corpus);
         let mut stream = ConsolidationCandidateStream::new(&grouped);
         assert_eq!(stream.frontier.len(), 7);
@@ -953,7 +1001,12 @@ mod tests {
         assert!(stream.frontier.is_empty());
         for limit in [1, 7, 64] {
             let expected = reference_selection(&expected_stream, limit);
-            let actual = plan_consolidation_candidates(&workspace, &corpus, Some(limit as u64));
+            let actual = plan_consolidation_candidates(
+                &workspace,
+                &corpus,
+                &corpus_metadata,
+                Some(limit as u64),
+            );
             assert_eq!(actual.considered_candidates, expected_stream.len());
             assert_eq!(format!("{:?}", actual.candidates), format!("{expected:?}"));
             assert_eq!(
@@ -962,7 +1015,7 @@ mod tests {
             );
         }
         corpus.reverse();
-        let reversed_groups = prepare_consolidation_groups(&corpus);
+        let reversed_groups = prepare_consolidation_groups(&corpus, &corpus_metadata);
         let reversed_stream: Vec<_> = ConsolidationCandidateStream::new(&reversed_groups)
             .map(|candidate| candidate.into_plan(&workspace))
             .collect();

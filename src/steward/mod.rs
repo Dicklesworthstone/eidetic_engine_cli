@@ -4823,13 +4823,14 @@ impl ManualRunner {
             Err(result) => return result,
         };
 
-        let memories = match opened
+        let (memories, metadata) = match opened
             .connection
-            .list_memories(&opened.workspace_id, None, false)
+            .consolidation_memory_snapshot(&opened.workspace_id)
         {
-            Ok(memories) => memories,
+            Ok(snapshot) => snapshot,
             Err(error) => {
-                let message = format!("Failed to list memories for consolidation: {error}");
+                let message =
+                    format!("Failed to read memories and metadata for consolidation: {error}");
                 return steward_job_failure(
                     "ee.steward.consolidation_pass.error.v1",
                     "consolidation_pass_memory_query_failed",
@@ -4841,8 +4842,12 @@ impl ManualRunner {
             }
         };
 
-        let selection =
-            plan_consolidation_candidates(&opened.workspace_id, &memories, self.options.item_limit);
+        let selection = plan_consolidation_candidates(
+            &opened.workspace_id,
+            &memories,
+            &metadata,
+            self.options.item_limit,
+        );
         budget.record(ResourceType::Items, usize_to_u64(memories.len()));
         budget.record(ResourceType::TimeMs, 0);
 
@@ -9191,6 +9196,15 @@ mod tests {
         }
     }
 
+    fn consolidation_metadata_for_fixture(
+        memories: &[StoredMemory],
+    ) -> BTreeMap<String, crate::models::memory::MemoryConsolidationMetadata> {
+        memories
+            .iter()
+            .map(|memory| (memory.id.clone(), Default::default()))
+            .collect()
+    }
+
     #[test]
     fn consolidation_planner_uses_best_duplicate_as_source() -> TestResult {
         let memories = vec![
@@ -9223,7 +9237,12 @@ mod tests {
             ),
         ];
 
-        let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, None);
+        let selection = plan_consolidation_candidates(
+            SCORE_WORKSPACE_ID,
+            &memories,
+            &consolidation_metadata_for_fixture(&memories),
+            None,
+        );
 
         ensure(
             selection.considered_candidates,
@@ -9303,13 +9322,245 @@ mod tests {
                     0.40,
                 ),
             ];
-            let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, None);
+            let selection = plan_consolidation_candidates(
+                SCORE_WORKSPACE_ID,
+                &memories,
+                &consolidation_metadata_for_fixture(&memories),
+                None,
+            );
             assert_eq!(selection.considered_candidates, 1, "{case}");
             assert_eq!(selection.candidates.len(), 1, "{case}");
             let candidate = &selection.candidates[0];
             assert_eq!(candidate.source_memory_id, "mem_survivor", "{case}");
             assert_eq!(candidate.target_memory_id, "mem_exact_duplicate", "{case}");
             assert_eq!(candidate.proposed_content, original, "{case}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consolidation_planner_preserves_scope_and_protected_sidecars() -> TestResult {
+        for case in [
+            "workflow",
+            "trust_class",
+            "trust_subclass",
+            "verification",
+            "producer_agent",
+            "tags",
+            "typed_fields",
+            "anchors",
+            "source_sealed",
+            "target_sealed",
+            "source_sentinel",
+            "target_sentinel",
+            "matching_sentinels",
+            "source_quarantine",
+            "target_quarantine",
+            "superseded",
+            "missing_metadata",
+        ] {
+            let mut memories = vec![
+                stored_memory_for_consolidation(
+                    "mem_scope_source",
+                    "procedural",
+                    "rule",
+                    "Run the release gate.",
+                    0.95,
+                    0.8,
+                    0.7,
+                ),
+                stored_memory_for_consolidation(
+                    "mem_scope_target",
+                    "procedural",
+                    "rule",
+                    "Run the release gate.",
+                    0.4,
+                    0.3,
+                    0.2,
+                ),
+            ];
+            let mut metadata = consolidation_metadata_for_fixture(&memories);
+            let positive =
+                plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, &metadata, None);
+            assert_eq!(positive.candidates.len(), 1, "{case}: exact control");
+            match case {
+                "workflow" => memories[1].workflow_id = Some("other-workflow".to_owned()),
+                "trust_class" => memories[1].trust_class = "human_explicit".to_owned(),
+                "trust_subclass" => memories[1].trust_subclass = Some("agent:Bob".to_owned()),
+                "verification" => {
+                    memories[1].provenance_verification_status = "verified".to_owned()
+                }
+                "producer_agent" => {
+                    memories[0].provenance_uri = Some("agent://Alice/release".to_owned());
+                    memories[1].provenance_uri = Some("agent://Bob/release".to_owned());
+                }
+                "missing_metadata" => {
+                    metadata.remove("mem_scope_target");
+                }
+                _ => {
+                    let source_side = case.starts_with("source_");
+                    let id = if source_side {
+                        "mem_scope_source"
+                    } else {
+                        "mem_scope_target"
+                    };
+                    let sidecar = metadata.get_mut(id).ok_or("missing fixture metadata")?;
+                    match case {
+                        "tags" => sidecar.tags.push("workflow:release".to_owned()),
+                        "typed_fields" => sidecar.typed_fields_json = Some(
+                            r#"{"schema":"ee.memory.typed_fields.v2","kind":"rule","fields":{}}"#
+                                .to_owned(),
+                        ),
+                        "anchors" => {
+                            sidecar
+                                .anchors
+                                .push(crate::models::memory::MemoryConsolidationAnchor {
+                                    kind: "path".to_owned(),
+                                    value_hash: "a".repeat(64),
+                                    redacted_value: "src/release.rs".to_owned(),
+                                    confidence_bits: 1.0_f32.to_bits(),
+                                    source: "explicit".to_owned(),
+                                    provenance: "manual".to_owned(),
+                                    captured_span_hash: "b".repeat(64),
+                                    freshness: "current".to_owned(),
+                                    generation: 0,
+                                })
+                        }
+                        "source_sealed" | "target_sealed" => sidecar.sealed = true,
+                        "source_sentinel" | "target_sentinel" | "matching_sentinels" => {
+                            sidecar.has_sentinels = true
+                        }
+                        "source_quarantine" | "target_quarantine" => sidecar.quarantined = true,
+                        "superseded" => sidecar.superseded = true,
+                        _ => return Err(format!("unknown consolidation fixture {case}")),
+                    }
+                    if case == "matching_sentinels" {
+                        metadata
+                            .get_mut("mem_scope_source")
+                            .ok_or("missing source metadata")?
+                            .has_sentinels = true;
+                    }
+                }
+            }
+            let selection =
+                plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, &metadata, None);
+            assert_eq!(selection.considered_candidates, 0, "{case}");
+            assert!(selection.candidates.is_empty(), "{case}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consolidation_planner_requires_survivor_validity_to_cover_target() -> TestResult {
+        for (case, source_start, source_end, target_start, target_end, expected) in [
+            ("unbounded", None, None, None, None, 1),
+            (
+                "unbounded covers bounded",
+                None,
+                None,
+                Some("2026-01-01T00:00:00Z"),
+                Some("2030-01-01T00:00:00Z"),
+                1,
+            ),
+            (
+                "offset-equivalent",
+                Some("2026-01-01T01:00:00+01:00"),
+                None,
+                Some("2026-01-01T00:00:00Z"),
+                None,
+                1,
+            ),
+            (
+                "ordinary later duplicate",
+                Some("2026-01-01T00:00:00Z"),
+                None,
+                Some("2026-01-02T00:00:00Z"),
+                None,
+                1,
+            ),
+            (
+                "narrower start",
+                Some("2026-01-01T00:00:00.000000002Z"),
+                None,
+                Some("2026-01-01T00:00:00.000000001Z"),
+                None,
+                0,
+            ),
+            (
+                "narrower end",
+                None,
+                Some("2030-01-01T00:00:00.000000001Z"),
+                None,
+                Some("2030-01-01T00:00:00.000000002Z"),
+                0,
+            ),
+            (
+                "legacy unbounded target",
+                Some("2026-01-01T00:00:00Z"),
+                None,
+                None,
+                None,
+                0,
+            ),
+            (
+                "target outlives source",
+                None,
+                Some("2030-01-01T00:00:00Z"),
+                None,
+                None,
+                0,
+            ),
+            (
+                "malformed bound",
+                Some("not-an-instant"),
+                None,
+                None,
+                None,
+                0,
+            ),
+            (
+                "inverted target",
+                None,
+                None,
+                Some("2030-01-01T00:00:00Z"),
+                Some("2026-01-01T00:00:00Z"),
+                0,
+            ),
+        ] {
+            let mut source = stored_memory_for_consolidation(
+                "mem_time_source",
+                "semantic",
+                "fact",
+                "Release gate passed.",
+                0.95,
+                0.8,
+                0.7,
+            );
+            let mut target = stored_memory_for_consolidation(
+                "mem_time_target",
+                "semantic",
+                "fact",
+                "Release gate passed.",
+                0.4,
+                0.3,
+                0.2,
+            );
+            source.valid_from = source_start.map(str::to_owned);
+            source.valid_to = source_end.map(str::to_owned);
+            target.valid_from = target_start.map(str::to_owned);
+            target.valid_to = target_end.map(str::to_owned);
+            let memories = vec![source, target];
+            let selection = plan_consolidation_candidates(
+                SCORE_WORKSPACE_ID,
+                &memories,
+                &consolidation_metadata_for_fixture(&memories),
+                None,
+            );
+            assert_eq!(selection.candidates.len(), expected, "{case}");
+            if let Some(candidate) = selection.candidates.first() {
+                assert_eq!(candidate.source_memory_id, "mem_time_source", "{case}");
+                assert_eq!(candidate.target_memory_id, "mem_time_target", "{case}");
+            }
         }
         Ok(())
     }
@@ -9382,7 +9633,12 @@ mod tests {
             ),
         ];
 
-        let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, Some(2));
+        let selection = plan_consolidation_candidates(
+            SCORE_WORKSPACE_ID,
+            &memories,
+            &consolidation_metadata_for_fixture(&memories),
+            Some(2),
+        );
 
         ensure(
             selection.considered_candidates,

@@ -11825,6 +11825,35 @@ enum ConsolidateAbsorbResolution {
     Blocked(Vec<CurateValidationIssue>),
 }
 
+/// Read the same applicability sidecars used by the proposer. The final
+/// call runs inside the absorption transaction, after the rows are re-read.
+fn consolidation_pair_preserves_metadata(
+    connection: &DbConnection,
+    source: &crate::db::StoredMemory,
+    target: &crate::db::StoredMemory,
+) -> Result<bool, DomainError> {
+    let metadata = connection
+        .memory_consolidation_metadata_in_current_snapshot(&[
+            source.id.as_str(),
+            target.id.as_str(),
+        ])
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to revalidate consolidation retrieval metadata: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let (Some(source_metadata), Some(target_metadata)) =
+        (metadata.get(&source.id), metadata.get(&target.id))
+    else {
+        return Ok(false);
+    };
+    Ok(crate::curate::consolidation_preserves_memory_scope(
+        source.consolidation_view(),
+        source_metadata,
+        target.consolidation_view(),
+        target_metadata,
+    ))
+}
+
 /// Revalidate a `Consolidate` candidate at apply time. A candidate only
 /// earns absorb semantics (lineage link + duplicate tombstone) when it is
 /// provably steward-derived for exactly this (workspace, source, target)
@@ -11928,6 +11957,13 @@ fn resolve_consolidate_absorb(
                 "Reject the candidate; one memory changed after the consolidation pass ran.",
             ));
         }
+    }
+    if !consolidation_pair_preserves_metadata(connection, &source, target)? {
+        issues.push(validation_issue(
+            "consolidate_absorb_metadata_mismatch",
+            "The surviving memory does not preserve the target's applicability, trust or retrieval metadata, or a protected sidecar prevents absorption.",
+            "Keep both memories; re-run consolidation only after their scopes and metadata are compatible.",
+        ));
     }
     if stored.proposed_content.as_deref() != Some(source.content.as_str()) {
         issues.push(validation_issue(
@@ -15758,6 +15794,11 @@ fn revalidate_consolidate_absorb_in_transaction(
         crate::curate::normalize_memory_content_for_consolidation(&target.content);
     if normalized_source.is_empty() || normalized_source != normalized_target {
         return Err(stale("pair no longer has byte-identical content"));
+    }
+    if !consolidation_pair_preserves_metadata(connection, &source, &target)? {
+        return Err(stale(
+            "pair no longer preserves applicability, trust or retrieval metadata",
+        ));
     }
     if current.proposed_content.as_deref() != Some(source.content.as_str()) {
         return Err(stale("proposed content drifted from the surviving source"));
@@ -29564,6 +29605,196 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "blocked target disappeared".to_owned())?;
             assert_eq!(target.content, changed_content, "{case}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consolidate_absorb_rechecks_scope_and_sidecars_after_approval() -> TestResult {
+        for case in [
+            "workflow",
+            "trust",
+            "validity",
+            "tags",
+            "anchor",
+            "source_seal",
+            "target_seal",
+            "source_sentinel",
+            "target_sentinel",
+            "superseded",
+            "quarantine",
+        ] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+            let workspace_path = tempdir.path();
+            let database_path = workspace_path.join("ee.db");
+            let workspace_id = test_workspace_id(workspace_path);
+            let source_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E51)).to_string();
+            let target_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E52)).to_string();
+            let candidate_id = crate::curate::steward_consolidation_candidate_id(
+                &workspace_id,
+                &source_id,
+                &target_id,
+            );
+            let connection = seed_consolidate_absorb_candidate_database(
+                &database_path,
+                workspace_path,
+                &workspace_id,
+                &source_id,
+                &target_id,
+                &candidate_id,
+                None,
+            )?;
+            validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &candidate_id,
+                actor: Some("ScarletMill"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("approved candidate missing")?;
+            let absorb = consolidate_absorb_plan_for_test(
+                &workspace_id,
+                &source_id,
+                &target_id,
+                &candidate_id,
+            );
+            super::revalidate_consolidate_absorb_in_transaction(
+                &connection,
+                &workspace_id,
+                &stored,
+                &absorb,
+            )
+            .map_err(|error| format!("{case}: exact active control: {}", error.message()))?;
+
+            let protected_id = if case.starts_with("source_") {
+                &source_id
+            } else {
+                &target_id
+            };
+            match case {
+                "workflow" => connection.execute_raw(&format!(
+                    "UPDATE memories SET workflow_id = 'another-workflow' WHERE id = '{target_id}'"
+                )).map_err(|error| error.to_string())?,
+                "trust" => {
+                    assert!(connection.update_memory_trust_class(&target_id, "human_explicit")
+                        .map_err(|error| error.to_string())?);
+                }
+                "validity" => {
+                    assert!(connection.set_memory_validity_for_diagnostic(
+                        &target_id, Some("2000-01-01T00:00:00Z"), None, false, false,
+                    ).map_err(|error| error.to_string())?);
+                }
+                "tags" => connection.add_memory_tags(&target_id, &["scope:unique".to_owned()])
+                    .map_err(|error| error.to_string())?,
+                "anchor" => {
+                    let anchor = crate::models::CreateMemoryAnchorInput::from_raw(
+                        &target_id, crate::models::MemoryAnchorKind::Path, "src/release.rs", 1.0,
+                        crate::models::MemoryAnchorSource::Explicit, "manual://scope-regression", 0,
+                    ).ok_or("invalid anchor fixture")?;
+                    connection.upsert_memory_anchors(&[anchor]).map_err(|error| error.to_string())?;
+                }
+                "source_seal" | "target_seal" => connection.insert_memory_seal(
+                    protected_id,
+                    &crate::models::memory_seal_commitment(b"distinct hidden protocol"),
+                    "2026-08-01T00:00:00Z",
+                ).map_err(|error| error.to_string())?,
+                "source_sentinel" | "target_sentinel" => {
+                    let sentinel = crate::models::MemorySentinelSpec::from_raw(
+                        protected_id, "env_var_registered:EE_PACK_TRACE",
+                        crate::models::MemorySentinelPolarity::Gate, None,
+                        "test://consolidation-scope", Some(300),
+                    ).map_err(|error| error.to_string())?;
+                    connection.upsert_memory_sentinel_spec(&sentinel).map_err(|error| error.to_string())?;
+                }
+                "superseded" => connection.execute_raw(&format!(
+                    "UPDATE memories SET superseded_at = '2026-08-01T00:00:00Z' WHERE id = '{target_id}'"
+                )).map_err(|error| error.to_string())?,
+                "quarantine" => connection.insert_feedback_quarantine(
+                    &format!("fq_{:026}", 1),
+                    &crate::db::CreateFeedbackQuarantineInput {
+                        workspace_id: workspace_id.clone(),
+                        source_id: "scope-regression".to_owned(),
+                        target_type: "memory".to_owned(),
+                        target_id: source_id.clone(),
+                        signal: "harmful".to_owned(),
+                        weight: 1.0,
+                        source_type: "automated_check".to_owned(),
+                        proposed_event_id: None,
+                        recorded_at: "2026-08-01T00:00:00Z".to_owned(),
+                        reason: "Pending review".to_owned(),
+                        event_reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                    },
+                ).map_err(|error| error.to_string())?,
+                _ => return Err(format!("unknown scope fixture {case}")),
+            }
+
+            let expected_source = connection
+                .get_memory(&source_id)
+                .map_err(|error| error.to_string())?;
+            let expected_target = connection
+                .get_memory(&target_id)
+                .map_err(|error| error.to_string())?;
+            let expected_metadata = connection
+                .memory_consolidation_metadata_in_current_snapshot(&[
+                    source_id.as_str(),
+                    target_id.as_str(),
+                ])
+                .map_err(|error| error.to_string())?;
+            let error = super::revalidate_consolidate_absorb_in_transaction(
+                &connection,
+                &workspace_id,
+                &stored,
+                &absorb,
+            )
+            .expect_err("postapproval scope drift must fail transaction revalidation");
+            assert!(
+                error
+                    .message()
+                    .contains("no longer preserves applicability"),
+                "{case}: {}",
+                error.message()
+            );
+            assert_consolidate_absorb_blocked_without_mutation(
+                &connection,
+                workspace_path,
+                &database_path,
+                &workspace_id,
+                &source_id,
+                &target_id,
+                &candidate_id,
+                "consolidate_absorb_metadata_mismatch",
+            )?;
+            assert_eq!(
+                connection
+                    .get_memory(&source_id)
+                    .map_err(|error| error.to_string())?,
+                expected_source,
+                "{case}"
+            );
+            assert_eq!(
+                connection
+                    .get_memory(&target_id)
+                    .map_err(|error| error.to_string())?,
+                expected_target,
+                "{case}"
+            );
+            assert_eq!(
+                connection
+                    .memory_consolidation_metadata_in_current_snapshot(&[
+                        source_id.as_str(),
+                        target_id.as_str()
+                    ],)
+                    .map_err(|error| error.to_string())?,
+                expected_metadata,
+                "{case}"
+            );
         }
         Ok(())
     }

@@ -25755,6 +25755,31 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+impl StoredMemory {
+    pub(crate) fn consolidation_view(&self) -> crate::models::memory::MemoryConsolidationView<'_> {
+        use crate::models::memory::{MemoryConsolidationScope, MemoryConsolidationView};
+
+        MemoryConsolidationView {
+            scope: MemoryConsolidationScope {
+                workspace_id: &self.workspace_id,
+                level: &self.level,
+                kind: &self.kind,
+                workflow_id: self.workflow_id.as_deref(),
+                trust_class: &self.trust_class,
+                trust_subclass: self.trust_subclass.as_deref(),
+                provenance_verification_status: &self.provenance_verification_status,
+                agent_provenance_uri: self.provenance_uri.as_deref().filter(|uri| {
+                    uri.starts_with("agent://")
+                        || uri.starts_with("agent-mail://")
+                        || uri.starts_with("agent_mail://")
+                }),
+            },
+            valid_from: self.valid_from.as_deref(),
+            valid_to: self.valid_to.as_deref(),
+        }
+    }
+}
+
 pub(crate) const MEMORY_INDEX_METADATA_BATCH_SIZE: usize = 128;
 
 /// Source sidecars for a memory already admitted to an index snapshot.
@@ -27680,6 +27705,124 @@ impl DbConnection {
             }
         }
         Ok(batch)
+    }
+
+    /// Pin proposal rows and sidecars to one read view, then release it before
+    /// the steward writes candidates. Apply revalidation owns its write scope.
+    pub(crate) fn consolidation_memory_snapshot(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(
+        Vec<StoredMemory>,
+        BTreeMap<String, crate::models::memory::MemoryConsolidationMetadata>,
+    )> {
+        self.begin_read_snapshot()?;
+        let result = (|| {
+            let memories = self.list_memories(workspace_id, None, false)?;
+            let ids = memories
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<Vec<_>>();
+            let metadata = self.memory_consolidation_metadata_in_current_snapshot(&ids)?;
+            self.commit_read_snapshot()?;
+            Ok((memories, metadata))
+        })();
+        if result.is_err() {
+            self.rollback_read_snapshot()?;
+        }
+        result
+    }
+
+    /// Hydrate exact-consolidation sidecars in bounded pages. Apply callers
+    /// use the same reader inside their serialized write transaction; a
+    /// missing row or failed read never becomes default-empty authority.
+    pub(crate) fn memory_consolidation_metadata_in_current_snapshot(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, crate::models::memory::MemoryConsolidationMetadata>> {
+        use crate::models::memory::{MemoryConsolidationAnchor, MemoryConsolidationMetadata};
+
+        let ids = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut result = BTreeMap::new();
+        for chunk in ids.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let mut index_metadata = self.memory_index_metadata_in_current_snapshot(chunk)?;
+            let mut tags = self.get_memory_tags_batch(chunk)?;
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params = chunk
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT m.id, m.kind, m.superseded_at, EXISTS(SELECT 1 FROM memory_seals s WHERE s.memory_id = m.id), EXISTS(SELECT 1 FROM memory_sentinel_specs s WHERE s.memory_id = m.id), EXISTS(SELECT 1 FROM feedback_quarantine q WHERE q.workspace_id = m.workspace_id AND q.target_type = 'memory' AND q.target_id = m.id AND q.status = 'pending') FROM memories m WHERE m.id IN ({placeholders}) ORDER BY m.id ASC"
+                ),
+                &params,
+            )?;
+            for row in &rows {
+                let id = required_text(row, 0, DbOperation::Query, "id")?;
+                let metadata = index_metadata.by_memory_id.remove(id).ok_or_else(|| {
+                    DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: format!("Consolidation metadata disappeared for memory {id}"),
+                    }
+                })?;
+                let typed_fields_json = metadata
+                    .typed_fields_json
+                    .as_deref()
+                    .map(|raw| {
+                        let kind = MemoryKind::from_str(required_text(
+                            row,
+                            1,
+                            DbOperation::Query,
+                            "kind",
+                        )?)
+                        .map_err(|error| typed_memory_fields_error(DbOperation::Query, error))?;
+                        canonicalize_typed_memory_fields_json(&kind, raw)
+                            .map_err(|error| typed_memory_fields_error(DbOperation::Query, error))
+                    })
+                    .transpose()?;
+                let mut anchors = metadata
+                    .anchors
+                    .into_iter()
+                    .map(|anchor| MemoryConsolidationAnchor {
+                        kind: anchor.anchor_kind.as_str().to_owned(),
+                        value_hash: anchor.anchor_value_hash,
+                        redacted_value: anchor.redacted_anchor_value,
+                        confidence_bits: anchor.confidence.to_bits(),
+                        source: anchor.source.as_str().to_owned(),
+                        provenance: anchor.provenance,
+                        captured_span_hash: anchor.captured_span_hash,
+                        freshness: anchor.freshness_state.as_str().to_owned(),
+                        generation: anchor.generation,
+                    })
+                    .collect::<Vec<_>>();
+                anchors.sort();
+                anchors.dedup();
+                result.insert(
+                    id.to_owned(),
+                    MemoryConsolidationMetadata {
+                        tags: tags.remove(id).unwrap_or_default(),
+                        typed_fields_json,
+                        anchors,
+                        superseded: optional_text(row, 2)?.is_some(),
+                        sealed: required_i64(row, 3, DbOperation::Query, "sealed")? != 0,
+                        has_sentinels: required_i64(row, 4, DbOperation::Query, "has_sentinels")?
+                            != 0,
+                        quarantined: required_i64(row, 5, DbOperation::Query, "quarantined")? != 0,
+                    },
+                );
+            }
+        }
+        Ok(result)
     }
 
     /// Query memories by a typed anchor hash.
@@ -60769,6 +60912,68 @@ UPDATE memories
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn consolidation_snapshot_preserves_canonical_retrieval_metadata() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let source_id =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E61)).to_string();
+        let target_id =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E62)).to_string();
+        let mut input = test_memory_input(workspace_id, "Run cargo fmt in src/release.rs.");
+        input.kind = "rule".to_owned();
+        input.tags = vec!["release".to_owned(), "scope".to_owned()];
+        connection.insert_memory(&source_id, &input)?;
+        input.tags.reverse();
+        connection.insert_memory(&target_id, &input)?;
+        connection.set_memory_typed_fields_json(
+            &source_id,
+            Some(r#"{"condition":"release","action":"Run cargo fmt"}"#),
+        )?;
+        connection.set_memory_typed_fields_json(
+            &target_id,
+            Some(r#"{"action":"Run cargo fmt","condition":" release "}"#),
+        )?;
+
+        let (memories, metadata) = connection.consolidation_memory_snapshot(workspace_id)?;
+        assert_eq!(memories.len(), 2);
+        let source = metadata.get(&source_id).ok_or("source sidecars missing")?;
+        let target = metadata.get(&target_id).ok_or("target sidecars missing")?;
+        assert_eq!(
+            source, target,
+            "row identity and capture time must not disable ordinary duplicates"
+        );
+        assert_eq!(source.tags, vec!["release".to_owned(), "scope".to_owned()]);
+        assert!(source.typed_fields_json.is_some());
+        assert!(
+            !source.anchors.is_empty(),
+            "positive control must exercise real anchor extraction"
+        );
+        assert!(
+            !source.sealed && !source.has_sentinels && !source.quarantined && !source.superseded
+        );
+
+        // The read snapshot must already be released so normal writes can
+        // change one scope, and the next hydration must observe that change.
+        connection.set_memory_typed_fields_json(
+            &target_id,
+            Some(r#"{"condition":"production only","action":"Run cargo fmt"}"#),
+        )?;
+        let changed = connection.memory_consolidation_metadata_in_current_snapshot(&[
+            source_id.as_str(),
+            target_id.as_str(),
+        ])?;
+        assert_ne!(
+            changed[&source_id].typed_fields_json,
+            changed[&target_id].typed_fields_json
+        );
+        assert_eq!(changed[&source_id].tags, changed[&target_id].tags);
+        assert_eq!(changed[&source_id].anchors, changed[&target_id].anchors);
         Ok(())
     }
 

@@ -377,6 +377,66 @@ pub(crate) fn normalize_memory_content_for_consolidation(content: &str) -> Strin
     }
 }
 
+/// The source survives unchanged. It must therefore retain the target's
+/// applicability and every retrieval sidecar, and neither row may carry
+/// sealed content, sentinel authority or a superseded revision.
+#[must_use]
+pub(crate) fn consolidation_preserves_memory_scope(
+    source: crate::models::memory::MemoryConsolidationView<'_>,
+    source_metadata: &crate::models::memory::MemoryConsolidationMetadata,
+    target: crate::models::memory::MemoryConsolidationView<'_>,
+    target_metadata: &crate::models::memory::MemoryConsolidationMetadata,
+) -> bool {
+    if source.scope != target.scope
+        || source_metadata != target_metadata
+        || source_metadata.superseded
+        || source_metadata.sealed
+        || source_metadata.has_sentinels
+        || source_metadata.quarantined
+    {
+        return false;
+    }
+
+    let instant = |raw: &str| {
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|value| value.with_timezone(&Utc))
+    };
+    let window = |view: crate::models::memory::MemoryConsolidationView<'_>| {
+        let start = match view.valid_from {
+            Some(raw) => Some(instant(raw)?),
+            None => None,
+        };
+        let end = match view.valid_to {
+            Some(raw) => Some(instant(raw)?),
+            None => None,
+        };
+        if matches!((start, end), (Some(start), Some(end)) if start > end) {
+            return None;
+        }
+        Some((start, end))
+    };
+    let Some((source_start, source_end)) = window(source) else {
+        return false;
+    };
+    let Some((target_start, target_end)) = window(target) else {
+        return false;
+    };
+    // Missing author bounds remain unbounded, including legacy rows. New
+    // captures already store their creation instant in valid_from.
+    let covers_start = match (source_start, target_start) {
+        (None, _) => true,
+        (Some(source), Some(target)) => source <= target,
+        (Some(_), None) => false,
+    };
+    let covers_end = match (source_end, target_end) {
+        (None, _) => true,
+        (Some(source), Some(target)) => source >= target,
+        (Some(_), None) => false,
+    };
+    covers_start && covers_end
+}
+
 /// Canonical deterministic id for a steward-proposed Consolidate candidate:
 /// BLAKE3 over the versioned domain tag, workspace id, surviving source
 /// memory id, and absorbed target memory id. Apply-time hardening recomputes
