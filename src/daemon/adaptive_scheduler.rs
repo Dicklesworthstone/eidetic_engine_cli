@@ -1120,9 +1120,7 @@ mod tests {
     fn context_dispatch_prefetch_hit_matches_the_cold_pack_bd_16pwc_4() {
         use std::sync::Arc;
 
-        use super::super::{
-            DaemonDispatchPolicy, METHOD_CONTEXT, dispatch_context_with_admission,
-        };
+        use super::super::{DaemonDispatchPolicy, METHOD_CONTEXT, dispatch_context_with_admission};
         use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus};
         use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
 
@@ -1228,18 +1226,16 @@ mod tests {
                     if !warm {
                         return Ok((AdaptivePolicyTickets::default(), false));
                     }
-                    let tickets = runtime.refresh_policy(
-                        prefetch,
-                        authorized,
-                        "agent-prefetch",
-                        || SwarmAdaptiveConfig {
-                            enabled: Some(true),
-                            prefetch_top_k: Some(1),
-                            prefetch_budget_ms: Some(5_000),
-                            similarity_threshold: Some(0.0),
-                            ..SwarmAdaptiveConfig::default()
-                        },
-                    );
+                    let tickets =
+                        runtime.refresh_policy(prefetch, authorized, "agent-prefetch", || {
+                            SwarmAdaptiveConfig {
+                                enabled: Some(true),
+                                prefetch_top_k: Some(1),
+                                prefetch_budget_ms: Some(5_000),
+                                similarity_threshold: Some(0.0),
+                                ..SwarmAdaptiveConfig::default()
+                            }
+                        });
                     Ok((tickets, false))
                 },
             )
@@ -1266,8 +1262,16 @@ mod tests {
         };
 
         let (cold_text, cold_hash) = pack_fields(&dispatch(&request("req-cold", HIT), false));
-        assert!(dispatch(&request("req-observe-hit", HIT), true).error.is_none());
-        assert!(dispatch(&request("req-observe-mid", MID), true).error.is_none());
+        assert!(
+            dispatch(&request("req-observe-hit", HIT), true)
+                .error
+                .is_none()
+        );
+        assert!(
+            dispatch(&request("req-observe-mid", MID), true)
+                .error
+                .is_none()
+        );
         let mark = policy
             .cass_prefetch_worker
             .as_ref()

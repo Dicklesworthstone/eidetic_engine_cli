@@ -7521,7 +7521,10 @@ mod tests {
                     ticket,
                 );
             }
-            (last.candidates.len(), prefetch_metrics(&coordinator).candidates_emitted)
+            (
+                last.candidates.len(),
+                prefetch_metrics(&coordinator).candidates_emitted,
+            )
         };
 
         let (uncapped_len, uncapped_emitted) = run(None);
