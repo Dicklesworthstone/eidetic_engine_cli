@@ -218,6 +218,25 @@ scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
     cargo test --locked test_name -- --exact
 ```
 
+**THE LINT GATE IS GREEN, SO TREAT A CLIPPY RED AS YOURS.** Measured 2026-10-30
+at `2f5e6fa21` on the lane: `cargo clippy --locked --all-targets -j 2 --
+-D warnings` reached `Finished \`dev\` profile ... in 17m 49s` with exit 0 and
+**zero** errors, warnings and `clippy::` lints. This is worth dating because the
+standing assumption here has been the opposite — project memory described
+`--all-targets` clippy as carrying "latent reds", which was true when written
+and is what makes an agent discount a clippy failure as pre-existing. It is not
+pre-existing any more. A clippy red after this date is a regression introduced
+since it, and the gate is a trustworthy signal rather than noise to be stepped
+around.
+
+Two things that green does NOT mean. It is a lint gate, not a test run — zero
+`test result:` lines, so it says nothing about behaviour. And `-D warnings`
+promotes the crate-wide `expect_used`/`unwrap_used` settings, so every
+`tests/*.rs` still needs its
+`#![allow(clippy::unwrap_used, clippy::expect_used)]` header after the `//!`
+block; the green means all 196 existing files carry it, not that a new file can
+omit it.
+
 **`--pinned-franken-stack` refuses any cargo command without `--locked`.** It
 exits 1 before materializing anything, with `"status":
 "source_state_refused"`, `blocking_codes:
