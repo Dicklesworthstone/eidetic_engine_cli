@@ -8203,7 +8203,47 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         )
         .await;
     }
+    let read_pool = database_path.exists().then(|| {
+        registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single()
+                .with_max_pin_duration(search_snapshot_max_pin_duration(request_timeout)),
+        )
+    });
+    let mut empty_read_snapshot = None;
+    let mut empty_generation = None;
+    if prepared_fast_embedder.is_none()
+        && options.source_mode.uses_embeddings()
+        && empty_search_generation_hint(&index_dir)
+        && let Some(read_pool) = read_pool.as_ref()
+    {
+        let snapshot = read_pool.pin_snapshot().map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to acquire search read snapshot for {}: {error}",
+                database_path.display()
+            ))
+        })?;
+        empty_generation = prepare_empty_search_generation(
+            cx,
+            options,
+            snapshot.checked_connection().map_err(|error| {
+                SearchError::Index(format!(
+                    "Search read snapshot became unavailable for {}: {error}",
+                    database_path.display()
+                ))
+            })?,
+        )
+        .await?;
+        if empty_generation.is_some() {
+            empty_read_snapshot = Some(snapshot);
+        } else {
+            // A writer may have published since the unleased hint. Release
+            // this source view before preparing a model, then pin a new one.
+            finish_search_snapshot(snapshot, Ok(()), &database_path)?;
+        }
+    }
     let embedder_preparation = if prepared_fast_embedder.is_none()
+        && empty_generation.is_none()
         && options.source_mode.uses_embeddings()
         && index_dir.exists()
         && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
@@ -8231,18 +8271,16 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             .map(|preparation| Arc::clone(&preparation.fast_embedder))
     });
 
-    if database_path.exists() {
-        let read_pool = registered_process_read_pool(
-            DatabaseConfig::file(database_path.clone()),
-            PoolConfig::default_single()
-                .with_max_pin_duration(search_snapshot_max_pin_duration(request_timeout)),
-        );
-        let read_snapshot = read_pool.pin_snapshot().map_err(|error| {
-            SearchError::Index(format!(
-                "Failed to acquire search read snapshot for {}: {error}",
-                database_path.display()
-            ))
-        })?;
+    if let Some(read_pool) = read_pool.as_ref() {
+        let read_snapshot = match empty_read_snapshot {
+            Some(snapshot) => snapshot,
+            None => read_pool.pin_snapshot().map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to acquire search read snapshot for {}: {error}",
+                    database_path.display()
+                ))
+            })?,
+        };
         let result = {
             let connection = read_snapshot.checked_connection().map_err(|error| {
                 SearchError::Index(format!(
@@ -8271,6 +8309,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 true,
                 None,
                 fast_embedder_override.clone(),
+                empty_generation,
                 retrieval_only,
             )
             .await
@@ -8349,6 +8388,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         true,
         None,
         fast_embedder_override,
+        None,
         retrieval_only,
     )
     .await?;
@@ -8397,6 +8437,88 @@ fn finish_search_snapshot<T>(
             }
             Err(error)
         }
+    }
+}
+
+/// An unleased observation is only a reason to try the model-free path. The
+/// source snapshot and generation lease below supply the actual authority.
+pub(crate) fn empty_search_generation_hint(index_dir: &Path) -> bool {
+    cfg!(unix)
+        && crate::core::index::index_generation_is_verified_empty(index_dir)
+            .is_ok_and(|empty| empty)
+}
+
+/// Proof carried from the caller's pinned source snapshot into local retrieval.
+/// Consume its lease at the normal collection boundary, before the global lane
+/// can reconcile another index under the same parent directory.
+pub(crate) struct PreparedEmptySearchGeneration {
+    index_dir: PathBuf,
+    source_generation: u64,
+    #[cfg(unix)]
+    lease: crate::core::index::IndexGenerationLease,
+}
+
+pub(crate) async fn prepare_empty_search_generation(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    connection: &DbConnection,
+) -> Result<Option<PreparedEmptySearchGeneration>, SearchError> {
+    search_checkpoint(cx)?;
+    #[cfg(unix)]
+    {
+        if connection.needs_migration().unwrap_or(true) {
+            return Ok(None);
+        }
+        let index_dir = options.resolve_index_dir();
+        let lease = match pin_search_generation(cx, &index_dir).await {
+            Ok(lease) => lease,
+            Err(error @ SearchError::Cancelled(_)) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        // The passive status probe checks the configured producer without
+        // loading it. Preserve semantic metadata mismatch, complete corpus and
+        // source-generation admission even for zero-document vector headers.
+        let status_options = IndexStatusOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+        };
+        let Ok(status) = get_index_status_in_current_snapshot(&status_options, connection) else {
+            return Ok(None);
+        };
+        let Some(source_generation) = status.db_generation else {
+            return Ok(None);
+        };
+        if status.health != IndexHealth::Ready
+            || status.index_generation != Some(source_generation)
+            || !crate::core::index::index_generation_is_verified_empty(&index_dir)
+                .is_ok_and(|empty| empty)
+        {
+            return Ok(None);
+        }
+        // Reuse ordinary snapshot admission rather than treating a zero count
+        // as permission to open corrupt, incompatible or redirected assets.
+        let selected = match lease.index_for_snapshot(cx, &index_dir, source_generation) {
+            Ok(selected) => selected,
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
+                return Err(SearchError::Cancelled(reason));
+            }
+            Err(_) => return Ok(None),
+        };
+        if selected != index_dir {
+            return Ok(None);
+        }
+        search_checkpoint(cx)?;
+        Ok(Some(PreparedEmptySearchGeneration {
+            index_dir,
+            source_generation,
+            lease,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (options, connection);
+        Ok(None)
     }
 }
 
@@ -8680,6 +8802,29 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
     rerank_seed: Deterministic<Seed>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<ContextSearchReport, SearchError> {
+    run_context_search_with_prepared_generation(
+        cx,
+        options,
+        read_connection,
+        audit_connection,
+        workspace_state,
+        rerank_seed,
+        fast_embedder_override,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_context_search_with_prepared_generation(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    workspace_state: Option<&SearchWorkspaceProbeState>,
+    rerank_seed: Deterministic<Seed>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    empty_generation: Option<PreparedEmptySearchGeneration>,
+) -> Result<ContextSearchReport, SearchError> {
     // Context candidate conversion batch-loads memories itself, so passthrough
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
     let mut audit_ids = SearchAuditIdSource::Ambient;
@@ -8695,6 +8840,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
         false,
         Some(&mut preloaded_memories),
         fast_embedder_override,
+        empty_generation,
         false,
     )
     .await?;
@@ -9626,6 +9772,7 @@ async fn run_search_inner(
         include_passthrough_scope_analysis_metadata,
         preloaded_memories,
         None,
+        None,
         false,
     )
     .await
@@ -9643,8 +9790,10 @@ async fn run_search_inner_with_performance(
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    empty_generation: Option<PreparedEmptySearchGeneration>,
     capture_deferred_audit: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
+    let model_free_empty_generation = empty_generation.is_some();
     options.validate()?;
     // Always keep an authoritative-memory map for this request. Global-store
     // hits populate it from their source database even when the caller does
@@ -9738,6 +9887,18 @@ async fn run_search_inner_with_performance(
     // NoIndex result may use source-only retrieval; corruption, incompatible
     // bytes, symlinks, lease failures and cancellation keep their typed error.
     let selected_index: Result<PathBuf, SearchError> = async {
+        if let Some(empty) = empty_generation {
+            if source_generation != Some(empty.source_generation) {
+                return Err(SearchError::Index(
+                    "Empty search generation does not match the pinned source snapshot".to_owned(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                generation_lease = Some(empty.lease);
+            }
+            return Ok(empty.index_dir);
+        }
         if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
             return Err(SearchError::NoIndex);
         }
@@ -9856,11 +10017,23 @@ async fn run_search_inner_with_performance(
         return Err(SearchError::NoIndex);
     }
     trace.record_elapsed("search::liveSnapshotRetrieval", live_snapshot_start);
+    let empty_generation = live_snapshot_retrieval.is_none()
+        && crate::core::index::index_generation_is_verified_empty(&index_dir)
+            .map_err(SearchError::IndexIncompatible)?;
     let source_mode_start = Instant::now();
     let source_mode = if live_snapshot_retrieval.is_some() {
         SourceModeResolution {
             applied: SearchSourceMode::LexicalOnly,
             fallback_applied: options.source_mode != SearchSourceMode::LexicalOnly,
+            unavailable_no_results: false,
+        }
+    } else if empty_generation && model_free_empty_generation {
+        // No local query vector or reranker is needed. In particular, runtime
+        // capability discovery must not initialize a cold model merely to
+        // return an empty set. The ordinary global merge still runs below.
+        SourceModeResolution {
+            applied: options.source_mode,
+            fallback_applied: false,
             unavailable_no_results: false,
         }
     } else {
@@ -9871,7 +10044,7 @@ async fn run_search_inner_with_performance(
             fast_embedder_override.as_deref(),
         )?
     };
-    let embed_backend = if source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -9893,7 +10066,7 @@ async fn run_search_inner_with_performance(
     let rerank_resolve_start = Instant::now();
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
-    let rerank_runtime = if live_snapshot_retrieval.is_some() {
+    let rerank_runtime = if live_snapshot_retrieval.is_some() || empty_generation {
         SearchRerankRuntime::disabled()
     } else {
         resolve_search_rerank_runtime(
@@ -9954,9 +10127,7 @@ async fn run_search_inner_with_performance(
     let retrieve_start = Instant::now();
     let search_result = if let Some(retrieval) = live_snapshot_retrieval {
         Ok(retrieval)
-    } else if crate::core::index::index_generation_is_verified_empty(&index_dir)
-        .map_err(SearchError::IndexIncompatible)?
-    {
+    } else if empty_generation {
         // Empty init/repair generations use a model-free hash placeholder.
         // No query vector is needed, and comparing its placeholder producer
         // with a selected semantic model would incorrectly require a rebuild.
@@ -10434,6 +10605,40 @@ pub async fn run_diag_search_with_cx(
     search_checkpoint(cx)?;
     resolved_search_fusion_weights(&options.workspace_path)?;
     let index_dir = options.resolve_index_dir();
+    let database_path = options.resolve_database_path();
+    if options.source_mode.uses_embeddings()
+        && database_path.exists()
+        && empty_search_generation_hint(&index_dir)
+    {
+        let pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single()
+                .with_max_pin_duration(search_snapshot_max_pin_duration(Duration::from_secs(30))),
+        );
+        let snapshot = pool.pin_snapshot().map_err(|_| {
+            SearchError::Index("Diagnostic search could not pin its source snapshot".to_owned())
+        })?;
+        let connection = snapshot.checked_connection().map_err(|_| {
+            SearchError::Index("Diagnostic source snapshot is unavailable".to_owned())
+        })?;
+        if let Some(empty_generation) =
+            prepare_empty_search_generation(cx, options, connection).await?
+        {
+            let mut snapshot_options = options.clone();
+            snapshot_options.as_of = Some(options.as_of.unwrap_or_else(Utc::now));
+            let result = run_diag_search_in_snapshot(
+                cx,
+                &snapshot_options,
+                None,
+                true,
+                Some(connection),
+                Some(empty_generation),
+            )
+            .await;
+            return finish_search_snapshot(snapshot, result, &database_path);
+        }
+        finish_search_snapshot(snapshot, Ok(()), &database_path)?;
+    }
     let fast_embedder = if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
@@ -10492,6 +10697,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
             fast_embedder_override,
             resolve_runtime_source_mode,
             None,
+            None,
         )
         .await;
     }
@@ -10520,6 +10726,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
             fast_embedder_override,
             resolve_runtime_source_mode,
             Some(connection),
+            None,
         )
         .await
     }
@@ -10533,7 +10740,9 @@ async fn run_diag_search_in_snapshot(
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     resolve_runtime_source_mode: bool,
     read_connection: Option<&DbConnection>,
+    empty_generation: Option<PreparedEmptySearchGeneration>,
 ) -> Result<SearchDiagnosticReport, SearchError> {
+    let model_free_empty_generation = empty_generation.is_some();
     options.validate()?;
     search_checkpoint(cx)?;
     let (fusion_weights, scoring_config) = resolved_search_configuration(&options.workspace_path)?;
@@ -10574,7 +10783,22 @@ async fn run_diag_search_in_snapshot(
         return Err(SearchError::NoIndex);
     }
     #[cfg(unix)]
-    let generation_lease = pin_search_generation(cx, &index_dir).await?;
+    let prepared_empty_path = empty_generation
+        .as_ref()
+        .map(|empty| empty.index_dir.clone());
+    if empty_generation
+        .as_ref()
+        .is_some_and(|empty| source_generation != Some(empty.source_generation))
+    {
+        return Err(SearchError::Index(
+            "Empty diagnostic generation does not match the pinned source snapshot".to_owned(),
+        ));
+    }
+    #[cfg(unix)]
+    let generation_lease = match empty_generation {
+        Some(empty) => empty.lease,
+        None => pin_search_generation(cx, &index_dir).await?,
+    };
     #[cfg(unix)]
     if (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
         && !generation_lease
@@ -10584,11 +10808,12 @@ async fn run_diag_search_in_snapshot(
         return Err(SearchError::NoIndex);
     }
     #[cfg(unix)]
-    let index_dir = match source_generation {
-        Some(generation) if !options.source_mode.uses_embeddings() => generation_lease
+    let index_dir = match (prepared_empty_path, source_generation) {
+        (Some(selected), _) => selected,
+        (None, Some(generation)) if !options.source_mode.uses_embeddings() => generation_lease
             .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
             .map_err(map_index_generation_error)?,
-        Some(generation) => match fast_embedder_override.as_deref() {
+        (None, Some(generation)) => match fast_embedder_override.as_deref() {
             Some(embedder) => generation_lease.index_for_snapshot_with_identity(
                 cx,
                 &index_dir,
@@ -10602,7 +10827,7 @@ async fn run_diag_search_in_snapshot(
             None => generation_lease.index_for_snapshot(cx, &index_dir, generation),
         }
         .map_err(map_index_generation_error)?,
-        None => index_dir,
+        (None, None) => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
         && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
@@ -10659,7 +10884,9 @@ async fn run_diag_search_in_snapshot(
             large_gap: search_index_gap_is_large(db_generation, index_generation),
         });
     }
-    let source_mode = if resolve_runtime_source_mode {
+    let empty_generation = crate::core::index::index_generation_is_verified_empty(&index_dir)
+        .map_err(SearchError::IndexIncompatible)?;
+    let source_mode = if resolve_runtime_source_mode && !model_free_empty_generation {
         resolve_source_mode(
             options,
             &index_dir,
@@ -10667,16 +10894,16 @@ async fn run_diag_search_in_snapshot(
             fast_embedder_override.as_deref(),
         )?
     } else {
-        // Unit tests that provide the exact embedder used to build a synthetic
-        // diagnostic index exercise arm/fusion math, not production model
-        // discovery. The public path above always enables runtime resolution.
+        // A carried empty-generation proof needs no runtime capability lookup.
+        // Synthetic diagnostic tests also bypass discovery when they supply
+        // the exact embedder used to build their arm/fusion fixture.
         SourceModeResolution {
             applied: options.source_mode,
             fallback_applied: false,
             unavailable_no_results: false,
         }
     };
-    let embed_backend = if source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -10700,11 +10927,12 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(scoring_candidate_limit);
-    let mut diag_result = if crate::core::index::index_generation_is_verified_empty(&index_dir)
-        .map_err(SearchError::IndexIncompatible)?
-    {
+    let mut diag_result = if empty_generation {
         empty_diag_search_result(
             source_mode.applied,
+            fast_embedder_override
+                .as_ref()
+                .is_some_and(|embedder| embedder.is_semantic() && embedder.is_ready()),
             config.rrf_k,
             scoring_candidate_limit as usize,
             fusion_weights,
@@ -12041,11 +12269,12 @@ struct DiagSearchSyncResult {
 
 fn empty_diag_search_result(
     source_mode: SearchSourceMode,
+    semantic_ready: bool,
     rrf_k: f64,
     limit: usize,
     fusion_weights: SearchFusionWeights,
 ) -> DiagSearchSyncResult {
-    let semantic_available = source_mode.uses_embeddings();
+    let semantic_available = source_mode.uses_embeddings() && semantic_ready;
     DiagSearchSyncResult {
         candidate_metadata: BTreeMap::new(),
         pre_fusion: PreFusionDiagnostics {
@@ -12063,8 +12292,12 @@ fn empty_diag_search_result(
                 elapsed_ms: 0.0,
                 results: Vec::new(),
                 error: (!semantic_available).then(|| {
-                    "semantic arm not executed because source mode resolved to lexical_only"
-                        .to_owned()
+                    if source_mode.uses_embeddings() {
+                        "semantic arm not executed because the admitted local generation is empty"
+                    } else {
+                        "semantic arm not executed because source mode resolved to lexical_only"
+                    }
+                    .to_owned()
                 }),
             },
         },
@@ -15848,6 +16081,123 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
+        fn admits_model_free_empty_search(fixture: &Fixture) -> bool {
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let pool = registered_process_read_pool(
+                    DatabaseConfig::file(fixture.options.resolve_database_path()),
+                    PoolConfig::default_single(),
+                );
+                let snapshot = pool.pin_snapshot().expect("empty probe source snapshot");
+                let prepared = prepare_empty_search_generation(
+                    &cx,
+                    &fixture.options,
+                    snapshot
+                        .checked_connection()
+                        .expect("empty probe connection"),
+                )
+                .await
+                .expect("empty probe admission");
+                let admitted = prepared.is_some();
+                drop(prepared);
+                snapshot.commit().expect("release empty probe snapshot");
+                admitted
+            })
+            .expect("empty probe runtime")
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn empty_model_preparation_hint_rechecks_source_and_published_generation() {
+            let fixture = Fixture::new();
+            let _selected =
+                crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+            assert!(empty_search_generation_hint(fixture.index()));
+            assert!(admits_model_free_empty_search(&fixture));
+
+            // A writer commits after the unleased hint but before admission.
+            // The old index is still physically empty; the source is not.
+            let db = DbConnection::open_file(fixture.options.resolve_database_path())
+                .expect("source writer");
+            let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            db.insert_memory(
+                &memory_id,
+                &test_memory_input(&fixture.workspace_id, &fixture.options.query),
+            )
+            .expect("first source memory");
+            db.close().expect("close source writer");
+            assert!(empty_search_generation_hint(fixture.index()));
+            assert!(
+                !admits_model_free_empty_search(&fixture),
+                "source-generation drift must return to ordinary preparation and retrieval"
+            );
+            let options = &fixture.options;
+            let (rejected, fallback) =
+                crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                    let rejected =
+                        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                            &cx,
+                            options,
+                            None,
+                            &[],
+                            Duration::ZERO,
+                            Duration::from_secs(30),
+                            Some(Arc::new(HashEmbedder::default_256())),
+                            true,
+                            false,
+                        )
+                        .await;
+                    let mut relaxed = options.clone();
+                    relaxed.source_mode = SearchSourceMode::Hybrid;
+                    relaxed.strict_source_mode = false;
+                    let fallback =
+                        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                            &cx,
+                            &relaxed,
+                            None,
+                            &[],
+                            Duration::ZERO,
+                            Duration::from_secs(30),
+                            Some(Arc::new(HashEmbedder::default_256())),
+                            true,
+                            false,
+                        )
+                        .await;
+                    (rejected, fallback)
+                })
+                .expect("stale strict search runtime");
+            assert!(
+                matches!(rejected, Err(SearchError::SourceModeUnavailable { .. })),
+                "physical emptiness cannot waive strict mode on an unadmitted source generation"
+            );
+            let fallback = fallback.expect("current source fallback");
+            assert!(
+                fallback
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == memory_id)
+            );
+            assert_eq!(
+                fallback.report.source_mode_applied,
+                SearchSourceMode::LexicalOnly
+            );
+            assert!(
+                fallback
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| { entry.code == "search_live_snapshot_lexical" })
+            );
+
+            // Publishing the first nonempty generation also invalidates the
+            // earlier hint, even when source and index watermarks agree again.
+            crate::core::index::rebuild_index(&fixture.rebuild)
+                .expect("publish first source memory");
+            assert!(!empty_search_generation_hint(fixture.index()));
+            assert!(!admits_model_free_empty_search(&fixture));
+        }
+
         #[test]
         fn verified_empty_generation_reads_skip_semantic_identity_and_embedding() {
             for dimension in [256, 512] {
@@ -16206,6 +16556,18 @@ mod tests {
                 index_generation_is_verified_empty(fixture.index())
                     .expect("physically empty generation")
             );
+            #[cfg(unix)]
+            {
+                let _selected = crate::core::index::install_test_workspace_embedder(
+                    &fixture.workspace_id,
+                    EmbedderStack::from_parts(selected.clone(), None),
+                );
+                assert!(empty_search_generation_hint(fixture.index()));
+                assert!(
+                    !admits_model_free_empty_search(&fixture),
+                    "empty tiers do not waive the configured semantic identity"
+                );
+            }
             let before = fixture.snapshot();
             assert!(run_search_with_embedder(&fixture.options, selected.clone()).is_err());
             assert!(run_diag_search_with_embedder(&fixture.options, selected.clone()).is_err());

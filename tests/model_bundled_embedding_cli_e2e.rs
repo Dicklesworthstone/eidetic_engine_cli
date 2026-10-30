@@ -978,6 +978,170 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
 
 #[cfg(unix)]
 #[test]
+fn verified_empty_search_diag_and_pack_do_not_acquire_a_model() -> TestResult {
+    let workspace = E2eWorkspace::create("empty-retrieval-without-model")?;
+    let model_root = workspace.path.join("absent-model-cache");
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut env = network_tripwire.proxy_env();
+    env.extend([
+        ("EE_EMBED_DOWNLOAD".to_string(), "auto".to_string()),
+        ("EE_EMBED_MODEL_DIR".to_string(), path_string(&model_root)),
+    ]);
+    let init = run_ee_with_env(
+        &workspace,
+        "empty_init",
+        &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+        &env,
+    )?;
+    ensure_success(&init, "empty init")?;
+    let query = "Unrecorded copper kestrel release notes";
+    for (phase, args, results_pointer, backend_pointer) in [
+        (
+            "empty_search",
+            vec![
+                "search",
+                query,
+                "--source-mode",
+                "semantic_only",
+                "--strict-source-mode",
+            ],
+            "/data/results",
+            "/data/embed_backend",
+        ),
+        (
+            "empty_diag",
+            vec!["diag", "search", query, "--all-arms"],
+            "/final/results",
+            "/final/embed_backend",
+        ),
+        (
+            "empty_pack",
+            vec![
+                "pack",
+                query,
+                "--source-mode",
+                "semantic_only",
+                "--strict-source-mode",
+                "--max-tokens",
+                "800",
+            ],
+            "/data/pack/items",
+            "/data/embed_backend",
+        ),
+        (
+            "empty_read_only_pack",
+            vec![
+                "pack",
+                query,
+                "--read-only",
+                "--source-mode",
+                "semantic_only",
+                "--strict-source-mode",
+                "--max-tokens",
+                "800",
+            ],
+            "/data/pack/items",
+            "/data/embed_backend",
+        ),
+    ] {
+        let mut args = args;
+        args.extend(["--workspace", workspace.workspace_arg()?, "--json"]);
+        let output = run_ee_with_env(&workspace, phase, &args, &env)?;
+        ensure_success(&output, phase)?;
+        let value = stdout_json(&output, phase)?;
+        assert!(
+            value
+                .pointer(results_pointer)
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty),
+            "{phase} must return the verified empty result: {value}"
+        );
+        assert_eq!(
+            value.pointer(backend_pointer).and_then(Value::as_str),
+            Some("hash_fallback"),
+            "{phase} must not claim neural execution"
+        );
+        if phase == "empty_diag" {
+            assert_eq!(
+                value.pointer("/preFusion/semanticFast/available"),
+                Some(&Value::Bool(false)),
+                "an empty response must not claim that a cold model is ready"
+            );
+        }
+        ensure_text_absent(
+            &output.stderr,
+            "downloading the local embedding model",
+            phase,
+        )?;
+        assert!(
+            !model_root.exists(),
+            "{phase} created model acquisition or staging files"
+        );
+        network_tripwire.assert_unused()?;
+    }
+    // Local emptiness cannot become a whole-request early return: the
+    // separately stored user-global lane must still contribute its evidence.
+    let mut offline_env = env.clone();
+    offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
+    let remembered = run_ee_with_env(
+        &workspace,
+        "empty_local_remember_global",
+        &[
+            "remember",
+            query,
+            "--global",
+            "--level",
+            "semantic",
+            "--kind",
+            "rule",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&remembered, "remember global with empty workspace")?;
+    let remembered = stdout_json(&remembered, "remember global with empty workspace")?;
+    let memory_id = remembered
+        .pointer("/data/memory_id")
+        .and_then(Value::as_str)
+        .ok_or("global memory ID missing")?;
+    let output = run_ee_with_env(
+        &workspace,
+        "empty_local_global_search",
+        &[
+            "search",
+            query,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
+            "--relevance-floor",
+            "0",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&output, "global search with empty workspace")?;
+    let value = stdout_json(&output, "global search with empty workspace")?;
+    assert!(
+        value
+            .pointer("/data/results")
+            .and_then(Value::as_array)
+            .is_some_and(|hits| {
+                hits.iter()
+                    .any(|hit| hit.get("memoryId").and_then(Value::as_str) == Some(memory_id))
+            }),
+        "local emptiness hid global memory {memory_id}: {value}"
+    );
+    assert!(!model_root.exists());
+    network_tripwire.assert_unused()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 #[ignore = "downloads the pinned 8M and 32M models; run the explicit smaller-model qualification"]
 fn smaller_model2vec_fetch_switch_reembed_and_daemon_retrieval() -> TestResult {
     let workspace = E2eWorkspace::create("smaller-model2vec-switch")?;

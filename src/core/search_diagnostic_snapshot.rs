@@ -1089,7 +1089,7 @@ mod tests {
         writer.close().map_err(|e| e.to_string())?;
         let options_ref = &options;
         let report = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
-            run_diag_search_in_snapshot(&cx, options_ref, None, true, Some(connection)).await
+            run_diag_search_in_snapshot(&cx, options_ref, None, true, Some(connection), None).await
         })
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
