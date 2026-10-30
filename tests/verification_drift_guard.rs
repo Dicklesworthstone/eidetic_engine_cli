@@ -3465,6 +3465,23 @@ fn open_coded_success_assertions_do_not_grow() {
          FIX: print all three. `ensure_command_success(&output, \"context\")` \
          does it for the ensure spelling; for the `status.code()` spelling add \
          the two streams to the message you already build.\n\
+         IF THE BRACKET SAYS [code] AND YOU ALREADY PRINT `output.status`, \
+         THAT IS NOT A FALSE POSITIVE AND ADDING STREAMS WILL NOT CLEAR IT. \
+         `code` is credited ONLY by a literal `.code()` in the window; \
+         `output.status` is not credited even though its Display renders \
+         \"exit status: 7\". That is deliberate, because the two carry \
+         DIFFERENT facts: on a signal death `.code()` is None while Display \
+         says \"signal: 9\". So print BOTH, beside each other, not one instead \
+         of the other:\n\
+         \x20    \"ee {{args:?}} failed: {{}} (code {{:?}})\\nstdout={{stdout}}\\nstderr={{}}\",\n\
+         \x20    output.status, output.status.code(), stderr\n\
+         AND PUT ANY EXPLANATORY COMMENT ABOVE THE `if`, NOT INSIDE THE BLOCK. \
+         The window is capped at 14 lines from the condition, so a comment \
+         between the condition and the format! pushes `.code()` out of the \
+         window and this gate keeps reporting [code] missing. That was \
+         measured the hard way on the first attempt at bd-mv9j7; \
+         tests/error_recall_e2e.rs and tests/incident_card_cli.rs are the \
+         worked examples.\n\
          NOT A DEFECT, and spell it this way so the gate agrees: asserting a \
          command FAILED is `ensure(!x.status.success(), ..)`, and asserting a \
          SPECIFIC failure code is a comparison against that code. Neither is \
