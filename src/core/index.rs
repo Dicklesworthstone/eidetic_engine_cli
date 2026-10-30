@@ -12186,18 +12186,25 @@ pub(crate) async fn repair_requested_index_with_cx_bounded_and_stack(
             metadata.generation == Some(snapshot.generation)
                 && metadata.document_counts == Some(snapshot.document_counts)
         })
-        && match stack_override.as_ref() {
-            Some(stack) => {
-                let fast = stack.fast();
-                u32::try_from(fast.dimension()).is_ok_and(|dimension| {
-                    validated_index_generation_with_identity(
-                        &index_dir,
-                        Some((fast.id(), dimension)),
-                    )
-                    .is_ok()
+        && {
+            // Equal source generations and labels do not establish vector
+            // compatibility. Use the same full producer admission as search
+            // before deciding that a requested repair has nothing to do.
+            // Empty generations require no model discovery, but must still
+            // prove that every persisted tier and WAL is empty.
+            let selected = if snapshot.documents_total == 0 {
+                None
+            } else {
+                Some(match stack_override.as_ref() {
+                    Some(stack) => stack_descriptors(stack),
+                    None => workspace_embedder_descriptors(&db, &workspace_id)?,
                 })
-            }
-            None => index_corpus_compatibility_is_current(&index_dir),
+            };
+            let status =
+                read_index_metadata_for_selection(&index_dir, None, selected.as_ref());
+            status.present
+                && status.corruption_error.is_none()
+                && status.compatibility_error.is_none()
         }
     {
         return Ok(false);
@@ -13517,6 +13524,62 @@ mod tests {
         workspace.join(".ee").join("index-rebuild-request.json")
     }
 
+    /// Exercise semantic routing with reproducible vectors and a real native
+    /// producer identity. This fixture does not load or claim neural weights.
+    #[derive(Debug)]
+    struct RequestedRepairEmbedder {
+        hash: HashEmbedder,
+        calls: AtomicU64,
+    }
+
+    impl RequestedRepairEmbedder {
+        fn new(seed: u64) -> Self {
+            Self {
+                hash: HashEmbedder::new(256, frankensearch::HashAlgorithm::JLProjection { seed }),
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl Embedder for RequestedRepairEmbedder {
+        fn embed<'a>(
+            &'a self,
+            cx: &'a asupersync::Cx,
+            text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.hash.embed(cx, text)
+        }
+
+        fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+            self.hash.identity()
+        }
+
+        fn dimension(&self) -> usize {
+            self.hash.dimension()
+        }
+
+        fn id(&self) -> &str {
+            "requested-repair-unit"
+        }
+
+        fn model_name(&self) -> &str {
+            self.id()
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn is_semantic(&self) -> bool {
+            true
+        }
+
+        fn category(&self) -> ModelCategory {
+            ModelCategory::StaticEmbedder
+        }
+    }
+
     struct RequestedIndexRepairFixture {
         _root: tempfile::TempDir,
         stack: std::cell::RefCell<EmbedderStack>,
@@ -13548,7 +13611,7 @@ mod tests {
             let fixture = Self {
                 _root: root,
                 stack: std::cell::RefCell::new(EmbedderStack::from_parts(
-                    Arc::new(TestSemanticEmbedder::new("requested-repair-unit", 256)),
+                    Arc::new(RequestedRepairEmbedder::new(11)),
                     None,
                 )),
                 options: IndexRebuildOptions {
@@ -13571,15 +13634,14 @@ mod tests {
 
         fn validate(&self, index: &Path) -> Result<(), String> {
             let stack = self.stack.borrow();
-            let fast = stack.fast();
-            validated_index_generation_with_identity(
-                index,
-                Some((
-                    fast.id(),
-                    u32::try_from(fast.dimension()).map_err(|error| error.to_string())?,
-                )),
+            let status = read_index_metadata_with_embedder(index, Some(stack.fast()));
+            if let Some(error) = status.corruption_error.or(status.compatibility_error) {
+                return Err(error);
+            }
+            ensure(
+                status.present && status.generation.is_some(),
+                "fixture index must publish a complete producer-bound generation",
             )
-            .map(|_| ())
         }
 
         #[cfg(feature = "lexical-bm25")]
@@ -13795,11 +13857,10 @@ mod tests {
         assert!(error.contains("vectors from different embedding backends cannot be mixed"));
         #[cfg(feature = "lexical-bm25")]
         {
-            let error =
-                crate::core::search::run_search_with_embedder(&fixture.search_options(), mismatch)
-                    .expect_err(
-                        "retrieval must reject a different backend for the same generation",
-                    );
+            let mut options = fixture.search_options();
+            options.source_mode = crate::core::search::SearchSourceMode::Hybrid;
+            let error = crate::core::search::run_search_with_embedder(&options, mismatch)
+                .expect_err("retrieval must reject a different backend for the same generation");
             assert!(matches!(
                 &error,
                 crate::core::search::SearchError::Index(_)
@@ -13820,6 +13881,180 @@ mod tests {
             format!("mem_{:026}", 1)
         );
         assert!(!fixture.repair(64)?);
+        Ok(())
+    }
+
+    #[test]
+    fn requested_index_repair_recovers_native_producer_drift_at_equal_generation() -> TestResult {
+        const CHILD: &str = "EE_TEST_REQUESTED_PRODUCER_REPAIR";
+        const SENTINEL: &str = "requested producer repair and no-op controls completed";
+        if std::env::var_os(CHILD).is_none() {
+            let isolated = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .args([
+                "--exact",
+                "core::index::tests::requested_index_repair_recovers_native_producer_drift_at_equal_generation",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("EE_EMBED_BACKEND", "local")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env_remove("EE_EMBED_MODEL_DIR")
+            .env_remove("EE_EMBED_MODEL_PATH")
+            .env("XDG_CONFIG_HOME", isolated.path().join("config"))
+            .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+            .env("XDG_DATA_HOME", isolated.path().join("data"))
+            .env("XDG_STATE_HOME", isolated.path().join("state"))
+            .output()
+            .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return ensure(
+                output.status.success()
+                    && stdout.contains(SENTINEL)
+                    && stdout.contains("1 passed"),
+                format!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr)),
+            );
+        }
+        for explicit in [true, false] {
+            let fixture = RequestedIndexRepairFixture::new()?;
+            fixture.request("2026-09-22T00:00:00Z")?;
+            assert!(fixture.repair(64)?);
+            let original = fixture.stack.borrow().clone();
+            let selected = Arc::new(RequestedRepairEmbedder::new(29));
+            assert_eq!(original.fast().id(), selected.id());
+            assert_eq!(original.fast().dimension(), selected.dimension());
+            assert_ne!(
+                delta::verified_embedder_identity(original.fast()),
+                delta::verified_embedder_identity(selected.as_ref()),
+            );
+            let selected_stack = EmbedderStack::from_parts(selected.clone(), None);
+            fixture.set_stack(selected_stack.clone())?;
+            let _selection =
+                install_test_workspace_embedder(&fixture.workspace_id, selected_stack.clone());
+            let index = fixture.options.resolve_index_dir();
+            let status_options = IndexStatusOptions {
+                workspace_path: fixture.options.workspace_path.clone(),
+                database_path: fixture.options.database_path.clone(),
+                index_dir: Some(index.clone()),
+            };
+            let stale = get_index_status_with_embedder(
+                &status_options,
+                Some(&fixture.db),
+                false,
+                selected.as_ref(),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(stale.health, IndexHealth::Stale);
+            assert_eq!(stale.db_generation, stale.index_generation);
+            assert!(stale.last_check_error.as_deref().is_some_and(|error| {
+                error.contains("producer_revision")
+            }));
+            let generation = stale.db_generation;
+            let counts = parse_index_metadata(&index)?
+                .ok_or("missing metadata")?
+                .document_counts;
+            let queued = fixture.queue(3)?;
+            fixture.request("2026-09-22T00:15:00Z")?;
+            let options = &fixture.options;
+            let repair = || -> Result<bool, String> {
+                let stack = explicit.then(|| selected_stack.clone());
+                crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                    repair_requested_index_with_cx_bounded_and_stack(&cx, options, 64, stack)
+                        .await
+                })
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+            };
+            assert!(
+                repair()?,
+                "equal generations must not suppress a producer repair"
+            );
+            fixture.validate(&index)?;
+            let ready = get_index_status_with_embedder(
+                &status_options,
+                Some(&fixture.db),
+                false,
+                selected.as_ref(),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(ready.health, IndexHealth::Ready);
+            assert_eq!(ready.db_generation, generation);
+            assert_eq!(ready.index_generation, generation);
+            assert_eq!(
+                parse_index_metadata(&index)?
+                    .ok_or("missing metadata")?
+                    .document_counts,
+                counts
+            );
+            assert_eq!(
+                fixture.job(&queued)?.status_enum(),
+                Some(SearchIndexJobStatus::Completed)
+            );
+            assert!(pending_index_rebuild_request(&fixture.options.workspace_path).is_none());
+            assert!(selected.calls.load(Ordering::Relaxed) > 0);
+            #[cfg(feature = "lexical-bm25")]
+            {
+                let mut options = fixture.search_options();
+                options.source_mode = crate::core::search::SearchSourceMode::Hybrid;
+                let report =
+                    crate::core::search::run_search_with_embedder(&options, selected.clone())
+                        .map_err(|error| error.to_string())?;
+                assert_eq!(report.status, crate::core::search::SearchStatus::Success);
+                assert_eq!(
+                    report.source_mode_applied,
+                    crate::core::search::SearchSourceMode::Hybrid
+                );
+                assert!(!report.source_mode_fallback);
+                assert!(report.errors.is_empty());
+                assert!(report.index_freshness.is_none_or(|status| !status.stale));
+                let hit = report
+                    .results
+                    .first()
+                    .ok_or("repaired memory was not retrieved")?;
+                assert_eq!(hit.doc_id, format!("mem_{:026}", 1));
+                assert!(hit.fast_score.is_some() && hit.lexical_score.is_some());
+            }
+            // Refresh the request so this exercises the healthy-generation
+            // decision, not the already-attempted request guard.
+            fixture.request("2026-09-22T00:30:00Z")?;
+            let before = index_regular_file_snapshot(&index)?;
+            let calls = selected.calls.load(Ordering::Relaxed);
+            assert!(!repair()?);
+            assert_eq!(index_regular_file_snapshot(&index)?, before);
+            assert_eq!(selected.calls.load(Ordering::Relaxed), calls);
+
+            assert!(
+                fixture
+                    .db
+                    .tombstone_memory(&format!("mem_{:026}", 1))
+                    .map_err(|error| error.to_string())?
+            );
+            fixture.request("2026-09-22T00:45:00Z")?;
+            assert!(repair()?);
+            assert!(index_generation_is_verified_empty(&index)?);
+            fixture.request("2026-09-22T01:00:00Z")?;
+            let before = index_regular_file_snapshot(&index)?;
+            let absent = fixture.options.workspace_path.join("absent-model");
+            let pending = ee_auto_download_embedder(absent.clone()).stack;
+            let _pending =
+                install_test_workspace_embedder(&fixture.workspace_id, pending.clone());
+            let override_stack = explicit.then_some(pending);
+            let no_op = crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+                repair_requested_index_with_cx_bounded_and_stack(&cx, options, 64, override_stack)
+                    .await
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            assert!(!no_op);
+            assert_eq!(index_regular_file_snapshot(&index)?, before);
+            assert_eq!(selected.calls.load(Ordering::Relaxed), calls);
+            assert!(!absent.exists());
+            assert!(!default_search_embedder_resolved());
+        }
+        println!("{SENTINEL}");
         Ok(())
     }
 
