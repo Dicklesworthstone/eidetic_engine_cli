@@ -1432,6 +1432,111 @@ fn dry_run_does_not_reserve_the_event_or_change_learning() {
 }
 
 #[test]
+fn outcome_previews_and_quarantine_listing_leave_a_copied_store_read_only() {
+    let fixture = Fixture::new();
+    let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+    let before = fixture.persisted_feedback_state();
+    let workspace = fixture._root.path().to_path_buf();
+    let copy_root = tempfile::tempdir().unwrap();
+    let database = copy_root.path().join("custom-preview.sqlite");
+    let mut options = OutcomeRecordOptions {
+        database_path: &database,
+        event_id: Some("fb_00000000000000000000000073".to_owned()),
+        agent_name: Some(REPLAY_AGENT.to_owned()),
+        dry_run: true,
+        harmful_per_source_per_hour: 1,
+        ..fixture.harmful_options()
+    };
+
+    // Copy only a complete, closed database. Starting without writer sidecars
+    // exposes an accidental read-write open even if no SQL rows are changed.
+    let checkpoint = fixture
+        .db
+        .wal_checkpoint(crate::db::WalCheckpointMode::Truncate)
+        .unwrap();
+    assert!(!checkpoint.busy);
+    assert_eq!(checkpoint.after.frames, 0);
+    fixture.db.close().unwrap();
+    std::fs::copy(&fixture.database, &database).unwrap();
+    let database_bytes = std::fs::read(&database).unwrap();
+    let assert_unchanged = || {
+        let observer = DbConnection::open_file_read_only(&database).unwrap();
+        assert_eq!(Fixture::feedback_state_for(&observer, WORKSPACE), before);
+        observer.close().unwrap();
+        assert!(
+            std::fs::read(&database).unwrap() == database_bytes,
+            "previews must leave the checkpointed database bytes unchanged"
+        );
+        let entries = std::fs::read_dir(copy_root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![database.clone()], "no writer sidecars");
+    };
+    assert_unchanged();
+
+    for signal in ["helpful", "harmful"] {
+        options.signal = signal.to_owned();
+        let report = record_outcome(&options).unwrap();
+        assert_eq!(report.status, OutcomeRecordStatus::DryRun);
+        assert_eq!(report.workspace_id, WORKSPACE);
+        assert_eq!(report.feedback.total_count, 1);
+        assert_eq!(report.quarantine.is_some(), signal == "harmful");
+        assert!(report.audit_id.is_none());
+        assert_unchanged();
+    }
+    let list_options = OutcomeQuarantineListOptions {
+        workspace_path: &workspace,
+        database_path: Some(&database),
+        status: Some("pending"),
+    };
+    let listed = list_feedback_quarantine(&list_options).unwrap();
+    assert_eq!(listed.workspace_id, WORKSPACE);
+    assert_eq!(listed.queue_depth, 1);
+    assert_eq!(listed.records[0].id, quarantine_id);
+    assert_unchanged();
+
+    let mut review_options = OutcomeQuarantineReviewOptions {
+        workspace_path: &workspace,
+        database_path: Some(&database),
+        quarantine_id: &quarantine_id,
+        reject: false,
+        actor: Some("read-only-reviewer"),
+        dry_run: true,
+    };
+    for reject in [false, true] {
+        review_options.reject = reject;
+        let report = review_feedback_quarantine(&review_options).unwrap();
+        assert_eq!(report.status, "dry_run");
+        assert_eq!(report.action, if reject { "reject" } else { "release" });
+        assert_eq!(report.feedback_event_id.as_deref(), Some(HELD_EVENT));
+        assert!(report.changed);
+        assert!(report.audit_id.is_none());
+        assert_unchanged();
+    }
+
+    let missing = copy_root.path().join("missing.sqlite");
+    options.database_path = &missing;
+    review_options.database_path = Some(&missing);
+    let missing_list_options = OutcomeQuarantineListOptions {
+        database_path: Some(&missing),
+        ..list_options
+    };
+    for result in [
+        record_outcome(&options).map(|_| ()),
+        list_feedback_quarantine(&missing_list_options).map(|_| ()),
+        review_feedback_quarantine(&review_options).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(DomainError::WorkspaceStoreMissing { message, .. })
+                if message == format!("Database not found at {}", missing.display())
+        ));
+        assert_unchanged();
+    }
+}
+
+#[test]
 fn quarantine_does_not_learn_or_install_a_live_feedback_event() {
     let fixture = Fixture::new();
     let mut options = fixture.options();
@@ -2126,6 +2231,110 @@ fn pending_feedback_retry_preserves_identity_after_policy_or_window_changes() {
         }
         assert!(replay.human_summary().contains("already quarantined"));
         assert_eq!(fixture.feedback_state(), before);
+    }
+}
+
+#[test]
+fn signed_zero_quarantine_replays_preserve_identity_and_hash_integrity() {
+    assert_ne!(
+        score_json_value(0.0).to_string(),
+        score_json_value(-0.0).to_string(),
+        "the established hash encoding distinguishes numerically equal signed zeros"
+    );
+    for original_weight in [0.0_f32, -0.0] {
+        let fixture = Fixture::new();
+        let mut options = fixture.harmful_options();
+        options.harmful_per_source_per_hour = 1;
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        options.event_id = Some(HELD_EVENT.to_owned());
+        options.weight = Some(original_weight);
+        let queued = record_outcome(&options).unwrap();
+        assert_eq!(queued.status, OutcomeRecordStatus::Quarantined);
+        let quarantine = queued.quarantine.unwrap();
+        let quarantine_id = quarantine.id.unwrap();
+        let raw_hash = quarantine.raw_event_hash.unwrap();
+        let pending = fixture.persisted_feedback_state();
+
+        for released in [false, true] {
+            if released {
+                let reviewed =
+                    review_feedback_quarantine(&fixture.release_options(&quarantine_id)).unwrap();
+                assert_eq!(reviewed.status, "released");
+                assert!(reviewed.changed);
+                assert_eq!(reviewed.feedback_event_id.as_deref(), Some(HELD_EVENT));
+                let learned = fixture.persisted_feedback_state();
+                assert_eq!(
+                    learned.posterior,
+                    (
+                        pending.posterior.0,
+                        pending.posterior.1 + DEFAULT_HARMFUL_WEIGHT
+                    )
+                );
+                assert_eq!(learned.events.len(), pending.events.len() + 1);
+                assert!(
+                    learned
+                        .events
+                        .iter()
+                        .all(|event| event.applied_at.is_some())
+                );
+                fixture.assert_pending_memory_jobs(pending.index_jobs.len() + 1);
+            }
+            let before = fixture.persisted_feedback_state();
+            for replay_weight in [0.0_f32, -0.0] {
+                options.weight = Some(replay_weight);
+                let replay = record_outcome(&options).unwrap();
+                assert_eq!(
+                    replay.status,
+                    if released {
+                        OutcomeRecordStatus::AlreadyRecorded
+                    } else {
+                        OutcomeRecordStatus::Quarantined
+                    }
+                );
+                if !released {
+                    let held = replay.quarantine.unwrap();
+                    assert!(held.replayed);
+                    assert_eq!(held.id.as_deref(), Some(quarantine_id.as_str()));
+                    assert_eq!(held.raw_event_hash.as_deref(), Some(raw_hash.as_str()));
+                }
+                assert_eq!(fixture.persisted_feedback_state(), before);
+            }
+
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE feedback_quarantine SET raw_event_hash = 'blake3:corrupted' WHERE id = '{quarantine_id}'"
+                ))
+                .unwrap();
+            let damaged = fixture.persisted_feedback_state();
+            for replay_weight in [0.0_f32, -0.0] {
+                options.weight = Some(replay_weight);
+                assert!(matches!(
+                    record_outcome(&options),
+                    Err(DomainError::PolicyDenied { message, .. })
+                        if message.contains("payload hash mismatch")
+                ));
+                assert_eq!(fixture.persisted_feedback_state(), damaged);
+            }
+            if !released {
+                assert!(matches!(
+                    review_feedback_quarantine(&fixture.release_options(&quarantine_id)),
+                    Err(DomainError::PolicyDenied { message, .. })
+                        if message.contains("payload hash mismatch")
+                ));
+                assert_eq!(fixture.persisted_feedback_state(), damaged);
+            }
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE feedback_quarantine SET raw_event_hash = '{raw_hash}' WHERE id = '{quarantine_id}'"
+                ))
+                .unwrap();
+            assert_eq!(fixture.persisted_feedback_state(), before);
+        }
     }
 }
 

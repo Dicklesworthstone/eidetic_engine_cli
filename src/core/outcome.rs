@@ -1026,17 +1026,7 @@ fn record_outcome_inner(
         validate_weight,
     )?;
 
-    if !options.database_path.exists() {
-        return Err(crate::core::storeless_workspace_error(
-            options.database_path,
-        ));
-    }
-
-    let connection =
-        DbConnection::open_file(options.database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let connection = open_existing_database(options.database_path, options.dry_run)?;
 
     let record = || {
         let target = resolve_target_workspace(
@@ -2453,7 +2443,7 @@ pub fn list_feedback_quarantine(
 ) -> Result<OutcomeQuarantineListReport, DomainError> {
     let mut prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
     let status = normalize_quarantine_status(options.status)?;
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_existing_database(&prepared.database_path, true)?;
     bind_prepared_quarantine_workspace(&connection, &mut prepared);
     let rows = connection
         .list_feedback_quarantine(&prepared.workspace_id, status.as_deref())
@@ -2484,7 +2474,7 @@ pub fn review_feedback_quarantine(
 ) -> Result<OutcomeQuarantineReviewReport, DomainError> {
     let mut prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
     let quarantine_id = validate_feedback_quarantine_id(options.quarantine_id)?;
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_existing_database(&prepared.database_path, options.dry_run)?;
     bind_prepared_quarantine_workspace(&connection, &mut prepared);
     let Some(row) = connection
         .get_feedback_quarantine(&quarantine_id)
@@ -2554,8 +2544,7 @@ pub fn review_feedback_quarantine(
         evidence_json: row.evidence_json.clone(),
         session_id: row.session_id.clone(),
     };
-    let expected_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
-    if expected_hash != row.raw_event_hash {
+    if !quarantined_feedback_hash_matches(&event_id, &feedback_input, &row.raw_event_hash)? {
         return Err(DomainError::PolicyDenied {
             message: format!("quarantined feedback payload hash mismatch for {}", row.id),
             repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
@@ -2635,11 +2624,21 @@ fn resolve_workspace_path(path: &Path) -> Result<std::path::PathBuf, DomainError
         })
 }
 
-fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+fn open_existing_database(
+    database_path: &Path,
+    read_only: bool,
+) -> Result<DbConnection, DomainError> {
     if !database_path.exists() {
         return Err(crate::core::storeless_workspace_error(database_path));
     }
-    DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+    // Previews and listing must not create or update the writer lock or change
+    // journal pragmas merely by opening an otherwise unchanged store.
+    let connection = if read_only {
+        DbConnection::open_file_read_only(database_path)
+    } else {
+        DbConnection::open_file(database_path)
+    };
+    connection.map_err(|error| DomainError::Storage {
         message: format!("Failed to open database: {error}"),
         repair: Some("ee doctor".to_owned()),
     })
@@ -3274,7 +3273,7 @@ fn existing_feedback_outcome(
     if !quarantined_feedback_matches(&row, input) {
         return Err(feedback_event_id_conflict(event_id));
     }
-    if raw_feedback_event_hash(event_id, input)? != row.raw_event_hash {
+    if !quarantined_feedback_hash_matches(event_id, input, &row.raw_event_hash)? {
         return Err(DomainError::PolicyDenied {
             message: format!("quarantined feedback payload hash mismatch for {}", row.id),
             repair: Some("ee outcome quarantine list --json".to_owned()),
@@ -3901,6 +3900,25 @@ fn feedback_quarantine_audit_details(
         "rawEventHash": &input.raw_event_hash,
     })
     .to_string()
+}
+
+fn quarantined_feedback_hash_matches(
+    event_id: &str,
+    input: &CreateFeedbackEventInput,
+    stored_hash: &str,
+) -> Result<bool, DomainError> {
+    if raw_feedback_event_hash(event_id, input)? == stored_hash {
+        return Ok(true);
+    }
+    if input.weight != 0.0 {
+        return Ok(false);
+    }
+    // Numeric event identity treats signed zeros as equivalent, but the
+    // established wire hash encodes their signs. Preserve either existing
+    // encoding only for zero; replay still checks the exact stored payload.
+    let mut equivalent = input.clone();
+    equivalent.weight = -equivalent.weight;
+    Ok(raw_feedback_event_hash(event_id, &equivalent)? == stored_hash)
 }
 
 pub(crate) fn raw_feedback_event_hash(
