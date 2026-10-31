@@ -1243,7 +1243,29 @@ fn consolidation_preserves_sealed_bodies_and_post_approval_tag_scope() -> TestRe
         }
         memory_id_from_remember(label, &ws.run_json(label, &args)?)
     };
-    let content = "Copper kestrel review scope: preserve the deployment evidence.";
+    // The duplicate body has to clear the curation specificity gate, because
+    // this fixture ends by asserting `curate validate` APPROVES the candidate.
+    // Measured on the pinned lane 2026-10-31 with the previous body, "Copper
+    // kestrel review scope: preserve the deployment evidence.": validate
+    // returned `fromStatus: pending, toStatus: rejected` with the repair "Add
+    // concrete commands, files, error codes, metrics, or provenance", i.e.
+    // `CandidateValidationError::CandidateTooGeneric` from
+    // `specificity_score`. The product is right -- AGENTS.md's "evidence over
+    // vibes" is exactly that gate -- and the old body carried no command, file,
+    // error code, metric or provenance at all.
+    //
+    // Content quality is incidental to what this test proves (that tag-scope
+    // alignment lets a REAL duplicate through the safety guard), so the fix is
+    // a body that clears the gate rather than a weaker assertion. Reusing the
+    // scorer's own certified fixture ties the two together: if the threshold or
+    // the signal set ever moves, `specificity_score_accepts_release_rule_fixture`
+    // in src/curate/mod.rs fails first and names the reason, instead of this
+    // e2e failing opaquely at `curate validate` again. That fixture is one line
+    // and carries an inline command, a branch and a provenance locator.
+    //
+    // Both memories below intentionally share this exact body -- being an exact
+    // duplicate is the premise of the consolidation pass under test.
+    let content = include_str!("fixtures/specificity/positive_release_rule.txt").trim();
     let survivor = remember("scope_survivor", content, "0.9", "shared", false)?;
     let target = remember(
         "scope_target",

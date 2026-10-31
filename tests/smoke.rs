@@ -2859,9 +2859,30 @@ fn curate_candidates_after_seed_matches_snapshot() -> TestResult {
     )?;
     ensure(init.stderr.is_empty(), "init stderr clean")?;
 
+    // This budget must exceed the WHOLE cost of one `ee remember`, not a
+    // fraction of it, because it guards a synchronous curation proposal that
+    // runs inside the remember call. The production default is 50ms
+    // (REMEMBER_CURATION_SYNC_BUDGET_MS); the lib's own `#[cfg(test)]` override
+    // is 60_000ms, which integration tests do not get because they drive the
+    // real binary as a subprocess.
+    //
+    // 5000 was already a 100x raise over the default and STILL fired on the
+    // pinned lane 2026-10-31: this test reported
+    // `expected "proposed", got "deferred_to_maintenance"`, whose only producer
+    // is that elapsed check. The same dispatch measured the cost independently
+    // --- `smoke::walking_skeleton_durability_scenario` printed `remember1
+    // 132.2s, remember2 97.8s` against an idle-laptop shape of ~0.4s --- so a
+    // 5s budget inside a ~100s remember cannot hold on a contended
+    // debug-profile worker, and the deferral was honest.
+    //
+    // Deliberately NOT relaxed into accepting either status: the rest of this
+    // test snapshots the proposed candidates, so a deferral leaves it nothing
+    // to assert and it would pass having verified nothing. A budget this large
+    // keeps the proposal path the only outcome, and if it ever fires anyway
+    // that is a real signal worth failing on.
     let remember_env = [(
         "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
-        OsString::from("5000"),
+        OsString::from("600000"),
     )];
     let mut seeded_memory_ids = Vec::new();
     for index in 1..=11 {
