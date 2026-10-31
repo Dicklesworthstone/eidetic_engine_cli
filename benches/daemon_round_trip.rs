@@ -1,4 +1,4 @@
-//! Daemon dispatch microbenchmarks and the warm-search latency acceptance gate.
+//! Daemon dispatch microbenchmarks and public cold/warm retrieval acceptance gates.
 //!
 //! Group name: `ee_daemon_round_trip`
 //!
@@ -18,11 +18,24 @@
 //! `--warm-search-observation` runs the identical workload without asserting
 //! the ceilings, so variable GitHub-hosted hardware cannot masquerade as the
 //! stable, exclusive-runner closure gate.
+//!
+//! `--warm-pack-gate` and `--warm-pack-observation` exercise real `ee pack`
+//! processes on the same fixture. They retain the first daemon call separately,
+//! compare repeated warm calls against fresh in-process calls, require matching
+//! selected content/provenance, and report the serving path for every sample.
+//! The gate enforces ADR 0052's >= 2x p50 improvement at 10,000 memories.
+//! Observations may select 10/100/1,000/10,000 memories with
+//! `--fixture-memories N` and mixed admitted/quarantined evidence with
+//! `--fixture-evidence N`; a smaller fixture cannot satisfy the 10k gate.
+//! Pack acceleration currently requires an empty feedback ledger. The fixture
+//! asserts that precondition and reports it explicitly. A nonempty ledger uses
+//! the canonical local fallback and must fail the warm serving-path assertion;
+//! its latency cannot be counted as verified daemon acceleration.
 
 #[cfg(unix)]
 use std::hint::black_box;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -44,12 +57,15 @@ use ee::core::model::{
 };
 #[cfg(unix)]
 use ee::daemon::protocol::DaemonRequest;
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+use ee::daemon::server::{METHOD_CAPABILITIES, METHOD_SHUTDOWN, client_round_trip};
 #[cfg(unix)]
 use ee::daemon::server::{METHOD_CONTEXT, METHOD_ECHO, dispatch};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip};
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateEvidenceSpanInput, CreateMemoryInput, CreateModelRegistryInput, CreateSessionInput,
+    CreateWorkspaceInput, DbConnection, EvidenceProducerKind,
+};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use ee::models::{
     ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus, WorkspaceId,
@@ -80,7 +96,30 @@ const SEARCH_WARM_P50_BUDGET_MS: f64 = 500.0;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 const SEARCH_QUERY: &str = "daemon warm latency quasar sentinel retrieval";
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-const SEARCH_TARGET_MEMORY_ID: &str = "mem_daemon_search_bench_04242";
+const SEARCH_TARGET_MEMORY_ID: &str = "mem_00000000000000000000004242";
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const PACK_MIN_P50_SPEEDUP: f64 = 2.0;
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const BENCH_OPERATING_PROFILE: &str = "portable";
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const BENCH_PACK_PROFILE: &str = "balanced";
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[derive(Clone, Copy)]
+struct FixtureSize {
+    memories: usize,
+    evidence: usize,
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+impl Default for FixtureSize {
+    fn default() -> Self {
+        Self {
+            memories: SEARCH_DOCUMENT_COUNT,
+            evidence: 0,
+        }
+    }
+}
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 struct RunningDaemon {
@@ -92,10 +131,13 @@ struct RunningDaemon {
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 impl RunningDaemon {
     fn start() -> Self {
-        let socket_dir = TempDir::new().unwrap_or_else(|error| {
-            panic!("daemon benchmark tempdir: {error}");
-        });
-        let socket_path = socket_dir.path().join("ee-daemon-bench.sock");
+        let socket_dir = tempfile::Builder::new()
+            .prefix("ee-b-")
+            .tempdir_in("/tmp")
+            .unwrap_or_else(|error| panic!("daemon benchmark tempdir: {error}"));
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("secure daemon benchmark tempdir: {error}"));
+        let socket_path = socket_dir.path().join("rpc.sock");
         let handle = ee::daemon::server::start_server(&socket_path)
             .unwrap_or_else(|error| panic!("start daemon benchmark server: {error}"));
         Self {
@@ -133,13 +175,13 @@ fn echo_request() -> DaemonRequest {
 }
 
 #[cfg(unix)]
-fn context_stub_request() -> DaemonRequest {
+fn context_refusal_request() -> DaemonRequest {
     let mut request = DaemonRequest::new(
         "bench-context-0001",
         BENCH_AGENT_ID,
         METHOD_CONTEXT,
         json!({
-            "task": "measure daemon context stub overhead",
+            "task": "measure daemon context validation overhead",
             "maxTokens": 4000,
         }),
     );
@@ -150,7 +192,7 @@ fn context_stub_request() -> DaemonRequest {
 #[cfg(unix)]
 fn bench_daemon_round_trip(criterion: &mut Criterion) {
     let echo = echo_request();
-    let context_stub = context_stub_request();
+    let context_refusal = context_refusal_request();
     let mut group = criterion.benchmark_group(BENCH_GROUP_NAME);
     group.measurement_time(Duration::from_secs(2));
 
@@ -161,14 +203,14 @@ fn bench_daemon_round_trip(criterion: &mut Criterion) {
         });
     });
 
-    group.bench_function("dispatch_context_stub", |bench| {
+    group.bench_function("dispatch_context_refusal", |bench| {
         bench.iter(|| {
-            let response = dispatch(black_box(&context_stub));
+            let response = dispatch(black_box(&context_refusal));
             black_box(response);
         });
     });
 
-    bench_live_socket_round_trip(&mut group, &echo, &context_stub);
+    bench_live_socket_round_trip(&mut group, &echo, &context_refusal);
     group.finish();
 }
 
@@ -176,14 +218,14 @@ fn bench_daemon_round_trip(criterion: &mut Criterion) {
 fn bench_live_socket_round_trip(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     echo: &DaemonRequest,
-    context_stub: &DaemonRequest,
+    context_refusal: &DaemonRequest,
 ) {
     use ee::daemon::server::client_round_trip;
 
     let daemon = RunningDaemon::start();
     for (label, request) in [
         ("echo_disabled_default", echo),
-        ("context_stub", context_stub),
+        ("context_refusal", context_refusal),
     ] {
         group.bench_with_input(
             criterion::BenchmarkId::new("client_round_trip", label),
@@ -204,7 +246,7 @@ fn bench_live_socket_round_trip(
 fn bench_live_socket_round_trip(
     _group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     _echo: &DaemonRequest,
-    _context_stub: &DaemonRequest,
+    _context_refusal: &DaemonRequest,
 ) {
 }
 
@@ -219,6 +261,7 @@ struct PrebuiltSearchFixture {
     fingerprint: SearchModelFingerprint,
     seed_ms: f64,
     index_ms: f64,
+    size: FixtureSize,
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -234,6 +277,7 @@ struct SearchModelFingerprint {
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 struct RunningPublicDaemon {
+    _socket_dir: TempDir,
     socket_path: PathBuf,
     workspace_id: String,
     child: Child,
@@ -242,12 +286,15 @@ struct RunningPublicDaemon {
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 impl RunningPublicDaemon {
     fn start(ee_binary: &Path, fixture: &PrebuiltSearchFixture) -> Self {
-        let socket_dir = fixture._root.path().join("public-daemon-socket");
-        std::fs::create_dir_all(&socket_dir)
+        // The server appends a 37-byte atomic-publication suffix. RCH TMPDIR
+        // paths can consume sun_path before a measurement starts.
+        let socket_dir = tempfile::Builder::new()
+            .prefix("ee-b-")
+            .tempdir_in("/tmp")
             .unwrap_or_else(|error| panic!("create public daemon socket parent: {error}"));
-        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))
             .unwrap_or_else(|error| panic!("secure public daemon socket parent: {error}"));
-        let socket_path = socket_dir.join("ee-daemon-search-slo.sock");
+        let socket_path = socket_dir.path().join("rpc.sock");
         let mut command = Command::new(ee_binary);
         command
             .arg("--workspace")
@@ -266,6 +313,7 @@ impl RunningPublicDaemon {
             .spawn()
             .unwrap_or_else(|error| panic!("spawn public foreground ee daemon: {error}"));
         let mut running = Self {
+            _socket_dir: socket_dir,
             socket_path,
             workspace_id: fixture.workspace.display().to_string(),
             child,
@@ -318,6 +366,41 @@ impl RunningPublicDaemon {
                 running.socket_path.display()
             )))
         );
+        // Socket publication is transport readiness, not model/index readiness.
+        // Never count a cold-model race or a successful fallback as a warm run.
+        let warm_deadline = Instant::now() + Duration::from_secs(120);
+        let mut readiness = DaemonRequest::new(
+            "bench-warm-readiness",
+            BENCH_AGENT_ID,
+            METHOD_CAPABILITIES,
+            json!({}),
+        );
+        readiness.workspace_id = Some(running.workspace_id.clone());
+        loop {
+            let response = client_round_trip(&running.socket_path, &readiness)
+                .unwrap_or_else(|error| panic!("probe daemon warm readiness: {error}"));
+            let result = response
+                .result
+                .unwrap_or_else(|| panic!("daemon readiness failed: {:?}", response.error));
+            let posture = result.pointer("/warm/posture").and_then(JsonValue::as_str);
+            if posture == Some("ready") {
+                break;
+            }
+            assert_eq!(posture, Some("warming"), "daemon cannot warm: {result}");
+            assert!(
+                Instant::now() < warm_deadline,
+                "daemon did not become warm-ready within 120s: {result}"
+            );
+            assert!(
+                running
+                    .child
+                    .try_wait()
+                    .expect("poll warming daemon")
+                    .is_none(),
+                "daemon exited while warming"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
         running
     }
 
@@ -395,7 +478,14 @@ fn configure_hermetic_process(
     command
         .env("HOME", home)
         .env("XDG_DATA_HOME", xdg_data)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        // EE_PROFILE selects the pack profile, not the operating profile.
+        // The latter is fixed in the fixture's [profile].selected config.
+        .env("EE_PROFILE", BENCH_PACK_PROFILE)
+        .env("EE_EMBED_BACKEND", "local")
         .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_DAEMON_WARM", "on")
         .env("EE_NO_COLOR", "1")
         .env_remove("EE_EMBED_MODEL_DIR")
         .env_remove("EE_EMBED_MODEL_FIXTURE_DIR")
@@ -412,6 +502,24 @@ fn configure_hermetic_process(
     if let Some(model_dir) = model_override {
         command.env("EE_EMBED_MODEL_DIR", model_dir);
     }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn assert_fixed_operating_profile(payload: &JsonValue) {
+    assert_eq!(
+        payload
+            .pointer("/data/profileRuntime/activeProfile")
+            .and_then(JsonValue::as_str),
+        Some(BENCH_OPERATING_PROFILE),
+        "benchmark operating profile drifted: {payload}"
+    );
+    assert_eq!(
+        payload
+            .pointer("/data/profileRuntime/source")
+            .and_then(JsonValue::as_str),
+        Some("workspace_config"),
+        "benchmark must not select budgets from a changing host probe: {payload}"
+    );
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -523,7 +631,7 @@ fn install_local_registry_source_and_read_fingerprint(
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
+fn build_prebuilt_search_fixture(ee_binary: &Path, size: FixtureSize) -> PrebuiltSearchFixture {
     assert!(
         matches!(std::env::var("EE_EMBED_DOWNLOAD").as_deref(), Ok("off")),
         "warm-search gate requires EE_EMBED_DOWNLOAD=off so measurement never performs network I/O"
@@ -544,6 +652,11 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
     let ee_dir = workspace.join(".ee");
     std::fs::create_dir_all(&ee_dir)
         .unwrap_or_else(|error| panic!("create warm-search fixture layout: {error}"));
+    std::fs::write(
+        ee_dir.join("config.toml"),
+        format!("[profile]\nselected = \"{BENCH_OPERATING_PROFILE}\"\n"),
+    )
+    .unwrap_or_else(|error| panic!("pin fixture operating profile: {error}"));
     let workspace = std::fs::canonicalize(&workspace)
         .unwrap_or_else(|error| panic!("canonicalize warm-search workspace: {error}"));
     let database = ee_dir.join("ee.db");
@@ -552,6 +665,10 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
     let xdg_data = root.path().join("xdg-data");
     std::fs::create_dir_all(&home)
         .unwrap_or_else(|error| panic!("create warm-search HOME: {error}"));
+    for directory in [home.join(".config"), home.join(".cache")] {
+        std::fs::create_dir_all(directory)
+            .unwrap_or_else(|error| panic!("create private fixture XDG directory: {error}"));
+    }
     std::fs::create_dir_all(&xdg_data)
         .unwrap_or_else(|error| panic!("create warm-search XDG_DATA_HOME: {error}"));
 
@@ -567,7 +684,7 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
             &workspace_id,
             &CreateWorkspaceInput {
                 path: workspace.display().to_string(),
-                name: Some("daemon-search-10k".to_owned()),
+                name: Some(format!("daemon-retrieval-{}", size.memories)),
             },
         )
         .unwrap_or_else(|error| panic!("insert warm-search workspace: {error}"));
@@ -584,9 +701,14 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
         "graph",
         "search",
     ];
-    for document_index in 0..SEARCH_DOCUMENT_COUNT {
+    assert!(
+        size.memories > 0,
+        "the retrieval fixture must contain memories"
+    );
+    let target_index = 4_242.min(size.memories - 1);
+    for document_index in 0..size.memories {
         let topic = topics[document_index % topics.len()];
-        let content = if document_index == 4_242 {
+        let content = if document_index == target_index {
             format!(
                 "{SEARCH_QUERY}. Unique target document {document_index} proves cold and warm result parity."
             )
@@ -595,9 +717,14 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
                 "Daemon search fixture document {document_index}: deterministic {topic} evidence for indexed retrieval latency."
             )
         };
+        let memory_id = if document_index == target_index {
+            SEARCH_TARGET_MEMORY_ID.to_owned()
+        } else {
+            format!("mem_{document_index:026}")
+        };
         connection
             .insert_memory(
-                &format!("mem_daemon_search_bench_{document_index:05}"),
+                &memory_id,
                 &CreateMemoryInput {
                     workspace_id: workspace_id.clone(),
                     level: "semantic".to_owned(),
@@ -623,6 +750,15 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
                 panic!("insert warm-search fixture document {document_index}: {error}");
             });
     }
+    seed_evidence_fixture(&connection, &workspace_id, size.evidence);
+    assert_eq!(
+        connection
+            .feedback_events_fingerprint(&workspace_id)
+            .expect("inspect fixture feedback ledger")
+            .count,
+        0,
+        "the pack acceleration fixture requires an empty feedback ledger"
+    );
     drop(connection);
     let seed_ms = seed_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -655,6 +791,7 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
             String::from_utf8_lossy(&output.stdout)
         )
     });
+    assert_fixed_operating_profile(&rebuild_json);
     assert_eq!(
         rebuild_json.pointer("/schema").and_then(JsonValue::as_str),
         Some("ee.response.v2")
@@ -675,14 +812,24 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
         rebuild_json
             .pointer("/data/memories_indexed")
             .and_then(JsonValue::as_u64),
-        Some(u64::try_from(SEARCH_DOCUMENT_COUNT).unwrap_or(u64::MAX))
+        Some(u64::try_from(size.memories).unwrap_or(u64::MAX))
     );
-    assert_eq!(
-        rebuild_json
-            .pointer("/data/documents_total")
-            .and_then(JsonValue::as_u64),
-        Some(u64::try_from(SEARCH_DOCUMENT_COUNT).unwrap_or(u64::MAX))
-    );
+    if size.evidence == 0 {
+        assert_eq!(
+            rebuild_json
+                .pointer("/data/documents_total")
+                .and_then(JsonValue::as_u64),
+            Some(u64::try_from(size.memories).unwrap_or(u64::MAX))
+        );
+    } else {
+        assert_eq!(
+            rebuild_json
+                .pointer("/data/evidence_indexed")
+                .and_then(JsonValue::as_u64),
+            Some(u64::try_from(size.evidence.div_ceil(5)).unwrap_or(u64::MAX)),
+            "evidence fixture must retain the intended admitted/quarantined split"
+        );
+    }
     let fingerprint = install_local_registry_source_and_read_fingerprint(
         &database,
         &workspace_id,
@@ -701,6 +848,68 @@ fn build_prebuilt_search_fixture(ee_binary: &Path) -> PrebuiltSearchFixture {
         fingerprint,
         seed_ms,
         index_ms,
+        size,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn seed_evidence_fixture(connection: &DbConnection, workspace_id: &str, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let session_id = "sess_00000000000000000000000001";
+    connection
+        .insert_session(
+            session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: session_id.to_owned(),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: u32::try_from(count).expect("evidence fixture count fits u32"),
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(session_id.as_bytes()).to_hex()),
+                metadata_json: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("seed evidence fixture session: {error}"));
+    for index in 0..count {
+        let admitted = index % 5 == 0;
+        let line = u32::try_from(index)
+            .expect("evidence line fits u32")
+            .checked_add(1)
+            .expect("evidence line is one-based and fits u32");
+        let excerpt = format!(
+            "Daemon fixture source {index}: release verification retains complete provenance."
+        );
+        connection
+            .insert_evidence_span(
+                &ee::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(index as u128 + 1))
+                    .to_string(),
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("daemon-bench-span-{index}"),
+                    span_kind: "message".to_owned(),
+                    start_line: line,
+                    end_line: line,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some(if admitted { "assistant" } else { "tool" }.to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt,
+                    metadata_json: Some(
+                        r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_owned(),
+                    ),
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("seed evidence fixture span {index}: {error}"));
     }
 }
 
@@ -762,6 +971,7 @@ fn run_daemon_deep_timing_probe(
         payload.pointer("/schema").and_then(JsonValue::as_str),
         Some("ee.explain.performance.v1")
     );
+    assert_fixed_operating_profile(&payload);
     assert_eq!(
         payload.pointer("/success").and_then(JsonValue::as_bool),
         Some(true)
@@ -890,6 +1100,7 @@ fn run_search_process(
             String::from_utf8_lossy(&output.stdout)
         );
     });
+    assert_fixed_operating_profile(&payload);
     assert_eq!(
         payload.pointer("/schema").and_then(JsonValue::as_str),
         Some("ee.response.v2")
@@ -919,6 +1130,21 @@ fn run_search_process(
     );
     assert!(!degradation_present(&payload, "embed_model_unavailable"));
     assert!(!degradation_present(&payload, "daemon_search_fallback"));
+    assert_eq!(
+        payload
+            .pointer("/data/servingPath")
+            .and_then(JsonValue::as_str),
+        Some(if daemon_socket.is_some() {
+            "daemon"
+        } else {
+            "in_process"
+        }),
+        "search measurement must prove its serving path"
+    );
+    assert_eq!(
+        payload.pointer("/data/fallbackReason"),
+        Some(&JsonValue::Null)
+    );
 
     let results = payload
         .pointer("/data/results")
@@ -964,6 +1190,34 @@ fn assert_result_parity(expected: &JsonValue, observation: &SearchObservation, p
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn measured_cli_artifact(ee_binary: &Path) -> JsonValue {
+    let path = std::fs::canonicalize(ee_binary)
+        .unwrap_or_else(|error| panic!("resolve measured CLI {}: {error}", ee_binary.display()));
+    let mut file = std::fs::File::open(&path)
+        .unwrap_or_else(|error| panic!("open measured CLI {}: {error}", path.display()));
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut size_bytes = 0_u64;
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => panic!("hash measured CLI {}: {error}", path.display()),
+        };
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        size_bytes += count as u64;
+    }
+    json!({
+        "path": path.to_string_lossy(),
+        "contentHash": format!("blake3:{}", hasher.finalize().to_hex()),
+        "sizeBytes": size_bytes,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn run_warm_search_measurement(enforce_budgets: bool) {
     let ee_binary = std::env::var_os("EE_BENCH_EE_BIN")
         .map(PathBuf::from)
@@ -973,8 +1227,11 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         "EE_BENCH_EE_BIN does not name a file: {}",
         ee_binary.display()
     );
+    // The external CLI can differ from the benchmark's source revision. Hash
+    // its actual bytes once, before any fixture setup or timed samples.
+    let cli_artifact = measured_cli_artifact(&ee_binary);
 
-    let fixture = build_prebuilt_search_fixture(&ee_binary);
+    let fixture = build_prebuilt_search_fixture(&ee_binary, FixtureSize::default());
     let daemon_started = Instant::now();
     let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
     let daemon_start_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
@@ -1098,6 +1355,9 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         "ee_search_daemon_10k_result_json={}",
         json!({
             "schema": "ee.perf.daemon_search_slo.v1",
+            "cliArtifact": cli_artifact,
+            "operatingProfile": BENCH_OPERATING_PROFILE,
+            "operatingProfileSource": "workspace_config",
             "fixture": {
                 "documents": SEARCH_DOCUMENT_COUNT,
                 "query": SEARCH_QUERY,
@@ -1168,8 +1428,420 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     }
 }
 
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+struct PackObservation {
+    wall_ms: f64,
+    serving_path: String,
+    signature: JsonValue,
+    hash: JsonValue,
+}
+
+/// The pack record ID, timestamps, timing diagnostics and time-derived scores
+/// can vary across ordinary persisted calls. Compare the actual selected
+/// entities, order, content, trust and provenance, plus the enforced budget.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn pack_content_signature(payload: &JsonValue) -> JsonValue {
+    let items = payload
+        .pointer("/data/pack/items")
+        .and_then(JsonValue::as_array)
+        .unwrap_or_else(|| panic!("pack response omitted its items: {payload}"));
+    assert!(
+        !items.is_empty(),
+        "empty packs cannot prove retrieval parity"
+    );
+    let selected: Vec<_> = items
+        .iter()
+        .map(|item| {
+            for field in [
+                "rank",
+                "section",
+                "content",
+                "estimatedTokens",
+                "trust",
+                "provenance",
+                "selectedIn",
+            ] {
+                assert!(
+                    item.get(field).is_some(),
+                    "pack item omitted canonical field {field}: {item}"
+                );
+            }
+            let mut selected = serde_json::Map::new();
+            for field in [
+                "rank",
+                "memoryId",
+                "entityKind",
+                "ruleId",
+                "evidenceSpanId",
+                "entityRevision",
+                "sessionId",
+                "startLine",
+                "endLine",
+                "section",
+                "content",
+                "estimatedTokens",
+                "trust",
+                "provenance",
+                "selectedIn",
+                "origin",
+                "redactions",
+            ] {
+                if let Some(value) = item.get(field) {
+                    selected.insert(field.to_owned(), value.clone());
+                }
+            }
+            assert!(selected.contains_key("content") && selected.contains_key("rank"));
+            JsonValue::Object(selected)
+        })
+        .collect();
+    json!({
+        "items": selected,
+        "maxTokens": payload.pointer("/data/pack/budget/maxTokens").expect("pack maxTokens"),
+        "usedTokens": payload.pointer("/data/pack/budget/usedTokens").expect("pack usedTokens"),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn verified_pack_serving_path(payload: &JsonValue, daemon_expected: bool) -> &str {
+    let serving_path = payload
+        .pointer("/data/servingPath")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_else(|| panic!("pack benchmark cannot establish serving path: {payload}"));
+    if daemon_expected {
+        assert!(
+            matches!(serving_path, "daemon" | "hybrid"),
+            "warm pack used {serving_path}: {payload}"
+        );
+        assert_eq!(
+            payload
+                .pointer("/data/retrievalPath")
+                .and_then(JsonValue::as_str),
+            Some("daemon")
+        );
+    } else {
+        assert_eq!(serving_path, "in_process");
+    }
+    assert_eq!(
+        payload.pointer("/data/fallbackReason"),
+        Some(&JsonValue::Null)
+    );
+    serving_path
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn run_pack_process(
+    ee_binary: &Path,
+    fixture: &PrebuiltSearchFixture,
+    daemon_socket: Option<&Path>,
+    read_only: bool,
+) -> PackObservation {
+    let mut command = Command::new(ee_binary);
+    command
+        .arg("--workspace")
+        .arg(&fixture.workspace)
+        .arg("--json")
+        .arg("pack")
+        .arg(SEARCH_QUERY)
+        .arg("--database")
+        .arg(&fixture.database)
+        .arg("--index-dir")
+        .arg(&fixture.index)
+        .arg("--max-tokens")
+        .arg("400")
+        .arg("--candidate-pool")
+        .arg("100")
+        .arg("--source-mode")
+        .arg("hybrid")
+        .arg("--strict-source-mode")
+        .arg("--relevance-floor")
+        .arg("0");
+    configure_hermetic_process(&mut command, &fixture.home, &fixture.xdg_data, None);
+    if let Some(socket) = daemon_socket {
+        command
+            .arg("--use-daemon")
+            .arg("--daemon-socket")
+            .arg(socket);
+    }
+    if read_only {
+        command.arg("--read-only");
+    }
+    let started = Instant::now();
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("spawn ee pack benchmark: {error}"));
+    let wall_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert!(
+        output.status.success(),
+        "ee pack benchmark failed with {:?}: stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: JsonValue = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid pack JSON: {error}; stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(payload["schema"], "ee.response.v2");
+    assert_eq!(payload["success"], true);
+    assert_eq!(
+        payload
+            .pointer("/data/request/profile")
+            .and_then(JsonValue::as_str),
+        Some(BENCH_PACK_PROFILE),
+        "pack benchmark profile drifted: {payload}"
+    );
+    assert_eq!(
+        payload
+            .pointer("/data/embed_backend")
+            .and_then(JsonValue::as_str),
+        Some("neural_local")
+    );
+    assert!(!degradation_present(&payload, "embed_model_unavailable"));
+    assert!(!degradation_present(&payload, "daemon_search_fallback"));
+    let serving_path = verified_pack_serving_path(&payload, daemon_socket.is_some());
+    let signature = pack_content_signature(&payload);
+    assert!(
+        signature["items"]
+            .as_array()
+            .expect("signature items")
+            .iter()
+            .any(|item| item["memoryId"].as_str() == Some(SEARCH_TARGET_MEMORY_ID)),
+        "pack benchmark must select the planted relevant memory: {signature}"
+    );
+    PackObservation {
+        wall_ms,
+        serving_path: serving_path.to_owned(),
+        signature,
+        hash: payload
+            .pointer("/data/pack/hash")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn fixture_size_from_args() -> FixtureSize {
+    let args: Vec<_> = std::env::args().collect();
+    let count = |flag: &str, default: usize| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .map_or(default, |position| {
+                args.get(position + 1)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value <= 100_000)
+                    .unwrap_or_else(|| panic!("{flag} requires an integer from 0 through 100000"))
+            })
+    };
+    let size = FixtureSize {
+        memories: count("--fixture-memories", SEARCH_DOCUMENT_COUNT),
+        evidence: count("--fixture-evidence", 0),
+    };
+    assert!(size.memories > 0, "--fixture-memories must be positive");
+    size
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn run_warm_pack_measurement(enforce_budgets: bool) {
+    let ee_binary = std::env::var_os("EE_BENCH_EE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("EE_BENCH_EE_BIN must name the release ee binary"));
+    assert!(ee_binary.is_file(), "EE_BENCH_EE_BIN does not name a file");
+    let cli_artifact = measured_cli_artifact(&ee_binary);
+    let size = fixture_size_from_args();
+    let read_only = std::env::args().any(|argument| argument == "--pack-read-only");
+    if enforce_budgets {
+        assert_eq!(
+            size.memories, SEARCH_DOCUMENT_COUNT,
+            "ADR 0052 gate requires 10000 memories; use observation mode at other sizes"
+        );
+        assert!(
+            !read_only,
+            "ADR 0052 gate measures ordinary persisted pack; use observation for read-only"
+        );
+    }
+    let fixture = build_prebuilt_search_fixture(&ee_binary, size);
+    let cold_first = run_pack_process(&ee_binary, &fixture, None, read_only);
+    let daemon_started = Instant::now();
+    let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
+    let daemon_ready_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
+    let daemon_first =
+        run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
+    assert_eq!(
+        cold_first.signature, daemon_first.signature,
+        "first daemon pack differs from cold selection"
+    );
+    let expected = cold_first.signature.clone();
+    for _ in 0..SEARCH_WARMUP_SAMPLES {
+        for socket in [None, Some(daemon.socket_path())] {
+            let observation = run_pack_process(&ee_binary, &fixture, socket, read_only);
+            assert_eq!(
+                observation.signature, expected,
+                "pack warmup selection drift"
+            );
+        }
+    }
+    let mut cold = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
+    let mut warm = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
+    let mut raw = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
+    for sample in 0..SEARCH_MEASURE_SAMPLES {
+        // Alternate path order so a monotonic host-load/thermal trend does not
+        // systematically favour the daemon path.
+        let (direct, resident) = if sample % 2 == 0 {
+            let direct = run_pack_process(&ee_binary, &fixture, None, read_only);
+            let resident =
+                run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
+            (direct, resident)
+        } else {
+            let resident =
+                run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
+            let direct = run_pack_process(&ee_binary, &fixture, None, read_only);
+            (direct, resident)
+        };
+        assert_eq!(
+            direct.signature, expected,
+            "cold pack sample {sample} selection drift"
+        );
+        assert_eq!(
+            resident.signature, expected,
+            "warm pack sample {sample} selection drift"
+        );
+        cold.push(direct.wall_ms);
+        warm.push(resident.wall_ms);
+        raw.push(json!({
+            "sample": sample, "coldMs": direct.wall_ms, "warmMs": resident.wall_ms,
+            "coldServingPath": direct.serving_path, "warmServingPath": resident.serving_path,
+            "coldHash": direct.hash, "warmHash": resident.hash,
+        }));
+    }
+    let cold_p50_ms = p50(cold);
+    let warm_p50_ms = p50(warm);
+    let speedup = cold_p50_ms / warm_p50_ms;
+    let passed = speedup >= PACK_MIN_P50_SPEEDUP;
+    println!("ee_pack_cli_cold_p50_ms={cold_p50_ms:.3}");
+    println!("ee_pack_daemon_warm_p50_ms={warm_p50_ms:.3}");
+    println!("ee_pack_daemon_p50_speedup={speedup:.3}");
+    println!(
+        "ee_pack_daemon_result_json={}",
+        json!({
+            "schema": "ee.perf.daemon_pack_round_trip.v1",
+            "cliArtifact": cli_artifact,
+            "operatingProfile": BENCH_OPERATING_PROFILE,
+            "operatingProfileSource": "workspace_config",
+            "packProfile": BENCH_PACK_PROFILE,
+            "fixture": { "memories": fixture.size.memories, "evidenceSpans": fixture.size.evidence,
+                "feedbackEvents": 0, "seedMs": fixture.seed_ms, "indexMs": fixture.index_ms,
+                "query": SEARCH_QUERY },
+            "backend": { "embedBackend": "neural_local", "downloads": "disabled",
+                "modelId": fixture.fingerprint.model_id, "modelRevision": fixture.fingerprint.model_revision,
+                "modelHash": fixture.fingerprint.model_hash, "dimension": fixture.fingerprint.dimension },
+            "readOnly": read_only,
+            "daemonReadyMs": daemon_ready_ms,
+            "firstColdMs": cold_first.wall_ms,
+            "firstDaemonMs": daemon_first.wall_ms,
+            "firstDaemonServingPath": daemon_first.serving_path,
+            "coldP50Ms": cold_p50_ms, "warmP50Ms": warm_p50_ms, "p50Speedup": speedup,
+            "minimumP50Speedup": PACK_MIN_P50_SPEEDUP,
+            "warmupPerPath": SEARCH_WARMUP_SAMPLES, "measuredPerPath": SEARCH_MEASURE_SAMPLES,
+            "resultParity": "selected_entities_order_content_trust_provenance_budget",
+            "packHashesCompared": false,
+            "executionOrder": "alternating_cold_warm_pairs",
+            "filesystemCache": "shared_warm_no_eviction",
+            "budgetEnforcement": if enforce_budgets { "hard_gate" } else { "observation_only" },
+            "passed": passed, "samples": raw,
+        })
+    );
+    if enforce_budgets {
+        assert!(
+            passed,
+            "ADR 0052 requires >= {PACK_MIN_P50_SPEEDUP}x p50 improvement at 10k memories; measured {speedup:.3}x (cold {cold_p50_ms:.3}ms, warm {warm_p50_ms:.3}ms)"
+        );
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+mod pack_benchmark_contracts {
+    use super::*;
+
+    fn response() -> JsonValue {
+        json!({"data": {
+            "servingPath": "in_process",
+            "pack": {
+                "id": "one-record", "hash": "one-hash",
+                "budget": {"maxTokens": 400, "usedTokens": 20},
+                "items": [
+                    {"rank": 1, "memoryId": "mem_a", "section": "facts", "content": "first fact",
+                     "estimatedTokens": 10, "trust": {"class": "agent_validated"},
+                     "provenance": [{"uri": "test://first"}], "selectedIn": "mmr"},
+                    {"rank": 2, "memoryId": "mem_b", "section": "facts", "content": "second fact",
+                     "estimatedTokens": 10, "trust": {"class": "agent_validated"},
+                     "provenance": [{"uri": "test://second"}], "selectedIn": "mmr"}
+                ]
+            }
+        }})
+    }
+
+    #[test]
+    fn pack_parity_detects_wrong_content_identity_order_trust_and_provenance() {
+        let baseline = response();
+        let expected = pack_content_signature(&baseline);
+        for (pointer, changed) in [
+            ("/data/pack/items/0/content", json!("wrong fact")),
+            ("/data/pack/items/0/memoryId", json!("mem_wrong")),
+            ("/data/pack/items/0/rank", json!(2)),
+            ("/data/pack/items/0/trust/class", json!("untrusted")),
+            ("/data/pack/items/0/provenance/0/uri", json!("test://wrong")),
+            ("/data/pack/budget/usedTokens", json!(401)),
+        ] {
+            let mut wrong = baseline.clone();
+            *wrong.pointer_mut(pointer).expect("fixture mutation path") = changed;
+            assert_ne!(pack_content_signature(&wrong), expected, "missed {pointer}");
+        }
+        let mut reordered = baseline.clone();
+        reordered
+            .pointer_mut("/data/pack/items")
+            .and_then(JsonValue::as_array_mut)
+            .expect("fixture items")
+            .reverse();
+        assert_ne!(pack_content_signature(&reordered), expected);
+        let mut delivered = baseline;
+        delivered["data"]["servingPath"] = json!("hybrid");
+        delivered["data"]["pack"]["id"] = json!("new-record");
+        assert_eq!(pack_content_signature(&delivered), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "empty packs cannot prove retrieval parity")]
+    fn pack_parity_refuses_vacuous_empty_results() {
+        let mut empty = response();
+        empty["data"]["pack"]["items"] = json!([]);
+        let _ = pack_content_signature(&empty);
+    }
+
+    #[test]
+    #[should_panic(expected = "warm pack used in_process_fallback")]
+    fn feedback_fallback_cannot_satisfy_daemon_acceleration_gate() {
+        let fallback = json!({"data": {
+            "servingPath": "in_process_fallback",
+            "retrievalPath": "in_process",
+            "fallbackReason": "daemon_pack_search_feedback_unsupported"
+        }});
+        let _ = verified_pack_serving_path(&fallback, true);
+    }
+}
+
 #[cfg(unix)]
 fn main() {
+    if std::env::args()
+        .any(|argument| argument == "--warm-pack-gate" || argument == "--warm-pack-observation")
+    {
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        run_warm_pack_measurement(std::env::args().any(|argument| argument == "--warm-pack-gate"));
+        #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+        panic!("warm-pack measurement requires safe same-EUID peer credentials on Linux or Apple");
+        return;
+    }
     if std::env::args().any(|argument| argument == "--warm-search-gate") {
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
         run_warm_search_measurement(true);

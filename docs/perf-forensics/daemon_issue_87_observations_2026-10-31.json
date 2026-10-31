@@ -1,0 +1,136 @@
+{
+  "format_version": 1,
+  "date": "2026-10-31",
+  "issue": "https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/87",
+  "measurement_kind": "published_release_baseline_only",
+  "updated_source_executed": false,
+  "release": {
+    "version": "0.18.0",
+    "source_commit": "969f0cbf19a5fdaa367328350c937cf566063efc",
+    "asset": "ee-x86_64-unknown-linux-gnu.tar.xz",
+    "asset_sha256": "a8c78867c10855cff4914b673bd3075fc4d7bc912065a8dcfbf9971dfb8890fc"
+  },
+  "model": {
+    "id": "minishlab/potion-multilingual-128M",
+    "revision": "a28f4eebecd4dc585034f605e52d414878a0417c",
+    "model_safetensors_sha256": "14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397",
+    "tokenizer_json_sha256": "19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1",
+    "backend": "neural_local",
+    "downloads_during_measurement": false
+  },
+  "host": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "mem_total_kib": 10206472,
+    "hardware_class": "shared_container",
+    "measured_search_operating_profile": "constrained",
+    "stable_runner_acceptance": false
+  },
+  "method": {
+    "samples_per_path": 5,
+    "order": "cold_then_warm_paired",
+    "cold": "fresh CLI process, shared warmed filesystem cache",
+    "warm": "fresh CLI process, one already-ready daemon per fixture",
+    "query": "quasar sentinel retrieval",
+    "pack_max_tokens": 400,
+    "pack_persistence": true,
+    "feedback_events": 0,
+    "evidence_spans": 0,
+    "timings_traced": false,
+    "outliers_removed": false,
+    "pack_selected_content_and_budget_parity": true,
+    "pack_hash_equality_asserted": false,
+    "new_serving_fields_available_in_release": false,
+    "daemon_fallback_diagnostics_observed_in_samples": false
+  },
+  "observations": [
+    {
+      "memories": 10,
+      "operation": "search",
+      "cold_wall_ms": [802.616, 740.353, 770.759, 884.002, 898.441],
+      "daemon_wall_ms": [403.132, 369.952, 320.953, 421.415, 306.872],
+      "cold_p50_ms": 802.616,
+      "daemon_p50_ms": 369.952
+    },
+    {
+      "memories": 10,
+      "operation": "pack",
+      "cold_wall_ms": [1204.156, 988.022, 1050.415, 1057.126, 1085.753],
+      "daemon_wall_ms": [521.306, 493.225, 645.113, 649.871, 675.883],
+      "cold_p50_ms": 1057.126,
+      "daemon_p50_ms": 645.113
+    },
+    {
+      "memories": 1000,
+      "operation": "search",
+      "cold_wall_ms": [836.813, 731.719, 968.435, 829.168, 836.739],
+      "daemon_wall_ms": [442.974, 419.919, 356.045, 375.480, 356.771],
+      "cold_p50_ms": 836.739,
+      "daemon_p50_ms": 375.480
+    },
+    {
+      "memories": 1000,
+      "operation": "pack",
+      "cold_wall_ms": [1120.138, 981.411, 985.300, 1039.719, 1176.064],
+      "daemon_wall_ms": [727.367, 754.389, 696.491, 754.949, 806.462],
+      "cold_p50_ms": 1039.719,
+      "daemon_p50_ms": 754.389
+    }
+  ],
+  "separate_traced_control": {
+    "memories": 10,
+    "includes_startup_and_repeated_requests": true,
+    "source_database_openat_calls": 109,
+    "tokenizer_openat_calls": 1,
+    "model_safetensors_openat_calls": 1,
+    "model_asset_opens_only_during_startup": true,
+    "trace_timings_used_for_speedup": false
+  },
+  "single_warm_search_performance_probes": [
+    {
+      "memories": 10,
+      "client_daemon_round_trip_ms": 305.164,
+      "daemon_total_ms": 301.666,
+      "inner_search_total_ms": 24.467,
+      "embedder_preparation_ms": 0.005,
+      "index_open_ms": 0.033,
+      "query_ms": 0.563
+    },
+    {
+      "memories": 1000,
+      "client_daemon_round_trip_ms": 330.772,
+      "daemon_total_ms": 325.814,
+      "inner_search_total_ms": 111.715,
+      "embedder_preparation_ms": 0.012,
+      "index_open_ms": 0.038,
+      "query_ms": 2.190
+    }
+  ],
+  "neutral_feedback_control": {
+    "memories": 10,
+    "observations_per_state": 1,
+    "signal": "neutral",
+    "confidence_before": 0.5,
+    "confidence_after": 0.5,
+    "pack_daemon_wall_ms_before_event": 616.619,
+    "pack_daemon_wall_ms_after_event": 1168.820,
+    "fallback_code_after_event": "daemon_search_fallback",
+    "fallback_message_after_event": "Warm daemon search unavailable (workspace changed after daemon retrieval); used canonical in-process search.",
+    "separate_explain_probe_after_event_local_embedder_prepare_ms": 482.978,
+    "is_updated_code_comparison": false
+  },
+  "not_measured": [
+    "base main 0a626d91277c08df3f5aff472cffe0c1cee1d41b",
+    "updated main code",
+    "10000-memory acceptance fixture",
+    "evidence-heavy fixture",
+    "reporter workspace and 31 GB host"
+  ],
+  "rust_verification": {
+    "executed": false,
+    "required_lane": "RCH",
+    "blockers": ["no RCH client or configured worker", "seven required sibling repositories absent"],
+    "local_cargo_fallback_used": false,
+    "adr_0052_acceptance_claimed": false
+  }
+}

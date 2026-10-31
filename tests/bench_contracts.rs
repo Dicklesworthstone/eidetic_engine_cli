@@ -21,6 +21,8 @@ mod context_stream;
 mod context_with_ppr;
 #[path = "../benches/curate_candidates.rs"]
 mod curate_candidates;
+#[path = "../benches/daemon_round_trip.rs"]
+mod daemon_round_trip;
 #[path = "../benches/graph_full_stack.rs"]
 mod graph_full_stack;
 #[path = "../benches/graph_minhash_rank.rs"]
