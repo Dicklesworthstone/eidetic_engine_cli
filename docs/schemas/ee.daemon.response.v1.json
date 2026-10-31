@@ -42,7 +42,7 @@
     },
     "error": {
       "type": "object",
-      "description": "Populated when the method failed. Registered codes include `daemon_unknown_method`, `daemon_method_unauthorized`, `daemon_request_decode_failed`, `daemon_request_schema_mismatch`, `daemon_context_params_invalid`, `daemon_context_deadline_exceeded`, `daemon_context_execution_failed`, `daemon_search_params_invalid`, and `daemon_search_execution_failed`, plus method-specific write, telemetry, lifecycle, and authorization codes. Consumers must tolerate unknown codes and opt-in CLI clients must use canonical local search when daemon search fails.",
+      "description": "Populated when the method failed. Registered codes include `daemon_unknown_method`, `daemon_method_unauthorized`, `daemon_request_decode_failed`, `daemon_request_schema_mismatch`, `daemon_context_params_invalid`, `daemon_context_deadline_exceeded`, `daemon_context_execution_failed`, `daemon_search_params_invalid`, `daemon_search_execution_failed`, and `daemon_pack_search_feedback_unsupported`, plus method-specific write, telemetry, lifecycle, and authorization codes. The feedback code refuses retrieval-only pack handoff when the workspace feedback ledger is nonempty; it is a method error and CLI fallbackReason, not a new degraded code. Consumers must tolerate unknown codes and opt-in CLI clients must use canonical local search when daemon search fails.",
       "required": ["code", "message"],
       "additionalProperties": false,
       "properties": {

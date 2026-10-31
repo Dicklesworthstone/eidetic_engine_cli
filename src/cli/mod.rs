@@ -95606,6 +95606,133 @@ mod tests {
                     )?;
                 }
             }
+            // Even neutral feedback makes the current handoff proof
+            // unsupported. Reject before remote retrieval, retain the exact
+            // method reason, and execute the canonical local read-only pack.
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .insert_feedback_event(
+                    "fb_00000000000000000000000087",
+                    &crate::db::CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: remembered.memory_id.to_string(),
+                        signal: "neutral".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: None,
+                        reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let feedback_packs_before = connection
+                .count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?;
+            let feedback_audits_before = connection
+                .count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let mut feedback_args = vec![
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace,
+                "pack",
+                "quasar release checksums",
+                "--read-only",
+                "--source-mode",
+                "lexical-only",
+                "--max-tokens",
+                "800",
+                "--no-lod",
+            ];
+            let (local_exit, local_stdout, local_stderr) = invoke(&feedback_args);
+            ensure_equal(
+                &local_exit,
+                &ProcessExitCode::Success,
+                &format!("local feedback pack: {local_stdout} {local_stderr}"),
+            )?;
+            let local: serde_json::Value =
+                serde_json::from_str(&local_stdout).map_err(|error| error.to_string())?;
+            feedback_args.extend(["--use-daemon", "--daemon-socket", socket_arg]);
+            let (exit, stdout, stderr) = invoke(&feedback_args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("feedback fallback pack: {stdout} {stderr}"),
+            )?;
+            let envelope: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &envelope["data"]["servingPath"],
+                &serde_json::json!("in_process_fallback"),
+                "feedback fallback cannot claim daemon retrieval",
+            )?;
+            ensure_equal(
+                &envelope["data"]["retrievalPath"],
+                &serde_json::json!("in_process"),
+                "feedback fallback executes local retrieval",
+            )?;
+            ensure_equal(
+                &envelope["data"]["fallbackReason"],
+                &serde_json::json!("daemon_pack_search_feedback_unsupported"),
+                "unsupported feedback retains its exact daemon method reason",
+            )?;
+            ensure(
+                stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
+                "feedback fallback keeps the existing degradation category",
+            )?;
+            let selection =
+                |payload: &serde_json::Value| -> Result<Vec<serde_json::Value>, String> {
+                    let items = payload
+                        .pointer("/data/pack/items")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "feedback pack omitted its selected items".to_owned())?;
+                    Ok(items
+                        .iter()
+                        .map(|item| {
+                            serde_json::json!({
+                                "memoryId": item["memoryId"],
+                                "rank": item["rank"],
+                                "section": item["section"],
+                                "content": item["content"],
+                                "trust": item["trust"],
+                                "provenance": item["provenance"],
+                                "selectedIn": item["selectedIn"],
+                            })
+                        })
+                        .collect())
+                };
+            ensure_equal(
+                &selection(&envelope)?,
+                &selection(&local)?,
+                "feedback fallback preserves canonical selected content and provenance",
+            )?;
+            ensure(
+                stdout.contains(content) && stdout.contains(&remembered.memory_id.to_string()),
+                "feedback fallback retains the planted memory",
+            )?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &connection
+                    .count_table_rows("pack_records")
+                    .map_err(|error| error.to_string())?,
+                &feedback_packs_before,
+                "read-only feedback fallback did not persist a pack",
+            )?;
+            ensure_equal(
+                &connection
+                    .count_table_rows("audit_log")
+                    .map_err(|error| error.to_string())?,
+                &feedback_audits_before,
+                "read-only feedback fallback wrote no audits",
+            )?;
+            drop(connection);
+
             // Explicit sockets bound to another workspace must use that
             // workspace's canonical local fallback, never the daemon corpus.
             let other = init_cli_workspace("ee-pack-other")?;

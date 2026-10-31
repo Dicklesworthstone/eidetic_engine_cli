@@ -106,6 +106,12 @@ mod tests {
                 "daemon_method_unauthorized",
             ),
             (
+                DaemonSearchFallbackReason::SearchMethodError(
+                    crate::daemon::server::DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE.into(),
+                ),
+                "daemon_pack_search_feedback_unsupported",
+            ),
+            (
                 DaemonSearchFallbackReason::SearchResponseValidationError("missing results".into()),
                 "search_response_drift",
             ),

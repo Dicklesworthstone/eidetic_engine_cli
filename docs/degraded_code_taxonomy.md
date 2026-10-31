@@ -1058,6 +1058,11 @@ the daemon-side codes onto the canonical `degraded[]` array on fallback.
 `daemon_socket_unavailable` and `daemon_search_fallback` are emitted CLI-side
 with repair hints. The latter records that an explicitly requested warm search
 path could not negotiate or complete and canonical in-process search was used.
+Pack requests whose early check finds workspace feedback, including neutral
+outcomes, use that existing degradation with `data.fallbackReason` set to
+`daemon_pack_search_feedback_unsupported`. This is a daemon method error and
+fallback reason, not a new degraded code; it rejects the unsupported handoff
+before retrieval while retaining the final source-snapshot guard.
 The
 bounded-pool `daemon_overloaded` and peer-credential
 `daemon_peer_unauthorized` codes are catalogued under their own concurrency

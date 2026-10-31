@@ -23910,6 +23910,16 @@ impl DbConnection {
         rows.iter().map(stored_feedback_event_from_row).collect()
     }
 
+    /// Check for feedback without counting or loading the full workspace ledger.
+    pub(crate) fn has_feedback_events(&self, workspace_id: &str) -> Result<bool> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT 1 FROM feedback_events WHERE workspace_id = ?1 LIMIT 1",
+            &[Value::Text(workspace_id.to_owned())],
+        )
+        .map(|rows| !rows.is_empty())
+    }
+
     /// Cheaply fingerprint feedback rows for cache invalidation.
     pub fn feedback_events_fingerprint(
         &self,

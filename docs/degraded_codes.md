@@ -4309,7 +4309,7 @@ DaemonRequest{schema="ee.daemon.request.v0_wrong", method="ee.daemon.echo"} sent
 
 **Introduced by:** bd-search-warm-latency-0bh05 (epic search-warm-latency)
 
-**Trigger.** An opt-in warm daemon search or pack retrieval cannot negotiate the exact envelope, method, authorization, and method-specific schemas, its round-trip fails, its scope requires local hydration, or the bounded capability-plus-retrieval attempt expires (five seconds by default). The CLI executes canonical in-process search and records why the requested acceleration path was not used.
+**Trigger.** An opt-in warm daemon search or pack retrieval cannot negotiate the exact envelope, method, authorization, and method-specific schemas, its round-trip fails, its scope requires local hydration, its pack handoff is unsupported because the workspace feedback ledger is nonempty (including a neutral outcome; fallbackReason=daemon_pack_search_feedback_unsupported), or the bounded capability-plus-retrieval attempt expires (five seconds by default). The CLI executes canonical in-process search and records why the requested acceleration path was not used.
 
 **Setup.**
 

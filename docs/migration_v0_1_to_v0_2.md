@@ -36,6 +36,18 @@ local assembly/persistence is `hybrid`; rejected or unavailable daemon
 execution is `in_process_fallback` with a machine-readable reason. These
 delivery diagnostics are outside pack identity and stored prompt content.
 
+The retrieval-only CLI pack route still requires an empty feedback ledger.
+When the daemon's early check finds any workspace feedback event, including
+a neutral outcome, it refuses before retrieval with method error and
+`fallbackReason` `daemon_pack_search_feedback_unsupported`. Cold-model and
+storage admission retain their existing error precedence. The CLI uses
+canonical local execution and the existing `daemon_search_fallback`
+degradation. This avoids
+doing remote retrieval that the final feedback-snapshot check would reject;
+it does not add daemon pack acceleration for workspaces with feedback. Search
+daemon routing remains supported. The pack benchmark's empty-ledger result
+must not be presented as evidence for this unsupported state.
+
 ## Verified retrieval-tuning application
 
 `ee.shadow.retrieval_tuning_report.v1` keeps its public shape. Promotion now

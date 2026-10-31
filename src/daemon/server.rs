@@ -122,6 +122,11 @@ pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_f
 pub(crate) const DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE: &str =
     "daemon_cached_local_embedder_unavailable";
 
+/// Pack handoffs currently require an empty feedback ledger. Report this
+/// before retrieval so the caller can execute its canonical local pack once.
+pub const DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE: &str =
+    "daemon_pack_search_feedback_unsupported";
+
 /// Warm-up posture of the daemon's process-cached search stack (GH #37).
 ///
 /// The semantic arm builds a ~500k-piece Unigram tokenizer and materialises a
@@ -4414,6 +4419,7 @@ fn dispatch_pack_search(
             "pack filters and agent-specific scope remain local",
         );
     }
+    read_pools.retain(&options.resolve_database_path());
     let loaded = if require_cached_local && options.source_mode.uses_embeddings() {
         match crate::core::index::already_loaded_local_embedder_for_workspace(
             &options.workspace_path,
@@ -4433,7 +4439,18 @@ fn dispatch_pack_search(
     } else {
         None
     };
-    read_pools.retain(&options.resolve_database_path());
+    // Preserve bd-snkcp's cold read-only refusal above: it must not open a
+    // store merely to discover that no loaded model can be lent. For a warm
+    // model the registry reader is resident and reusable for this short read.
+    if crate::core::search::pack_search_has_unsupported_feedback(&options) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE,
+            "Pack retrieval with quality-feedback state requires canonical local scoring; daemon retrieval was not started.",
+        );
+    }
     let retrieval = match loaded {
         Some(loaded) => {
             crate::core::search::run_pack_search_with_cached_local_embedder(&options, Some(loaded))
@@ -8835,6 +8852,7 @@ mod tests {
             }),
         );
         request.workspace_id = Some(workspace.path().display().to_string());
+        let retrievals = crate::core::search::pack_search_retrieval_calls_for_test();
         let response = dispatch_pack_search(
             &request,
             &AtomicBool::new(false),
@@ -8846,6 +8864,122 @@ mod tests {
             DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE
         );
         assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+        assert_eq!(
+            crate::core::search::pack_search_retrieval_calls_for_test(),
+            retrievals
+        );
+    }
+
+    #[test]
+    fn daemon_pack_feedback_refusal_precedes_retrieval_and_observes_fresh_workspace_state() {
+        use crate::db::{CreateFeedbackEventInput, CreateWorkspaceInput, DbConnection};
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let database = workspace.path().join("ee.db");
+        let bound_id = "wsp_52000000000000000000000089";
+        let other_id = "wsp_52000000000000000000000090";
+        let connection = DbConnection::open_file(&database).expect("database");
+        connection.migrate().expect("schema");
+        for (id, path) in [
+            (bound_id, workspace.path().to_path_buf()),
+            (other_id, workspace.path().join("other")),
+        ] {
+            connection
+                .insert_workspace(
+                    id,
+                    &CreateWorkspaceInput {
+                        path: path.display().to_string(),
+                        name: None,
+                    },
+                )
+                .expect("workspace binding");
+        }
+        let mut request = DaemonRequest::new(
+            "feedback-preflight",
+            TEST_AGENT_ID,
+            METHOD_PACK_SEARCH,
+            serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "release", "workspacePath": workspace.path(),
+                "databasePath": database,
+                "sourceMode": "hybrid", "requireCachedLocalEmbedder": false,
+            }),
+        );
+        request.workspace_id = Some(workspace.path().display().to_string());
+        let (options, _, _, _) = DaemonSearchParams::from_value(&request.params)
+            .expect("params")
+            .into_search_parts(request.workspace_id.as_deref().unwrap())
+            .expect("authorized options");
+        let pools = DaemonReadPools::default();
+        pools.retain(&database);
+        assert!(!crate::core::search::pack_search_has_unsupported_feedback(
+            &options
+        ));
+        let event = |workspace_id: &str| CreateFeedbackEventInput {
+            workspace_id: workspace_id.to_owned(),
+            target_type: "candidate".to_owned(),
+            target_id: "neutral-canary".to_owned(),
+            signal: "neutral".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        };
+        connection
+            .insert_feedback_event("fb_52000000000000000000000089", &event(other_id))
+            .expect("foreign feedback");
+        assert!(
+            !crate::core::search::pack_search_has_unsupported_feedback(&options),
+            "another bound workspace's feedback must not disable this handoff"
+        );
+        let generation = connection
+            .get_workspace_generation(bound_id)
+            .expect("generation");
+        connection
+            .insert_feedback_event("fb_52000000000000000000000090", &event(bound_id))
+            .expect("neutral feedback");
+        assert_eq!(
+            connection
+                .get_workspace_generation(bound_id)
+                .expect("generation"),
+            generation
+        );
+
+        let retrievals = crate::core::search::pack_search_retrieval_calls_for_test();
+        let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
+        assert!(response.result.is_none());
+        assert_eq!(
+            response.error.expect("precise refusal").code,
+            DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE
+        );
+        assert_eq!(
+            crate::core::search::pack_search_retrieval_calls_for_test(),
+            retrievals,
+            "preflight must precede canonical model preparation and retrieval"
+        );
+        let stats = crate::db::read_pool::process_read_pool_stats_for_database(
+            &DatabaseConfig::file(database),
+        )
+        .expect("resident preflight reader");
+        assert_eq!(stats.active_pins, 0);
+        assert!(stats.idle > 0);
+        assert!(!workspace.path().join(".ee/index").exists());
+
+        let mut missing = options.clone();
+        missing.database_path = Some(workspace.path().join("absent.db"));
+        assert!(!crate::core::search::pack_search_has_unsupported_feedback(
+            &missing
+        ));
+        assert!(!missing.resolve_database_path().exists());
+        let corrupt = workspace.path().join("corrupt.db");
+        fs::write(&corrupt, b"not a database").expect("corrupt fixture");
+        missing.database_path = Some(corrupt);
+        assert!(
+            !crate::core::search::pack_search_has_unsupported_feedback(&missing),
+            "unreadable storage must defer to canonical error handling"
+        );
     }
 
     #[test]

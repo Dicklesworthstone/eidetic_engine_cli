@@ -2488,6 +2488,85 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
 }
 
 #[test]
+fn daemon_pack_search_refuses_nonempty_feedback_before_repeating_retrieval() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let (workspace, database) = seed_context_workspace(temp.path())?;
+    let index = workspace.join(".ee/index");
+    rebuild_test_index(&workspace, &database, &index)?;
+    let socket = secure_socket_path(temp.path(), "feedback.sock")?;
+    // No startup neural warm-up is needed for this lexical handoff fixture.
+    let mut handle = start_server(&socket).map_err(|error| error.to_string())?;
+    let mut request = search_request("pack-feedback-empty", &workspace, &database, &index);
+    request.method = METHOD_PACK_SEARCH.to_owned();
+    request.params["sourceMode"] = serde_json::json!("lexical_only");
+    request.params["strictSourceMode"] = serde_json::json!(true);
+    request.params["requireCachedLocalEmbedder"] = serde_json::json!(false);
+    let empty = successful_result(
+        client_round_trip(handle.socket_path(), &request).map_err(|error| error.to_string())?,
+        "empty-ledger handoff",
+    )?;
+    ensure(
+        empty.get("schema").and_then(serde_json::Value::as_str)
+            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1)
+            && empty
+                .pointer("/handoff/report/results")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|hits| !hits.is_empty()),
+        format!("empty feedback ledger must still allow real daemon retrieval: {empty}"),
+    )?;
+
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let workspace_id = stable_test_workspace_id(&workspace)?;
+    let generation = connection
+        .get_workspace_generation(&workspace_id)
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_feedback_event(
+            "fb_00000000000000000000008701",
+            &ee::db::CreateFeedbackEventInput {
+                workspace_id: workspace_id.clone(),
+                target_type: "memory".to_owned(),
+                target_id: "mem_00000000000000000000005001".to_owned(),
+                signal: "neutral".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: None,
+                reason: Some("neutral feedback must not cause duplicate retrieval".to_owned()),
+                evidence_json: None,
+                session_id: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    ensure(
+        connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            == generation,
+        "feedback negative control unexpectedly changed the workspace generation",
+    )?;
+    connection.close().map_err(|error| error.to_string())?;
+    for call in 0..3 {
+        request.request_id = format!("pack-feedback-present-{call}");
+        let response =
+            client_round_trip(handle.socket_path(), &request).map_err(|error| error.to_string())?;
+        ensure_error_code(
+            &response,
+            ee::daemon::server::DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE,
+        )?;
+        ensure(
+            response.result.is_none(),
+            "refused feedback handoff unexpectedly returned results",
+        )?;
+        ensure(
+            response.degraded_codes.is_empty(),
+            "the early refusal must remain a method error, not a new degradation taxonomy",
+        )?;
+    }
+    handle.shutdown().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales() -> TestResult {
     fn selected_content(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
         let items = payload

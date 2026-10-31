@@ -8087,6 +8087,50 @@ pub fn run_search_with_performance(
     run_search_with_performance_and_filters(options, None, &[])
 }
 
+/// A nonempty quality-feedback ledger cannot currently cross the pack handoff
+/// boundary: feedback and calibration changes have no complete revision witness.
+/// Refuse that known state before retrieval instead of calculating a result
+/// that `PackSearchHandoff::snapshot_matches` must reject later.
+///
+/// This is only an early negative check. Missing or unreadable storage defers
+/// to canonical execution and its existing errors; an empty result never
+/// replaces the final source-snapshot checks on both sides of the handoff.
+pub(crate) fn pack_search_has_unsupported_feedback(options: &SearchOptions) -> bool {
+    let database_path = options.resolve_database_path();
+    if !database_path.is_file() || options.validate().is_err() {
+        return false;
+    }
+    let pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path),
+        PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+    );
+    let Ok(connection) = pool.acquire() else {
+        return false;
+    };
+    let workspace_root = default_workspace_root(&options.workspace_path);
+    let requested = crate::core::curate::stable_workspace_id(&workspace_root);
+    let Ok(workspace_id) = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[&options.workspace_path, workspace_root.as_path()],
+    ) else {
+        return false;
+    };
+    connection
+        .has_feedback_events(&workspace_id)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PACK_SEARCH_RETRIEVAL_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn pack_search_retrieval_calls_for_test() -> u64 {
+    PACK_SEARCH_RETRIEVAL_CALLS.get()
+}
+
 /// Run canonical retrieval without a writer. The daemon may finish this after
 /// a disconnected client; only the receiving pack process can persist it.
 pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHandoff, SearchError> {
@@ -8097,6 +8141,8 @@ pub(crate) fn run_pack_search_with_cached_local_embedder(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
 ) -> Result<PackSearchHandoff, SearchError> {
+    #[cfg(test)]
+    PACK_SEARCH_RETRIEVAL_CALLS.set(PACK_SEARCH_RETRIEVAL_CALLS.get().saturating_add(1));
     let attestation = loaded.as_ref().map(|loaded| loaded.attestation.clone());
     let timeout = search_request_timeout();
     let run = crate::core::run_cli_with_cx(timeout, |cx| async move {
