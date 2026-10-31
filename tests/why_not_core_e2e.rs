@@ -398,3 +398,121 @@ fn why_not_is_deterministic_across_runs() -> TestResult {
     }
     Ok(())
 }
+
+/// Positive control for [`without_timing_entries`]: it must remove the
+/// timing entry from every place the report repeats it.
+///
+/// A scrub used by a determinism assertion is the one helper that must not be
+/// taken on trust. If it silently removed nothing, the assertion above would
+/// go back to measuring machine load; if it removed too much, the assertion
+/// would compare two husks and pass forever. The fixture below is the shape
+/// observed on the pinned lane on 2026-10-31, including the hint whose
+/// `rationale` is a verbatim copy of the degradation `message` -- that copy is
+/// the only handle on the hint, because hints carry no `code`.
+#[test]
+fn timing_scrub_removes_every_copy_of_the_elapsed_entry() -> TestResult {
+    let code = ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE;
+    let message = "Pack assembly took 29435ms, at or over the standard resource-profile \
+                   elapsed failure threshold of 2000ms. The pack contents are unaffected.";
+    let report = serde_json::json!({
+        "schema": "ee.why_not_selected.v1",
+        "filtersApplied": [
+            {"stage": "selection", "code": "selected", "passed": true,
+             "detail": "target memory was selected"},
+            {"stage": "retrieval", "code": code, "passed": false, "detail": message},
+        ],
+        "degraded": [
+            {"code": "graph_feature_disabled", "severity": "medium",
+             "message": "Proximity-to-seed scoring is disabled."},
+            {"code": code, "severity": "medium", "message": message},
+        ],
+        "counterfactualHints": [
+            {"kind": "repair_degraded_index", "action": "ee config set x true",
+             "rationale": "Proximity-to-seed scoring is disabled."},
+            {"kind": "repair_degraded_index", "action": "Re-run to see whether it repeats.",
+             "rationale": message},
+        ],
+    });
+
+    let (scrubbed, removed) = without_timing_entries(&report);
+
+    if removed.is_empty() {
+        return Err(
+            "scrub reported removing nothing from a report that carries the timing \
+                    entry twice; a silent no-op here makes the determinism assertion a load \
+                    measurement again"
+                .to_owned(),
+        );
+    }
+    for (array_key, expected_len) in [
+        ("filtersApplied", 1),
+        ("degraded", 1),
+        ("counterfactualHints", 1),
+    ] {
+        let entries = scrubbed[array_key]
+            .as_array()
+            .ok_or_else(|| format!("{array_key} must survive as an array: {scrubbed}"))?;
+        if entries.len() != expected_len {
+            return Err(format!(
+                "{array_key} should keep its {expected_len} non-timing entr(y/ies), kept {}: {:?}",
+                entries.len(),
+                entries
+            ));
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.get("code").and_then(Value::as_str) == Some(code))
+        {
+            return Err(format!(
+                "{array_key} still carries a timing entry: {entries:?}"
+            ));
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.get("rationale").and_then(Value::as_str) == Some(message))
+        {
+            return Err(format!(
+                "{array_key} still carries the hint copied from the timing message: {entries:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Negative control: a report with no timing entry must come back untouched.
+///
+/// This is the arm that catches over-stripping. The two `graph_feature_disabled`
+/// signals are config-derived and perfectly reproducible, so a scrub that drops
+/// them would be hiding real drift rather than load.
+#[test]
+fn timing_scrub_leaves_a_report_without_timing_entries_alone() -> TestResult {
+    let report = serde_json::json!({
+        "schema": "ee.why_not_selected.v1",
+        "filtersApplied": [
+            {"stage": "retrieval", "code": "graph_feature_disabled", "passed": false,
+             "detail": "Context profile HITS boost is disabled."},
+        ],
+        "degraded": [
+            {"code": "graph_feature_disabled", "severity": "medium",
+             "message": "Context profile HITS boost is disabled."},
+        ],
+        "counterfactualHints": [
+            {"kind": "repair_degraded_index", "action": "ee config set y true",
+             "rationale": "Context profile HITS boost is disabled."},
+        ],
+    });
+
+    let (scrubbed, removed) = without_timing_entries(&report);
+
+    if !removed.is_empty() {
+        return Err(format!(
+            "scrub removed {removed:?} from a report that carries no timing entry"
+        ));
+    }
+    if scrubbed != report {
+        return Err(format!(
+            "scrub altered a report it should have passed through:\nbefore: {report}\nafter:  {scrubbed}"
+        ));
+    }
+    Ok(())
+}
