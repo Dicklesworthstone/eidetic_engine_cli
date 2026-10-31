@@ -1388,7 +1388,20 @@ fn consolidation_preserves_sealed_bodies_and_post_approval_tag_scope() -> TestRe
         &query_path,
         serde_json::json!({
             "version": "ee.query.v1",
-            "query": { "text": "copper kestrel review deployment evidence" },
+            // DERIVED from the body above, not written out again. This query
+            // used to spell "copper kestrel review deployment evidence", which
+            // matched the old body by nothing but an author remembering to keep
+            // the two in step -- and when the body changed to clear the
+            // curation specificity gate, this lexical_only search silently
+            // matched nothing and the pack came back empty. The assertion below
+            // then failed for a reason that had nothing to do with tag scope,
+            // which is what it exists to test. Deriving the text means a future
+            // body change cannot orphan the query again.
+            //
+            // Both visible memories share this body, so the text alone matches
+            // both; the `scope-exclusive` requirement is what selects the
+            // target, and that tag is re-added after approval a few lines up.
+            "query": { "text": content },
             "tags": { "require": ["scope-exclusive"] }
         })
         .to_string(),
