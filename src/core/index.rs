@@ -20,9 +20,10 @@ use crate::core::remote_embed::{
 };
 #[cfg(test)]
 use crate::db::ModelRegistryUpsertOutcome;
+use crate::db::read_pool::{PoolConfig, registered_process_read_pool};
 use crate::db::{
-    AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
-    DbOperation, EVIDENCE_CANONICAL_PROVENANCE_REVISION, EVIDENCE_SCREENING_VERSION,
+    AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DatabaseConfig, DbConnection,
+    DbError, DbOperation, EVIDENCE_CANONICAL_PROVENANCE_REVISION, EVIDENCE_SCREENING_VERSION,
     EVIDENCE_SECURITY_POLICY_EPOCH, EvidenceAdmissionReport, SearchIndexJobStatus,
     SearchIndexJobType, StoredModelRegistryEntry, StoredSearchIndexJob,
 };
@@ -9034,12 +9035,22 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
 ) -> Result<EmbedderPreparation, SearchError> {
     let started = Instant::now();
     if configured_embedder_model_root().is_none() && database_path.exists() {
-        let db = DbConnection::open_file_read_only(database_path).map_err(|error| {
-            SearchError::SubsystemError {
+        // A resident daemon retains this ordinary unpinned reader between
+        // requests. Re-check registry authority on every call, without paying
+        // a full source-store open merely to discover the same loaded model.
+        // If another request owns it, immediately use the pool's ad-hoc read
+        // path; model preparation must not queue behind a corpus snapshot or
+        // a different request's first model load.
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.to_path_buf()),
+            PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+        );
+        let db = read_pool
+            .acquire()
+            .map_err(|error| SearchError::SubsystemError {
                 subsystem: "model registry",
                 source: Box::new(error),
-            }
-        })?;
+            })?;
         if let Some(workspace_id) =
             workspace_id_for_index_status(&db, workspace_path).map_err(|error| {
                 SearchError::SubsystemError {
@@ -10066,7 +10077,11 @@ pub(crate) fn prepare_index_status_embedder_for_workspace(
     if !database_path.exists() {
         return Ok(());
     }
-    let db = DbConnection::open_file_read_only(database_path)?;
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.to_path_buf()),
+        PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+    );
+    let db = read_pool.acquire()?;
     if let Some(workspace_id) = workspace_id_for_index_status(&db, workspace_path)? {
         let _ = workspace_embedder_descriptors(&db, &workspace_id)?;
     }

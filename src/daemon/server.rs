@@ -73,6 +73,8 @@ use crate::core::search::{
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
     run_search_unaudited, run_search_with_performance_and_filters,
 };
+use crate::db::DatabaseConfig;
+use crate::db::read_pool::{ProcessReadPoolResidency, retain_process_read_pools};
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
@@ -86,7 +88,8 @@ use super::protocol::{
 };
 pub use super::protocol::{
     DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-    DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_PACK_SEARCH, METHOD_SEARCH,
+    DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_PACK_SEARCH,
+    METHOD_SEARCH,
 };
 use super::{
     DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT, DAEMON_METHOD_UNAUTHORIZED_CODE,
@@ -252,6 +255,9 @@ pub struct DaemonDispatchPolicy {
     /// Owned by one server instance, including its detached startup worker.
     /// Model caches may be shared, but readiness for another workspace is not.
     search_warm_state: Arc<AtomicU8>,
+    /// Strong ownership is explicit and server-scoped. The ordinary process
+    /// registry is weak, so warm-up alone does not keep a read pool alive.
+    read_pools: Arc<DaemonReadPools>,
     /// Search advisories are emitted once per active workspace condition.
     search_advisory_session: Arc<Mutex<SearchAdvisorySession>>,
     /// Scoped CASS prefetch coordinator (bd-16pwc.4). Shared by every
@@ -273,6 +279,57 @@ pub struct DaemonDispatchPolicy {
     /// which already carries `Arc<DaemonDispatchPolicy>`. `None` ⇒ the
     /// in-process direct write path (Inc 1) is used.
     write_router: Option<DaemonWriteRouter>,
+}
+
+#[derive(Debug, Default)]
+struct DaemonReadPools {
+    state: Mutex<DaemonReadPoolsState>,
+}
+
+#[derive(Debug, Default)]
+struct DaemonReadPoolsState {
+    closed: bool,
+    stores: BTreeMap<PathBuf, (Instant, Arc<ProcessReadPoolResidency>)>,
+}
+
+impl DaemonReadPools {
+    fn retain(&self, database_path: &Path) {
+        // Custom database paths have already passed workspace authorization.
+        // Keep their residency bounded even if a peer rotates through stores.
+        const MAX_RESIDENT_STORES: usize = 8;
+        let path = fs::canonicalize(database_path).unwrap_or_else(|_| database_path.to_path_buf());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return;
+        }
+        if let Some((last_used, _)) = state.stores.get_mut(&path) {
+            *last_used = Instant::now();
+            return;
+        }
+        if state.stores.len() >= MAX_RESIDENT_STORES
+            && let Some(oldest) = state
+                .stores
+                .iter()
+                .min_by_key(|(_, (last_used, _))| *last_used)
+                .map(|(path, _)| path.clone())
+        {
+            state.stores.remove(&oldest);
+        }
+        let residency = retain_process_read_pools(&DatabaseConfig::file(path.clone()));
+        state.stores.insert(path, (Instant::now(), residency));
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.closed = true;
+        state.stores.clear();
+    }
 }
 
 impl DaemonDispatchPolicy {
@@ -631,6 +688,7 @@ pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     search_warm_state: Arc<AtomicU8>,
+    read_pools: Arc<DaemonReadPools>,
     pool: Arc<InflightPool>,
     accept_thread: Option<JoinHandle<()>>,
     /// Closing this private endpoint wakes accept even if the public socket
@@ -725,6 +783,9 @@ impl DaemonServerHandle {
         }
 
         self.shutdown.store(true, Ordering::SeqCst);
+        // A detached warm-up may still finish after shutdown. Revoke retention
+        // now so it cannot repopulate a stopped server's resident resources.
+        self.read_pools.close();
         if let Some(scheduler) = &self.scheduler_thread {
             // Wake an idle scheduler immediately. The park token also covers
             // shutdown racing with the scheduler's check before it parks.
@@ -1223,6 +1284,12 @@ fn start_server_with_dispatch_policy(
     } else {
         warm_posture::COLD
     }));
+    dispatch_policy.read_pools = Arc::new(DaemonReadPools::default());
+    if let Some(workspace) = dispatch_policy.bound_workspace_id.as_deref() {
+        dispatch_policy
+            .read_pools
+            .retain(&Path::new(workspace).join(".ee/ee.db"));
+    }
     let broker = SocketBroker::new(socket_path);
     let (listener, _publish_lock) = broker.publish_listener()?;
     let socket_path = broker.socket_path().to_path_buf();
@@ -1396,6 +1463,7 @@ fn start_server_with_dispatch_policy(
         socket_path,
         shutdown,
         search_warm_state: Arc::clone(&dispatch_policy.search_warm_state),
+        read_pools: Arc::clone(&dispatch_policy.read_pools),
         pool,
         accept_thread: Some(accept_thread),
         accept_wakeup: Some(accept_wakeup),
@@ -2453,11 +2521,12 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             defer_advisory_until_socket_write,
             permit,
         ),
-        METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown),
+        METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown, &policy.read_pools),
         METHOD_SEARCH => dispatch_search(
             request,
             shutdown,
             search_advisory_session,
+            &policy.read_pools,
             defer_advisory_until_socket_write,
         ),
         METHOD_ORIENT_HOOK | METHOD_RECALL => dispatch_memory_read(request),
@@ -2892,6 +2961,10 @@ struct DaemonSearchReuseContract {
     daemon_process: String,
     default_search_embedder: String,
     search_index: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_index_admission: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_index_uncached: Option<String>,
 }
 
 impl Default for DaemonSearchReuseContract {
@@ -2899,8 +2972,23 @@ impl Default for DaemonSearchReuseContract {
         Self {
             daemon_process: "long_lived".to_owned(),
             default_search_embedder: "process_scoped".to_owned(),
-            search_index: "per_request".to_owned(),
+            search_index: "generation_scoped".to_owned(),
+            search_index_admission: Some("per_request".to_owned()),
+            search_index_uncached: Some("wal_or_unverified_artifacts".to_owned()),
         }
+    }
+}
+
+impl DaemonSearchReuseContract {
+    fn is_legacy(&self) -> bool {
+        // Keep v3 interoperability with a daemon started before this upgrade.
+        // Its honest per-request contract remains visible in CLI JSON; only
+        // the new contract claims generation-scoped resident vector readers.
+        self.daemon_process == "long_lived"
+            && self.default_search_embedder == "process_scoped"
+            && self.search_index == "per_request"
+            && self.search_index_admission.is_none()
+            && self.search_index_uncached.is_none()
     }
 }
 
@@ -3041,7 +3129,7 @@ pub struct DaemonSearchRenderings {
 }
 
 // Keep this in one-to-one correspondence with the 39 `$defs/uint64` references
-// in ee.daemon.search.response.v3. Optional performance paths are skipped when
+// in ee.daemon.search.response.v3/v4. Optional performance paths are skipped when
 // the negotiated response omits that block.
 const DAEMON_SEARCH_UINT64_INSTANCE_POINTERS: &[&str] = &[
     "/response/data/resultCount",
@@ -3262,7 +3350,7 @@ impl DaemonSearchResult {
             "degraded": degraded,
         });
         Self {
-            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V3.to_owned(),
+            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V4.to_owned(),
             response,
             performance,
             human,
@@ -3275,18 +3363,24 @@ impl DaemonSearchResult {
     pub fn from_value(mut value: serde_json::Value) -> Result<Self, String> {
         canonicalize_daemon_search_uint64s(&mut value)?;
         let result: Self = serde_json::from_value(value)
-            .map_err(|_| "result does not match ee.daemon.search.response.v3".to_owned())?;
+            .map_err(|_| "result does not match ee.daemon.search.response.v3 or v4".to_owned())?;
         result.validate()?;
         Ok(result)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V3 {
-            return Err(format!(
-                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V3}`"
-            ));
-        }
-        if self.reuse_contract != DaemonSearchReuseContract::default() {
+        let contract_matches_schema = match self.schema.as_str() {
+            DAEMON_SEARCH_RESPONSE_SCHEMA_V3 => self.reuse_contract.is_legacy(),
+            DAEMON_SEARCH_RESPONSE_SCHEMA_V4 => {
+                self.reuse_contract == DaemonSearchReuseContract::default()
+            }
+            _ => {
+                return Err(format!(
+                    "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V3}` or `{DAEMON_SEARCH_RESPONSE_SCHEMA_V4}`"
+                ));
+            }
+        };
+        if !contract_matches_schema {
             return Err("daemon search reuse contract drifted".to_owned());
         }
         let response = self
@@ -4288,7 +4382,11 @@ fn validate_canonical_search_rerank(value: &serde_json::Value) -> Result<(), Str
     Ok(())
 }
 
-fn dispatch_pack_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+fn dispatch_pack_search(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    read_pools: &DaemonReadPools,
+) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_search_params_error(request, "daemon is shutting down");
     }
@@ -4335,6 +4433,7 @@ fn dispatch_pack_search(request: &DaemonRequest, shutdown: &AtomicBool) -> Daemo
     } else {
         None
     };
+    read_pools.retain(&options.resolve_database_path());
     let retrieval = match loaded {
         Some(loaded) => {
             crate::core::search::run_pack_search_with_cached_local_embedder(&options, Some(loaded))
@@ -4369,6 +4468,7 @@ fn dispatch_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
+    read_pools: &DaemonReadPools,
     defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     let daemon_total_start = Instant::now();
@@ -4400,6 +4500,7 @@ fn dispatch_search(
             Ok(parts) => parts,
             Err(message) => return daemon_search_params_error(request, &message),
         };
+    read_pools.retain(&options.resolve_database_path());
     let search_run =
         match run_search_with_performance_and_filters(&options, kind.as_deref(), &field_filters) {
             Ok(run) => run,
@@ -5899,6 +6000,12 @@ fn dispatch_context_with_admission(
             );
         }
     };
+    policy.read_pools.retain(
+        &options
+            .database_path
+            .clone()
+            .unwrap_or_else(|| options.workspace_path.join(".ee/ee.db")),
+    );
     let advisory_workspace_id =
         crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
     // Resolve only after the envelope and context paths have been authorized.
@@ -5991,7 +6098,8 @@ fn dispatch_context_with_admission(
             );
         }
     };
-    let context_response = context_run.response;
+    let mut context_response = context_run.response;
+    context_response.serving = Some(crate::models::RequestServingMetadata::daemon());
     let context_search_report = context_run.search_report;
     let context_search_advisory_snapshot = context_run.search_advisory_snapshot;
 
@@ -6680,7 +6788,7 @@ fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Valu
             },
             "ee.daemon.search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
+                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V4
             },
             "ee.daemon.pack_search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
@@ -8727,7 +8835,11 @@ mod tests {
             }),
         );
         request.workspace_id = Some(workspace.path().display().to_string());
-        let response = dispatch_pack_search(&request, &AtomicBool::new(false));
+        let response = dispatch_pack_search(
+            &request,
+            &AtomicBool::new(false),
+            &DaemonReadPools::default(),
+        );
         assert!(response.result.is_none());
         assert_eq!(
             response.error.unwrap().code,
@@ -9035,6 +9147,31 @@ mod tests {
             renderings.timing, base["timing"],
             "validated timing must survive CLI rendering conversion"
         );
+
+        let mut resident = base.clone();
+        resident["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V4);
+        resident["reuseContract"] = serde_json::to_value(DaemonSearchReuseContract::default())
+            .expect("resident reuse contract serializes");
+        let current = DaemonSearchResult::from_value(resident.clone())
+            .expect("generation-scoped reuse contract is supported")
+            .into_renderings()
+            .expect("resident contract remains serializable");
+        assert_eq!(current.reuse_contract, resident["reuseContract"]);
+        let mut mismatched = resident.clone();
+        mismatched["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V3);
+        assert!(DaemonSearchResult::from_value(mismatched).is_err());
+        let mut mismatched = base.clone();
+        mismatched["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V4);
+        assert!(DaemonSearchResult::from_value(mismatched).is_err());
+        for (field, value) in [
+            ("searchIndex", "process_scoped_without_invalidation"),
+            ("searchIndexAdmission", "never"),
+            ("searchIndexUncached", "none"),
+        ] {
+            let mut invalid = resident.clone();
+            invalid["reuseContract"][field] = serde_json::json!(value);
+            assert!(DaemonSearchResult::from_value(invalid).is_err());
+        }
 
         let mut degradation_drift = base.clone();
         degradation_drift["response"]["degraded"] = serde_json::json!([{
@@ -10032,6 +10169,18 @@ mod tests {
             .join()
             .expect("warm worker catches its search failures");
         assert_eq!(ready.search_warm_posture(), "ready");
+        let resident = crate::db::read_pool::process_read_pool_stats_for_database(
+            &DatabaseConfig::file(database.clone()),
+        )
+        .expect("completed daemon warm-up retains its canonical read pool");
+        assert!(
+            resident.idle > 0,
+            "a warm reader must survive between requests"
+        );
+        assert_eq!(
+            resident.active_pins, 0,
+            "warm-up releases its source snapshot"
+        );
         assert!(!Arc::ptr_eq(
             &ready.search_warm_state,
             &policy.search_warm_state
@@ -10124,6 +10273,53 @@ mod tests {
                 "{off} must disable startup warm-up"
             );
         }
+    }
+
+    #[test]
+    fn daemon_read_pool_ownership_is_bounded_revoked_and_fresh_on_restart() {
+        use crate::db::read_pool::{
+            PoolConfig, process_read_pool_stats_for_database, registered_process_read_pool,
+        };
+
+        let directory = private_tempdir();
+        let database_path = directory.path().join("source.db");
+        let database = DatabaseConfig::file(database_path.clone());
+        let owner = DaemonReadPools::default();
+        owner.retain(&database_path);
+        let first = registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        let previous = Arc::downgrade(&first);
+        drop(first);
+        assert!(previous.upgrade().is_some());
+        assert!(!database_path.exists(), "ownership does not create storage");
+
+        owner.close();
+        assert!(previous.upgrade().is_none());
+        owner.retain(&database_path);
+        drop(registered_process_read_pool(
+            database.clone(),
+            PoolConfig::default_single(),
+        ));
+        assert!(
+            process_read_pool_stats_for_database(&database).is_none(),
+            "a late warm worker cannot revive a stopped owner"
+        );
+
+        let restarted = DaemonReadPools::default();
+        restarted.retain(&database_path);
+        drop(registered_process_read_pool(
+            database.clone(),
+            PoolConfig::default_single(),
+        ));
+        assert!(process_read_pool_stats_for_database(&database).is_some());
+        for number in 0..12 {
+            restarted.retain(&directory.path().join(format!("store-{number}.db")));
+        }
+        assert_eq!(restarted.state.lock().unwrap().stores.len(), 8);
+        assert!(
+            process_read_pool_stats_for_database(&database).is_none(),
+            "least-recently-used store is released"
+        );
+        restarted.close();
     }
 
     #[test]
@@ -10268,7 +10464,7 @@ mod tests {
             result
                 .pointer("/method_schemas/ee.daemon.search/response")
                 .and_then(serde_json::Value::as_str),
-            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3)
+            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V4)
         );
         assert_eq!(
             result
@@ -12149,6 +12345,7 @@ mod tests {
             )),
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            read_pools: Arc::new(DaemonReadPools::default()),
             pool,
             accept_thread: None,
             accept_wakeup: None,
@@ -12218,6 +12415,7 @@ mod tests {
             socket_path: workspace.path().join("scheduler.sock"),
             shutdown,
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            read_pools: Arc::new(DaemonReadPools::default()),
             pool: InflightPool::new(1),
             accept_thread: None,
             accept_wakeup: None,
@@ -12267,6 +12465,7 @@ mod tests {
             )),
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            read_pools: Arc::new(DaemonReadPools::default()),
             pool: InflightPool::new(1),
             accept_thread: None,
             accept_wakeup: None,

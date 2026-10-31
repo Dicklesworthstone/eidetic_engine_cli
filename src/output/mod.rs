@@ -11986,6 +11986,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             version: "3",
             description: "Strict daemon search result with optional ee.explain.performance.v1 payload.",
             category: "ops",
+            definition: daemon_search_response_v3_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
+            version: "4",
+            description: "Strict daemon search result with generation-scoped index reuse and per-request admission.",
+            category: "ops",
             definition: daemon_search_response_schema_definition,
         },
         SchemaEntry {
@@ -13634,8 +13641,12 @@ fn daemon_search_request_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.daemon.search.request.v2.json").to_string()
 }
 
-fn daemon_search_response_schema_definition() -> String {
+fn daemon_search_response_v3_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.daemon.search.response.v3.json").to_string()
+}
+
+fn daemon_search_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.daemon.search.response.v4.json").to_string()
 }
 
 fn prompt_budget_report_schema_definition() -> String {

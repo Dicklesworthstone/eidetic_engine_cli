@@ -146,19 +146,112 @@ pub struct AcquireWaitStats {
 
 pub struct ReadConnectionPool {
     database: DatabaseConfig,
+    database_identity: ReadPoolDatabaseIdentity,
     config: PoolConfig,
     state: Mutex<PoolState>,
 }
 
-// bd-fv0yn: RwLock (was Mutex) so cache-hit reads via
-// `process_read_pool_for_database` and `registered_process_read_pool`'s
-// Weak-upgrade fast path take `.read()` and run concurrently. Stale-
-// Weak removal (formerly on the read path) is deferred to the next
-// `registered_process_read_pool` write-path's opportunistic retain.
-// Sibling to bd-1nan9 / bd-2lin9 / bd-25yao / bd-2r38i / bd-8tsi5 /
-// bd-3mr0x.
-static PROCESS_READ_POOL_REGISTRY: OnceLock<RwLock<BTreeMap<String, Weak<ReadConnectionPool>>>> =
-    OnceLock::new();
+// The registry is observational and weak. A daemon explicitly owns residency;
+// a one-shot command must still release its connections when it returns.
+// Keep different configurations separate: retaining the warm-up's default pool
+// must not silently replace a pack's configured size or snapshot deadline.
+static PROCESS_READ_POOL_REGISTRY: OnceLock<
+    RwLock<BTreeMap<String, ProcessReadPoolRegistryEntry>>,
+> = OnceLock::new();
+
+#[derive(Default)]
+struct ProcessReadPoolRegistryEntry {
+    pools: Vec<Weak<ReadConnectionPool>>,
+    residents: Vec<Weak<ProcessReadPoolResidency>>,
+}
+
+/// A daemon-owned lease on the bounded read-pool configurations for one store.
+/// This holds connections, never a read transaction: each request still pins
+/// and releases its own authoritative source snapshot.
+#[derive(Default)]
+pub(crate) struct ProcessReadPoolResidency {
+    pools: Mutex<Vec<Arc<ReadConnectionPool>>>,
+}
+
+impl std::fmt::Debug for ProcessReadPoolResidency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pools = self
+            .pools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f.debug_struct("ProcessReadPoolResidency")
+            .field("pool_count", &pools.len())
+            .finish()
+    }
+}
+
+impl ProcessReadPoolResidency {
+    fn retain(&self, pool: Arc<ReadConnectionPool>) {
+        // Search and pack can use different configured pin budgets. Retain a
+        // small bounded set, and discard replaced files and superseded handles.
+        const MAX_RESIDENT_CONFIGURATIONS: usize = 4;
+        let mut pools = self
+            .pools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pools.retain(|retained| {
+            retained.database_identity == pool.database_identity && retained.config != pool.config
+        });
+        pools.push(pool);
+        if pools.len() > MAX_RESIDENT_CONFIGURATIONS {
+            pools.remove(0);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReadPoolDatabaseIdentity {
+    Memory,
+    File(Option<ReadPoolFileIdentity>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReadPoolFileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    created: std::time::SystemTime,
+}
+
+impl ReadPoolDatabaseIdentity {
+    fn for_database(database: &DatabaseConfig) -> Self {
+        match database.location() {
+            DatabaseLocation::Memory => Self::Memory,
+            DatabaseLocation::File(path) => {
+                let metadata = std::fs::metadata(path)
+                    .ok()
+                    .filter(std::fs::Metadata::is_file);
+                #[cfg(unix)]
+                let identity = metadata.map(|metadata| {
+                    use std::os::unix::fs::MetadataExt;
+                    ReadPoolFileIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    }
+                });
+                #[cfg(not(unix))]
+                let identity = metadata.and_then(|metadata| {
+                    metadata
+                        .created()
+                        .ok()
+                        .map(|created| ReadPoolFileIdentity { created })
+                });
+                Self::File(identity)
+            }
+        }
+    }
+
+    fn can_reuse(&self, current: &Self) -> bool {
+        !matches!(self, Self::File(None)) && self == current
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ReadConnectionPoolBuilder {
@@ -312,8 +405,10 @@ impl ReadConnectionPool {
     #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
         let database = read_pool_database_config(database);
+        let database_identity = ReadPoolDatabaseIdentity::for_database(&database);
         Self {
             database,
+            database_identity,
             config,
             state: Mutex::new(PoolState {
                 active: 0,
@@ -727,37 +822,73 @@ pub fn registered_process_read_pool(
     config: PoolConfig,
 ) -> Arc<ReadConnectionPool> {
     let key = process_read_pool_registry_key(&database);
+    let identity = ReadPoolDatabaseIdentity::for_database(&database);
     let registry = process_read_pool_registry();
 
-    // bd-fv0yn: fast path — shared `.read()` lock for the cache-hit
-    // upgrade. Concurrent callers against DIFFERENT database keys
-    // parallelize at this layer.
+    // Cache-hit reads do not serialize on the registry's write lock. Both the
+    // effective configuration and physical source file must still match.
     {
         let read_guard = registry
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(pool) = read_guard.get(&key).and_then(Weak::upgrade) {
+        if let Some(pool) =
+            read_guard.get(&key).and_then(|entry| {
+                entry.pools.iter().filter_map(Weak::upgrade).find(|pool| {
+                    pool.config == config && pool.database_identity.can_reuse(&identity)
+                })
+            })
+        {
             return pool;
         }
     }
 
-    // Slow path: key missing or stale Weak. Take the write lock to
-    // insert. Re-check after acquiring the write lock so a concurrent
-    // creator's pool is honored (no double-construction for the same
-    // key). The insert naturally overwrites any stale Weak for the
-    // same key; opportunistically reap other stale Weaks here so the
-    // map stays bounded by live pools, not by distinct-keys-ever-
-    // observed.
+    // A file/configuration change starts a new pool. Keep weak observations of
+    // the old pools until their in-flight snapshots finish, so a checkpoint
+    // cannot lose attribution just because the next request used new settings.
     let mut write_guard = registry
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(pool) = write_guard.get(&key).and_then(Weak::upgrade) {
+    prune_process_read_pool_registry(&mut write_guard);
+    let entry = write_guard.entry(key).or_default();
+    if let Some(pool) = entry
+        .pools
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|pool| pool.config == config && pool.database_identity.can_reuse(&identity))
+    {
         return pool;
     }
-    write_guard.retain(|_, weak| weak.upgrade().is_some());
     let pool = Arc::new(ReadConnectionPool::new(database, config));
-    write_guard.insert(key, Arc::downgrade(&pool));
+    entry.pools.push(Arc::downgrade(&pool));
+    for resident in entry.residents.iter().filter_map(Weak::upgrade) {
+        resident.retain(Arc::clone(&pool));
+    }
     pool
+}
+
+/// Retain subsequently requested pools for this store until the owner drops
+/// the returned lease. No database is opened and no snapshot is pinned here.
+#[must_use]
+pub(crate) fn retain_process_read_pools(
+    database: &DatabaseConfig,
+) -> Arc<ProcessReadPoolResidency> {
+    let key = process_read_pool_registry_key(database);
+    let identity = ReadPoolDatabaseIdentity::for_database(database);
+    let residency = Arc::new(ProcessReadPoolResidency::default());
+    let mut registry = process_read_pool_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A sequence of server starts or nonexistent custom stores can create
+    // residency leases without ever acquiring a pool. Bound that path too.
+    prune_process_read_pool_registry(&mut registry);
+    let entry = registry.entry(key).or_default();
+    for pool in entry.pools.iter().filter_map(Weak::upgrade) {
+        if pool.database_identity.can_reuse(&identity) {
+            residency.retain(pool);
+        }
+    }
+    entry.residents.push(Arc::downgrade(&residency));
+    residency
 }
 
 /// Return same-process read-pool stats for a database if a live pool is
@@ -765,7 +896,40 @@ pub fn registered_process_read_pool(
 /// process has a WAL reader.
 #[must_use]
 pub fn process_read_pool_stats_for_database(database: &DatabaseConfig) -> Option<PoolStats> {
-    process_read_pool_for_database(database).map(|pool| pool.stats())
+    let pools = process_read_pools_for_database(database);
+    if pools.is_empty() {
+        return None;
+    }
+    let mut aggregate = PoolStats::default();
+    let mut waits = Vec::new();
+    for pool in pools {
+        let stats = pool.stats();
+        aggregate.active = aggregate.active.saturating_add(stats.active);
+        aggregate.idle = aggregate.idle.saturating_add(stats.idle);
+        aggregate.active_pins = aggregate.active_pins.saturating_add(stats.active_pins);
+        aggregate.expired_pins = aggregate.expired_pins.saturating_add(stats.expired_pins);
+        aggregate.max_size = aggregate.max_size.saturating_add(stats.max_size);
+        aggregate.max_seen = aggregate.max_seen.saturating_add(stats.max_seen);
+        aggregate.drops = aggregate.drops.saturating_add(stats.drops);
+        aggregate.release_failures = aggregate
+            .release_failures
+            .saturating_add(stats.release_failures);
+        aggregate.ad_hoc_bypass_count = aggregate
+            .ad_hoc_bypass_count
+            .saturating_add(stats.ad_hoc_bypass_count);
+        aggregate.size_was_zero |= stats.size_was_zero;
+        if let Some(blocker) = stats.checkpoint_blocked_by
+            && aggregate
+                .checkpoint_blocked_by
+                .as_ref()
+                .is_none_or(|old| blocker.pin_age_ms > old.pin_age_ms)
+        {
+            aggregate.checkpoint_blocked_by = Some(blocker);
+        }
+        waits.extend_from_slice(&pool.lock_state().acquire_wait_ns);
+    }
+    aggregate.acquire_wait = acquire_wait_stats(&waits);
+    Some(aggregate)
 }
 
 /// Attribute a real WAL checkpoint outcome to the visible process-local pool.
@@ -777,22 +941,27 @@ pub fn note_process_checkpoint_outcome(
     database: &DatabaseConfig,
     checkpoint_busy: bool,
 ) -> ProcessCheckpointOutcome {
-    let Some(pool) = process_read_pool_for_database(database) else {
-        return ProcessCheckpointOutcome {
-            checkpoint_busy,
-            process_pool_visible: false,
-            blocker: None,
-        };
-    };
+    let pools = process_read_pools_for_database(database);
+    let blocker = checkpoint_busy
+        .then(|| {
+            pools
+                .iter()
+                .filter_map(|pool| pool.oldest_active_pin_for_checkpoint_blocker())
+                .max_by_key(|pin| pin.pin_age_ms)
+        })
+        .flatten();
+    if checkpoint_busy && !pools.is_empty() {
+        trace_checkpoint_blocked_by_pin(blocker.as_ref());
+    }
 
     ProcessCheckpointOutcome {
         checkpoint_busy,
-        process_pool_visible: true,
-        blocker: pool.note_checkpoint_outcome(checkpoint_busy),
+        process_pool_visible: !pools.is_empty(),
+        blocker,
     }
 }
 
-fn process_read_pool_for_database(database: &DatabaseConfig) -> Option<Arc<ReadConnectionPool>> {
+fn process_read_pools_for_database(database: &DatabaseConfig) -> Vec<Arc<ReadConnectionPool>> {
     let key = process_read_pool_registry_key(database);
     // bd-fv0yn: pure read path — shared `.read()` lock; stale-Weak
     // removal is deferred to the next `registered_process_read_pool`
@@ -801,12 +970,23 @@ fn process_read_pool_for_database(database: &DatabaseConfig) -> Option<Arc<ReadC
     let registry = process_read_pool_registry()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let pool = registry.get(&key).and_then(Weak::upgrade);
-    pool
+    registry.get(&key).map_or_else(Vec::new, |entry| {
+        entry.pools.iter().filter_map(Weak::upgrade).collect()
+    })
 }
 
-fn process_read_pool_registry() -> &'static RwLock<BTreeMap<String, Weak<ReadConnectionPool>>> {
+fn process_read_pool_registry() -> &'static RwLock<BTreeMap<String, ProcessReadPoolRegistryEntry>> {
     PROCESS_READ_POOL_REGISTRY.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn prune_process_read_pool_registry(registry: &mut BTreeMap<String, ProcessReadPoolRegistryEntry>) {
+    registry.retain(|_, entry| {
+        entry.pools.retain(|pool| pool.strong_count() > 0);
+        entry
+            .residents
+            .retain(|resident| resident.strong_count() > 0);
+        !entry.pools.is_empty() || !entry.residents.is_empty()
+    });
 }
 
 fn process_read_pool_registry_key(database: &DatabaseConfig) -> String {
@@ -2478,6 +2658,181 @@ mod tests {
         assert!(
             process_read_pool_stats_for_database(&database).is_none(),
             "registry must store Weak handles so command-local pools can drop"
+        );
+    }
+
+    #[test]
+    fn resident_registry_reuses_connections_without_retaining_a_snapshot() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("resident-reader.db");
+        seed_snapshot_database(&database_path);
+        let database = DatabaseConfig::file(database_path.clone());
+        let residency = retain_process_read_pools(&database);
+        let pool = registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        let weak = Arc::downgrade(&pool);
+        let pin = must(pool.pin_snapshot(), "first request snapshot opens");
+        let slot = pin.slot_id();
+        assert_eq!(snapshot_item_count(&pin), 1);
+        must(pin.commit(), "first request snapshot releases");
+        drop(pool);
+
+        let idle = must_some(
+            process_read_pool_stats_for_database(&database),
+            "daemon lease retains its warmed reader",
+        );
+        assert_eq!(idle.idle, 1);
+        assert_eq!(
+            idle.active_pins, 0,
+            "residency must not pin an old source view"
+        );
+        insert_snapshot_item(&database_path, 2, "after");
+
+        let next = registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        assert!(Arc::ptr_eq(
+            &next,
+            &must_some(weak.upgrade(), "same resident pool remains alive")
+        ));
+        let pin = must(next.pin_snapshot(), "next request snapshot opens");
+        assert_eq!(pin.slot_id(), slot, "reuse the physical read connection");
+        assert_eq!(
+            snapshot_item_count(&pin),
+            2,
+            "observe the new committed row"
+        );
+        must(pin.commit(), "next request snapshot releases");
+        drop(next);
+        drop(residency);
+        assert!(weak.upgrade().is_none());
+        assert!(process_read_pool_stats_for_database(&database).is_none());
+    }
+
+    #[test]
+    fn resident_registry_honors_configuration_and_keeps_inflight_attribution() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("resident-config.db");
+        seed_snapshot_database(&database_path);
+        let database = DatabaseConfig::file(database_path);
+        let _residency = retain_process_read_pools(&database);
+        let original = registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        let pin = must(
+            original.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("old-configuration".to_owned()),
+                request_id: None,
+            }),
+            "original snapshot opens",
+        );
+        let updated_config = PoolConfig::new(4, Duration::from_secs(45))
+            .with_max_pin_duration(Duration::from_secs(90))
+            .with_acquire_timeout(Duration::from_millis(20));
+        let updated = registered_process_read_pool(database.clone(), updated_config.clone());
+        assert!(!Arc::ptr_eq(&original, &updated));
+        assert_eq!(updated.config(), &updated_config);
+        let outcome = note_process_checkpoint_outcome(&database, true);
+        assert_eq!(
+            outcome
+                .blocker
+                .and_then(|blocker| blocker.workflow_id)
+                .as_deref(),
+            Some("old-configuration"),
+            "a configuration change must not hide an in-flight snapshot"
+        );
+        must(pin.commit(), "original snapshot releases");
+        let old_again =
+            registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        assert!(Arc::ptr_eq(&original, &old_again));
+        let updated_again = registered_process_read_pool(database, updated_config);
+        assert!(Arc::ptr_eq(&updated, &updated_again));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resident_registry_invalidates_replaced_files_and_isolates_stores() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let path = tempdir.path().join("replace.db");
+        let other_path = tempdir.path().join("other.db");
+        // Registration itself must not open a DB or create storage; bytes are
+        // enough to test physical identity without relying on SQLite caching.
+        must(fs::write(&path, b"first"), "first source file creates");
+        must(
+            fs::write(&other_path, b"other"),
+            "other source file creates",
+        );
+        let database = DatabaseConfig::file(path.clone());
+        let _residency = retain_process_read_pools(&database);
+        let original = registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        must(
+            fs::rename(&path, tempdir.path().join("before.db")),
+            "old source retains",
+        );
+        must(
+            fs::write(&path, b"replacement"),
+            "replacement source creates",
+        );
+        let replacement =
+            registered_process_read_pool(database.clone(), PoolConfig::default_single());
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        let repeated = registered_process_read_pool(database, PoolConfig::default_single());
+        assert!(Arc::ptr_eq(&replacement, &repeated));
+        let other = registered_process_read_pool(
+            DatabaseConfig::file(other_path),
+            PoolConfig::default_single(),
+        );
+        assert!(!Arc::ptr_eq(&replacement, &other));
+    }
+
+    #[test]
+    fn resident_registry_bounds_retained_configurations_and_does_not_create_missing_store() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let path = tempdir.path().join("missing.db");
+        let database = DatabaseConfig::file(path.clone());
+        let residency = retain_process_read_pools(&database);
+        for size in 1..=12 {
+            drop(registered_process_read_pool(
+                database.clone(),
+                PoolConfig::new(size, Duration::from_secs(30)),
+            ));
+        }
+        assert!(!path.exists(), "residency must not create a missing store");
+        assert_eq!(residency.pools.lock().unwrap().len(), 4);
+        drop(residency);
+        assert!(process_read_pool_stats_for_database(&database).is_none());
+    }
+
+    #[test]
+    fn residency_without_pool_acquisition_prunes_dead_store_keys() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let prefix = format!("file:{}", tempdir.path().join("missing-").display());
+        for sequence in 0..64 {
+            let path = tempdir.path().join(format!("missing-{sequence}.db"));
+            drop(retain_process_read_pools(&DatabaseConfig::file(
+                path.clone(),
+            )));
+            assert!(!path.exists(), "retention alone must never create a store");
+        }
+        let active = retain_process_read_pools(&DatabaseConfig::file(
+            tempdir.path().join("missing-active.db"),
+        ));
+        {
+            let registry = process_read_pool_registry().read().unwrap();
+            let scoped = registry
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .collect::<Vec<_>>();
+            assert_eq!(scoped.len(), 1, "dead residency keys must not accumulate");
+            assert!(scoped[0].1.pools.is_empty());
+            assert_eq!(scoped[0].1.residents.len(), 1);
+            assert!(scoped[0].1.residents[0].upgrade().is_some());
+        }
+        drop(active);
+        let _cleanup =
+            retain_process_read_pools(&DatabaseConfig::file(tempdir.path().join("cleanup.db")));
+        assert!(
+            process_read_pool_registry()
+                .read()
+                .unwrap()
+                .keys()
+                .all(|key| !key.starts_with(&prefix)),
+            "a later lease registration must remove the last dead owner"
         );
     }
 

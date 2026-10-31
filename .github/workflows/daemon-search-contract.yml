@@ -12,6 +12,7 @@ on:
       - src/daemon/search_result_contract*.rs
       - docs/schemas/ee.search.document.v1.json
       - docs/schemas/ee.daemon.search.response.v3.json
+      - docs/schemas/ee.daemon.search.response.v4.json
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/daemon-search-contract.yml

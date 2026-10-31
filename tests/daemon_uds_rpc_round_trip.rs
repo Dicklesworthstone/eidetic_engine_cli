@@ -46,7 +46,7 @@ use ee::daemon::{
         ClientError, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE, DAEMON_CONTEXT_PARAMS_INVALID_CODE,
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-        DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_UNKNOWN_METHOD_CODE,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_UNKNOWN_METHOD_CODE,
         DAEMON_WRITE_PARAMS_INVALID_CODE, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_CONTEXT,
         METHOD_ECHO, METHOD_PACK_SEARCH, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY,
         METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip, start_server,
@@ -1280,7 +1280,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
         result
             .pointer("/method_schemas/ee.daemon.search/response")
             .and_then(serde_json::Value::as_str)
-            == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3),
+            == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V4),
         format!("search response schema capability wrong; got {result}"),
     )?;
     ensure(
@@ -1499,7 +1499,7 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
             result
                 .pointer("/schema")
                 .and_then(serde_json::Value::as_str)
-                == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3),
+                == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V4),
             format!("method response schema drifted: {result}"),
         )?;
         ensure(
@@ -1527,8 +1527,19 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
             result
                 .pointer("/reuseContract/searchIndex")
                 .and_then(serde_json::Value::as_str)
-                == Some("per_request"),
+                == Some("generation_scoped"),
             format!("search index reuse contract drifted: {result}"),
+        )?;
+        ensure(
+            result
+                .pointer("/reuseContract/searchIndexAdmission")
+                .and_then(serde_json::Value::as_str)
+                == Some("per_request")
+                && result
+                    .pointer("/reuseContract/searchIndexUncached")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("wal_or_unverified_artifacts"),
+            format!("search index cache admission contract drifted: {result}"),
         )?;
         let timing = result
             .pointer("/timing")
@@ -2473,6 +2484,289 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
     handle
         .shutdown()
         .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales() -> TestResult {
+    fn selected_content(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let items = payload
+            .pointer("/data/pack/items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("pack omitted items: {payload}"))?;
+        ensure(
+            !items.is_empty(),
+            "pack parity cannot pass on an empty selection",
+        )?;
+        Ok(serde_json::Value::Array(items.iter().map(|item| serde_json::json!({
+            "rank": item["rank"], "memoryId": item["memoryId"], "section": item["section"],
+            "content": item["content"], "trust": item["trust"], "provenance": item["provenance"],
+            "selectedIn": item["selectedIn"],
+        })).collect()))
+    }
+
+    fn assert_daemon_serving_path(payload: &serde_json::Value) -> TestResult {
+        ensure(
+            payload
+                .pointer("/data/servingPath")
+                .and_then(serde_json::Value::as_str)
+                == Some("daemon")
+                && payload
+                    .pointer("/data/retrievalPath")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("daemon")
+                && payload
+                    .pointer("/data/fallbackReason")
+                    .is_some_and(serde_json::Value::is_null),
+            format!("raw context response must identify successful daemon execution: {payload}"),
+        )
+    }
+
+    fn insert_fixture_memory(
+        database: &Path,
+        workspace: &Path,
+        id: &str,
+        content: String,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: stable_test_workspace_id(workspace)?,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content,
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.9,
+                    importance: 0.8,
+                    provenance_uri: Some("test://daemon-resident-lifecycle".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn wait_for_ready(handle: &ee::daemon::server::DaemonServerHandle) -> TestResult {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while handle.search_warm_posture() == "warming" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        ensure(
+            handle.search_warm_posture() == "ready",
+            format!(
+                "daemon never became ready: {}",
+                handle.search_warm_posture()
+            ),
+        )
+    }
+
+    // Twelve calls cross the previously observed early/late pack boundary;
+    // neither a single cache hit nor two agreeing calls are enough evidence.
+    for memory_count in [10_usize, 100] {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, database) = seed_context_workspace(temp.path())?;
+        let index = workspace.join(".ee/index");
+        for sequence in 1..memory_count {
+            insert_fixture_memory(
+                &database,
+                &workspace,
+                &format!("mem_{:026}", 80_000 + sequence),
+                format!("Unrelated orchard irrigation fixture record {sequence}."),
+            )?;
+        }
+        rebuild_test_index(&workspace, &database, &index)?;
+        let mut options = context_pack_options(&workspace, &database, "release provenance");
+        options.index_dir = Some(index.clone());
+        options.strict_source_mode = true;
+        let local = run_context_pack_with_performance_controlled(&options, "pack", None, None)
+            .map_err(|error| format!("canonical local baseline: {error}"))?;
+        let local_json: serde_json::Value =
+            serde_json::from_str(&ee::output::render_context_response_json(&local.response))
+                .map_err(|error| error.to_string())?;
+        let expected_selection = selected_content(&local_json)?;
+
+        let socket_path = secure_socket_path(temp.path(), "lifecycle.sock")?;
+        let mut handle = start_server_for_workspace(&socket_path, workspace.display().to_string())
+            .map_err(|error| error.to_string())?;
+        wait_for_ready(&handle)?;
+        let mut params = context_pack_params(&workspace, &database, "release provenance");
+        params["indexDir"] = serde_json::json!(index.display().to_string());
+        params["strictSourceMode"] = serde_json::json!(true);
+        let mut expected_search = None;
+        for call in 0..12 {
+            let mut request = DaemonRequest::new(
+                format!("lifecycle-pack-{call}"),
+                TEST_AGENT_ID,
+                METHOD_CONTEXT,
+                params.clone(),
+            );
+            request.workspace_id = Some(workspace.display().to_string());
+            let packed = successful_result(
+                client_round_trip(handle.socket_path(), &request)
+                    .map_err(|error| format!("pack {call} at {memory_count} memories: {error}"))?,
+                "repeated pack",
+            )?;
+            assert_daemon_serving_path(&packed)?;
+            ensure(
+                selected_content(&packed)? == expected_selection,
+                format!(
+                    "pack {call} at {memory_count} memories differs from canonical local content: {packed}"
+                ),
+            )?;
+            let mut request = search_request(
+                &format!("lifecycle-search-{call}"),
+                &workspace,
+                &database,
+                &index,
+            );
+            request.params["sourceMode"] = serde_json::json!("lexical_only");
+            request.params["strictSourceMode"] = serde_json::json!(true);
+            let result = successful_result(
+                client_round_trip(handle.socket_path(), &request)
+                    .map_err(|error| error.to_string())?,
+                "repeated search",
+            )?;
+            let results = result
+                .pointer("/response/data/results")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("search omitted results: {result}"))?;
+            ensure(
+                results
+                    .iter()
+                    .any(|hit| hit["docId"] == "mem_00000000000000000000005001"),
+                format!("repeated search lost its planted result: {result}"),
+            )?;
+            if let Some(expected) = &expected_search {
+                ensure(
+                    results == expected,
+                    format!("search {call} changed ordering or content: {result}"),
+                )?;
+            } else {
+                expected_search = Some(results.clone());
+            }
+        }
+
+        // A permanent cached answer would pass every equality above. Change
+        // the corpus and publish an index generation while the daemon lives.
+        const NEW_MEMORY: &str = "mem_00000000000000000000005002";
+        insert_fixture_memory(
+            &database,
+            &workspace,
+            NEW_MEMORY,
+            "Release provenance release provenance now requires a fresh verification receipt."
+                .to_owned(),
+        )?;
+        rebuild_test_index(&workspace, &database, &index)?;
+        let local = run_context_pack_with_performance_controlled(&options, "pack", None, None)
+            .map_err(|error| format!("post-rebuild local pack: {error}"))?;
+        let local_json: serde_json::Value =
+            serde_json::from_str(&ee::output::render_context_response_json(&local.response))
+                .map_err(|error| error.to_string())?;
+        let refreshed_selection = selected_content(&local_json)?;
+        ensure(
+            refreshed_selection != expected_selection,
+            "negative control did not change canonical pack selection",
+        )?;
+        for restarted in [false, true] {
+            if restarted {
+                handle.shutdown().map_err(|error| error.to_string())?;
+                ensure(
+                    !socket_path.exists(),
+                    "shutdown left the old socket published",
+                )?;
+                handle = start_server_for_workspace(&socket_path, workspace.display().to_string())
+                    .map_err(|error| error.to_string())?;
+                wait_for_ready(&handle)?;
+            }
+            let mut request = DaemonRequest::new(
+                format!("refreshed-pack-{restarted}"),
+                TEST_AGENT_ID,
+                METHOD_CONTEXT,
+                params.clone(),
+            );
+            request.workspace_id = Some(workspace.display().to_string());
+            let packed = successful_result(
+                client_round_trip(handle.socket_path(), &request)
+                    .map_err(|error| error.to_string())?,
+                "refreshed pack",
+            )?;
+            assert_daemon_serving_path(&packed)?;
+            ensure(
+                selected_content(&packed)? == refreshed_selection,
+                format!(
+                    "warm pack did not observe rebuilt generation (restarted={restarted}): {packed}"
+                ),
+            )?;
+            let mut request = search_request("refreshed-search", &workspace, &database, &index);
+            request.params["sourceMode"] = serde_json::json!("lexical_only");
+            request.params["strictSourceMode"] = serde_json::json!(true);
+            let result = successful_result(
+                client_round_trip(handle.socket_path(), &request)
+                    .map_err(|error| error.to_string())?,
+                "refreshed search",
+            )?;
+            ensure(
+                result
+                    .pointer("/response/data/results")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|hits| hits.iter().any(|hit| hit["docId"] == NEW_MEMORY)),
+                format!(
+                    "resident search returned a stale generation (restarted={restarted}): {result}"
+                ),
+            )?;
+        }
+
+        let other_root = temp.path().join("other");
+        let (other_workspace, other_database) = seed_context_workspace(&other_root)?;
+        let other_index = other_workspace.join(".ee/index");
+        const OTHER_MEMORY: &str = "mem_00000000000000000000005003";
+        insert_fixture_memory(
+            &other_database,
+            &other_workspace,
+            OTHER_MEMORY,
+            "Other workspace release provenance private receipt.".to_owned(),
+        )?;
+        rebuild_test_index(&other_workspace, &other_database, &other_index)?;
+        let foreign = search_request(
+            "foreign-workspace",
+            &other_workspace,
+            &other_database,
+            &other_index,
+        );
+        let refused =
+            client_round_trip(handle.socket_path(), &foreign).map_err(|error| error.to_string())?;
+        ensure_error_code(&refused, DAEMON_METHOD_UNAUTHORIZED_CODE)?;
+        handle.shutdown().map_err(|error| error.to_string())?;
+        let mut other_handle =
+            start_server_for_workspace(&socket_path, other_workspace.display().to_string())
+                .map_err(|error| error.to_string())?;
+        wait_for_ready(&other_handle)?;
+        let mut foreign = foreign;
+        foreign.params["sourceMode"] = serde_json::json!("lexical_only");
+        foreign.params["strictSourceMode"] = serde_json::json!(true);
+        let result = successful_result(
+            client_round_trip(other_handle.socket_path(), &foreign)
+                .map_err(|error| error.to_string())?,
+            "other workspace search",
+        )?;
+        let hits = result
+            .pointer("/response/data/results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("other workspace search omitted results: {result}"))?;
+        ensure(
+            hits.iter().any(|hit| hit["docId"] == OTHER_MEMORY)
+                && !hits.iter().any(|hit| hit["docId"] == NEW_MEMORY),
+            format!("resident resources crossed workspace boundaries: {result}"),
+        )?;
+        other_handle.shutdown().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 

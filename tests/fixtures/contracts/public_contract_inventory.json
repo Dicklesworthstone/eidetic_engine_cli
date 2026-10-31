@@ -507,12 +507,31 @@
     },
     {
       "schemaId": "ee.daemon.search.response.v3",
-      "status": "experimental",
+      "status": "legacy",
       "surface": "daemon_search_method_response",
       "owner": "src/daemon/protocol.rs::DAEMON_SEARCH_RESPONSE_SCHEMA_V3",
       "schemaFile": "docs/schemas/ee.daemon.search.response.v3.json",
       "canonicalDocs": [
         "docs/schemas/ee.daemon.search.response.v3.json",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "tests/**",
+          "reason": "Compatibility fixtures preserve the strict per-request-index contract accepted from an older running daemon."
+        }
+      ],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.search.response.v4",
+      "status": "experimental",
+      "surface": "daemon_search_method_response",
+      "owner": "src/daemon/protocol.rs::DAEMON_SEARCH_RESPONSE_SCHEMA_V4",
+      "schemaFile": "docs/schemas/ee.daemon.search.response.v4.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.search.response.v4.json",
         "docs/schemas/ee.daemon.response.v1.json"
       ],
       "currentFacingContexts": [],

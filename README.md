@@ -2493,6 +2493,14 @@ code on fallback, such as `daemon_socket_unavailable`, `daemon_warming`,
 `degraded` entries retain the readable explanation and repair advice. These
 delivery fields do not change the pack hash or prompt text.
 
+Daemon search advertises `ee.daemon.search.response.v4`, whose strict
+`reuseContract` reports generation-scoped index readers with per-request
+source admission. Updated clients also accept the unchanged v3 contract from
+an older running daemon. Restart the daemon after upgrading the binary to
+activate resident-resource changes; both response schemas are available from
+`ee schema export`. See the [migration notes](docs/migration_v0_1_to_v0_2.md#daemon-resident-search-response)
+for the exact contract and fallback behavior.
+
 ### Codex
 
 Codex shells out, so the same calls work. `ee pack "<task>" --json` can be

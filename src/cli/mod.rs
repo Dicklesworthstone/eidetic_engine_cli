@@ -50594,13 +50594,24 @@ fn validate_daemon_search_capabilities(
     capabilities: &serde_json::Value,
 ) -> Result<(), DaemonSearchFallbackReason> {
     use crate::daemon::protocol::{
-        DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
+        DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_SEARCH,
+    };
+    // A daemon started before this client was upgraded may still serve the
+    // strict v3 contract. The result decoder validates each version against
+    // its own reuse contract; an unknown version still falls back locally.
+    let response_schema = match capabilities
+        .pointer("/method_schemas/ee.daemon.search/response")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3) => DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+        _ => DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
     };
     validate_daemon_method_capabilities(
         capabilities,
         METHOD_SEARCH,
         DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-        DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+        response_schema,
     )
 }
 
@@ -95359,7 +95370,7 @@ mod tests {
             "method_schemas": {
                 "ee.daemon.search": {
                     "request": crate::daemon::protocol::DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                    "response": crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V3
+                    "response": crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V4
                 }
             }
         })
@@ -95758,6 +95769,11 @@ mod tests {
     fn daemon_search_capability_negotiation_rejects_method_and_schema_drift() {
         let capabilities = daemon_search_capabilities_fixture();
         assert_eq!(validate_daemon_search_capabilities(&capabilities), Ok(()));
+
+        let mut legacy = capabilities.clone();
+        legacy["method_schemas"]["ee.daemon.search"]["response"] =
+            serde_json::json!(crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V3);
+        assert_eq!(validate_daemon_search_capabilities(&legacy), Ok(()));
 
         let mut missing_method = capabilities.clone();
         missing_method["methods"] = serde_json::json!([]);

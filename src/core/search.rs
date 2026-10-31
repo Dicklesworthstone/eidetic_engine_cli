@@ -80,6 +80,9 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalRead;
 
 #[cfg(unix)]
+#[path = "search_index_cache.rs"]
+mod index_cache;
+#[cfg(unix)]
 #[path = "search_prefetch.rs"]
 mod prefetch;
 #[cfg(unix)]
@@ -8215,6 +8218,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     record_retrieval_audit: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
+    let mut request_trace = SearchPerformanceTrace::default();
     options.validate()?;
     search_checkpoint(cx)?;
     // Validate before index reconciliation or model preparation can write state.
@@ -8224,9 +8228,11 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
 
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
+    request_trace.record_elapsed("search::requestValidate", total_start);
     // A retrieval-only daemon worker may outlive its socket client. It must
     // never claim/requeue index jobs or open the source store for repair.
     if !retrieval_only {
+        let reconcile_start = Instant::now();
         reconcile_search_index_before_read_with_cx_and_timeout(
             cx,
             options,
@@ -8237,7 +8243,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             }),
         )
         .await;
+        request_trace.record_elapsed("search::indexReconcile", reconcile_start);
     }
+    let read_pool_start = Instant::now();
     let read_pool = database_path.exists().then(|| {
         registered_process_read_pool(
             DatabaseConfig::file(database_path.clone()),
@@ -8245,6 +8253,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 .with_max_pin_duration(search_snapshot_max_pin_duration(request_timeout)),
         )
     });
+    request_trace.record_elapsed("search::readPoolLookup", read_pool_start);
+    let empty_probe_start = Instant::now();
     let mut empty_read_snapshot = None;
     let mut empty_generation = None;
     if prepared_fast_embedder.is_none()
@@ -8277,6 +8287,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             finish_search_snapshot(snapshot, Ok(()), &database_path)?;
         }
     }
+    request_trace.record_elapsed("search::emptyGenerationProbe", empty_probe_start);
+    let embedder_admission_start = Instant::now();
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && empty_generation.is_none()
         && options.source_mode.uses_embeddings()
@@ -8312,6 +8324,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     } else {
         None
     };
+    // Includes compatibility/registry admission as well as any preparation;
+    // embedderPrepare below remains the narrower model-specific subspan.
+    request_trace.record_elapsed("search::embedderAdmission", embedder_admission_start);
     let fast_embedder_override = prepared_fast_embedder.or_else(|| {
         embedder_preparation
             .as_ref()
@@ -8319,6 +8334,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     });
 
     if let Some(read_pool) = read_pool.as_ref() {
+        let snapshot_start = Instant::now();
         let read_snapshot = match empty_read_snapshot {
             Some(snapshot) => snapshot,
             None => read_pool.pin_snapshot().map_err(|error| {
@@ -8328,6 +8344,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 ))
             })?,
         };
+        request_trace.record_elapsed("search::snapshotAcquire", snapshot_start);
         let result = {
             let connection = read_snapshot.checked_connection().map_err(|error| {
                 SearchError::Index(format!(
@@ -8390,7 +8407,12 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 Ok(run)
             })
         };
+        let release_start = Instant::now();
         let mut run = finish_search_snapshot(read_snapshot, result, &database_path)?;
+        request_trace.timings.append(&mut run.performance.timings);
+        run.performance = request_trace;
+        run.performance
+            .record_elapsed("search::snapshotRelease", release_start);
         if let Some(preparation) = embedder_preparation {
             run.performance
                 .record_duration("search::embedderPrepare", preparation.elapsed);
@@ -8410,17 +8432,27 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         if record_retrieval_audit
             && !retrieval_only
             && let Some(facts) = &run.audit_facts
-            && let Ok(connection) = DbConnection::open_file(&database_path)
         {
-            facts.record(
-                options,
-                &connection,
-                &run.report.results,
-                run.report.status,
-                &mut SearchAuditIdSource::Ambient,
-                &mut SearchPerformanceTrace::default(),
-            );
+            let audit_open_start = Instant::now();
+            let connection = DbConnection::open_file(&database_path);
+            run.performance
+                .record_elapsed("search::auditConnectionOpen", audit_open_start);
+            if let Ok(connection) = connection {
+                facts.record(
+                    options,
+                    &connection,
+                    &run.report.results,
+                    run.report.status,
+                    &mut SearchAuditIdSource::Ambient,
+                    &mut run.performance,
+                );
+            }
         }
+        // The historical search::total is the inner retrieval span. Keep it
+        // compatible, and expose the full request including post-snapshot
+        // audit I/O so a warm daemon cannot hide setup behind that inner total.
+        run.performance
+            .record_elapsed("search::requestTotal", total_start);
         return Ok(run);
     }
 
@@ -8439,6 +8471,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         retrieval_only,
     )
     .await?;
+    request_trace.timings.append(&mut run.performance.timings);
+    run.performance = request_trace;
     if kind_filter.is_some() || !typed_field_filters.is_empty() {
         return Err(SearchError::Index(format!(
             "Database not found at {}; typed memory filters require an initialized workspace",
@@ -8453,6 +8487,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         }
     }
     run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+    run.performance
+        .record_elapsed("search::requestTotal", total_start);
     Ok(run)
 }
 
@@ -12433,8 +12469,8 @@ async fn diag_search_sync(
             }
             return;
         }
-        let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
-            Ok(idx) => Arc::new(idx),
+        let index = match open_search_vector_index(&index_dir_owned, config.clone()) {
+            Ok(index) => index,
             Err(error) => {
                 if let Ok(mut guard) = task_result.lock() {
                     *guard = Some(Err(map_frankensearch_error(
@@ -14376,14 +14412,14 @@ async fn search_sync_with_performance(
         }
 
         let two_tier_open_start = Instant::now();
-        let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
-            Ok(idx) => {
+        let index = match open_search_vector_index(&index_dir_owned, config.clone()) {
+            Ok(index) => {
                 push_search_performance_timing(
                     &async_timings,
                     "searchSync::twoTierOpen",
                     two_tier_open_start.elapsed(),
                 );
-                Arc::new(idx)
+                index
             }
             Err(e) => {
                 push_search_performance_timing(
@@ -15771,6 +15807,24 @@ fn mark_hit_validity(
         );
     }
     hit.metadata = Some(metadata);
+}
+
+/// Both callers hold the generation lease through retrieval. Canonical source,
+/// producer and generation admission still runs for every request before here.
+fn open_search_vector_index(
+    index_dir: &Path,
+    config: TwoTierConfig,
+) -> Result<Arc<TwoTierIndex>, frankensearch::SearchError> {
+    #[cfg(unix)]
+    {
+        index_cache::open(index_dir, config)
+    }
+    #[cfg(not(unix))]
+    {
+        // The resident cache requires the Unix publication/read lease and
+        // physical inode identity; other platforms retain the canonical open.
+        TwoTierIndex::open(index_dir, config).map(Arc::new)
+    }
 }
 
 #[cfg(feature = "lexical-bm25")]

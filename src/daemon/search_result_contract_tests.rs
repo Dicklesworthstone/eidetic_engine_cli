@@ -354,7 +354,7 @@ fn schemas() -> (Value, Value) {
     ))
     .expect("canonical document schema");
     let daemon: Value = serde_json::from_str(include_str!(
-        "../../docs/schemas/ee.daemon.search.response.v3.json"
+        "../../docs/schemas/ee.daemon.search.response.v4.json"
     ))
     .expect("daemon response schema");
     (canonical, daemon["$defs"]["searchDocument"].clone())

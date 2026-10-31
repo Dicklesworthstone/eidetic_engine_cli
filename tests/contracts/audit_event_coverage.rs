@@ -35,7 +35,7 @@ use ee::core::init::{InitOptions, InitStatus, init_workspace};
 use ee::core::memory::{
     GetMemoryOptions, RememberMemoryOptions, get_memory_details, remember_memory,
 };
-use ee::core::search::{SearchOptions, run_search};
+use ee::core::search::{SearchOptions, run_search, run_search_with_performance};
 use ee::core::why::{WhyOptions, explain_memory};
 use ee::db::{DbConnection, audit_actions};
 use ee::models::MemoryScope;
@@ -148,7 +148,7 @@ fn ee_search_writes_hash_only_retrieval_audit_rows() -> TestResult {
     let before = audit_actions_for(&database);
     let executed_before = count_action(&before, audit_actions::SEARCH_EXECUTED);
     let returned_before = count_action(&before, audit_actions::SEARCH_RETURNED_MEM);
-    let report = run_search(&SearchOptions {
+    let run = run_search_with_performance(&SearchOptions {
         workspace_path: workspace.clone(),
         database_path: Some(database.clone()),
         index_dir: Some(workspace.join(".ee").join("index")),
@@ -169,6 +169,7 @@ fn ee_search_writes_hash_only_retrieval_audit_rows() -> TestResult {
         strict_scope: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
+    let report = &run.report;
     if report.results.is_empty() {
         return Err(format!(
             "fixture expected at least one search hit, got status={:?}",
@@ -191,6 +192,43 @@ fn ee_search_writes_hash_only_retrieval_audit_rows() -> TestResult {
             "search must append one search.returned_mem row per returned hit: {} hits, {returned_delta} rows",
             report.results.len()
         ));
+    }
+    // These operations execute outside the inner retrieval span. Their cost
+    // must remain visible in the returned trace, including the audit whose
+    // exactly-once effect was just established against the real database.
+    let performance =
+        report.performance_explain_json_with_trace(SpeedMode::Default, false, &run.performance);
+    let timings = performance
+        .pointer("/data/timings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "search performance omitted timings".to_owned())?;
+    for name in [
+        "search::indexReconcile",
+        "search::readPoolLookup",
+        "search::snapshotAcquire",
+        "search::snapshotRelease",
+        "search::auditConnectionOpen",
+        "search::auditWorkspaceCheck",
+        "search::auditPayloadBuild",
+        "search::auditFlush",
+        "search::requestTotal",
+    ] {
+        if timings.iter().filter(|span| span["name"] == name).count() != 1 {
+            return Err(format!(
+                "search must expose exactly one {name} timing: {timings:?}"
+            ));
+        }
+    }
+    let elapsed = |name: &str| {
+        timings
+            .iter()
+            .find(|span| span["name"] == name)
+            .and_then(|span| span["elapsedMs"].as_f64())
+            .ok_or_else(|| format!("missing numeric timing for {name}"))
+    };
+    let total = elapsed("search::requestTotal")?;
+    if total < elapsed("search::total")? || total < elapsed("search::auditFlush")? {
+        return Err("full request timing must include retrieval and audit spans".to_owned());
     }
     Ok(())
 }

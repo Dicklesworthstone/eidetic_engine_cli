@@ -20,9 +20,10 @@ use ee::daemon::protocol::{
 };
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
-    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DaemonSearchResult,
-    METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN,
-    METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, dispatch,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+    DAEMON_SEARCH_RESPONSE_SCHEMA_V4, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_CONTEXT,
+    METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
+    METHOD_WRITE_JOURNAL, dispatch,
 };
 use ee::db::{CreateWorkspaceInput, DbConnection};
 
@@ -31,7 +32,8 @@ type TestResult = Result<(), String>;
 const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
 const SEARCH_REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.request.v2.json";
-const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v3.json";
+const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v4.json";
+const LEGACY_SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v3.json";
 const SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS: &[&str] = &[
     "/response/data/resultCount",
     "/response/data/rerank/topK",
@@ -175,7 +177,7 @@ fn capabilities_response() -> Value {
             "method_schemas": {
                 "ee.daemon.search": {
                     "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
+                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V4
                 }
             },
             "forward_compat": {
@@ -403,7 +405,7 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
     if request.pointer("/$id").and_then(Value::as_str)
         != Some("https://eidetic-engine/schemas/ee.daemon.search.request.v2.json")
         || response.pointer("/$id").and_then(Value::as_str)
-            != Some("https://eidetic-engine/schemas/ee.daemon.search.response.v3.json")
+            != Some("https://eidetic-engine/schemas/ee.daemon.search.response.v4.json")
     {
         return Err("daemon search method schema ids drifted".to_owned());
     }
@@ -739,7 +741,7 @@ fn daemon_search_request_v2_schema_accepts_only_canonical_enum_values() -> TestR
 }
 
 #[test]
-fn real_daemon_search_response_v3_validates_and_redacts_performance_fallbacks() -> TestResult {
+fn real_daemon_search_response_v4_validates_and_redacts_performance_fallbacks() -> TestResult {
     const SECRET_QUERY: &str = "release sk_live_daemon_query_must_not_escape_performance";
     let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
     let result = actual_daemon_search_result(SECRET_QUERY)?;
@@ -792,7 +794,7 @@ fn real_daemon_search_response_v3_validates_and_redacts_performance_fallbacks() 
 }
 
 #[test]
-fn daemon_search_response_v3_schema_rejects_rust_validator_drift_matrix() -> TestResult {
+fn daemon_search_response_v4_schema_rejects_rust_validator_drift_matrix() -> TestResult {
     let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
     let valid = actual_daemon_search_result("schema drift matrix")?;
     validate_json_schema(&valid, &schema, "$")?;
@@ -946,7 +948,7 @@ fn daemon_search_response_v3_schema_rejects_rust_validator_drift_matrix() -> Tes
 }
 
 #[test]
-fn daemon_search_response_v3_uint64_boundaries_match_rust_validation() -> TestResult {
+fn daemon_search_response_v4_uint64_boundaries_match_rust_validation() -> TestResult {
     const COUNTER_PATH: &str = "/response/data/rerank/advisorySummary/sessionOccurrenceCount";
 
     let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
@@ -1079,6 +1081,66 @@ fn daemon_search_response_v3_uint64_boundaries_match_rust_validation() -> TestRe
 }
 
 #[test]
+fn daemon_search_versions_pin_distinct_reuse_contracts() -> TestResult {
+    let current_schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
+    let legacy_schema = read_schema(LEGACY_SEARCH_RESPONSE_SCHEMA_PATH)?;
+    let current = actual_daemon_search_result("schema version reuse contract")?;
+    validate_json_schema(&current, &current_schema, "$")?;
+    DaemonSearchResult::from_value(current.clone())?;
+
+    let mut legacy = current.clone();
+    legacy["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V3);
+    legacy["reuseContract"] = serde_json::json!({
+        "daemonProcess": "long_lived",
+        "defaultSearchEmbedder": "process_scoped",
+        "searchIndex": "per_request"
+    });
+    validate_json_schema(&legacy, &legacy_schema, "$")?;
+    DaemonSearchResult::from_value(legacy.clone())?;
+
+    let mut legacy_with_new_contract = current.clone();
+    legacy_with_new_contract["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V3);
+    let mut current_with_legacy_contract = legacy;
+    current_with_legacy_contract["schema"] = serde_json::json!(DAEMON_SEARCH_RESPONSE_SCHEMA_V4);
+    let mut current_without_admission = current.clone();
+    current_without_admission["reuseContract"]
+        .as_object_mut()
+        .ok_or("reuse contract must be an object")?
+        .remove("searchIndexAdmission");
+    let mut current_with_unknown_field = current;
+    current_with_unknown_field["reuseContract"]["unknown"] = serde_json::json!(true);
+    for (label, invalid, schema) in [
+        (
+            "v3 with resident fields",
+            legacy_with_new_contract,
+            &legacy_schema,
+        ),
+        (
+            "v4 with legacy fields",
+            current_with_legacy_contract,
+            &current_schema,
+        ),
+        (
+            "v4 without admission",
+            current_without_admission,
+            &current_schema,
+        ),
+        (
+            "v4 unknown reuse field",
+            current_with_unknown_field,
+            &current_schema,
+        ),
+    ] {
+        if validate_json_schema(&invalid, schema, "$").is_ok()
+            || DaemonSearchResult::from_value(invalid).is_ok()
+        {
+            return Err(format!("schema or Rust accepted {label}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn daemon_search_current_method_schemas_are_registered_and_exportable() -> TestResult {
     for (schema_id, schema_path, expected_id) in [
         (
@@ -1088,8 +1150,13 @@ fn daemon_search_current_method_schemas_are_registered_and_exportable() -> TestR
         ),
         (
             DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
-            SEARCH_RESPONSE_SCHEMA_PATH,
+            LEGACY_SEARCH_RESPONSE_SCHEMA_PATH,
             "https://eidetic-engine/schemas/ee.daemon.search.response.v3.json",
+        ),
+        (
+            DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
+            SEARCH_RESPONSE_SCHEMA_PATH,
+            "https://eidetic-engine/schemas/ee.daemon.search.response.v4.json",
         ),
         (
             ee::daemon::protocol::DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,

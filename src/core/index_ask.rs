@@ -110,7 +110,11 @@ fn already_loaded_local_embedder_with_caches(
     if !loaded_model_possible(default, registered) {
         return Ok(None);
     }
-    let connection = DbConnection::open_file_read_only(database_path)?;
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.to_path_buf()),
+        PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+    );
+    let connection = read_pool.acquire()?;
     let Some(workspace_id) = workspace_id_for_index_status(&connection, workspace_path)? else {
         return Ok(None);
     };
@@ -258,9 +262,15 @@ fn prepare_read_only_search_embedder_with_settings(
 ) -> Result<EmbedderPreparation, SearchError> {
     model_initialization_checkpoint(cx, "before read-only embedder preparation")?;
     let started = Instant::now();
-    let database = database_path
-        .exists()
-        .then(|| DbConnection::open_file_read_only(database_path))
+    let read_pool = database_path.exists().then(|| {
+        registered_process_read_pool(
+            DatabaseConfig::file(database_path.to_path_buf()),
+            PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+        )
+    });
+    let database = read_pool
+        .as_ref()
+        .map(|pool| pool.acquire())
         .transpose()
         .map_err(|error| SearchError::SubsystemError {
             subsystem: "model registry",
@@ -276,7 +286,7 @@ fn prepare_read_only_search_embedder_with_settings(
         })?
         .flatten();
     let selection = cached_local_selection(
-        database.as_ref().zip(workspace_id.as_deref()),
+        database.as_deref().zip(workspace_id.as_deref()),
         settings,
         remote_selected,
     )

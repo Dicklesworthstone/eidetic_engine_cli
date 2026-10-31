@@ -1,5 +1,41 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
+## Daemon resident search response
+
+New daemons advertise and emit `ee.daemon.search.response.v4`. Its strict
+`reuseContract` describes the resident resources and the admission boundary:
+
+| Field | Required value |
+| --- | --- |
+| `daemonProcess` | `long_lived` |
+| `defaultSearchEmbedder` | `process_scoped` |
+| `searchIndex` | `generation_scoped` |
+| `searchIndexAdmission` | `per_request` |
+| `searchIndexUncached` | `wal_or_unverified_artifacts` |
+
+The index cache retains bounded immutable readers and their quantized tiers
+for an admitted generation. Every request still validates the canonical
+workspace and source state. A WAL-bearing or unverifiable vector artifact
+uses the uncached canonical reader. This contract describes eligibility for
+reuse; it does not assert that every request was a cache hit.
+
+The historical `ee.daemon.search.response.v3` schema remains unchanged and
+exportable through `ee schema`. Updated clients negotiate and accept an older
+running daemon's exact three-field v3 contract, including
+`searchIndex: "per_request"`. A v3 response carrying the v4 fields, or a v4
+response carrying only the legacy contract, is rejected. Restart the daemon
+after upgrading the binary to use the new resident-resource implementation.
+Older clients that support only v3 use their existing local fallback when a
+new daemon advertises v4. The request remains
+`ee.daemon.search.request.v2`; transport framing, workspace authorization, and
+the retrieval-only `ee.daemon.pack_search` method remain unchanged.
+
+Public pack and search JSON attach `data.servingPath`, `data.retrievalPath`,
+and nullable `data.fallbackReason`. Pack retrieval served by the daemon with
+local assembly/persistence is `hybrid`; rejected or unavailable daemon
+execution is `in_process_fallback` with a machine-readable reason. These
+delivery diagnostics are outside pack identity and stored prompt content.
+
 ## Verified retrieval-tuning application
 
 `ee.shadow.retrieval_tuning_report.v1` keeps its public shape. Promotion now

@@ -15,7 +15,8 @@
 //! at `docs/schemas/ee.daemon.{request,response}.v1.json` are the
 //! agent-facing envelope contract. Method-specific search payloads are pinned
 //! separately by `ee.daemon.search.request.v2` and
-//! `ee.daemon.search.response.v3`. Agents that don't speak Rust read those
+//! `ee.daemon.search.response.v4` (v3 remains accepted from older daemons).
+//! Agents that don't speak Rust read those
 //! schemas directly, but the Rust types here are the source of truth for what
 //! `ee daemon` accepts/emits.
 
@@ -42,8 +43,11 @@ pub const DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1: &str = "ee.daemon.pack_search.r
 /// Strict method-specific request schema for [`METHOD_SEARCH`].
 pub const DAEMON_SEARCH_REQUEST_SCHEMA_V2: &str = "ee.daemon.search.request.v2";
 
-/// Strict method-specific response schema for [`METHOD_SEARCH`].
+/// Historical method-specific response accepted from an older running daemon.
 pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V3: &str = "ee.daemon.search.response.v3";
+
+/// Current response with generation-scoped resident-reader reuse diagnostics.
+pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V4: &str = "ee.daemon.search.response.v4";
 
 /// Bounded SessionStart context, without full diagnostic probes.
 pub const METHOD_ORIENT_HOOK: &str = "ee.daemon.orient_hook";

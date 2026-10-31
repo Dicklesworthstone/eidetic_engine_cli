@@ -611,7 +611,8 @@ pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
 /// registration). Covers both the wire-framing envelopes spoken on the UDS
 /// (`ee.daemon.request.v1`, `ee.daemon.response.v1`), the currently advertised
 /// strict search method pair (`ee.daemon.search.request.v2`,
-/// `ee.daemon.search.response.v3`), and the CLI `data` payload envelopes
+/// `ee.daemon.search.response.v4`), the accepted legacy search response
+/// (`ee.daemon.search.response.v3`), and the CLI `data` payload envelopes
 /// returned by `ee daemon start` / `ee daemon stop` (`ee.daemon.start.v1`,
 /// `ee.daemon.stop.v1`).
 pub const DAEMON_SCHEMAS: &[SchemaEntry] = &[
@@ -631,8 +632,13 @@ pub const DAEMON_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Daemon,
     ),
     SchemaEntry::new(
-        "daemon_search_response",
+        "daemon_search_response_legacy",
         "ee.daemon.search.response.v3",
+        SchemaCategory::Daemon,
+    ),
+    SchemaEntry::new(
+        "daemon_search_response",
+        "ee.daemon.search.response.v4",
         SchemaCategory::Daemon,
     ),
     SchemaEntry::new("daemon_start", "ee.daemon.start.v1", SchemaCategory::Daemon),
