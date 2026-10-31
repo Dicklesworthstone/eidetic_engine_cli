@@ -1546,7 +1546,39 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     //
     // EE_EMBED_DOWNLOAD=off is this file's own idiom -- the cass fixtures and
     // the two status fixtures repaired in 3d24f7e59 already pin it.
-    let embed_envs = [("EE_EMBED_DOWNLOAD", OsString::from("off"))];
+    //
+    // BUT THAT KNOB ALONE IS HALF AN IDIOM, and the missing half is why this
+    // fixture was still host-dependent. EE_EMBED_DOWNLOAD blocks a FETCH; it
+    // says nothing about WHERE a model is looked for, so an artifact already
+    // sitting in the machine registry is still discovered and still promotes the
+    // bundled row to `available`. Measured on the pinned lane 2026-10-31:
+    // `availableCount` came back 1 against the 0 asserted below, because that
+    // worker's model cache is now populated -- the same cause that had
+    // why_not_core_e2e asserting against an absent embedder.
+    //
+    // EE_EMBED_MODEL_DIR is the knob that closes it: docs/env_vars.md gives it
+    // HIGHEST PRECEDENCE in model resolution, above the verified workspace
+    // registry row and above both machine-registry layouts, so pointing it at an
+    // empty directory makes "no verified artifact" true BY CONSTRUCTION on any
+    // host rather than true by accident on a cacheless one. tests/golden.rs
+    // already pairs the two knobs exactly this way at five sites; this is that
+    // idiom, not a new one.
+    //
+    // This is what stops the 0 below being flipped a third time. It has already
+    // gone 0 -> 1 (b8015752b, corroborated on a dev Mac with a populated cache)
+    // -> 0 (corroborated on two cacheless workers), each edit correct about its
+    // own host, because the value depends on something the fixture did not
+    // control. Now it does.
+    let embed_envs = [
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
+        (
+            "EE_EMBED_MODEL_DIR",
+            workspace
+                .join(".ee")
+                .join("empty-model-cache")
+                .into_os_string(),
+        ),
+    ];
 
     let status_empty = run_ee_logged_with_env(
         "model-status-empty",
