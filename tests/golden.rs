@@ -4682,9 +4682,34 @@ mod tests {
         let candidates = connection
             .list_curation_candidates(WORKSPACE_ID, Some("consolidate"), Some("pending"), None)
             .map_err(|error| error.to_string())?;
+        // Carry the observation, not just the expectation. This row failed on
+        // the pinned lane 2026-10-31 and the message named only what it wanted,
+        // so the log could not say whether consolidation produced ZERO
+        // candidates (the four seeds no longer pair) or MORE than one (a
+        // control was absorbed) -- opposite causes with opposite repairs, and
+        // the fixture seeds exactly one eligible pair plus two deliberate
+        // near-miss controls ("guideline" against "rule", and the same text at
+        // a different level). Absorption eligibility was deliberately narrowed
+        // after this golden was last regenerated on 2026-08-07, by fce4ebc9b
+        // ("preserve distinct commands and code during absorption") and
+        // 5b8d2e09a ("preserve applicability and retrieval metadata"), so
+        // which direction this moved is the whole diagnosis.
         ensure(
             candidates.len() == 1,
-            "exactly one deduplicated pending consolidate candidate",
+            format!(
+                "expected exactly one deduplicated pending consolidate candidate, got {}: {:?}",
+                candidates.len(),
+                candidates
+                    .iter()
+                    .map(|candidate| (
+                        candidate.id.as_str(),
+                        candidate.candidate_type.as_str(),
+                        candidate.status.as_str(),
+                        candidate.target_memory_id.as_deref(),
+                        candidate.reason.as_str(),
+                    ))
+                    .collect::<Vec<_>>()
+            ),
         )?;
         let candidate_id = candidates
             .first()
