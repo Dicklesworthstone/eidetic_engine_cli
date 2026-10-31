@@ -2347,9 +2347,18 @@ printf '[RCH] remote worker-a (0.1s)\n'
         ));
     }
     let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    // `exec --` and the cargo command are asserted SEPARATELY, not as adjacent
+    // text. `stamp_committed_tree_build_provenance` (scripts/rch_verify.sh:3225)
+    // injects `env VERGEN_GIT_SHA=.. VERGEN_GIT_DESCRIBE=.. VERGEN_GIT_DIRTY=..`
+    // between them, and that injection IS the product behaviour -- it is
+    // bd-reality-core-convergence-1azkt.10 acceptance bullet 2, stamping the
+    // candidate binary with the commit it was built from, because nothing else
+    // in the tree populated those vars once Actions went dark. Requiring the
+    // two halves to touch asserted the absence of any future env override.
     if remote_invocations.len() != 1
+        || !remote_invocations[0].starts_with("exec -- ")
         || !remote_invocations[0]
-            .contains("exec -- cargo test --locked --lib cargo_config_provenance_isolated_smoke")
+            .contains("cargo test --locked --lib cargo_config_provenance_isolated_smoke")
     {
         return Err(format!(
             "isolated Cargo config run should invoke fake RCH exactly once: {remote_invocations:?}"
@@ -3205,9 +3214,12 @@ printf '[RCH] remote worker-a (0.1s)\n'
         ));
     }
     let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    // Split for the same reason as the isolated-Cargo-config case above: the
+    // committed-tree provenance stamp injects `env VERGEN_GIT_*` between
+    // `exec --` and the cargo command (bd-reality-core-convergence-1azkt.10).
     if remote_invocations.len() != 1
-        || !remote_invocations[0]
-            .contains("exec -- cargo test --locked --lib pinned_franken_stack_smoke")
+        || !remote_invocations[0].starts_with("exec -- ")
+        || !remote_invocations[0].contains("cargo test --locked --lib pinned_franken_stack_smoke")
     {
         return Err(format!(
             "pinned stack should launch exactly one Cargo verifier: {:?}",
