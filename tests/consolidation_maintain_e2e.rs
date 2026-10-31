@@ -1001,10 +1001,40 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
             "pack must contain the survivor as exactly one item and the duplicate never: {pack_ids:?}"
         ),
     )?;
+    // Print the per-reason omission counts the response already carries, because
+    // the pack id list alone cannot say WHY a control is missing and the
+    // candidate reasons have completely different repairs.
+    //
+    // Measured on the pinned lane 2026-10-31: this row failed with a pack
+    // holding exactly ONE item, the survivor, at --max-tokens 2000 -- no budget
+    // wall for three short memories. The SIBLING check
+    // `search_keeps_controls_distinct` did not fire in either run, and ws.check
+    // reports only on failure, so retrieval keeps both controls distinct and
+    // they are lost at PACK. `kind_control` carries the SAME text as the
+    // survivor at a different kind, and `diversity_key_for_memory` is
+    // "{level}:{kind}:{first_tag}", so the two are meant to be distinguishable
+    // to MMR; `wording_control` differs only in wording.
+    //
+    // So `redundantCandidates` > 0 here means the redundancy filter is
+    // collapsing precisely the memories the consolidation pass deliberately
+    // REFUSED to merge, which is a product gap on this bead's own
+    // "deduplicated search/pack behavior" criterion (bd-1oep7).
+    // `belowRelevanceFloor` or `tokenBudgetExceeded` would send this somewhere
+    // else entirely. One field, read for free on the next run instead of
+    // another dispatch.
+    let omissions = json_at(&pack, &["data", "pack", "quality", "omissions"]);
     ws.check(
         "pack_keeps_controls_distinct",
         id_count(&pack_ids, &wording_control_id) == 1 && id_count(&pack_ids, &kind_control_id) == 1,
-        &format!("each control must pack as exactly one distinct item: {pack_ids:?}"),
+        &format!(
+            "each control must pack as exactly one distinct item: {pack_ids:?}; \
+             wording_control={wording_control_id} kind_control={kind_control_id} \
+             survivor={survivor_id}; omission counts={}",
+            omissions.map_or_else(
+                || "ABSENT at /data/pack/quality/omissions".to_owned(),
+                JsonValue::to_string
+            )
+        ),
     )?;
 
     // --- Idempotency: steward re-run and apply replay create nothing new,
