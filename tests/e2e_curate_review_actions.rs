@@ -509,7 +509,12 @@ fn queued_conflict_scope_split_preserves_both_memories_until_reviewed_apply() ->
     let (pending_output, pending_apply) = fixture.run(&["curate", "apply", candidate_id])?;
     ensure(
         pending_output.status.success(),
-        "blocked pending apply must return its structured report",
+        format!(
+            "blocked pending apply must return its structured report; status={:?}; \
+             stdout={pending_apply}; stderr={}",
+            pending_output.status.code(),
+            String::from_utf8_lossy(&pending_output.stderr),
+        ),
     )?;
     assert_blocked_conflict_apply(&pending_apply, "candidate_not_approved")?;
     {
@@ -632,7 +637,12 @@ fn queued_conflict_apply_refuses_resolution_completed_after_approval() -> TestRe
     let (output, response) = fixture.run(&["curate", "apply", candidate_id])?;
     ensure(
         output.status.success(),
-        "blocked stale apply must return its structured report",
+        format!(
+            "blocked stale apply must return its structured report; status={:?}; \
+             stdout={response}; stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        ),
     )?;
     assert_blocked_conflict_apply(&response, "conflict_proposal_stale")?;
     let db = fixture.database()?;
@@ -827,7 +837,12 @@ fn reviewed_conflict_merge_rereads_sources_and_human_review_before_apply() -> Te
         let (output, refused) = fixture.run(&["curate", "apply", candidate_id])?;
         ensure(
             output.status.success(),
-            "a changed merge receipt or source must return the structured blocked report",
+            format!(
+                "a changed merge receipt or source must return the structured blocked \
+                 report; status={:?}; stdout={refused}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ),
         )?;
         assert_blocked_conflict_apply(&refused, expected_code)?;
         ensure(
