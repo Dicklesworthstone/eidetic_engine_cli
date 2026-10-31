@@ -544,6 +544,44 @@ the target, times the per-test cost you have measured, against your ceiling —
 and it is cheaper than every other instrument in this file. **Filter the target
 to the module you actually need.**
 
+**THE WHOLE RECIPE, MEASURED 2026-10-31, AND IT COSTS TWO DISPATCHES FOR FOUR
+SHARDS.** `-- --list` builds a target and enumerates its tests WITHOUT running
+them, and it accepts several `--test` flags at once, so one dispatch sizes a
+whole family:
+
+```bash
+RCH_REQUIRE_REMOTE=1 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
+  rch exec --job --worker <ID> -- cargo test --locked \
+    --test integration_a_d --test integration_e_f \
+    --test integration_g_m --test integration_s_z -j 2 -- --list
+```
+
+That returned `773`, `617`, `508` and `550 tests` — **2448**, and the 508
+independently reproduced this file's own earlier measurement of
+`integration_g_m`. Then filter to the modules that matter and dispatch once
+more with `--no-fail-fast`, which is what makes a multi-target run report every
+target instead of stopping at the first failure:
+
+| step | cost |
+|---|---|
+| size four shards (`--list`, one dispatch) | one build, no tests run |
+| filtered run of 25 modules across all four | 397 of 2448 tests — **16%** |
+
+**Two traps in reading that listing.** First, a shard pulls its files in with
+`#[path = "../<file>.rs"]`, so the module name is the FILE STEM and the thing
+you grep for a bead citation is that file, not the shard root — a depth-1 grep
+of `tests/*.rs` finds nothing. Second, and this cost a wrong table:
+
+> **With `-j 2` the targets' `--list` output INTERLEAVES, so you cannot split a
+> merged log on its `Running …` lines to attribute tests per target.** Doing
+> that put all 2448 under whichever shard appeared last. Each target's own
+> `N tests, 0 benchmarks` total IS reliable; for per-module counts, tally the
+> module stems globally and resolve ownership from the `#[path]` includes on
+> disk, after checking that no stem is included by two shards.
+
+Validate the tally by reconciling it against the announced totals — 2448 from
+the module tally equalling 773+617+508+550 is what says the parse is sound.
+
 **The 96.5 s is a PROFILE artefact, not the tests being slow (bd-3vuhv).** The
 e2e harness resolves `EE_BINARY` to the debug build and says so itself:
 
