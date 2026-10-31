@@ -651,11 +651,24 @@ fn closure_lint_accepts_exact_fixtures_golden_artifact() -> TestResult {
     )?;
 
     let (output, report) = run_linter(temp.path())?;
+    // Spelled inline rather than through `output_excerpt`, which prints the
+    // same three facts: the drift guard credits code/stdout/stderr by scanning
+    // this window for those literal tokens, and a helper CALL contains none of
+    // them, so the site reported all three missing while printing all three
+    // (bd-mv9j7). `.code()` is additional to the status, not instead of it --
+    // it is None for a signal death, where Display still reports "signal: 9",
+    // which is also why `output_excerpt`'s `status={:?}` alone would not do.
+    // This comment sits ABOVE the `ensure(` deliberately: the window starts at
+    // that line, so anything between it and the format! args pushes them out.
     ensure(
         output.status.success(),
         format!(
-            "linter must accept an exact, non-empty tests/fixtures/golden artifact\n{}",
-            output_excerpt(&output)
+            "linter must accept an exact, non-empty tests/fixtures/golden artifact; \
+             status={} (code {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         ),
     )?;
     ensure_eq(report_status(&report)?, "pass", "report status")?;
