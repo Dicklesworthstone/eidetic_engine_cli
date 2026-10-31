@@ -1270,6 +1270,40 @@ treat a repeat `--job` to the same pinned worker as UNVERIFIED — dispatch to a
 different worker, or verify a committed tree through `scripts/rch_verify.sh`,
 which materialises a source export rather than syncing the working tree.
 
+**THE COUNT TELL IS UNAVAILABLE FOR THE MOST COMMON REPAIR THERE IS — editing an
+assertion — so here is the second tell.** A fix that changes what a test
+*expects* adds no test, so the total cannot move and the paragraph above leaves
+you with no audit at all. But such a fix makes the two sources
+*distinguishable by outcome*: **if the old source could not pass the new
+assertion, then a pass proves the new source arrived.** Pre-register that before
+dispatching, naming the old expected value, so the inference is recorded rather
+than constructed afterwards.
+
+Measured 2026-10-31, two warm pinned `--job` dispatches to the same worker. The
+first carried a repair that added two tests, so the count tell was available and
+read 552 against the 550 of an earlier `--list` — source confirmed. The second
+changed only expected values (a logged `exitCode` 3 → 10 and a
+`candidate_pool` 20 → 1) and came back `28 passed; 0 failed` and `6 passed;
+0 failed` with totals unchanged at 773 and 552. The old source expected 3 and a
+pool of 20 and fails both assertions, so green is only reachable from the new
+source. No count moved and the run is still auditable.
+
+Two cautions. This works only when the change is *outcome-inverting*: widening
+an assertion so that BOTH the old and new product satisfy it tells you nothing,
+and neither does a fix whose old form would also pass. And it proves arrival
+only on GREEN — a red could be stale source reproducing the old failure, which
+is why the old failure's exact message is worth recording too.
+
+**A stale assertion can hide another stale assertion behind it, so a repaired
+test is not a verified test until it has run.** Same session: four tests were
+repaired for a ratified prose-vs-command contract, and three went green while
+the fourth then failed on a *different* leftover — a logged exit code the same
+test contradicted itself about, pinning 3 while asserting the process exited 10.
+Nobody had reached it because the first assertion failed first. Budget for
+layers: a filtered re-run after each repair is cheap on a warm pinned worker
+(80 s here against a 74-minute unfiltered shard sweep), and it is the only thing
+that finds the next layer.
+
 **The discriminator for the first three is the announcement, and it is cheap.**
 libtest prints
 `running N tests` *before* it runs them. A summary belongs to that announcement
