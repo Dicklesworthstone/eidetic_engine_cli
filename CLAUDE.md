@@ -318,6 +318,38 @@ Both behaviours changed inside the 0.14.2 → 0.18.0 gap. **Read the source at
 HEAD, or dispatch to the lane.** A binary probe is only evidence about the
 binary, and the one on PATH is not this tree.
 
+**AND THE OBVIOUS FIX FOR ALL OF THIS IS A TRAP, which is worth writing down
+because it is attractive, available, and would pass every gate.** The published
+release carries a native `ee-aarch64-apple-darwin` archive, and `Cargo.toml`
+says 0.18.0, so downloading the v0.18.0 asset gives this Mac a binary that
+`ee_require_current_binary` ACCEPTS — unblocking verify.sh, its 34 callers and
+every `scripts/e2e_*.sh` in one step. Measured 2026-10-31, that binary would be
+**1320 commits** behind HEAD: v0.18.0 was tagged 2026-10-14 and the version in
+`Cargo.toml` does not move until the next release, so the whole 0.18.0
+development window satisfies the guard.
+
+The guard knows and says so at `scripts/lib/ee_binary_resolution.sh:249`:
+
+> SEMVER EQUALITY IS NOT COMMIT IDENTITY: this guard passes for any binary
+> declaring the same version, however stale within that version. It cannot
+> refuse on that basis, so it must at least leave enough in the log for a
+> reader to notice.
+
+Which is why it prints `binary_version`, `mtime_epoch` and `size_bytes` — read
+those, not the pass. **This is worse than the 0.14.2 case above, not better:**
+0.14.2 is refused loudly, while a released 0.18.0 is waved through and then
+believed.
+
+**Never regenerate a golden with it.** `673487f93` ("fix(retrieval): recover
+matching producers and refresh live provenance", 2026-10-29) is NOT in v0.18.0,
+and it is what added `provenanceChainHashVersion` to the search document — the
+field whose absence is currently failing
+`search_deterministic_golden`. An `UPDATE_GOLDEN=1` run under the release binary
+would therefore rewrite that golden to the PRE-field shape: locally green, red
+on the lane, and now wrong in a way that looks reviewed. Use it for the
+build-admission preflight, for `--build-admission-ee-bin`, and for environment
+questions that do not depend on this tree's behaviour. Nothing else.
+
 The second is **not a free-space failure, and reading it as one wastes the
 fix.** The denying check reported 30 GB available against a 1 GB minimum; what
 failed was `external_required: true` against `external: false`, because `TMPDIR`
