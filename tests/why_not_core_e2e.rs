@@ -121,6 +121,67 @@ fn why_not_options(workspace_path: &Path, db_path: &Path, task: &str) -> Context
     }
 }
 
+/// Remove the wall-clock-derived entries from a why-not report, returning the
+/// scrubbed report and the messages that were dropped.
+///
+/// `pack::PackBudgetAudit::timing_degradations` exists precisely because these
+/// entries are not reproducible, and its doc comment says so: they "must never
+/// enter the pack hash ... wall-clock time is not reproducible — folding a
+/// timing entry into `self.degradations` would make the same query over the
+/// same store hash differently on a loaded machine, breaking the determinism
+/// contract in AGENTS.md". Callers append them to a response *after* the hash
+/// is computed. The why-not report carries no hash, so it receives them
+/// inline — in `filtersApplied`, in `degraded`, and as a `counterfactualHints`
+/// entry whose `rationale` repeats the message.
+///
+/// A byte-identity assertion over a report still containing them therefore
+/// measures machine load rather than determinism. Observed on the pinned lane
+/// 2026-10-31: two back-to-back runs of this fixture differed in exactly one
+/// place — `Pack assembly took 29435ms, at or over the ... failure threshold
+/// of 2000ms` at severity `medium`, against `took 1875ms, at or over the ...
+/// warning threshold of 500ms` at severity `low`. Both readings are honest;
+/// the elapsed figure, the threshold it is compared against and the resulting
+/// severity all move with load. So this test draws the same line for its
+/// comparison that the product draws for its hash.
+fn without_timing_entries(report: &Value) -> (Value, Vec<String>) {
+    let mut scrubbed = report.clone();
+    let mut removed = Vec::new();
+
+    for array_key in ["filtersApplied", "degraded"] {
+        if let Some(entries) = scrubbed.get_mut(array_key).and_then(Value::as_array_mut) {
+            entries.retain(|entry| {
+                let timing = entry.get("code").and_then(Value::as_str)
+                    == Some(ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE);
+                if timing {
+                    for text_key in ["message", "detail"] {
+                        if let Some(text) = entry.get(text_key).and_then(Value::as_str) {
+                            removed.push(text.to_owned());
+                        }
+                    }
+                }
+                !timing
+            });
+        }
+    }
+
+    // The hints carry no `code`, so they are matched by the rationale they
+    // copied from the degradation that was just removed. The other hints on
+    // this surface (the two `graph_feature_disabled` repairs) are config-
+    // derived and must survive.
+    if let Some(hints) = scrubbed
+        .get_mut("counterfactualHints")
+        .and_then(Value::as_array_mut)
+    {
+        hints.retain(|hint| {
+            hint.get("rationale")
+                .and_then(Value::as_str)
+                .is_none_or(|rationale| !removed.iter().any(|message| message == rationale))
+        });
+    }
+
+    (scrubbed, removed)
+}
+
 fn setup(content: &str, task: &str) -> TestResult<(TempDir, Value, String)> {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
@@ -305,11 +366,34 @@ fn why_not_is_deterministic_across_runs() -> TestResult {
     )
     .map_err(|error| format!("second run failed: {error:?}"))?;
 
-    let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
-    let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
+    let first_value = serde_json::to_value(&first).map_err(|error| error.to_string())?;
+    let second_value = serde_json::to_value(&second).map_err(|error| error.to_string())?;
+    let (first_json, first_removed) = without_timing_entries(&first_value);
+    let (second_json, second_removed) = without_timing_entries(&second_value);
+
+    // Vacuity guard. The scrub above is narrow by construction, but a scrub
+    // that emptied the report would make the comparison below trivially true
+    // and this test permanently, silently green. The selection verdict is not
+    // timing-derived, so it has to survive the scrub.
+    if first_json["schema"] != "ee.why_not_selected.v1" {
+        return Err(format!(
+            "scrubbing timing entries lost the report schema, so the comparison would be \
+             vacuous: {first_json}"
+        ));
+    }
+    let surviving_filters = first_json["filtersApplied"].as_array().map_or(0, Vec::len);
+    if surviving_filters == 0 {
+        return Err(format!(
+            "scrubbing timing entries emptied filtersApplied, so the comparison would be \
+             vacuous; removed {first_removed:?}"
+        ));
+    }
+
     if first_json != second_json {
         return Err(format!(
-            "why-not output is not deterministic:\nfirst:  {first_json}\nsecond: {second_json}"
+            "why-not output is not deterministic (timing-derived entries already excluded; \
+             first removed {first_removed:?}, second removed {second_removed:?}):\n\
+             first:  {first_json}\nsecond: {second_json}"
         ));
     }
     Ok(())

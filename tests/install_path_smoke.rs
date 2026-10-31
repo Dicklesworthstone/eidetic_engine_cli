@@ -27,7 +27,16 @@ const INSTALL_METHODS: &[InstallMethod] = &[
     },
     InstallMethod {
         section: "### Cargo",
-        command_fragment: "cargo install eidetic-engine",
+        // `+nightly` is part of the contract, not noise. This crate is
+        // nightly-only (`rust-toolchain.toml` pins `channel = "nightly"`, and
+        // AGENTS.md forbids stable), so a bare `cargo install eidetic-engine`
+        // is a command that resolves to whatever toolchain the reader defaults
+        // to and can fail with E0514 on stable. This fragment used to be
+        // spelled without `+nightly`, which no correct README line can
+        // contain -- the toolchain selector sits between the two words -- so
+        // the assertion demanded the one spelling the project must not
+        // publish. Pinning the selector asserts the README keeps it.
+        command_fragment: "cargo +nightly install eidetic-engine",
         status_row_prefix: "| crates.io |",
     },
 ];

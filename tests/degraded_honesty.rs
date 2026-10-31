@@ -5,8 +5,8 @@ use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::degraded_honesty::{
-    validate_no_fake_success_output, validate_no_unsupported_evidence_claims,
-    validate_repair_command,
+    RepairCommandKind, classify_repair_command, validate_no_fake_success_output,
+    validate_no_unsupported_evidence_claims,
 };
 use ee::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use serde_json::{Value, json};
@@ -104,6 +104,58 @@ fn ensure_no_ansi(text: &str, context: &str) -> TestResult {
         !text.contains("\u{1b}["),
         format!("{context} must not contain ANSI styling"),
     )
+}
+
+/// Assert that a storeless-addressing repair carries its *conditional* init
+/// offer, rather than being equal to a bare `ee init --workspace .`.
+///
+/// bd-ixdqd. Five sites in this file asserted
+/// `repair == "ee init --workspace ."` on `WORKSPACE_STORE_MISSING_CODE`
+/// surfaces. The product deliberately does not say that, and
+/// `core::degraded_honesty` documents why in as many words: the prefix
+/// contract governs `DegradationCode::repair` (the static matrix) and
+/// "deliberately does NOT govern the `repair` field on runtime error
+/// surfaces -- `DomainError::WorkspaceStoreMissing { repair, .. }` ... That
+/// is the honest content there: an addressing mistake has no single fix
+/// command, because only the operator knows which workspace they meant."
+///
+/// So the real repair is prose that ENDS with the init command behind a
+/// guard -- ". Only if you intended to create a NEW store here: ee init
+/// --workspace <path>" -- and the structured runnable actions live in
+/// `details.recovery[]` (`storeless_workspace_recovery_actions`). The guard
+/// clause is the load-bearing part: an unconditional `ee init` suggestion is
+/// what lets a mistyped `--workspace` plant a new store, which is the exact
+/// hazard `91cf7bcbd` ("reject storeless write and search addresses") was
+/// made to close.
+///
+/// This assertion is therefore STRICTLY STRONGER than the equality it
+/// replaces: the old form could not see the guard at all, and would have
+/// passed had the product dropped it. The addressed path is a per-run temp
+/// directory, so the exact string cannot be pinned; these two substrings
+/// are the parts that carry the contract.
+fn ensure_storeless_repair_contract(value: &Value, pointer: &str, context: &str) -> TestResult {
+    let repair = value
+        .pointer(pointer)
+        .ok_or_else(|| format!("{context}: missing JSON pointer {pointer}"))?
+        .as_str()
+        .ok_or_else(|| {
+            format!(
+                "{context}: {pointer} must be a string, got {}",
+                value.pointer(pointer).unwrap_or(&Value::Null)
+            )
+        })?
+        .to_owned();
+
+    for needle in [
+        "Re-check --workspace addressing",
+        "Only if you intended to create a NEW store here: ee init --workspace",
+    ] {
+        ensure(
+            repair.contains(needle),
+            format!("{context}: {pointer} must contain {needle:?}; got {repair:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// True when `path` or any ancestor holds a `.ee` store or a `.git` directory.
@@ -432,15 +484,84 @@ fn ensure_no_fake_or_unsupported_claims(
     )
 }
 
+/// Assert the repair surface is not a dead end, honouring the fact that
+/// `repair` is one field NAME with two contracts (bd-ixdqd).
+///
+/// This used to run every repair it found through `validate_repair_command`,
+/// whose prefix rule governs `DegradationCode::repair` -- the static matrix --
+/// and which `core::degraded_honesty` says "deliberately does NOT govern the
+/// `repair` field on runtime error surfaces ... Those values never reach this
+/// function". This helper was the counter-example to that last sentence: it
+/// reached in through `first_repair_command`'s `/error/repair` arm and failed
+/// four tests for prose that is the ratified, correct content there.
+///
+/// The two honest shapes, per AGENTS.md ("`error.details.recovery[]` is a
+/// structured array of recovery actions ... not prose-only repair strings"):
+///
+///   1. a runnable command, which still has to satisfy the prefix rule; or
+///   2. prose guidance PLUS a non-empty structured `details.recovery[]`,
+///      every entry of which offers something concrete.
+///
+/// Only the UNKNOWN-prefix classification takes branch 2. Empty and
+/// placeholder repairs stay failures whatever `recovery[]` holds -- a
+/// `recovery[]` must not be able to excuse an unfinished repair string, which
+/// is what a blanket `if !passed` fallthrough would have allowed.
+///
+/// `command` is deliberately not required of an entry: `RecoveryAction`
+/// populates only the fields its `kind` makes meaningful (`Flag` → `flag_name`
+/// + `value_hint`, `Env` → `env_name` + `value_hint`, `Install` → `command`),
+/// and the storeless actions are `Flag` and `Env`. Demanding `command` would
+/// assert a shape the product does not emit, which is the same error this
+/// helper is being repaired for.
 fn ensure_repair_command_is_actionable(value: &Value, context: &str) -> TestResult {
-    if let Some(repair) = first_repair_command(value) {
-        let report = validate_repair_command(&repair);
-        ensure(
-            report.passed,
-            format!("{context} repair command must be actionable: {report:?}"),
-        )?;
+    let Some(repair) = first_repair_command(value) else {
+        return Ok(());
+    };
+
+    match classify_repair_command(&repair) {
+        RepairCommandKind::Actionable | RepairCommandKind::Template => Ok(()),
+        kind @ (RepairCommandKind::Empty | RepairCommandKind::Placeholder) => Err(format!(
+            "{context} repair string is {kind:?}, which no recovery[] can excuse: {repair:?}"
+        )),
+        RepairCommandKind::Unknown => {
+            let actions = value
+                .pointer("/error/details/recovery")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "{context} repair is prose rather than a command, so the envelope must \
+                         carry details.recovery[]; none present. repair={repair:?}"
+                    )
+                })?;
+            ensure(
+                !actions.is_empty(),
+                format!(
+                    "{context} repair is prose rather than a command and details.recovery[] is \
+                     empty, so the surface offers no next step. repair={repair:?}"
+                ),
+            )?;
+            for (index, action) in actions.iter().enumerate() {
+                // The authoritative key spellings, from the hand-written
+                // serializer in `models::RecoveryAction::to_json` -- the struct
+                // derives no `Serialize`, so the field names are not the wire
+                // names and must be read from there.
+                let concrete = ["/command", "/example", "/valueHint"].iter().any(|field| {
+                    action
+                        .pointer(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+                });
+                ensure(
+                    concrete,
+                    format!(
+                        "{context} details.recovery[{index}] offers nothing concrete (no \
+                         command, example or value hint): {action}"
+                    ),
+                )?;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn ensure_logged_contract_shape(result: &LoggedCommand, context: &str) -> TestResult {
@@ -663,12 +784,7 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
         json!(WORKSPACE_STORE_MISSING_CODE),
         "workspace-store-missing error code",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/error/repair",
-        json!("ee init --workspace ."),
-        "repair command",
-    )?;
+    ensure_storeless_repair_contract(&result.parsed, "/error/repair", "context")?;
 
     let fake_success = validate_no_fake_success_output("context", false, false, &result.stdout);
     ensure(
@@ -699,12 +815,7 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
         json!(["storage"]),
         "logged degradation/error code",
     )?;
-    ensure_json_pointer(
-        &log_json,
-        "/repairCommand",
-        json!("ee init --workspace ."),
-        "logged repair command",
-    )?;
+    ensure_storeless_repair_contract(&log_json, "/repairCommand", "context e2e log")?;
     ensure_json_pointer(
         &log_json,
         "/commandBoundaryMatrixRow",
@@ -2725,12 +2836,7 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         json!(WORKSPACE_STORE_MISSING_CODE),
         "economy workspace-store-missing error code",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/error/repair",
-        json!("ee init --workspace ."),
-        "economy missing-database repair command",
-    )?;
+    ensure_storeless_repair_contract(&result.parsed, "/error/repair", "economy missing-database")?;
 
     let fake_success =
         validate_no_fake_success_output("economy report", false, false, &result.stdout);
@@ -3619,12 +3725,7 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
         json!(WORKSPACE_STORE_MISSING_CODE),
         "review session workspace-store-missing error code",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/error/repair",
-        json!("ee init --workspace ."),
-        "review session repair command",
-    )?;
+    ensure_storeless_repair_contract(&result.parsed, "/error/repair", "review session")?;
     ensure(
         !result.stdout.contains("review_evidence_unavailable")
             && !result.stdout.contains("Session review is unavailable"),
@@ -3660,12 +3761,7 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
         json!([WORKSPACE_STORE_MISSING_CODE]),
         "logged review session workspace-store-missing code",
     )?;
-    ensure_json_pointer(
-        &log_json,
-        "/repairCommand",
-        json!("ee init --workspace ."),
-        "logged review session repair command",
-    )?;
+    ensure_storeless_repair_contract(&log_json, "/repairCommand", "logged review session")?;
     ensure_json_pointer(
         &log_json,
         "/commandBoundaryMatrixRow",
