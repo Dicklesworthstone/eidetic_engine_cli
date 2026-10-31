@@ -802,17 +802,32 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
         json!("ee.degraded_honesty.e2e_log.v1"),
         "e2e log schema",
     )?;
-    ensure_json_pointer(&log_json, "/exitCode", json!(3), "logged exit code")?;
+    // bd-tzlmo, the same refinement as the process-exit assertion above and as
+    // the review-session test's logged code: an absent store is an addressing
+    // miss, not a storage failure. This site was the leftover. The test
+    // contradicted itself until now -- line ~767 asserts the PROCESS exited
+    // WORKSPACE_STORE_MISSING_EXIT (10) while this asserted the LOGGED code for
+    // the same run was 3 -- which is why it survived: the first assertion to
+    // fail was the repair string in front of it, so nobody reached this one.
+    ensure_json_pointer(
+        &log_json,
+        "/exitCode",
+        json!(WORKSPACE_STORE_MISSING_EXIT),
+        "logged exit code",
+    )?;
     ensure_json_pointer(
         &log_json,
         "/parsedJsonSchema",
         json!("ee.error.v2"),
         "logged parsed schema",
     )?;
+    // Same refinement, same bead. The review-session test already carries the
+    // refined expectation here and passes with it, so this is the one place
+    // where the two tests disagreed about the same product behaviour.
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["storage"]),
+        json!([WORKSPACE_STORE_MISSING_CODE]),
         "logged degradation/error code",
     )?;
     ensure_storeless_repair_contract(&log_json, "/repairCommand", "context e2e log")?;

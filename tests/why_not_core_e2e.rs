@@ -80,7 +80,18 @@ fn remember_fixture(workspace_path: &Path, db_path: &Path, content: &str) -> Tes
     Ok(report.memory_id.to_string())
 }
 
-fn why_not_options(workspace_path: &Path, db_path: &Path, task: &str) -> ContextPackOptions {
+/// `candidate_pool` is a parameter because one fixture needs it to be 1.
+///
+/// An explicit pool is honoured verbatim -- `resolve_pack_candidate_pool`
+/// returns `explicit` before consulting config and applies no minimum, and the
+/// runtime profile's `cap_pack_candidate_pool` only ever lowers it -- so a pool
+/// of 1 really does admit exactly one candidate.
+fn why_not_options(
+    workspace_path: &Path,
+    db_path: &Path,
+    task: &str,
+    candidate_pool: u32,
+) -> ContextPackOptions {
     ContextPackOptions {
         bead_id: None,
         task_paths: Vec::new(),
@@ -95,7 +106,7 @@ fn why_not_options(workspace_path: &Path, db_path: &Path, task: &str) -> Context
         filters: Default::default(),
         profile: None,
         max_tokens: Some(1000),
-        candidate_pool: Some(20),
+        candidate_pool: Some(candidate_pool),
         max_results: None,
         include_tombstoned: false,
         as_of: None,
@@ -183,16 +194,33 @@ fn without_timing_entries(report: &Value) -> (Value, Vec<String>) {
 }
 
 fn setup(content: &str, task: &str) -> TestResult<(TempDir, Value, String)> {
+    setup_with_competitors(content, &[], task, 20)
+}
+
+/// `setup`, plus memories that compete with the target for a bounded pool.
+///
+/// The competitors are stored BEFORE the target so that nothing about the fix
+/// depends on insertion order deciding ties: the target is the last write, so
+/// if anything it is favoured by recency, and it must still lose.
+fn setup_with_competitors(
+    content: &str,
+    competitors: &[&str],
+    task: &str,
+    candidate_pool: u32,
+) -> TestResult<(TempDir, Value, String)> {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
     init_fixture_workspace(&workspace_path)?;
 
+    for competitor in competitors {
+        remember_fixture(&workspace_path, &database_path, competitor)?;
+    }
     let memory_id_raw = remember_fixture(&workspace_path, &database_path, content)?;
     let memory_id = MemoryId::from_str(&memory_id_raw).map_err(|error| format!("{error:?}"))?;
 
     let report = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, task),
+        &why_not_options(&workspace_path, &database_path, task, candidate_pool),
         memory_id,
     )
     .map_err(|error| format!("explain_why_not_default failed: {error:?}"))?;
@@ -237,11 +265,32 @@ fn why_not_retrieved_memory_is_authoritative() -> TestResult {
 
 #[test]
 fn why_not_unretrieved_memory_is_reconstructed() -> TestResult {
-    // The memory shares no terms with the task, so it never enters the candidate
-    // pool; why-not must honestly mark the reason reconstructed (not authoritative).
-    let (_temp, json, memory_id_raw) = setup(
+    // The target must not enter the candidate pool, so why-not has to mark the
+    // reason reconstructed rather than authoritative.
+    //
+    // THE EXCLUSION IS STRUCTURAL, AND IT HAS TO BE. This fixture used to store
+    // ONE memory sharing no terms with the task and rely on term overlap alone
+    // to keep it out, which is only true where retrieval is lexical. Measured
+    // on the pinned lane 2026-10-31: with an embedder resolved, `source_mode:
+    // Hybrid` scores this smoothie recipe against this task at relevance
+    // 0.449983, so the single stored memory was the pool and the report came
+    // back `selected: true`, stage `selected`. The test passed on the dev Mac
+    // for the WRONG REASON -- no embedder resolves there, so it was asserting
+    // the degraded-index path. The failure message this fixture prints had
+    // pre-registered exactly that reading ("the fixture premise ... no longer
+    // holds and the fixture needs a competitor or a tighter budget"), which is
+    // what identified it.
+    //
+    // So: one competitor that shares nearly every term with the task, and a
+    // candidate pool of 1. The target cannot be the single admitted candidate
+    // unless it outranks an almost-exact match, which is false under lexical
+    // and semantic scoring alike. That holds whether or not an embedder
+    // resolves, which is the property the old premise lacked.
+    let (_temp, json, memory_id_raw) = setup_with_competitors(
         "Banana mango smoothie recipe with crushed ice.",
+        &["Prepare the release verification gate before shipping the build."],
         "prepare release verification gate",
+        1,
     )?;
 
     if json["memoryId"] != Value::String(memory_id_raw) {
@@ -279,10 +328,10 @@ fn why_not_unretrieved_memory_is_reconstructed() -> TestResult {
             "an unretrieved memory must report selected=false; got {observed} ({}). \
              stage={}, primaryReason={}, reasonSource={}, scores={}. If the stage \
              shows it reaching candidate admission, the fixture premise (one \
-             memory, no shared terms, therefore never a candidate) no longer holds \
-             and the fixture needs a competitor or a tighter budget; if the stage \
-             shows it excluded while selected is true, those two disagree and that \
-             is a product defect.",
+             competitor outranking it, pool of 1, therefore never admitted) no \
+             longer holds -- check whether the competitor still outranks the \
+             target; if the stage shows it excluded while selected is true, those \
+             two disagree and that is a product defect.",
             if observed.is_null() {
                 "field ABSENT from the report, not merely false"
             } else {
@@ -294,9 +343,27 @@ fn why_not_unretrieved_memory_is_reconstructed() -> TestResult {
             json["scores"]
         ));
     }
-    if json["primaryReason"] != "not_retrieved" {
+    // EITHER retrieval-miss reason satisfies this file's contract, and pinning
+    // only the first was the second thing wrong with this fixture.
+    // `why_not_primary_reason` returns "not_retrieved" only when the target is
+    // absent AND the degraded list is EMPTY; otherwise it returns
+    // "not_retrieved_due_to_degraded_index". This tree emits
+    // `graph_feature_disabled` degradations by default, so the bare spelling is
+    // not reachable from an end-to-end run whatever the fixture does, and
+    // demanding it made the assertion unsatisfiable rather than strict.
+    //
+    // Nothing is lost by accepting both. `why_not_reason_source` maps BOTH to
+    // "reconstructed", which is the honesty contract this file's header
+    // declares, and the sibling `why_not_retrieved_memory_is_authoritative`
+    // already treats them as one class by rejecting both. The strict assertion
+    // that carries the contract is `reasonSource` below.
+    let primary_reason = json["primaryReason"].as_str().unwrap_or_default();
+    if !matches!(
+        primary_reason,
+        "not_retrieved" | "not_retrieved_due_to_degraded_index"
+    ) {
         return Err(format!(
-            "an unretrieved memory should report not_retrieved, got {}",
+            "an unretrieved memory should report a retrieval miss, got {}",
             json["primaryReason"]
         ));
     }
@@ -322,7 +389,7 @@ fn why_not_missing_memory_id_errors() -> TestResult {
 
     let absent = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5151_5151));
     let result = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, "any task"),
+        &why_not_options(&workspace_path, &database_path, "any task", 20),
         absent,
     );
     if let Ok(report) = &result {
@@ -356,12 +423,12 @@ fn why_not_is_deterministic_across_runs() -> TestResult {
     let task = "prepare release verification";
 
     let first = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, task),
+        &why_not_options(&workspace_path, &database_path, task, 20),
         memory_id,
     )
     .map_err(|error| format!("first run failed: {error:?}"))?;
     let second = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, task),
+        &why_not_options(&workspace_path, &database_path, task, 20),
         memory_id,
     )
     .map_err(|error| format!("second run failed: {error:?}"))?;
