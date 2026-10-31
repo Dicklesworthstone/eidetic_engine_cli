@@ -16,6 +16,9 @@ impl std::fmt::Display for DaemonSearchFallbackReason {
         if let Self::SearchResponseValidationError(detail) = self {
             write!(formatter, ": {detail}")?;
         }
+        if let Self::SearchMethodError(code) = self {
+            write!(formatter, ": {code}")?;
+        }
         Ok(())
     }
 }
@@ -84,5 +87,64 @@ mod tests {
             "{}",
             degradation.message
         );
+    }
+
+    #[test]
+    fn serving_diagnostics_distinguish_transport_and_method_failures() {
+        for (reason, expected) in [
+            (
+                DaemonSearchFallbackReason::SocketUnavailable,
+                "daemon_socket_unavailable",
+            ),
+            (
+                DaemonSearchFallbackReason::DeadlineExceeded,
+                "daemon_deadline_exceeded",
+            ),
+            (DaemonSearchFallbackReason::DaemonWarming, "daemon_warming"),
+            (
+                DaemonSearchFallbackReason::SearchMethodError("daemon_method_unauthorized".into()),
+                "daemon_method_unauthorized",
+            ),
+            (
+                DaemonSearchFallbackReason::SearchResponseValidationError("missing results".into()),
+                "search_response_drift",
+            ),
+        ] {
+            let mut envelope = serde_json::json!({"data": {"results": []}});
+            crate::models::RequestServingMetadata::fallback(reason.code())
+                .apply_to_envelope(&mut envelope);
+            assert_eq!(envelope["data"]["servingPath"], "in_process_fallback");
+            assert_eq!(envelope["data"]["retrievalPath"], "in_process");
+            assert_eq!(envelope["data"]["fallbackReason"], expected);
+            assert_eq!(envelope["data"]["results"], serde_json::json!([]));
+        }
+    }
+
+    #[test]
+    fn serving_diagnostics_do_not_call_retrieval_only_reuse_full_daemon_execution() {
+        for (serving, path, retrieval) in [
+            (
+                crate::models::RequestServingMetadata::in_process(),
+                "in_process",
+                "in_process",
+            ),
+            (
+                crate::models::RequestServingMetadata::hybrid(),
+                "hybrid",
+                "daemon",
+            ),
+            (
+                crate::models::RequestServingMetadata::daemon(),
+                "daemon",
+                "daemon",
+            ),
+        ] {
+            let mut envelope = serde_json::json!({"data": {"query": "release", "results": []}});
+            serving.apply_to_envelope(&mut envelope);
+            assert_eq!(envelope["data"]["servingPath"], path);
+            assert_eq!(envelope["data"]["retrievalPath"], retrieval);
+            assert!(envelope["data"]["fallbackReason"].is_null());
+            assert_eq!(envelope["data"]["query"], "release");
+        }
     }
 }

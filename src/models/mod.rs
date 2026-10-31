@@ -421,6 +421,101 @@ pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 /// Response envelope schema (v2) for successful command output.
 pub const RESPONSE_SCHEMA_V2: &str = "ee.response.v2";
 
+/// Where this invocation actually executed. This describes delivery, not the
+/// identity of a stored pack or a cached search result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServingPath {
+    InProcess,
+    Daemon,
+    /// Retrieval ran in the daemon; assembly and persistence stayed with the
+    /// caller so a lost RPC reply cannot persist a pack twice.
+    Hybrid,
+    InProcessFallback,
+}
+
+impl ServingPath {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InProcess => "in_process",
+            Self::Daemon => "daemon",
+            Self::Hybrid => "hybrid",
+            Self::InProcessFallback => "in_process_fallback",
+        }
+    }
+}
+
+/// Machine-readable transport diagnostics attached after canonical execution.
+/// The reason is a stable code, never an error message that clients must parse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestServingMetadata {
+    pub path: ServingPath,
+    pub fallback_reason: Option<String>,
+}
+
+impl RequestServingMetadata {
+    #[must_use]
+    pub const fn in_process() -> Self {
+        Self {
+            path: ServingPath::InProcess,
+            fallback_reason: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn daemon() -> Self {
+        Self {
+            path: ServingPath::Daemon,
+            fallback_reason: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hybrid() -> Self {
+        Self {
+            path: ServingPath::Hybrid,
+            fallback_reason: None,
+        }
+    }
+
+    #[must_use]
+    pub fn fallback(reason: impl Into<String>) -> Self {
+        Self {
+            path: ServingPath::InProcessFallback,
+            fallback_reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub const fn retrieval_path(&self) -> &'static str {
+        match self.path {
+            ServingPath::Daemon | ServingPath::Hybrid => "daemon",
+            ServingPath::InProcess | ServingPath::InProcessFallback => "in_process",
+        }
+    }
+
+    /// Overlay the current delivery on an envelope, including one read from a
+    /// cache. Cached metadata must never impersonate the current serving path.
+    pub fn apply_to_envelope(&self, envelope: &mut serde_json::Value) {
+        if let Some(data) = envelope.get_mut("data") {
+            self.apply_to_data(data);
+        }
+    }
+
+    pub fn apply_to_data(&self, data: &mut serde_json::Value) {
+        if let Some(data) = data.as_object_mut() {
+            data.insert("servingPath".to_owned(), self.path.as_str().into());
+            data.insert("retrievalPath".to_owned(), self.retrieval_path().into());
+            data.insert(
+                "fallbackReason".to_owned(),
+                self.fallback_reason
+                    .as_deref()
+                    .map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+        }
+    }
+}
+
 /// Current error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V2: &str = "ee.error.v2";
 

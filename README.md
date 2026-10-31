@@ -2476,6 +2476,23 @@ then add `--use-daemon` to `ee pack`. On one Linux worker the median pack took
 pack falls back to local retrieval and names the fallback in `degraded`
 (`bd-snkcp`).
 
+Pack and search JSON also report `data.servingPath`, `data.retrievalPath`, and
+`data.fallbackReason`, so timing is not the test of whether routing succeeded:
+
+| `servingPath` | Meaning |
+| --- | --- |
+| `in_process` | The CLI executed the request locally. |
+| `daemon` | The daemon executed the request. |
+| `hybrid` | The daemon supplied retrieval; the CLI assembled and, when requested, persisted the pack. |
+| `in_process_fallback` | Requested daemon execution could not be used; canonical local execution completed the request. |
+
+`retrievalPath` is `daemon` for accepted daemon retrieval, otherwise `in_process`.
+`fallbackReason` is `null` on success or direct local execution and a stable
+code on fallback, such as `daemon_socket_unavailable`, `daemon_warming`,
+`daemon_deadline_exceeded`, or `daemon_method_unauthorized`. The existing
+`degraded` entries retain the readable explanation and repair advice. These
+delivery fields do not change the pack hash or prompt text.
+
 ### Codex
 
 Codex shells out, so the same calls work. `ee pack "<task>" --json` can be

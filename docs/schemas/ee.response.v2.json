@@ -20,6 +20,21 @@
     "data": {
       "type": "object",
       "description": "Command-specific payload. See the per-command schema files in docs/schemas.",
+      "properties": {
+        "servingPath": {
+          "type": "string",
+          "enum": ["in_process", "daemon", "hybrid", "in_process_fallback"],
+          "description": "Execution path for this invocation. hybrid means daemon retrieval with canonical client-side pack assembly and persistence. Delivery metadata does not contribute to pack identity."
+        },
+        "retrievalPath": {
+          "type": "string",
+          "enum": ["in_process", "daemon"]
+        },
+        "fallbackReason": {
+          "type": ["string", "null"],
+          "description": "Stable reason code when a requested daemon path fell back; null for direct local execution or successful daemon reuse. Existing degraded diagnostics retain the human-readable explanation."
+        }
+      },
       "additionalProperties": { "$ref": "#/$defs/jsonValue" }
     },
     "degraded": {

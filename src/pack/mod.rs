@@ -4765,6 +4765,9 @@ pub struct ContextResponse {
     pub success: bool,
     pub data: ContextResponseData,
     pub cached_json: Option<String>,
+    /// Per-invocation diagnostics; excluded from pack identity and persisted
+    /// cache values, and overlaid by the delivery renderer.
+    pub serving: Option<crate::models::RequestServingMetadata>,
 }
 
 impl ContextResponse {
@@ -4791,6 +4794,7 @@ impl ContextResponse {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: None,
+            serving: None,
             data: ContextResponseData {
                 command: PACK_COMMAND,
                 embed_backend: EmbedBackend::HashFallback,
@@ -4855,6 +4859,7 @@ impl ContextResponse {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: Some(cached_json),
+            serving: None,
             data: ContextResponseData {
                 command,
                 embed_backend,

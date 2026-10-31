@@ -3005,7 +3005,10 @@ pub fn render_context_response_json_with_options(
     options: ContextJsonRenderOptions,
 ) -> String {
     if let Some(cached_json) = &response.cached_json {
-        return context_response_cached_json_with_top_level_degraded(cached_json);
+        return context_response_cached_json_with_top_level_degraded(
+            cached_json,
+            response.serving.as_ref(),
+        );
     }
 
     let rendered_text = options.include_rendered_text.then(|| {
@@ -3033,6 +3036,11 @@ pub fn render_context_response_json_with_options(
     b.field_bool("success", response.success);
     b.field_object("data", |d| {
         d.field_str("command", response.data.command);
+        if let Some(serving) = &response.serving {
+            d.field_str("servingPath", serving.path.as_str());
+            d.field_str("retrievalPath", serving.retrieval_path());
+            field_optional_str(d, "fallbackReason", serving.fallback_reason.as_deref());
+        }
         d.field_str(
             "embed_backend",
             response.data.embed_backend.as_str(),
@@ -3519,7 +3527,10 @@ fn build_pack_evidence_item(obj: &mut JsonBuilder, item: &PackEvidenceItem) {
     obj.field_bool("feasible", true);
 }
 
-fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> String {
+fn context_response_cached_json_with_top_level_degraded(
+    cached_json: &str,
+    serving: Option<&crate::models::RequestServingMetadata>,
+) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(cached_json) else {
         return cached_json.to_owned();
     };
@@ -3535,6 +3546,9 @@ fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> St
             .map(response_degraded_from_data)
             .unwrap_or_else(|| serde_json::json!([]));
         object.insert("degraded".to_string(), degraded);
+    }
+    if let Some(serving) = serving {
+        serving.apply_to_envelope(&mut value);
     }
     serde_json::to_string(&value).unwrap_or_else(|_| cached_json.to_owned())
 }
@@ -23825,6 +23839,62 @@ mod tests {
             &parsed["degraded"][0]["code"].as_str(),
             &Some("template_repair_fixture"),
             "cached context response top-level degraded code",
+        )
+    }
+
+    #[test]
+    fn serving_metadata_overlays_cached_delivery_without_changing_the_pack() -> TestResult {
+        let mut response = context_response_fixture()?;
+        let original: serde_json::Value =
+            serde_json::from_str(&render_context_response_json(&response))
+                .map_err(|error| error.to_string())?;
+        response.serving = Some(crate::models::RequestServingMetadata::hybrid());
+        let hybrid: serde_json::Value =
+            serde_json::from_str(&render_context_response_json(&response))
+                .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &hybrid["data"]["pack"],
+            &original["data"]["pack"],
+            "pack identity after serving overlay",
+        )?;
+        ensure_equal(
+            &hybrid["data"]["servingPath"],
+            &serde_json::json!("hybrid"),
+            "hybrid serving path",
+        )?;
+        ensure_equal(
+            &hybrid["data"]["fallbackReason"],
+            &serde_json::Value::Null,
+            "successful reuse reason",
+        )?;
+
+        let mut cached =
+            ContextResponse::from_cached_json(response.data.request.clone(), hybrid.to_string());
+        cached.serving = Some(crate::models::RequestServingMetadata::fallback(
+            "daemon_socket_unavailable",
+        ));
+        let fallback: serde_json::Value =
+            serde_json::from_str(&render_context_response_json(&cached))
+                .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &fallback["data"]["pack"],
+            &original["data"]["pack"],
+            "cached pack identity",
+        )?;
+        ensure_equal(
+            &fallback["data"]["servingPath"],
+            &serde_json::json!("in_process_fallback"),
+            "current cached delivery path",
+        )?;
+        ensure_equal(
+            &fallback["data"]["retrievalPath"],
+            &serde_json::json!("in_process"),
+            "current cached retrieval path",
+        )?;
+        ensure_equal(
+            &fallback["data"]["fallbackReason"],
+            &serde_json::json!("daemon_socket_unavailable"),
+            "current cached fallback reason",
         )
     }
 

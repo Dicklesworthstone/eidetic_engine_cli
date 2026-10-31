@@ -50485,6 +50485,7 @@ mod daemon_search_diagnostics;
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DaemonSearchFallbackReason {
     UnsupportedCliOption(&'static str),
+    SocketUnavailable,
     CapabilityRoundTripFailed,
     CapabilityMethodError,
     CapabilityProtocolDrift,
@@ -50497,7 +50498,7 @@ enum DaemonSearchFallbackReason {
     CapabilityMethodSchemaDrift,
     RequestEncodingFailed,
     SearchRoundTripFailed,
-    SearchMethodError,
+    SearchMethodError(String),
     SearchResultMissing,
     SearchResponseDrift,
     SearchResponseValidationError(String),
@@ -50510,6 +50511,7 @@ impl DaemonSearchFallbackReason {
     const fn as_str(&self) -> &'static str {
         match self {
             Self::UnsupportedCliOption(option) => option,
+            Self::SocketUnavailable => "daemon socket unavailable",
             Self::CapabilityRoundTripFailed => "capability round-trip failed",
             Self::CapabilityMethodError => "capability method returned an error",
             Self::CapabilityProtocolDrift => "capability protocol drift",
@@ -50525,7 +50527,7 @@ impl DaemonSearchFallbackReason {
             Self::CapabilityMethodSchemaDrift => "search method schema drift",
             Self::RequestEncodingFailed => "search request encoding failed",
             Self::SearchRoundTripFailed => "search round-trip failed",
-            Self::SearchMethodError => "search method returned an error",
+            Self::SearchMethodError(_) => "search method returned an error",
             Self::SearchResultMissing => "search result missing",
             Self::SearchResponseDrift | Self::SearchResponseValidationError(_) => {
                 "search response drift"
@@ -50533,6 +50535,32 @@ impl DaemonSearchFallbackReason {
             Self::DeadlineExceeded => "capability and search deadline exceeded",
             #[cfg(not(unix))]
             Self::PlatformUnsupported => "daemon search is unsupported on this platform",
+        }
+    }
+
+    fn code(&self) -> &str {
+        match self {
+            Self::UnsupportedCliOption(_) => "unsupported_cli_option",
+            Self::SocketUnavailable => "daemon_socket_unavailable",
+            Self::CapabilityRoundTripFailed => "capability_round_trip_failed",
+            Self::CapabilityMethodError => "capability_method_error",
+            Self::CapabilityProtocolDrift => "capability_protocol_drift",
+            Self::CapabilityEnvelopeSchemaDrift => "capability_envelope_schema_drift",
+            Self::CapabilityMethodMissing => "capability_method_missing",
+            Self::DaemonWarming => "daemon_warming",
+            Self::CachedLocalEmbedderUnavailable => "cached_local_embedder_unavailable",
+            Self::CapabilityAuthorizationDrift => "capability_authorization_drift",
+            Self::CapabilityMethodSchemaDrift => "capability_method_schema_drift",
+            Self::RequestEncodingFailed => "request_encoding_failed",
+            Self::SearchRoundTripFailed => "search_round_trip_failed",
+            Self::SearchMethodError(code) => code,
+            Self::SearchResultMissing => "search_result_missing",
+            Self::SearchResponseDrift | Self::SearchResponseValidationError(_) => {
+                "search_response_drift"
+            }
+            Self::DeadlineExceeded => "daemon_deadline_exceeded",
+            #[cfg(not(unix))]
+            Self::PlatformUnsupported => "platform_unsupported",
         }
     }
 }
@@ -50730,6 +50758,7 @@ fn search_daemon_response_before(
         client_round_trip_before(socket_path, &capabilities_request, deadline).map_err(
             |error| match error {
                 ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+                ClientError::Connect(_) => DaemonSearchFallbackReason::SocketUnavailable,
                 _ => DaemonSearchFallbackReason::CapabilityRoundTripFailed,
             },
         )?;
@@ -50788,6 +50817,7 @@ fn search_daemon_response_before(
     let response =
         client_round_trip_before(socket_path, &request, deadline).map_err(|error| match error {
             ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+            ClientError::Connect(_) => DaemonSearchFallbackReason::SocketUnavailable,
             _ => DaemonSearchFallbackReason::SearchRoundTripFailed,
         })?;
     if let Some(error) = response.error {
@@ -50795,7 +50825,7 @@ fn search_daemon_response_before(
             if error.code == crate::daemon::server::DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE {
                 DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable
             } else {
-                DaemonSearchFallbackReason::SearchMethodError
+                DaemonSearchFallbackReason::SearchMethodError(error.code)
             },
         );
     }
@@ -50812,25 +50842,54 @@ fn run_context_pack_with_daemon_retrieval(
     mesh_mode: MeshCommandMode,
 ) -> Result<crate::core::context::ContextPackPerformanceRun, ContextPackError> {
     if !use_daemon {
-        return run_context_pack_with_performance(options, command);
+        let mut run = run_context_pack_with_performance(options, command)?;
+        let serving = crate::models::RequestServingMetadata::in_process();
+        serving.apply_to_envelope(&mut run.performance);
+        run.response.serving = Some(serving);
+        return Ok(run);
     }
+    let serving = std::sync::Mutex::new(None);
     let provider = |search_options: &SearchOptions, require_cached_local: bool| {
-        if !options.filters.filters.is_empty() {
-            return Err(daemon_search_fallback_degradation(
-                DaemonSearchFallbackReason::UnsupportedCliOption(
-                    "metadata field filters remain in-process",
-                ),
-            ));
-        }
-        if mesh_mode != MeshCommandMode::Off {
-            return Err(daemon_search_fallback_degradation(
-                DaemonSearchFallbackReason::UnsupportedCliOption("--mesh remains in-process"),
-            ));
-        }
-        pack_search_via_daemon(search_options, socket, require_cached_local)
-            .map_err(daemon_search_fallback_degradation)
+        let result = if !options.filters.filters.is_empty() {
+            Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                "metadata field filters remain in-process",
+            ))
+        } else if mesh_mode != MeshCommandMode::Off {
+            Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--mesh remains in-process",
+            ))
+        } else {
+            pack_search_via_daemon(search_options, socket, require_cached_local)
+        };
+        *serving
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(match &result {
+            Ok(_) => crate::models::RequestServingMetadata::hybrid(),
+            Err(reason) => crate::models::RequestServingMetadata::fallback(reason.code()),
+        });
+        result.map_err(daemon_search_fallback_degradation)
     };
-    crate::core::context::run_context_pack_with_search_provider(options, command, &provider)
+    let mut run =
+        crate::core::context::run_context_pack_with_search_provider(options, command, &provider)?;
+    let mut serving = serving
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(crate::models::RequestServingMetadata::in_process);
+    // Core revalidates the handoff against its source-of-truth snapshot. A
+    // successful RPC that is later rejected must not be reported as reuse.
+    if serving.path == crate::models::ServingPath::Hybrid
+        && run
+            .response
+            .data
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "daemon_search_fallback")
+    {
+        serving = crate::models::RequestServingMetadata::fallback("daemon_handoff_rejected");
+    }
+    serving.apply_to_envelope(&mut run.performance);
+    run.response.serving = Some(serving);
+    Ok(run)
 }
 
 #[cfg(unix)]
@@ -51136,6 +51195,7 @@ fn daemon_search_performance_json(
             serde_json::Value::Array(command_timings),
         );
     }
+    crate::models::RequestServingMetadata::daemon().apply_to_envelope(&mut performance);
     performance
 }
 
@@ -51528,7 +51588,9 @@ where
         let startup_elapsed = invocation_started.elapsed();
         let daemon_round_trip_start = Instant::now();
         match search_via_daemon(args, &options, kind_filter.as_deref()) {
-            Ok(renderings) => {
+            Ok(mut renderings) => {
+                crate::models::RequestServingMetadata::daemon()
+                    .apply_to_envelope(&mut renderings.response);
                 let daemon_round_trip_elapsed = daemon_round_trip_start.elapsed();
                 command_timings.push(cli_performance_timing_json(
                     "command::daemonRoundTrip",
@@ -51554,11 +51616,16 @@ where
                     stdout,
                 );
             }
-            Err(reason) => Some(daemon_search_fallback_degradation(reason)),
+            Err(reason) => Some(reason),
         }
     } else {
         None
     };
+
+    let serving = daemon_fallback.as_ref().map_or_else(
+        crate::models::RequestServingMetadata::in_process,
+        |reason| crate::models::RequestServingMetadata::fallback(reason.code()),
+    );
 
     if args.explain_performance {
         let core_search_start = Instant::now();
@@ -51568,8 +51635,10 @@ where
             &typed_field_filters,
         ) {
             Ok(mut run) => {
-                if let Some(degradation) = daemon_fallback {
-                    run.report.degraded.push(degradation);
+                if let Some(reason) = daemon_fallback {
+                    run.report
+                        .degraded
+                        .push(daemon_search_fallback_degradation(reason));
                 }
                 command_timings.push(cli_performance_timing_json(
                     "command::coreSearch",
@@ -51585,6 +51654,7 @@ where
                     args.explain,
                     &run.performance,
                 );
+                serving.apply_to_envelope(&mut payload);
                 command_timings.push(cli_performance_timing_json(
                     "command::performancePayloadBuild",
                     payload_start.elapsed(),
@@ -51616,8 +51686,10 @@ where
 
     match run_search_with_filters(&options, kind_filter.as_deref(), &typed_field_filters) {
         Ok(mut report) => {
-            if let Some(degradation) = daemon_fallback {
-                report.degraded.push(degradation);
+            if let Some(reason) = daemon_fallback {
+                report
+                    .degraded
+                    .push(daemon_search_fallback_degradation(reason));
             }
             // bd-cli-surface-consistency-cluster-1jnu1 item 5: `--full` opts out
             // of the 240-character body elision on every renderer, so the flag
@@ -51635,6 +51707,7 @@ where
                         &mut process.search_advisory_session,
                         &advisory_workspace_id,
                         preview,
+                        Some(&serving),
                     ) + "\n"),
                 ),
                 output::Renderer::Json
@@ -51650,6 +51723,7 @@ where
                         &mut process.search_advisory_session,
                         &advisory_workspace_id,
                         preview,
+                        Some(&serving),
                     ) + "\n"),
                 ),
             }
@@ -51795,14 +51869,19 @@ fn format_search_json_with_mesh_and_recalibration_in_process(
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
     preview: SearchContentPreview,
+    serving: Option<&crate::models::RequestServingMetadata>,
 ) -> String {
+    let mut data = report.data_json_with_advisory_session_for_workspace_and_preview(
+        advisory_session,
+        workspace_id,
+        preview,
+    );
+    if let Some(serving) = serving {
+        serving.apply_to_data(&mut data);
+    }
     format_search_json_data_with_mesh_and_recalibration(
         report,
-        report.data_json_with_advisory_session_for_workspace_and_preview(
-            advisory_session,
-            workspace_id,
-            preview,
-        ),
+        data,
         mesh_mode,
         recalibration,
         result_path_hint,
@@ -51860,6 +51939,7 @@ fn format_search_toon_with_mesh_in_process(
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
     preview: SearchContentPreview,
+    serving: Option<&crate::models::RequestServingMetadata>,
 ) -> String {
     output::render_toon_from_json(&format_search_json_with_mesh_and_recalibration_in_process(
         report,
@@ -51869,6 +51949,7 @@ fn format_search_toon_with_mesh_in_process(
         advisory_session,
         workspace_id,
         preview,
+        serving,
     ))
 }
 
@@ -78031,6 +78112,7 @@ mod tests {
             &mut reusable.search_advisory_session,
             "workspace-reusable",
             SearchContentPreview::Truncated,
+            None,
         );
         let repeated = format_search_json_with_mesh_and_recalibration_in_process(
             &stale_report(130),
@@ -78040,6 +78122,7 @@ mod tests {
             &mut reusable.search_advisory_session,
             "workspace-reusable",
             SearchContentPreview::Truncated,
+            None,
         );
         assert_eq!(warning_count(&first), 2);
         assert_eq!(warning_count(&repeated), 0);
@@ -78058,6 +78141,7 @@ mod tests {
                 &mut standalone.search_advisory_session,
                 "workspace-standalone",
                 SearchContentPreview::Truncated,
+                None,
             );
             assert_eq!(warning_count(&rendered), 2);
         }
@@ -78081,6 +78165,7 @@ mod tests {
                 &mut process.search_advisory_session,
                 "workspace-permanent",
                 SearchContentPreview::Truncated,
+                None,
             );
             serde_json::from_str::<serde_json::Value>(&rendered)
                 .expect("permanent advisory search response JSON")
@@ -95420,6 +95505,20 @@ mod tests {
                     !stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
                     &format!("positive pack must really use daemon retrieval: {stdout}"),
                 )?;
+                ensure_equal(
+                    &envelope["data"]["servingPath"],
+                    &serde_json::json!("hybrid"),
+                    "pack assembly remains local after daemon retrieval",
+                )?;
+                ensure_equal(
+                    &envelope["data"]["retrievalPath"],
+                    &serde_json::json!("daemon"),
+                    "successful daemon retrieval is explicit",
+                )?;
+                ensure(
+                    envelope["data"]["fallbackReason"].is_null(),
+                    "no fallback reason on successful reuse",
+                )?;
                 let pack = &envelope["data"]["pack"];
                 let text = pack["text"].as_str().ok_or("pack text")?;
                 ensure(text.contains(content), "actual stored memory selected")?;
@@ -95522,6 +95621,18 @@ mod tests {
                 stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
                 "wrong-workspace fallback disclosed",
             )?;
+            let envelope: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &envelope["data"]["servingPath"],
+                &serde_json::json!("in_process_fallback"),
+                "wrong workspace cannot claim daemon reuse",
+            )?;
+            ensure_equal(
+                &envelope["data"]["fallbackReason"],
+                &serde_json::json!("daemon_method_unauthorized"),
+                "daemon refusal code survives fallback",
+            )?;
             ensure(
                 !stdout.contains(content),
                 "other workspace cannot retrieve daemon memory",
@@ -95558,6 +95669,18 @@ mod tests {
             ensure(
                 stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
                 "missing socket fallback disclosed",
+            )?;
+            let envelope: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &envelope["data"]["servingPath"],
+                &serde_json::json!("in_process_fallback"),
+                "missing socket fallback path",
+            )?;
+            ensure_equal(
+                &envelope["data"]["fallbackReason"],
+                &serde_json::json!("daemon_socket_unavailable"),
+                "missing socket fallback reason",
             )?;
             ensure(
                 stdout.contains(content),
@@ -95835,7 +95958,7 @@ mod tests {
         };
         ensure_equal(
             &search_via_daemon(&args, &options, None),
-            &Err(DaemonSearchFallbackReason::CapabilityRoundTripFailed),
+            &Err(DaemonSearchFallbackReason::SocketUnavailable),
             "missing daemon socket fallback reason",
         )
     }
