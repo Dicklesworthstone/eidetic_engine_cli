@@ -69,6 +69,53 @@ RUSTFMT_TIMEOUT_SEC = 60
 GIT_TIMEOUT_SEC = 20
 
 
+def repo_config_path() -> Path | None:
+    """The repository's own rustfmt.toml, or None when it cannot be found.
+
+    MEASURED FALSE POSITIVE, 2026-10-31. Every check below writes the staged
+    blob to a TEMP DIRECTORY and runs rustfmt there, and rustfmt discovers
+    `rustfmt.toml` by walking up from the file it is formatting -- so from a
+    temp dir it finds nothing and silently applies its OWN defaults instead of
+    this repository's policy.
+
+    That is not a cosmetic difference. `tests/golden.rs` was refused with a
+    diff at two pre-existing lines the commit had not touched, while
+    `cargo fmt --check`, `rustfmt --check tests/golden.rs` and
+    `rustfmt --check --config skip_children=true tests/golden.rs` all reported
+    clean in-repo. Adding `--config-path` to the temp-file invocation returned
+    it to clean, which isolates the cause to config discovery and nothing else.
+
+    The FALSE NEGATIVE is the worse direction and the reason this matters: a
+    file that is dirty under repo policy but clean under rustfmt defaults is
+    waved through here, and then reds `cargo fmt --check`, a GATED verify.sh
+    stage that CLAUDE.md records as having sat red for three days because
+    nothing on this host could see it. A guard measuring against the wrong
+    policy is worse than no guard, because it is trusted.
+
+    Fails open by returning None, matching this file's stated contract that
+    the only exit-1 path is "rustfmt ran to completion and reported a diff".
+    """
+    try:
+        done = _run(["git", "rev-parse", "--show-toplevel"], GIT_TIMEOUT_SEC)
+    except Exception as error:  # noqa: BLE001 - fail open
+        _warn(f"could not resolve the repository root ({error}); using rustfmt defaults")
+        return None
+    if done.returncode != 0:
+        _warn("could not resolve the repository root; using rustfmt defaults")
+        return None
+    candidate = Path(done.stdout.decode("utf-8", "replace").strip()) / "rustfmt.toml"
+    if not candidate.is_file():
+        _warn(f"no rustfmt.toml at {candidate}; using rustfmt defaults")
+        return None
+    return candidate
+
+
+def config_args() -> list[str]:
+    """`--config-path <repo>/rustfmt.toml`, or nothing when unavailable."""
+    path = repo_config_path()
+    return ["--config-path", str(path)] if path else []
+
+
 def _warn(message: str) -> None:
     print(f"[40-rustfmt] {message}", file=sys.stderr)
 
@@ -146,6 +193,7 @@ def check_blob(path: str, workdir: Path) -> bool | None:
                 "--check",
                 "--config",
                 SKIP_CHILDREN,
+                *config_args(),
                 str(scratch),
             ],
             RUSTFMT_TIMEOUT_SEC,
@@ -195,6 +243,7 @@ def batch_is_clean(files: list[Path]) -> bool | None:
                 "--check",
                 "--config",
                 SKIP_CHILDREN,
+                *config_args(),
                 *[str(f) for f in files],
             ],
             RUSTFMT_TIMEOUT_SEC,
