@@ -34,6 +34,27 @@ fn assert_unmapped_remediation(report: &Value, reason_fragment: &str) -> TestRes
     Ok(())
 }
 
+/// The exact complement of `assert_unmapped_remediation`: a blocker whose
+/// failure class HAS an owner must name it and say so in its status.
+///
+/// DELIBERATELY DOES NOT PIN THE BEAD ID. Which bead owns a failure class is
+/// product data that moves, so coupling a contract test to one identifier turns
+/// an ordinary tracker edit into a test failure. The property this surface owes
+/// a caller is that a mapped blocker is attributable at all.
+///
+/// No reason fragment either: a mapped blocker reports
+/// `"remediation_reason": null` and carries its guidance through the bead
+/// reference instead, so the prose check the unmapped helper performs has
+/// nothing to read here.
+fn assert_mapped_remediation(report: &Value) -> TestResult {
+    let blocker = &report["known_blocker"];
+    let bead = blocker["remediation_bead"].as_str().unwrap_or_default();
+    if bead.trim().is_empty() || blocker["remediation_bead_status"] != "mapped" {
+        return Err(format!("expected mapped remediation guidance: {blocker}"));
+    }
+    Ok(())
+}
+
 fn target_tmp_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
@@ -6563,7 +6584,14 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
             "transport timeout should be worker-state evidence: {report}"
         ));
     }
-    assert_unmapped_remediation(&report, "identify the failed transfer phase")?;
+    // `remote_transport_timeout` is MAPPED now, so asserting unmapped guidance
+    // here asserted the absence of an owner for a class that has one. Measured:
+    // this report carries `remediation_bead_status: "mapped"` with a named bead
+    // and `remediation_reason: null`. This test's subject is span promotion --
+    // that a warning span is not promoted to the first error -- and the
+    // remediation check is a secondary well-formedness assertion, so it moves to
+    // the mapped complement rather than being dropped.
+    assert_mapped_remediation(&report)?;
     if report["summary_markdown"]
         .as_str()
         .unwrap_or_default()
