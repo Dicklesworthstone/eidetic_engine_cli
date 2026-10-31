@@ -1495,7 +1495,25 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
     let workspace_arg = workspace.to_string_lossy().into_owned();
 
-    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    // Declared HERE, before the first command, because the registry row is
+    // written by whichever command INDEXES -- not by the status read that
+    // asserts on it. See the HERMETIC EMBEDDER POSTURE note further down for
+    // the full reasoning and the measurement.
+    let embed_envs = [
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
+        (
+            "EE_EMBED_MODEL_DIR",
+            workspace
+                .join(".ee")
+                .join("empty-model-cache")
+                .into_os_string(),
+        ),
+    ];
+
+    let init = run_ee_with_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &embed_envs,
+    )?;
     ensure(
         init.status.success(),
         format!(
@@ -1505,17 +1523,23 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         ),
     )?;
 
-    let remember = run_ee(&[
-        "--workspace",
-        workspace_arg.as_str(),
-        "--json",
-        "remember",
-        "--level",
-        "procedural",
-        "--kind",
-        "rule",
-        "Seed memory for model status/list smoke.",
-    ])?;
+    // Enved because THIS is the command that promotes the registry row: it
+    // indexes, and the index path writes `status: Available` as soon as a fast
+    // embedder resolves. See the note below.
+    let remember = run_ee_with_env(
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "Seed memory for model status/list smoke.",
+        ],
+        &embed_envs,
+    )?;
     ensure(
         remember.status.success(),
         format!(
@@ -1564,21 +1588,27 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     // already pairs the two knobs exactly this way at five sites; this is that
     // idiom, not a new one.
     //
+    // AND IT HAS TO BE ON EVERY COMMAND THAT INDEXES, NOT ON THE STATUS READ.
+    // Measured 2026-10-31: setting both knobs on `model status` alone changed
+    // nothing -- `availableCount` was still 1. `availableCount` counts registry
+    // ROWS whose status is `available`, and the row is written by
+    // `active_embedding_registry_input_with_source` (src/core/index.rs:9630) on
+    // the INDEX path, with `status: ModelRegistryStatus::Available`, as soon as
+    // a fast embedder resolves. The earlier un-enved `ee remember` therefore
+    // indexed against this worker's populated cache and promoted the row, and
+    // `model status` then merely read it back out of the database. Pinning the
+    // reader cannot undo a write that already happened.
+    //
+    // So `embed_envs` is declared at the top of this test and passed to `init`
+    // and `remember` as well. The general shape, worth remembering: pinning the
+    // command that ASSERTS does nothing when the state is created by a command
+    // that RAN EARLIER.
+    //
     // This is what stops the 0 below being flipped a third time. It has already
     // gone 0 -> 1 (b8015752b, corroborated on a dev Mac with a populated cache)
     // -> 0 (corroborated on two cacheless workers), each edit correct about its
     // own host, because the value depends on something the fixture did not
     // control. Now it does.
-    let embed_envs = [
-        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
-        (
-            "EE_EMBED_MODEL_DIR",
-            workspace
-                .join(".ee")
-                .join("empty-model-cache")
-                .into_os_string(),
-        ),
-    ];
 
     let status_empty = run_ee_logged_with_env(
         "model-status-empty",
