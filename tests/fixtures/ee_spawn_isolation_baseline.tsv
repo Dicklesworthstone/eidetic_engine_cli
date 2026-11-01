@@ -171,7 +171,6 @@
 2	tests/north_star_context_e2e.rs
 1	tests/pack_baseline_ledger_unit.rs
 1	tests/pack_budget_too_small_test.rs
-1	tests/pack_quality_contracts.rs
 1	tests/perf_budget_conformance.rs
 2	tests/preflight_hook_bash.rs
 2	tests/preflight_hook_zsh.rs

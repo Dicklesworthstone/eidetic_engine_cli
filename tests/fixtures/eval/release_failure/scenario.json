@@ -60,7 +60,7 @@
         "--tag",
         "verification",
         "--provenance",
-        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#L7-L23",
         "--json",
         "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main."
       ],
@@ -89,7 +89,7 @@
         "--tag",
         "workflow",
         "--provenance",
-        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#L25-L36",
         "--json",
         "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published."
       ],
@@ -168,7 +168,7 @@
         ],
         "critical_omitted_memory_ids": [],
         "min_provenance_density": 1.0,
-        "allowed_degradation_codes": ["semantic_disabled", "graph_snapshot_stale"],
+        "allowed_degradation_codes": ["embed_model_unavailable"],
         "forbidden_redaction_leaks": ["secret", "token"],
         "token_budget": {
           "max_tokens": 4000,
@@ -213,7 +213,7 @@
   },
   "degraded_branches": [
     {
-      "code": "semantic_disabled",
+      "code": "embed_model_unavailable",
       "description": "Semantic retrieval unavailable; lexical/manual memories still surface the release rule.",
       "repair_action": "ee index rebuild --workspace <workspace>",
       "preserves_success_signal": true

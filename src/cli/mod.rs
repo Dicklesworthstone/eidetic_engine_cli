@@ -17560,7 +17560,7 @@ fn pack_quality_actuals_for_cases(
             .ok_or_else(|| {
                 pack_quality_execution_error(format!("case {} has no command step", case.case_id))
             })?;
-        let case_memories = if let Some(tier_name) = &step.tier {
+        let mut case_memories = if let Some(tier_name) = &step.tier {
             let tier = source
                 .tiers
                 .iter()
@@ -17577,6 +17577,11 @@ fn pack_quality_actuals_for_cases(
         } else {
             memories.to_vec()
         };
+        // File evidence belongs to the fixture, not the fresh evaluation
+        // workspace. Resolve it before seeding both the store and index so
+        // freshness checks still inspect the actual source. Malformed and
+        // missing evidence remains visible to the production pack evaluator.
+        resolve_pack_quality_provenance(fixture_path, &mut case_memories)?;
         let workspace_path = run_root.join(format!("case-{case_index}"));
         std::fs::create_dir(&workspace_path).map_err(|error| {
             pack_quality_execution_error(format!("create eval workspace: {error}"))
@@ -17912,6 +17917,43 @@ fn resolve_pack_quality_query_path(fixture_path: &Path, raw_path: &str) -> PathB
         }
     }
     fixture_path.join(path)
+}
+
+fn resolve_pack_quality_provenance(
+    fixture_path: &Path,
+    memories: &mut [crate::eval::SourceMemory],
+) -> Result<(), DomainError> {
+    for memory in memories {
+        let Some(Ok(crate::models::ProvenanceUri::File { path, span })) = memory
+            .provenance_uri
+            .as_deref()
+            .map(str::parse::<crate::models::ProvenanceUri>)
+        else {
+            continue;
+        };
+        if Path::new(&path).is_absolute() {
+            continue;
+        }
+        let fixture_relative = fixture_path.join(&path);
+        let resolved = if fixture_relative.exists() || !Path::new(&path).exists() {
+            fixture_relative
+        } else {
+            PathBuf::from(path)
+        };
+        let path = std::path::absolute(resolved)
+            .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+        let path = path.to_str().ok_or_else(|| {
+            pack_quality_execution_error("fixture evidence path is not UTF-8".into())
+        })?;
+        memory.provenance_uri = Some(
+            crate::models::ProvenanceUri::File {
+                path: path.to_owned(),
+                span,
+            }
+            .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn query_file_error_to_domain(error: QueryFileError) -> DomainError {
@@ -96583,6 +96625,11 @@ mod tests {
                 relation: "supports".into(),
                 weight: 0.8,
             });
+        super::resolve_pack_quality_provenance(
+            Path::new("tests/fixtures/eval/release_failure"),
+            &mut source.memories,
+        )
+        .map_err(|error| error.to_string())?;
         let workspace_id = super::seed_pack_quality_workspace(
             &workspace,
             &database,
@@ -96613,6 +96660,26 @@ mod tests {
             &source.memories[0].content,
             "original content retained",
         )?;
+        let provenance = memory
+            .provenance_uri
+            .as_deref()
+            .ok_or("seeded memory lost its source")?
+            .parse::<crate::models::ProvenanceUri>()
+            .map_err(|error| error.to_string())?;
+        if let crate::models::ProvenanceUri::File { path, span } = provenance {
+            ensure(
+                Path::new(&path).is_absolute(),
+                "fixture evidence is absolute",
+            )?;
+            let evidence = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+            ensure(
+                evidence.contains(&memory.content),
+                "fixture evidence remains readable",
+            )?;
+            ensure(span.is_some(), "fixture line span is retained")?;
+        } else {
+            return Err("fixture file provenance changed schemes".into());
+        }
         let links = db
             .list_memory_links_for_memory(&memory.id, None)
             .map_err(|error| error.to_string())?;

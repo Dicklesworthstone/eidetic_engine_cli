@@ -14,7 +14,7 @@
       "importance": 0.85,
       "tags": ["release", "cargo", "verification"],
       "content": "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main.",
-      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#L7-L23",
       "expected_query_match": [
         "prepare release",
         "failing release workflow",
@@ -31,7 +31,7 @@
       "importance": 0.8,
       "tags": ["release", "clippy", "workflow"],
       "content": "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published.",
-      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#L25-L36",
       "expected_query_match": ["prepare release", "release failure", "unused import"]
     }
   ],

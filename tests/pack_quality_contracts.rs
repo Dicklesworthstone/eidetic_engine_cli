@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
-use std::process::Command;
+use std::path::Path;
+
+#[path = "support/isolated_ee.rs"]
+mod isolated_ee;
 
 use insta::assert_snapshot;
 use serde_json::Value;
@@ -7,49 +10,90 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    let exe =
-        std::env::var("CARGO_BIN_EXE_ee").unwrap_or_else(|_| env!("CARGO_BIN_EXE_ee").to_string());
-    Command::new(&exe)
+    let root = tempfile::Builder::new()
+        .prefix("ee-pack-quality-contract-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    isolated_ee::isolated_ee_command(&root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee: {error}"))
 }
 
-fn scrub_pack_quality_report(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object.iter_mut() {
-                scrub_pack_quality_report(child);
-                if key == "fixtureDir" && child.is_string() {
-                    *child = Value::String("[FIXTURE_DIR]".to_string());
-                }
-                if key == "stdout" && child.is_string() {
-                    if let Some(s) = child.as_str() {
-                        if s.contains("target/ee-e2e") {
-                            *child = Value::String(
-                                s.replace(|c: char| c.is_ascii_hexdigit(), "X").to_string(),
-                            );
-                        }
-                    }
-                }
-                if key == "selectedIds" || key == "actualSelectedIds" {
-                    if let Value::Array(arr) = child {
-                        arr.sort_by(|a, b| {
-                            let a_str = a.as_str().unwrap_or("");
-                            let b_str = b.as_str().unwrap_or("");
-                            a_str.cmp(b_str)
-                        });
-                    }
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                scrub_pack_quality_report(item);
-            }
-        }
-        _ => {}
+/// Check the retained production output before normalizing run-specific paths.
+/// Selection order, quality measurements and degradation verdicts are never
+/// scrubbed: identical evaluations must produce those in the same order.
+fn scrub_pack_quality_report(value: &mut Value) -> TestResult {
+    let comparisons = value
+        .pointer("/data/report/comparisons")
+        .and_then(Value::as_array)
+        .ok_or("missing report comparisons")?
+        .clone();
+    let artifacts = value
+        .pointer_mut("/data/artifactPaths")
+        .and_then(Value::as_array_mut)
+        .ok_or("missing artifactPaths")?;
+    if artifacts.len() != comparisons.len() || artifacts.is_empty() {
+        return Err("each evaluated case must retain its production pack artifact".into());
     }
+    for (index, artifact) in artifacts.iter_mut().enumerate() {
+        let workspace = artifact["workspace"].as_str().ok_or("missing workspace")?;
+        let workspace = Path::new(workspace);
+        let output = artifact["stdout"].as_str().ok_or("missing stdout path")?;
+        if !workspace.is_absolute() || Path::new(output) != workspace.join("pack.json") {
+            return Err(format!(
+                "artifact must name its actual workspace pack: {artifact}"
+            ));
+        }
+        let expected_workspace = ee::core::workspace::stable_workspace_id(workspace);
+        if artifact["workspaceId"] != expected_workspace || !artifact["stderr"].is_null() {
+            return Err(format!(
+                "invalid retained workspace identity or stderr: {artifact}"
+            ));
+        }
+        let bytes = std::fs::read(output)
+            .map_err(|error| format!("read retained pack {output}: {error}"))?;
+        let pack: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse retained pack {output}: {error}"))?;
+        let comparison = comparisons
+            .iter()
+            .find(|case| case["case_id"] == artifact["caseId"])
+            .ok_or("artifact has no evaluated case")?;
+        let items = pack
+            .pointer("/data/pack/items")
+            .and_then(Value::as_array)
+            .ok_or("retained output has no pack items")?;
+        let ids = items
+            .iter()
+            .map(|item| item["memoryId"].clone())
+            .collect::<Vec<_>>();
+        if comparison["actual_selected_ids"] != Value::Array(ids)
+            || comparison["actual_tokens_used"] != pack["data"]["pack"]["budget"]["usedTokens"]
+        {
+            return Err(format!(
+                "report measurements disagree with retained pack {output}"
+            ));
+        }
+        if !items.iter().all(|item| {
+            item["provenance"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        }) || comparison["provenance_density"] != 1.0
+        {
+            return Err(format!(
+                "release fixture must retain provenance for every item: {output}"
+            ));
+        }
+        let placeholder = format!("[PACK_WORKSPACE_{index}]");
+        artifact["stdout"] = Value::String(format!("{placeholder}/pack.json"));
+        artifact["workspace"] = Value::String(placeholder);
+        artifact["workspaceId"] = Value::String(format!("[PACK_WORKSPACE_ID_{index}]"));
+    }
+    *value
+        .pointer_mut("/data/fixtureDir")
+        .ok_or("missing fixtureDir")? = Value::String("[FIXTURE_DIR]".into());
+    Ok(())
 }
 
 #[test]
@@ -149,7 +193,7 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
         }
     }
 
-    scrub_pack_quality_report(&mut value);
+    scrub_pack_quality_report(&mut value)?;
     let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
     assert_snapshot!("pack_quality_report_stable_fields", value);
 
@@ -198,8 +242,8 @@ fn pack_quality_report_arrays_are_deterministically_sorted() -> TestResult {
     let mut v2: Value =
         serde_json::from_str(&stdout2).map_err(|e| format!("output2 not JSON: {e}"))?;
 
-    scrub_pack_quality_report(&mut v1);
-    scrub_pack_quality_report(&mut v2);
+    scrub_pack_quality_report(&mut v1)?;
+    scrub_pack_quality_report(&mut v2)?;
 
     if v1 != v2 {
         return Err(format!(
@@ -241,15 +285,15 @@ fn pack_quality_lexical_only_branch_is_reported() -> TestResult {
         .ok_or("missing /data/degradedBranches")?;
 
     let has_lexical_only = degraded_branches.iter().any(|branch| {
-        branch
-            .get("code")
-            .and_then(Value::as_str)
-            .is_some_and(|code| code == "semantic_disabled")
+        branch["code"] == "embed_model_unavailable"
+            && branch["executed"] == true
+            && branch["mode"] == "observed_pack_output"
+            && branch["observedCaseIds"] == serde_json::json!(["pq.release_failure.context.v1"])
     });
 
     if !has_lexical_only {
         return Err(format!(
-            "expected semantic_disabled degraded branch, got: {:?}",
+            "expected observed hash-fallback degraded branch, got: {:?}",
             degraded_branches
         ));
     }
@@ -279,7 +323,7 @@ fn pack_quality_artifact_paths_are_reported() -> TestResult {
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let value: Value =
+    let mut value: Value =
         serde_json::from_str(&stdout).map_err(|e| format!("output not JSON: {e}"))?;
 
     let artifact_paths = value
@@ -291,11 +335,73 @@ fn pack_quality_artifact_paths_are_reported() -> TestResult {
         return Err("artifactPaths should not be empty for pack-quality run".to_string());
     }
 
-    let first = &artifact_paths[0];
-    if first.get("stdout").is_none() {
-        return Err("artifact path entry missing stdout field".to_string());
-    }
+    scrub_pack_quality_report(&mut value)
+}
 
+#[test]
+fn pack_quality_rejects_broken_provenance_and_retains_failed_output() -> TestResult {
+    for (uri, expected_code) in [
+        (
+            "file://missing-evidence.txt#L1",
+            "context_evidence_freshness_missing_source",
+        ),
+        (
+            "file://source_memory.json#memory-1",
+            "context_invalid_provenance",
+        ),
+    ] {
+        let root = tempfile::Builder::new()
+            .prefix("ee-pack-quality-broken-evidence-")
+            .tempdir()
+            .map_err(|error| error.to_string())?
+            .keep();
+        let fixture = root.join("release_failure");
+        std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
+        std::fs::copy(
+            "tests/fixtures/eval/release_failure/scenario.json",
+            fixture.join("scenario.json"),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut source: Value = serde_json::from_str(include_str!(
+            "fixtures/eval/release_failure/source_memory.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        source["memories"][0]["provenance_uri"] = Value::String(uri.into());
+        std::fs::write(
+            fixture.join("source_memory.json"),
+            serde_json::to_vec(&source).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let output = run_ee(&[
+            "--json",
+            "eval",
+            "run",
+            "release_failure",
+            "--pack-quality",
+            "--scenario",
+            "usr_pre_task_brief",
+            "--fixture-dir",
+            root.to_str().ok_or("fixture path is not UTF-8")?,
+        ])?;
+        let mut value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!(
+                "{error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })?;
+        if output.status.success()
+            || value["success"] != false
+            || value["data"]["report"]["aggregate_verdict"] != "regression"
+            || !value["data"]["report"]["comparisons"][0]["unexpected_degradation_codes"]
+                .as_array()
+                .is_some_and(|codes| codes.iter().any(|code| code == expected_code))
+        {
+            return Err(format!(
+                "broken evidence must fail with {expected_code}: {value}"
+            ));
+        }
+        scrub_pack_quality_report(&mut value)?;
+    }
     Ok(())
 }
 
