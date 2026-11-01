@@ -211,7 +211,7 @@
               "scheme": "file",
               "label": "docs/query-schema.md:L221",
               "locator": "L221",
-              "note": "Memory mem_00000000000000000000000101 selected for context pack; evidenceFreshness=missing_source"
+              "note": "Memory mem_00000000000000000000000101 source evidence; evidenceFreshness=missing_source"
             }
           ],
           "evidenceFreshness": {
@@ -260,7 +260,7 @@
               "scheme": "file",
               "label": "docs/query-schema.md:L230",
               "locator": "L230",
-              "note": "Memory mem_00000000000000000000000102 selected for context pack; evidenceFreshness=missing_source"
+              "note": "Memory mem_00000000000000000000000102 source evidence; evidenceFreshness=missing_source"
             },
             {
               "uri": "ee-mem://mem_00000000000000000000000101",

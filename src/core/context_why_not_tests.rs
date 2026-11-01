@@ -674,6 +674,10 @@ fn why_not_missing_global_memories_keep_canonical_cross_workspace_admission() ->
                 assert_eq!(report.primary_reason, "not_retrieved", "{scope:?}");
                 assert_eq!(report.reason_source, "reconstructed");
                 assert!(!report.provenance.is_empty());
+                assert!(!report.selected);
+                assert!(report.provenance.iter().all(|entry| {
+                    !entry.note.contains("selected") && entry.note.contains("evidenceFreshness=")
+                }));
             } else {
                 assert_eq!(report.primary_reason, "excluded_by_scope", "{scope:?}");
                 assert_eq!(report.reason_source, "authoritative");

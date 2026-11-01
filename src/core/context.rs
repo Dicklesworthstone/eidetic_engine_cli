@@ -16882,9 +16882,12 @@ fn provenance_for_memory_cached(
                 memory.workspace_id == stable_context_workspace_id(&path)
                     || memory.workspace_id == crate::core::workspace::stable_workspace_id(&path)
             });
+    // Provenance is attached before selection, and why-not also renders it for
+    // omitted candidates. Describe the source here; selection is a separate
+    // observed fact in the pack/why-not response.
     let note = if global_store_lane {
         format!(
-            "Memory {} selected by cross_shard_read from the user-global store; lane={}; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
+            "Memory {} from the user-global store; lane={}; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
             memory.id,
             crate::core::global_store::GLOBAL_PROVENANCE_LANE,
             memory.workspace_id,
@@ -16893,13 +16896,13 @@ fn provenance_for_memory_cached(
         )
     } else if local_workspace {
         format!(
-            "Memory {} selected for context pack; evidenceFreshness={}",
+            "Memory {} source evidence; evidenceFreshness={}",
             memory.id,
             freshness.status.as_str()
         )
     } else {
         format!(
-            "Memory {} selected by cross_shard_read; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
+            "Memory {} from cross_shard_read; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
             memory.id,
             memory.workspace_id,
             active_workspace_id,

@@ -114,7 +114,7 @@ expression: canonical_json_text(value)
             {
               "label": "AGENTS.md:L164-173",
               "locator": "L164-173",
-              "note": "Memory mem_00000000000000000000000001 selected for context pack; evidenceFreshness=missing_source",
+              "note": "Memory mem_00000000000000000000000001 source evidence; evidenceFreshness=missing_source",
               "scheme": "file",
               "uri": "file://AGENTS.md#L164-173"
             }

@@ -3000,7 +3000,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
                 format!("context item {memory_id} must not cite another memory's source"),
             )?;
             let expected_note =
-                format!("Memory {memory_id} selected for context pack; evidenceFreshness=fresh");
+                format!("Memory {memory_id} source evidence; evidenceFreshness=fresh");
             ensure(
                 provenance.iter().any(|entry| {
                     entry.get("uri").and_then(serde_json::Value::as_str)
