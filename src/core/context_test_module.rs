@@ -1266,6 +1266,134 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
+    fn daemon_pack_feedback_race_falls_back_before_any_persisted_writes() -> TestResult {
+        let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        options.memory_scope = MemoryScope::Workspace;
+        options.persist_pack = true;
+        options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let event_id = "fb_52000000000000000000000901";
+        {
+            let connection =
+                DbConnection::open_file(database).map_err(|error| error.to_string())?;
+            connection
+                .insert_feedback_event(
+                    event_id,
+                    &crate::db::CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: memory_id.clone(),
+                        signal: "neutral".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: None,
+                        reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let provider = |search_options: &SearchOptions, _: bool| -> Result<_, SearchDegradation> {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let handoff = crate::core::search::run_pack_search(search_options)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            let connection = DbConnection::open_file_read_only(database)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            assert!(handoff.snapshot_matches(search_options, &connection));
+            assert_eq!(connection.count_table_rows("pack_records").unwrap(), 0);
+            assert!(
+                connection
+                    .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                    .unwrap()
+                    .is_empty()
+            );
+            let generation = connection.get_workspace_generation(&workspace_id).unwrap();
+            let append_fingerprint = connection
+                .feedback_events_fingerprint(&workspace_id)
+                .unwrap();
+            let writer_path = database.clone();
+            std::thread::spawn(move || -> Result<(), String> {
+                let writer =
+                    DbConnection::open_file(writer_path).map_err(|error| error.to_string())?;
+                writer
+                    .execute_raw(&format!(
+                        "UPDATE feedback_events SET signal = 'harmful' WHERE id = '{event_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .join()
+            .map_err(|_| SearchDegradation::daemon_fallback("feedback writer panicked"))?
+            .map_err(|error| SearchDegradation::daemon_fallback(&error))?;
+            assert_eq!(
+                connection.get_workspace_generation(&workspace_id).unwrap(),
+                generation
+            );
+            assert_eq!(
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .unwrap(),
+                append_fingerprint
+            );
+            assert!(!handoff.snapshot_matches(search_options, &connection));
+            Ok(handoff)
+        };
+        let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            run.response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "daemon_search_fallback")
+        );
+        assert!(
+            run.response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory_id)
+        );
+        let connection =
+            DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        assert_eq!(
+            connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        assert_eq!(
+            connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_RETURNED_MEM, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        options.persist_pack = false;
+        let canonical = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert_eq!(run.response.data.pack.items, canonical.data.pack.items);
+        assert_eq!(
+            connection
+                .count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
     fn daemon_pack_abandoned_retrieval_leaves_pending_jobs_and_audit_unchanged() -> TestResult {
         let (options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         let database = options.database_path.as_ref().ok_or("fixture database")?;

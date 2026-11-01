@@ -23910,14 +23910,37 @@ impl DbConnection {
         rows.iter().map(stored_feedback_event_from_row).collect()
     }
 
-    /// Check for feedback without counting or loading the full workspace ledger.
-    pub(crate) fn has_feedback_events(&self, workspace_id: &str) -> Result<bool> {
-        self.query_for(
-            DbOperation::Query,
-            "SELECT 1 FROM feedback_events WHERE workspace_id = ?1 LIMIT 1",
-            &[Value::Text(workspace_id.to_owned())],
-        )
-        .map(|rows| !rows.is_empty())
+    /// Identity of the exact rows read for calibration and quality admission.
+    /// Unlike the cheap append fingerprint, this detects updates, replacements
+    /// and application markers even when row count and maximum rowid agree.
+    pub(crate) fn feedback_events_content_fingerprint_from_events(
+        workspace_id: &str,
+        events: &[StoredFeedbackEvent],
+    ) -> Result<String> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.feedback_events.content.v1\0");
+        hasher.update(&(workspace_id.len() as u64).to_be_bytes());
+        hasher.update(workspace_id.as_bytes());
+        hasher.update(&(events.len() as u64).to_be_bytes());
+        let mut ordered: Vec<_> = events.iter().collect();
+        ordered.sort_unstable_by(|left, right| {
+            (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
+        });
+        for event in ordered {
+            if !event.weight.is_finite() {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Cannot fingerprint non-finite feedback weight".to_owned(),
+                });
+            }
+            let bytes = serde_json::to_vec(event).map_err(|error| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("Cannot fingerprint feedback event: {error}"),
+            })?;
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(&bytes);
+        }
+        Ok(format!("blake3:{}", hasher.finalize().to_hex()))
     }
 
     /// Cheaply fingerprint feedback rows for cache invalidation.

@@ -1302,7 +1302,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             && result
                 .pointer("/method_schemas/ee.daemon.pack_search/response")
                 .and_then(serde_json::Value::as_str)
-                == Some("ee.daemon.pack_search.response.v1"),
+                == Some("ee.daemon.pack_search.response.v2"),
         format!(
             "pack search capability must retain its workspace authorization and typed schemas: {result}"
         ),
@@ -2487,8 +2487,11 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
     Ok(())
 }
 
+#[cfg(feature = "lexical-bm25")]
 #[test]
-fn daemon_pack_search_refuses_nonempty_feedback_before_repeating_retrieval() -> TestResult {
+fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes() -> TestResult {
+    use ee::core::search::{SearchDedupMode, SearchHit, SearchOptions, run_search_unaudited};
+
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let (workspace, database) = seed_context_workspace(temp.path())?;
     let index = workspace.join(".ee/index");
@@ -2501,13 +2504,39 @@ fn daemon_pack_search_refuses_nonempty_feedback_before_repeating_retrieval() -> 
     request.params["sourceMode"] = serde_json::json!("lexical_only");
     request.params["strictSourceMode"] = serde_json::json!(true);
     request.params["requireCachedLocalEmbedder"] = serde_json::json!(false);
+    request.params["relevanceFloor"] = serde_json::json!(0.0);
+    request.params["asOf"] = serde_json::json!("2030-01-01T00:00:00Z");
+    let local_options = SearchOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database.clone()),
+        index_dir: Some(index.clone()),
+        query: "release provenance".to_owned(),
+        limit: 5,
+        speed: SpeedMode::Instant,
+        explain: false,
+        as_of: Some(
+            chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                .map_err(|error| error.to_string())?
+                .with_timezone(&chrono::Utc),
+        ),
+        include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: Some(0.0),
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: true,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+    };
     let empty = successful_result(
         client_round_trip(handle.socket_path(), &request).map_err(|error| error.to_string())?,
         "empty-ledger handoff",
     )?;
     ensure(
         empty.get("schema").and_then(serde_json::Value::as_str)
-            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1)
+            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2)
             && empty
                 .pointer("/handoff/report/results")
                 .and_then(serde_json::Value::as_array)
@@ -2531,7 +2560,7 @@ fn daemon_pack_search_refuses_nonempty_feedback_before_repeating_retrieval() -> 
                 weight: 1.0,
                 source_type: "outcome_observed".to_owned(),
                 source_id: None,
-                reason: Some("neutral feedback must not cause duplicate retrieval".to_owned()),
+                reason: Some("feedback must retain canonical resident retrieval".to_owned()),
                 evidence_json: None,
                 session_id: None,
             },
@@ -2544,24 +2573,108 @@ fn daemon_pack_search_refuses_nonempty_feedback_before_repeating_retrieval() -> 
             == generation,
         "feedback negative control unexpectedly changed the workspace generation",
     )?;
-    connection.close().map_err(|error| error.to_string())?;
-    for call in 0..3 {
-        request.request_id = format!("pack-feedback-present-{call}");
-        let response =
-            client_round_trip(handle.socket_path(), &request).map_err(|error| error.to_string())?;
-        ensure_error_code(
-            &response,
-            ee::daemon::server::DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE,
-        )?;
-        ensure(
-            response.result.is_none(),
-            "refused feedback handoff unexpectedly returned results",
-        )?;
-        ensure(
-            response.degraded_codes.is_empty(),
-            "the early refusal must remain a method error, not a new degradation taxonomy",
-        )?;
+    let packs_before = connection
+        .count_table_rows("pack_records")
+        .map_err(|error| error.to_string())?;
+    let audits_before = connection
+        .count_table_rows("audit_log")
+        .map_err(|error| error.to_string())?;
+    let mut previous_snapshot = None;
+    let mut neutral_score = None;
+    for (call, signal) in ["neutral", "harmful", "helpful", "harmful", "neutral"]
+        .into_iter()
+        .enumerate()
+    {
+        connection
+            .execute_raw(&format!(
+                "UPDATE feedback_events SET signal = '{signal}' WHERE id = 'fb_00000000000000000000008701'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let canonical = run_search_unaudited(&local_options).map_err(|error| error.to_string())?;
+        for restarted in [false, true] {
+            if restarted {
+                handle.shutdown().map_err(|error| error.to_string())?;
+                handle = start_server(&socket).map_err(|error| error.to_string())?;
+            }
+            request.request_id = format!("pack-feedback-present-{call}-{restarted}");
+            let result = successful_result(
+                client_round_trip(handle.socket_path(), &request)
+                    .map_err(|error| error.to_string())?,
+                "feedback handoff",
+            )?;
+            ensure(
+                result["schema"] == ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+                "feedback witness requires the v2 handoff",
+            )?;
+            let hits: Vec<SearchHit> =
+                serde_json::from_value(result["handoff"]["report"]["results"].clone())
+                    .map_err(|error| error.to_string())?;
+            ensure(
+                !hits.is_empty(),
+                "feedback parity must include a real result",
+            )?;
+            ensure(
+                hits.len() == canonical.results.len(),
+                "feedback candidate count differs",
+            )?;
+            for (actual, expected) in hits.iter().zip(&canonical.results) {
+                ensure(
+                    actual.doc_id == expected.doc_id
+                        && actual.score == expected.score
+                        && actual.ranking_score() == expected.ranking_score(),
+                    format!("feedback {signal} differs from canonical ranking: {result}"),
+                )?;
+            }
+            if signal == "neutral" {
+                neutral_score = Some(hits[0].ranking_score());
+            } else if signal == "harmful" {
+                ensure(
+                    neutral_score.is_some_and(|score| hits[0].ranking_score() < score),
+                    "harmful feedback must actually affect scoring",
+                )?;
+            }
+            let snapshot = result["handoff"]["snapshot"].clone();
+            ensure(snapshot.is_object(), "handoff omitted its source witness")?;
+            if !restarted {
+                if let Some(previous) = &previous_snapshot {
+                    ensure(
+                        snapshot != *previous,
+                        "same-count feedback mutation reused an old witness",
+                    )?;
+                }
+                previous_snapshot = Some(snapshot);
+            } else {
+                ensure(
+                    previous_snapshot.as_ref() == Some(&snapshot),
+                    "daemon restart must reproduce the current feedback witness",
+                )?;
+            }
+            ensure(
+                connection
+                    .count_table_rows("pack_records")
+                    .map_err(|error| error.to_string())?
+                    == packs_before
+                    && connection
+                        .count_table_rows("audit_log")
+                        .map_err(|error| error.to_string())?
+                        == audits_before,
+                "read-only daemon retrieval or canonical comparison performed persisted writes",
+            )?;
+            ensure(
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .map_err(|error| error.to_string())?
+                    .count
+                    == 1
+                    && connection
+                        .get_workspace_generation(&workspace_id)
+                        .map_err(|error| error.to_string())?
+                        == generation,
+                "same-count mutation control changed the source generation or row count",
+            )?;
+        }
     }
+    connection.close().map_err(|error| error.to_string())?;
     handle.shutdown().map_err(|error| error.to_string())?;
     Ok(())
 }

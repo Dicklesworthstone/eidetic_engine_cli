@@ -107,7 +107,7 @@ mod tests {
             ),
             (
                 DaemonSearchFallbackReason::SearchMethodError(
-                    crate::daemon::server::DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE.into(),
+                    "daemon_pack_search_feedback_unsupported".into(),
                 ),
                 "daemon_pack_search_feedback_unsupported",
             ),

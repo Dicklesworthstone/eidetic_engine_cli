@@ -2493,15 +2493,17 @@ code on fallback, such as `daemon_socket_unavailable`, `daemon_warming`,
 `degraded` entries retain the readable explanation and repair advice. These
 delivery fields do not change the pack hash or prompt text.
 
-The CLI's pack daemon route currently requires an empty workspace feedback
-ledger. Any recorded feedback, including a neutral outcome, requires local
-fallback. When the daemon's early check detects this unsupported handoff
-state, it returns `fallbackReason: "daemon_pack_search_feedback_unsupported"`
-before retrieval; other admission or storage failures keep their existing
-reasons. The local pack uses the current feedback and canonical checks. These
-workspaces do not receive pack acceleration from `--use-daemon`; daemon search
-remains supported. The pack performance gate uses an empty feedback ledger
-and does not establish gains for workspaces with feedback.
+The CLI's pack daemon route accepts existing neutral and scoring feedback
+through the versioned `ee.daemon.pack_search.response.v2` handoff. The client
+validates the complete feedback content, the calibration inputs actually used
+by retrieval, the scoring reference time, and the source generation against
+its pinned snapshot before accepting candidates. Changed or unverifiable
+state retains canonical local fallback (`daemon_handoff_rejected`); an older
+daemon must be restarted to provide the v2 contract. Pack assembly and
+persistence still have one owner in the client. The performance benchmark now
+defaults to mixed neutral/helpful/harmful feedback and offers explicit empty
+and neutral controls. The **10,000-memory, at-least-2x median improvement gate
+remains unverified**; source support is not a measured performance result.
 
 Daemon search advertises `ee.daemon.search.response.v4`, whose strict
 `reuseContract` reports generation-scoped index readers with per-request

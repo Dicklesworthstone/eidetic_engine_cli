@@ -141,6 +141,22 @@ impl Fixture {
         let reader = DbConnection::open_file_read_only(self.root.join(".ee/ee.db")).unwrap();
         run_search_with_read_connection(&self.options(), &reader).unwrap()
     }
+
+    fn publish_index(&self) -> crate::core::index::TestWorkspaceEmbedderStackGuard {
+        let guard = crate::core::index::install_test_hash_workspace_embedder(&self.workspace);
+        let report = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: self.root.clone(),
+            database_path: Some(self.root.join(".ee/ee.db")),
+            index_dir: None,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(
+            report.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        guard
+    }
 }
 
 struct SemanticIdentityFixture {
@@ -925,11 +941,240 @@ fn handoff_rejects_new_or_mutated_feedback_and_changed_reference_time() {
     fixture.harmful(&id, 1);
     assert!(!handoff.snapshot_matches(&options, &fixture.db));
     let with_feedback = run_pack_search(&options).unwrap();
+    assert!(with_feedback.snapshot_matches(&options, &fixture.db));
+    let append_fingerprint = fixture
+        .db
+        .feedback_events_fingerprint(&fixture.workspace)
+        .unwrap();
     fixture
         .db
         .execute_raw("UPDATE feedback_events SET signal = 'positive'")
         .unwrap();
+    assert_eq!(
+        fixture
+            .db
+            .feedback_events_fingerprint(&fixture.workspace)
+            .unwrap(),
+        append_fingerprint
+    );
     assert!(!with_feedback.snapshot_matches(&options, &fixture.db));
+}
+
+#[test]
+fn feedback_handoff_preserves_canonical_quality_order_before_candidate_truncation() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::minutes(1);
+    let first = fixture.memory(1, 1.0, 1.0, now);
+    let second = fixture.memory(2, 0.9, 1.0, now);
+    fixture.harmful(&first, 1);
+    fixture.harmful(&first, 2);
+    let _embedder = fixture.publish_index();
+    let mut options = fixture.options();
+    options.limit = 1;
+    options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+    let generation = fixture
+        .db
+        .get_workspace_generation(&fixture.workspace)
+        .unwrap();
+    let append_fingerprint = fixture
+        .db
+        .feedback_events_fingerprint(&fixture.workspace)
+        .unwrap();
+    let mut previous: Option<PackSearchHandoff> = None;
+    for signal in ["neutral", "harmful", "positive", "harmful"] {
+        fixture
+            .db
+            .execute_raw(&format!("UPDATE feedback_events SET signal = '{signal}'"))
+            .unwrap();
+        assert_eq!(
+            fixture
+                .db
+                .get_workspace_generation(&fixture.workspace)
+                .unwrap(),
+            generation
+        );
+        assert_eq!(
+            fixture
+                .db
+                .feedback_events_fingerprint(&fixture.workspace)
+                .unwrap(),
+            append_fingerprint
+        );
+        if let Some(old) = previous {
+            assert!(
+                !old.snapshot_matches(&options, &fixture.db),
+                "a same-count edit must invalidate the old handoff"
+            );
+        }
+        let mut handoff = run_pack_search(&options).unwrap();
+        assert!(handoff.can_reuse_for_pack());
+        assert!(handoff.snapshot_matches(&options, &fixture.db));
+        let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+        let canonical = run_search_with_read_connection(&options, &reader).unwrap();
+        assert_eq!(handoff.report.results.len(), 1);
+        assert_eq!(
+            handoff.report.results[0].doc_id,
+            if signal == "harmful" { &second } else { &first }.as_str()
+        );
+        assert_eq!(
+            serde_json::to_value(&handoff.report.results).unwrap(),
+            serde_json::to_value(&canonical.results).unwrap()
+        );
+        handoff.revalidate(&options, &reader);
+        assert_eq!(
+            serde_json::to_value(&handoff.report.results).unwrap(),
+            serde_json::to_value(&canonical.results).unwrap(),
+            "client hydration must preserve the canonical scores and candidate order"
+        );
+        previous = Some(handoff);
+    }
+    assert_eq!(fixture.db.count_table_rows("pack_records").unwrap(), 0);
+}
+
+#[test]
+fn feedback_calibration_edits_recompute_floor_admission_before_handoff() {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(1, 1.0, 1.0, Utc::now());
+    for number in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+        fixture.harmful(&memory, number as u128);
+    }
+    let _embedder = fixture.publish_index();
+    let mut options = fixture.options();
+    options.relevance_floor = Some(0.5);
+    options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+    let append_fingerprint = fixture
+        .db
+        .feedback_events_fingerprint(&fixture.workspace)
+        .unwrap();
+    let mut previous: Option<PackSearchHandoff> = None;
+    for truth in [0.1, 0.9, 0.1] {
+        fixture.db.execute_raw(&format!(
+            "UPDATE feedback_events SET signal = 'neutral', evidence_json = '{{\"score\":1.0,\"groundTruthRelevance\":{truth}}}'"
+        )).unwrap();
+        assert_eq!(
+            fixture
+                .db
+                .feedback_events_fingerprint(&fixture.workspace)
+                .unwrap(),
+            append_fingerprint
+        );
+        if let Some(old) = previous {
+            assert!(!old.snapshot_matches(&options, &fixture.db));
+        }
+        let handoff = run_pack_search(&options).unwrap();
+        assert!(handoff.snapshot_matches(&options, &fixture.db));
+        let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+        let canonical = run_search_with_read_connection(&options, &reader).unwrap();
+        assert_eq!(
+            serde_json::to_value(&handoff.report.results).unwrap(),
+            serde_json::to_value(&canonical.results).unwrap()
+        );
+        assert_eq!(handoff.report.results.len(), usize::from(truth > 0.5));
+        previous = Some(handoff);
+    }
+}
+
+#[test]
+fn feedback_handoff_is_bound_to_pinned_snapshot_during_concurrent_edits() {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(1, 1.0, 1.0, Utc::now());
+    fixture.harmful(&memory, 1);
+    let _embedder = fixture.publish_index();
+    let mut options = fixture.options();
+    options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+    let mut handoff = run_pack_search(&options).unwrap();
+    let pool = registered_process_read_pool(
+        DatabaseConfig::file(options.resolve_database_path()),
+        PoolConfig::default_single(),
+    );
+    let snapshot = pool.pin_snapshot().unwrap();
+    let reader = snapshot.checked_connection().unwrap();
+    assert!(handoff.snapshot_matches(&options, reader));
+    let before = serde_json::to_value(&handoff.report.results).unwrap();
+    let database = options.resolve_database_path();
+    std::thread::spawn(move || {
+        let writer = DbConnection::open_file(database).unwrap();
+        writer
+            .execute_raw("UPDATE feedback_events SET signal = 'positive'")
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    assert!(
+        handoff.snapshot_matches(&options, reader),
+        "assembly continues against its admitted source view"
+    );
+    handoff.revalidate(&options, reader);
+    assert_eq!(
+        serde_json::to_value(&handoff.report.results).unwrap(),
+        before
+    );
+    snapshot.commit().unwrap();
+    let fresh = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    assert!(
+        !handoff.snapshot_matches(&options, &fresh),
+        "a subsequent request must see the new feedback"
+    );
+    assert!(
+        run_pack_search(&options)
+            .unwrap()
+            .snapshot_matches(&options, &fresh)
+    );
+}
+
+#[test]
+fn handoff_rejects_changed_calibration_bytes_and_incompatible_snapshot_contracts() {
+    let fixture = Fixture::new();
+    fixture.memory(1, 1.0, 1.0, Utc::now());
+    let options = fixture.options();
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    let path = search_score_calibration_jsonl_path(&fixture.root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "{\"score\":1.0,\"groundTruthRelevance\":0.9}\n"
+            .repeat(MIN_SEARCH_SCORE_CALIBRATION_SAMPLES),
+    )
+    .unwrap();
+    assert!(!handoff.snapshot_matches(&options, &fixture.db));
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(
+        &path,
+        "{\"score\":1.0,\"groundTruthRelevance\":0.1}\n"
+            .repeat(MIN_SEARCH_SCORE_CALIBRATION_SAMPLES),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert!(
+        !handoff.snapshot_matches(&options, &fixture.db),
+        "same-size same-mtime calibration replacement is not fresh"
+    );
+
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    let value = serde_json::to_value(&handoff).unwrap();
+    let mut old_contract = value.clone();
+    old_contract["snapshot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("calibration_input_identity");
+    old_contract["snapshot"]["quality_feedback_absent"] = serde_json::json!(true);
+    assert!(PackSearchHandoff::from_value(old_contract).is_err());
+    let mut unknown_contract = value.clone();
+    unknown_contract["snapshot"]["unknown_revision"] = serde_json::json!(1);
+    assert!(PackSearchHandoff::from_value(unknown_contract).is_err());
+    let mut wrong_generation = value;
+    wrong_generation["snapshot"]["generation"] = serde_json::json!(u64::MAX);
+    let wrong_generation = PackSearchHandoff::from_value(wrong_generation).unwrap();
+    assert!(!wrong_generation.snapshot_matches(&options, &fixture.db));
 }
 
 #[test]

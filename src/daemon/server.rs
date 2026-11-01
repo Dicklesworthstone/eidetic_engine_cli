@@ -87,7 +87,7 @@ use super::protocol::{
     METHOD_RECALL, read_request, write_response,
 };
 pub use super::protocol::{
-    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
     DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_PACK_SEARCH,
     METHOD_SEARCH,
 };
@@ -121,11 +121,6 @@ pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_f
 /// A read-only pack must never make a cold or remote daemon load a model.
 pub(crate) const DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE: &str =
     "daemon_cached_local_embedder_unavailable";
-
-/// Pack handoffs currently require an empty feedback ledger. Report this
-/// before retrieval so the caller can execute its canonical local pack once.
-pub const DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE: &str =
-    "daemon_pack_search_feedback_unsupported";
 
 /// Warm-up posture of the daemon's process-cached search stack (GH #37).
 ///
@@ -4439,18 +4434,9 @@ fn dispatch_pack_search(
     } else {
         None
     };
-    // Preserve bd-snkcp's cold read-only refusal above: it must not open a
-    // store merely to discover that no loaded model can be lent. For a warm
-    // model the registry reader is resident and reusable for this short read.
-    if crate::core::search::pack_search_has_unsupported_feedback(&options) {
-        return DaemonResponse::err(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE,
-            "Pack retrieval with quality-feedback state requires canonical local scoring; daemon retrieval was not started.",
-        );
-    }
+    // Retrieval captures a complete feedback/calibration witness from its
+    // source snapshot. The client verifies that witness before any writes;
+    // legitimate feedback history does not require a second, cold retrieval.
     let retrieval = match loaded {
         Some(loaded) => {
             crate::core::search::run_pack_search_with_cached_local_embedder(&options, Some(loaded))
@@ -4463,7 +4449,7 @@ fn dispatch_pack_search(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
-                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, "handoff": handoff }),
+                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, "handoff": handoff }),
             );
             if daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
                 response
@@ -6809,7 +6795,7 @@ fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Valu
             },
             "ee.daemon.pack_search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1
+                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2
             }
         },
         // GH #37: lets a client tell "this daemon is still loading its model"
@@ -8870,39 +8856,60 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lexical-bm25")]
     #[test]
-    fn daemon_pack_feedback_refusal_precedes_retrieval_and_observes_fresh_workspace_state() {
-        use crate::db::{CreateFeedbackEventInput, CreateWorkspaceInput, DbConnection};
+    fn daemon_pack_feedback_handoff_tracks_updates_without_writes() {
+        use crate::db::{
+            CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+        };
 
         let workspace = tempfile::tempdir().expect("workspace");
         let database = workspace.path().join("ee.db");
         let bound_id = "wsp_52000000000000000000000089";
-        let other_id = "wsp_52000000000000000000000090";
+        let memory_id = "mem_52000000000000000000000089";
         let connection = DbConnection::open_file(&database).expect("database");
         connection.migrate().expect("schema");
-        for (id, path) in [
-            (bound_id, workspace.path().to_path_buf()),
-            (other_id, workspace.path().join("other")),
-        ] {
-            connection
-                .insert_workspace(
-                    id,
-                    &CreateWorkspaceInput {
-                        path: path.display().to_string(),
-                        name: None,
-                    },
-                )
-                .expect("workspace binding");
-        }
+        connection
+            .insert_workspace(
+                bound_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .expect("workspace binding");
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: bound_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Release provenance requires verified checksums.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.8,
+                    provenance_uri: Some("test://daemon-feedback".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("memory");
         let mut request = DaemonRequest::new(
-            "feedback-preflight",
+            "feedback-handoff",
             TEST_AGENT_ID,
             METHOD_PACK_SEARCH,
             serde_json::json!({
                 "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "query": "release", "workspacePath": workspace.path(),
                 "databasePath": database,
-                "sourceMode": "hybrid", "requireCachedLocalEmbedder": false,
+                "sourceMode": "lexical_only", "strictSourceMode": true,
+                "relevanceFloor": 0.0,
+                "requireCachedLocalEmbedder": false,
             }),
         );
         request.workspace_id = Some(workspace.path().display().to_string());
@@ -8912,13 +8919,10 @@ mod tests {
             .expect("authorized options");
         let pools = DaemonReadPools::default();
         pools.retain(&database);
-        assert!(!crate::core::search::pack_search_has_unsupported_feedback(
-            &options
-        ));
-        let event = |workspace_id: &str| CreateFeedbackEventInput {
-            workspace_id: workspace_id.to_owned(),
-            target_type: "candidate".to_owned(),
-            target_id: "neutral-canary".to_owned(),
+        let event = CreateFeedbackEventInput {
+            workspace_id: bound_id.to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: memory_id.to_owned(),
             signal: "neutral".to_owned(),
             weight: 1.0,
             source_type: "outcome_observed".to_owned(),
@@ -8927,18 +8931,11 @@ mod tests {
             evidence_json: None,
             session_id: None,
         };
-        connection
-            .insert_feedback_event("fb_52000000000000000000000089", &event(other_id))
-            .expect("foreign feedback");
-        assert!(
-            !crate::core::search::pack_search_has_unsupported_feedback(&options),
-            "another bound workspace's feedback must not disable this handoff"
-        );
         let generation = connection
             .get_workspace_generation(bound_id)
             .expect("generation");
         connection
-            .insert_feedback_event("fb_52000000000000000000000090", &event(bound_id))
+            .insert_feedback_event("fb_52000000000000000000000090", &event)
             .expect("neutral feedback");
         assert_eq!(
             connection
@@ -8947,38 +8944,64 @@ mod tests {
             generation
         );
 
-        let retrievals = crate::core::search::pack_search_retrieval_calls_for_test();
-        let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
-        assert!(response.result.is_none());
-        assert_eq!(
-            response.error.expect("precise refusal").code,
-            DAEMON_PACK_SEARCH_FEEDBACK_UNSUPPORTED_CODE
-        );
-        assert_eq!(
-            crate::core::search::pack_search_retrieval_calls_for_test(),
-            retrievals,
-            "preflight must precede canonical model preparation and retrieval"
-        );
+        let packs = connection.count_table_rows("pack_records").unwrap();
+        let audits = connection.count_table_rows("audit_log").unwrap();
+        let mut previous = None;
+        for signal in ["neutral", "harmful", "helpful", "harmful", "neutral"] {
+            connection
+                .execute_raw(&format!(
+                    "UPDATE feedback_events SET signal = '{signal}' WHERE id = 'fb_52000000000000000000000090'"
+                ))
+                .expect("same-count feedback update");
+            if let Some(previous) = &previous {
+                assert!(
+                    !crate::core::search::PackSearchHandoff::snapshot_matches(
+                        previous,
+                        &options,
+                        &connection,
+                    ),
+                    "old handoff must not survive a same-count feedback mutation"
+                );
+            }
+            let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.expect("feedback retrieval");
+            assert_eq!(result["schema"], DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2);
+            let handoff =
+                crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
+                    .expect("versioned handoff");
+            assert!(handoff.snapshot_matches(&options, &connection));
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == memory_id)
+            );
+            assert_eq!(connection.count_table_rows("pack_records").unwrap(), packs);
+            assert_eq!(connection.count_table_rows("audit_log").unwrap(), audits);
+            previous = Some(handoff);
+        }
         let stats = crate::db::read_pool::process_read_pool_stats_for_database(
-            &DatabaseConfig::file(database),
+            &DatabaseConfig::file(database.clone()),
         )
-        .expect("resident preflight reader");
+        .expect("resident retrieval reader");
         assert_eq!(stats.active_pins, 0);
         assert!(stats.idle > 0);
         assert!(!workspace.path().join(".ee/index").exists());
 
-        let mut missing = options.clone();
-        missing.database_path = Some(workspace.path().join("absent.db"));
-        assert!(!crate::core::search::pack_search_has_unsupported_feedback(
-            &missing
-        ));
-        assert!(!missing.resolve_database_path().exists());
-        let corrupt = workspace.path().join("corrupt.db");
-        fs::write(&corrupt, b"not a database").expect("corrupt fixture");
-        missing.database_path = Some(corrupt);
-        assert!(
-            !crate::core::search::pack_search_has_unsupported_feedback(&missing),
-            "unreadable storage must defer to canonical error handling"
+        request.params["sourceMode"] = serde_json::json!("hybrid");
+        request.params["requireCachedLocalEmbedder"] = serde_json::json!(true);
+        let retrievals = crate::core::search::pack_search_retrieval_calls_for_test();
+        let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
+        assert_eq!(
+            response.error.expect("cold model refused").code,
+            DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE
+        );
+        assert_eq!(
+            crate::core::search::pack_search_retrieval_calls_for_test(),
+            retrievals,
+            "feedback history must not bypass cached-only model admission"
         );
     }
 

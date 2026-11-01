@@ -3086,7 +3086,10 @@ async fn run_context_pack_with_performance_inner(
         Some(snapshot) => snapshot,
         None => {
             let snapshot_open_start = Instant::now();
-            let snapshot = if pin_snapshot {
+            // A handoff proves equality at one source view. Keep that view
+            // pinned through hydration and assembly even when ordinary local
+            // reads are configured to release their pin between operations.
+            let snapshot = if pin_snapshot || remote_search.is_some() {
                 read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
             } else {
                 read_pool.acquire_snapshot(false)

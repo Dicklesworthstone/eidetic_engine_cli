@@ -50794,7 +50794,7 @@ fn search_daemon_response_before(
 ) -> Result<serde_json::Value, DaemonSearchFallbackReason> {
     use crate::daemon::protocol::DaemonRequest;
     use crate::daemon::server::{
-        ClientError, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        ClientError, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
         DaemonSearchParams, METHOD_CAPABILITIES, METHOD_PACK_SEARCH, METHOD_SEARCH,
         client_round_trip_before,
     };
@@ -50827,7 +50827,7 @@ fn search_daemon_response_before(
             capabilities,
             METHOD_PACK_SEARCH,
             DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
         )?;
     } else {
         validate_daemon_search_capabilities(capabilities)?;
@@ -50988,7 +50988,7 @@ fn pack_search_via_daemon(
         )
         .and_then(|value| {
             if value.get("schema").and_then(serde_json::Value::as_str)
-                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1)
+                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2)
                 || value.as_object().is_none_or(|object| object.len() != 2)
             {
                 return Err(DaemonSearchFallbackReason::SearchResponseDrift);
@@ -95648,9 +95648,8 @@ mod tests {
                     )?;
                 }
             }
-            // Even neutral feedback makes the current handoff proof
-            // unsupported. Reject before remote retrieval, retain the exact
-            // method reason, and execute the canonical local read-only pack.
+            // A neutral outcome still contributes to the handoff witness, but
+            // legitimate feedback must preserve resident retrieval and parity.
             let connection =
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
             connection
@@ -95676,6 +95675,10 @@ mod tests {
             let feedback_audits_before = connection
                 .count_table_rows("audit_log")
                 .map_err(|error| error.to_string())?;
+            let feedback_search_audits_before = connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                .map_err(|error| error.to_string())?
+                .len();
             connection.close().map_err(|error| error.to_string())?;
             let mut feedback_args = vec![
                 "ee",
@@ -95704,28 +95707,28 @@ mod tests {
             ensure_equal(
                 &exit,
                 &ProcessExitCode::Success,
-                &format!("feedback fallback pack: {stdout} {stderr}"),
+                &format!("feedback daemon pack: {stdout} {stderr}"),
             )?;
             let envelope: serde_json::Value =
                 serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
             ensure_equal(
                 &envelope["data"]["servingPath"],
-                &serde_json::json!("in_process_fallback"),
-                "feedback fallback cannot claim daemon retrieval",
+                &serde_json::json!("hybrid"),
+                "feedback pack reuses resident retrieval with local assembly",
             )?;
             ensure_equal(
                 &envelope["data"]["retrievalPath"],
-                &serde_json::json!("in_process"),
-                "feedback fallback executes local retrieval",
+                &serde_json::json!("daemon"),
+                "feedback pack executes daemon retrieval",
             )?;
             ensure_equal(
                 &envelope["data"]["fallbackReason"],
-                &serde_json::json!("daemon_pack_search_feedback_unsupported"),
-                "unsupported feedback retains its exact daemon method reason",
+                &serde_json::Value::Null,
+                "unchanged feedback requires no fallback",
             )?;
             ensure(
-                stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
-                "feedback fallback keeps the existing degradation category",
+                !stdout.contains(DAEMON_SEARCH_FALLBACK_CODE),
+                "valid feedback handoff must actually reuse daemon retrieval",
             )?;
             let selection =
                 |payload: &serde_json::Value| -> Result<Vec<serde_json::Value>, String> {
@@ -95751,11 +95754,11 @@ mod tests {
             ensure_equal(
                 &selection(&envelope)?,
                 &selection(&local)?,
-                "feedback fallback preserves canonical selected content and provenance",
+                "feedback handoff preserves canonical selected content and provenance",
             )?;
             ensure(
                 stdout.contains(content) && stdout.contains(&remembered.memory_id.to_string()),
-                "feedback fallback retains the planted memory",
+                "feedback handoff retains the planted memory",
             )?;
             let connection =
                 DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
@@ -95764,14 +95767,53 @@ mod tests {
                     .count_table_rows("pack_records")
                     .map_err(|error| error.to_string())?,
                 &feedback_packs_before,
-                "read-only feedback fallback did not persist a pack",
+                "read-only feedback handoff did not persist a pack",
             )?;
             ensure_equal(
                 &connection
                     .count_table_rows("audit_log")
                     .map_err(|error| error.to_string())?,
                 &feedback_audits_before,
-                "read-only feedback fallback wrote no audits",
+                "read-only feedback handoff wrote no audits",
+            )?;
+            drop(connection);
+
+            feedback_args.retain(|arg| *arg != "--read-only");
+            let (exit, stdout, stderr) = invoke(&feedback_args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("persisted feedback daemon pack: {stdout} {stderr}"),
+            )?;
+            let persisted: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure(
+                persisted["data"]["servingPath"] == "hybrid"
+                    && persisted["data"]["retrievalPath"] == "daemon"
+                    && persisted["data"]["fallbackReason"].is_null(),
+                "persisted feedback pack must reuse the validated daemon handoff",
+            )?;
+            ensure_equal(
+                &selection(&persisted)?,
+                &selection(&local)?,
+                "persisted feedback pack keeps canonical content",
+            )?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &connection
+                    .count_table_rows("pack_records")
+                    .map_err(|error| error.to_string())?,
+                &(feedback_packs_before + 1),
+                "exactly one local pack record for feedback handoff",
+            )?;
+            ensure_equal(
+                &connection
+                    .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                &(feedback_search_audits_before + 1),
+                "exactly one search audit for persisted feedback handoff",
             )?;
             drop(connection);
 
@@ -95957,6 +95999,47 @@ mod tests {
         assert_eq!(
             validate_daemon_search_capabilities(&schema_drift),
             Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift)
+        );
+    }
+
+    #[test]
+    fn daemon_pack_capability_requires_feedback_witness_version_and_workspace_authority() {
+        use crate::daemon::protocol::{
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            METHOD_PACK_SEARCH,
+        };
+        let mut capabilities = daemon_search_capabilities_fixture();
+        capabilities["methods"] = serde_json::json!([METHOD_PACK_SEARCH]);
+        capabilities["authorization"][METHOD_PACK_SEARCH] = serde_json::json!("same_uid_workspace");
+        capabilities["method_schemas"][METHOD_PACK_SEARCH] = serde_json::json!({
+            "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+        });
+        let validate = |value: &serde_json::Value| {
+            super::validate_daemon_method_capabilities(
+                value,
+                METHOD_PACK_SEARCH,
+                DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+            )
+        };
+        assert_eq!(validate(&capabilities), Ok(()));
+        for incompatible in [
+            "ee.daemon.pack_search.response.v1",
+            "ee.daemon.pack_search.response.v99",
+        ] {
+            let mut legacy = capabilities.clone();
+            legacy["method_schemas"][METHOD_PACK_SEARCH]["response"] =
+                serde_json::json!(incompatible);
+            assert_eq!(
+                validate(&legacy),
+                Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift),
+            );
+        }
+        capabilities["authorization"][METHOD_PACK_SEARCH] = serde_json::json!("same_uid");
+        assert_eq!(
+            validate(&capabilities),
+            Err(DaemonSearchFallbackReason::CapabilityAuthorizationDrift),
         );
     }
 
