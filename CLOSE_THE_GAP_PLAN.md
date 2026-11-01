@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22, 2026-10-31)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -9,8 +9,20 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-10-22 re-baseline (§17, read this first; it supersedes the §16 header
-> below).** Track R worked. Measured black-box on the shipped `v0.18.0` against
+> **2026-10-31 audit (§19, read this first).** The shipped offline memory loop
+> works in a small isolated workspace. Current source has substantial recovery
+> and identity improvements, but there is no complete green proof for one
+> candidate. A fresh shape-corpus run finds relevant scenarios but packs much
+> material outside the judged sessions (§19.2); headline metrics conceal this.
+> Actions remains disabled repository-wide; a same-version release
+> 1,326 commits behind the audit baseline passes the current-binary guard.
+> Nine missing closeout dependencies have been added, and the existing binary
+> identity owner now requires source identity rather than a version bump.
+> Earlier measurements below are historical: §18 corrects several §17 claims,
+> including the import speed comparison and backup-loss attribution.
+>
+> **2026-10-22 re-baseline (§17, historical; see §18 corrections).** Track R
+> worked. Measured black-box on the shipped `v0.18.0` against
 > the `.43` oracle corpus, five of the six headline 2026-10-01 failures are
 > fixed and two of the five outcome metrics now MEET their targets:
 > **UTR 1.0000** (was ~0.65, target ≥ 0.95) and **PAP precision 1.00 / recall
@@ -2967,3 +2979,356 @@ explain.
 Unverified as of this entry: `cargo fmt --check` passes, so it parses, but cargo
 does not run locally and the in-flight 14-target `bd-z368i` dispatch froze its
 snapshot before the edit. No verdict on this change can be read off that run.
+
+## 19. Comprehensive reality check — 2026-10-31
+
+### 19.1 Verdict and evidence boundaries
+
+**The memory product is real; convergence is not demonstrated.** This is no
+longer a walking-skeleton implementation problem. The remaining critical work
+is to make retrieval identity, recovery, quality, operational limits, and the
+verification path agree on one reproducible candidate. More command surfaces
+will not establish those properties.
+
+This pass read all 1,838 lines of `AGENTS.md`, all 3,495 lines of `README.md`,
+all 3,721 lines of `COMPREHENSIVE_PLAN.md`, and the complete prior 2,969-line
+bridge. It applied the reality-check skill and all five of its references,
+then inspected the critical implementation, test, dependency, release and
+tracker paths. It did not exhaustively review every Rust function or establish
+a comprehensive security proof.
+
+The audit separates three populations:
+
+| Population | Identity | What evidence about it means |
+| --- | --- | --- |
+| Source baseline for the remote run | `0a626d91277c08df3f5aff472cffe0c1cee1d41b` | Explicit immutable input, not a moving `HEAD` |
+| Published native artifact | v0.18.0, source `969f0cbf19a5fdaa367328350c937cf566063efc`, clean, release, aarch64 Darwin | Shipped behavior only; 1,326 commits behind the source baseline |
+| Installed PATH executable | v0.14.2, source provenance unavailable | Environment admission only; never current product evidence |
+
+Peers advanced the checkout during the audit. Source readings and local static
+checks therefore describe the observed checkout, while the remote command
+retains the explicit baseline above. The README delta was read too: 35 new
+lines describe daemon routing, feedback-triggered local fallback and resident
+search contracts. Those changes have no behavioral verdict from this run.
+A later moving tip cannot inherit the run's verdict automatically.
+Observations are dated October 31 in the local
+timezone; retained timestamps after midnight are November 1 UTC.
+
+The published archive's SHA-256 was independently checked against the GitHub
+release asset digest:
+`6e8cfd66997be4a631e30125ea86b3a86a01958dbc6abf33ce795d32813eec87`.
+All behavioral probes used a fresh workspace and private HOME/XDG directories with
+`EE_EMBED_DOWNLOAD=off`. They did not inspect or modify the operator's memory
+database. Raw commands, responses, errors and reports are retained locally at
+`/private/tmp/ee-reality-20261031.m9d4VS`; the measured facts below are retained
+in this tracked document so the conclusions do not depend solely on temporary
+files. That directory contains no claim of a complete candidate capsule.
+
+### 19.2 Fresh runtime evidence about the shipped release
+
+The small offline experiment seeded two release-related memories and an
+unrelated gardening memory. Assertions inspected result and pack item arrays,
+not echoed queries or a substring anywhere in the response.
+
+| Experiment | Observed result | Scope of conclusion |
+| --- | --- | --- |
+| `init`, then three `remember` calls | All successful; three indexed documents | Manual capture persists and indexes on the release |
+| Search for formatting before release | Exactly the two relevant memory IDs; gardening excluded | Useful lexical retrieval on this controlled corpus |
+| Nonsense query | `resultCount: 0`, empty results | An honest no-match, not a missing-index error |
+| `pack "prepare release" --source-mode lexical_only --max-tokens 1500` | Two relevant items, provenance on both, 23 content tokens within budget | Core packing is useful; this is not a whole-envelope token bound |
+| `why` on the remembered rule | Found; latest pack selection names the same pack hash and a stored replay ledger | Explanation connects durable memory to the actual pack |
+| Helpful `outcome` | Recorded event, audit ID, positive count 1 | Feedback recording works; it does not prove calibrated future ranking |
+| Native validated rule with a source memory | Stored and indexed; later pack contains an item with `entityKind: rule` | Typed rules reach production packing alongside memory entities |
+| Backup create → verify → side-path restore → search | Three memories, one feedback event, one pack and its two items restored; relevant memory IDs searchable again | Small memory/history recovery works; no CASS evidence was in this backup |
+| Twelve sequential read-only packs with one fixed `--as-of` | All twelve return one non-null hash; file content, size and mtime snapshots unchanged | Stable fixed-clock, serial, lexical packing in this small release fixture |
+| Change selected corpus under the same future `--as-of` and request | Selection and hash change | The repeated-hash check is not satisfied by a constant hash |
+| `preflight check` on a destructive-command string | Exit zero; risk match with builtin provenance | Advisory behavior works; the command string was never executed |
+| `maintenance status` | Real job/history response | Discoverability only; maintenance execution is not proved here |
+
+Single observed command durations were approximately 0.21–0.25 seconds for the
+three initial writes, 0.17 seconds for relevant search, 0.38 seconds for the
+first valid pack and 0.06 seconds for `why`. These are diagnostic observations,
+not percentiles, SLO evidence, neural performance, or a replacement for the
+shape-corpus series in §18.7.
+
+The failed exploratory invocations were retained too. `lexical` is not the
+accepted source-mode spelling (`lexical_only` is); a validated rule requires
+source evidence; `maintain` is not the command (`maintenance` is). These are
+probe corrections, not product defects. The twelve-pack result does not close
+`bd-wubqf`: its failing concurrent conditions and later source candidate differ.
+
+A second, broader offline release experiment ran the current shape-corpus
+probe with `--target-records 0`, retained workspaces and output, and downloads
+off. This means the generator's **123-record base corpus**, not an empty
+corpus. Its fixture CASS adapter supplied 14 sessions: 46 spans were admitted
+and 77 quarantined by record/projection policy. The default seed is 43 and
+the query split is `all`, so this is not a held-out quality estimate.
+Across 40 judged queries:
+
+| Measurement | Fresh result | Meaning / limit |
+| --- | --- | --- |
+| Scenario hit in top five | 39/40, **0.975** | Retrieval usually finds the judged scenario |
+| Exact labeled recall@5 | **0.7000** mean | Different from finding any span in that scenario |
+| Pack session/scenario precision | 88/247 items, **0.3563** | Most items are outside the oracle's judged-relevant sessions; this is a session-level proxy, not exhaustive human relevance annotation |
+| Explicit-distractor FAR | 5/247, **0.0202** | Counts named distractors, not every unrelated session |
+| UTR | **0.9996**, 36,468 content characters | The instrument's character-based scaffolding proxy; readable content is not necessarily relevant content |
+| Proposal quality | Five proposals; precision **1.0**, recall **5/6** arcs, zero marked pollution | Synthetic incident arcs; not operator-history generalization or completed apply/retrieve proof |
+| `ask` | 14/40 answered, all with a judged-scenario citation; all negative queries abstained | Selective usefulness on this corpus; not universal answer coverage |
+
+The relevance gap is visible in the retained output, not only a metric: query
+`q01`, “how do I release a crate to crates.io”, packs an espresso-descaling
+answer alongside useful release evidence. Therefore UTR/PAP/FAR meeting their
+current numeric targets must not close `.11`/`.12` or `.50` while pack
+precision and downstream usefulness remain unproved. Existing owners now
+carry this example and must preserve held-out relevance/recall/abstention
+controls; an empty pack cannot fix precision. Do not claim that every item
+outside a judged session is necessarily wrong without auditing that judgment.
+
+The positive probe exits zero in **report** mode. A matched negative run
+deliberately skips import, then exits **2** with an explicit harness-error reason
+instead of presenting the empty store as measured product recall. Its output
+still contains diagnostic zero/null fields, so consumers must honor the error
+and exit code. Both runs use the same verified release and retained 123-record
+corpus shape; neither uses a genuine CASS executable or private history.
+Observed pack/search medians were 0.241/0.191 seconds; the two controls ran
+concurrently, so these are diagnostic series, not a controlled performance
+baseline. A single corpus size establishes no write-cost slope.
+
+### 19.3 Vision checklist, with implementation and proof kept separate
+
+`WORKING` below applies only to the bounded experiment stated. `PARTIAL` means
+a remaining product or coverage gap. `UNPROVEN` means a complete matching run
+is absent from this audit, even where source and tests are substantial. A
+command parser entry is never promoted to behavioral proof.
+
+Owner suffixes such as `.13` refer to `bd-reality-core-convergence-1azkt`.
+The promise column's “plan” references mean `COMPREHENSIVE_PLAN.md`; “bridge”
+references mean this document. Current README scope and accepted amendments
+take precedence over historical implementation examples in the older plan.
+
+| # / Promise and source | Status | Evidence / remaining acceptance | Owner |
+| --- | --- | --- | --- |
+| 1. Local CLI without daemon or paid APIs — README, Design Philosophy 1–3 | WORKING, offline fixture | Fresh release loop executed with model downloads off | `.19` consumes broader proof |
+| 2. Rust/nightly, no unsafe core, required foundations — AGENTS, Toolchain; plan §§6–7 | PARTIAL proof | `src/lib.rs` forbids unsafe; SQLModel `FrankenConnection`, Asupersync command runtime and Frankensearch APIs are real; resolved root and fuzz trees pass forbidden-dependency audit | `.4`, `.18`, `.37` |
+| 3. Ingest explicit facts, failures and rules — README, Quick Example; plan §30.4 | WORKING, small fixture | Persisted records and retrieved exact IDs; large/batch/cancel paths need candidate evidence | `.19`, `.17` |
+| 4. Ingest CASS without duplicating its store — README, CASS Integration; plan §15 | PARTIAL | Fresh release imports 14 sessions / 123 spans from the fixture adapter; current trust, default-model activation, genuine-CASS and scale proof remain open | `.44`, `.45`, `.48`, `.66` |
+| 5. Retrieve relevant material with honest scores — README, Explainable Retrieval; plan §27.5 | PARTIAL | Scenario retrieval succeeds on 39/40 queries, but only 88/247 packed items come from judged-relevant sessions; uncalibrated posture is honest, quality remains insufficiently established | `.11`, `.12`, `.30`, `.33` |
+| 6. Neural default plus honest offline fallback — README, Graceful Degradation / Choosing a local embedding model | PARTIAL | Offline fallback named; current status now checks selected producer headers; no neural model/transition verdict from this pass | `.2`, `.16`, `.66`, `.70` |
+| 7. Pack memories, native rules and evidence with provenance — README, Context pack controls; plan §19 | PARTIAL | Memory and native-rule release paths executed; current typed CASS, admission and generic entity contracts need full proof | `.45`, `.59`, `.60`, `bd-vp087` |
+| 8. Reproducible pack identity and read-only behavior — README, Deterministic By Default / Pack replay evidence | PARTIAL | Twelve fixed-clock release reads pass; current concurrent hash failure remains unresolved by this experiment | `.2`, `.3`, `.10`, `bd-wubqf`, `bd-ve7c6` |
+| 9. Explain selection and non-selection across typed entities — README, Explainable Retrieval; plan §21.5 | PARTIAL | Memory `why` traced to stored selection; typed `why-not` owner remains open | `.52`, `.17` |
+| 10. Learn from sessions, feedback and corroborating evidence — README, Curation & rules; plan §§16–17 | PARTIAL | Feedback recorded; §18 demonstrates improved proposal quality; audited current end-to-end proposal → validate → apply → retrieve still required | `.46`, `.50`, `.59`, `.60` |
+| 11. Maintain with bounded storage, decay and consolidation — README, Diagnostics / Limitations; plan §§16, 18, 30.11 | PARTIAL | Retention tests/history show progress; do not equate status output or eight writes with 1,100-write and byte-bound acceptance | `.16`, `.42`, `.55`, `.57`, `bd-1oep7` |
+| 12. Recover all durable five-job state safely — README, Backup & Restore; plan §30.14 | PARTIAL | Small release round trip passes; current source has many durable-family exporters and validators; evolved mixed-store behavior remains a candidate gate | `.13`, `.14` |
+| 13. Report evidence withheld during redacted recovery — README, Backup & Restore / Privacy & Trust | IMPLEMENTED, candidate proof pending | `backup_evidence_export.rs` now has source/export histograms, `rowCountBasis`, integrity checks and `backup_evidence_admission_reduced` | `.13`, `.14` |
+| 14. Secrets, provenance, trust and workspace boundaries survive every path — README, Privacy & Trust; plan §22 | UNPROVEN as a universal property | Policy gates are present; this audit's public fixture is not an adversarial privacy/security campaign | `.12`, `.14`, `.17` and existing boundary owners |
+| 15. PPR uses the required graph foundation — README, Graph-derived insights; plan §§7.5, 14 | PARTIAL, honest production degradation | `context.rs` explicitly disables production PPR influence when the pinned FNX API is missing; local reference tests are not upstream implementation proof | `.4`, `.15` |
+| 16. Cancellation/crash safety and concurrent-writer integrity — plan §§4.8, 8, 10.2, 27.3 | UNPROVEN at this baseline | Requires killed/interleaved operations with durable-state and publication assertions, not compilation | `.3`, `bd-37r5a`, `.17` |
+| 17. Stable JSON, schemas, renderers and consumed goldens — README, JSON output; plan §§20.3–20.5, 27.4 | PARTIAL | Exercised responses parse; source inventories and schema files are present, but many golden/byte contracts lack executed consumption | `.17`, `bd-qzr0v`, `bd-byte-compared-contracts-never-executed-feftl` |
+| 18. Reproducible latency, import and growth targets — README, Performance; plan §28; bridge §16.5 | UNPROVEN for current candidate | Use §18's corrected lexical comparison, not the withdrawn 30× import claim; rebuild raw, same-config series | `.6`, `.47`, `.48`, `.50`, `.57` |
+| 19. Independent team/mesh operation within accepted scope — README, Team confederation; bridge §15 | PARTIAL proof carried forward | Delegated two-host amendment stands; no new two-human, Windows or external-IdP proof is invented | `.8`, mesh verification matrix |
+| 20. Optional daemon/MCP/serve/science capabilities — README, Configuration / MCP / Limitations; plan §§23–24 | PARTIAL / explicit scope | Inspect actual feature registry and production handlers; empty Cargo feature arrays are not implementation proof; core success remains independent of adapters | existing adapter owners, `.9` |
+| 21. Health distinguishes ready, broken and unmeasured — README, Diagnostics / Troubleshooting; plan §21 | PARTIAL proof | Small release hash-tier index is ready and searchable; current producer-header checks address the old mechanism but need attributable acceptance | `.66`, `.70` |
+| 22. One source-attested green verification candidate — README, Development & Verification; plan §27; bridge §15 | UNPROVEN | Current binary guard accepts stale same-version source; hosted Actions off; complete capsule not established | `.5`, `.18`, `.19`, `bd-sxalp` |
+| 23. Install/release claims match downloadable artifacts — README, Installation status / Limitations | PARTIAL | Native archive verified and executed; published release lacks manifest/probe/SLSA/Sigstore assets named by remaining claims/gates | `.7`, `.9`, `.20`, `.21`, `.27`, `.68` |
+
+The eight North Stars remain outcomes, not eight command names:
+
+| North Star | Fresh evidence in this pass | What remains before full acceptance |
+| --- | --- | --- |
+| 1. Release advice | Correct manual rule/failure pack | Complete candidate scenario including imported evidence and verification history |
+| 2. Async migration advice | Source/test path inspected | Executed expected Cx/Scope/cancellation guidance on the candidate |
+| 3. CI failure → reusable procedure | Feedback and typed-rule pieces work | Actual CASS failure/fix arc → reviewed promotion → future retrieval |
+| 4. Cold onboarding | Fresh init and offline capture work | Useful project conventions and first-task context, not merely a successful init |
+| 5. Dangerous-action advice | Risk match remains advisory and exit-zero | Memory-backed warning and provenance under missing/failed optional stores |
+| 6. Offline usefulness | Relevant retrieval, pack and why executed | Larger corpus and all offline degradation branches |
+| 7. Post-session learning | Feedback persisted and restored | Bounded proposal/apply audit, quality controls and future usefulness |
+| 8. Concurrent agents | No new concurrency verdict from release probe | One immutable snapshot's integrity, visibility and cancellation histories |
+
+`tests/suites/integration_north_star.rs` contains seven tests covering scenarios
+1–6, including two variants of scenario 3. Its name does not establish all
+eight. Scenario 7 and 8 must remain explicit entries in the manifest, using
+their existing learning and multi-writer suites.
+
+Two stale diagnoses should not drive new implementation. Current
+`read_index_metadata_for_selection` resolves the selected workspace producer,
+and `verify_selected_index_producers` compares the full vector-header producer
+revision and dimension, including hash indexes. This addresses the mechanism
+described in `.66`'s October 23 comment; reproducing that old comment alone is
+not a reason to write the fix again. Similarly, the current backup inventory
+explicitly distinguishes source and artifact histograms and checks the
+authenticated artifact bytes. Both are implementation progress with acceptance
+proof still to reconcile, not evidence that the old defective source remains.
+
+The quality-gate distinction is equally concrete: the current
+`scripts/real_shape_corpus/probe.py` constructs `mode: "report"` and identifies
+its CASS provider as the fixture adapter. `verify.sh` invokes its **self-test**,
+not a candidate corpus evaluation. That is useful instrument coverage but does
+not discharge `.50`'s enforced, pinned-CASS release suite or `.62`'s own-history
+measurement. The generated shape corpus, a genuine CASS executable, and private
+own-history evaluation are three separate evidence populations.
+
+### 19.4 Verification reality: green checks answer different questions
+
+Fresh checks passed: `cargo fmt --check`, the root/fuzz forbidden-dependency
+audit, vision coverage, and eleven Python guards covering action pins,
+degradation classification, spawn isolation, golden consumption, production
+reachability, shard coverage, step assertion isolation, graph routing,
+boundary inventory, RCH remediation guidance and RCH documentation examples.
+The external toolchain volume was mounted before trusting the format result.
+The shape-probe self-test also passed **34/34 binary-free arms**, including
+positive and negative platform, environment, diagnostic, metric and shape
+controls. It explicitly skipped its end-to-end controls because no `--ee`
+was supplied; those skipped controls are not included in this pass count.
+
+**The separate closure audit is RED.** With automatic reopening disabled,
+`scripts/closure-lint.sh --audit --json` exited 1 after auditing 232 relevant
+closures, matching 122 existing baseline exceptions and finding one remaining
+violation: closed `.67` lacks `tests/golden/probe-fail-closed.snap`. This is a
+closure-contract failure, not evidence that the repaired probe is broken.
+It is recorded on existing owner `bd-qzr0v`. The repair must demonstrate a
+consumed behavioral contract (or a deliberately specified alternative for this
+Python instrument); adding a decorative snapshot is not acceptance. The audit
+did not reopen any bead or expand the exception baseline.
+The verification-drift guard separately exits zero with `count: 0`: the red
+gate has an open tracking owner. That is a tracking verdict, not a successful
+closure audit. `verify.sh` can continue past tracked closure drift, so its
+stage result must not erase the underlying violation from candidate evidence.
+
+Three denominators prevent these passes being misread:
+
+- Vision coverage: **146/146 documented surfaces present**, zero parser gap;
+  **140/146 have source-level invocation witnesses**, six accepted unwitnessed
+  surfaces. Witness discovery is not execution or assertion quality.
+- Golden consumption: **2/113 files in `tests/golden/` are read**; 111 are not.
+  This is that directory's census, not a claim about all snapshot locations.
+  The guard deliberately enforces the existing floor of two.
+- Spawn isolation: **270 unisolated spawn functions across 206 files** remain
+  at the accepted baseline. Green means no growth, not universal isolation.
+
+Live GitHub inspection found **88 workflows: 85 individually active and three
+manually disabled**, while repository Actions permissions still report
+`enabled: false`. Individual workflow state does not override that setting.
+The newest run is the failed CI Static run from October 8 at `341586ed4`:
+[retained GitHub run](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/runs/37856761808).
+No repository settings or workflow dispatches were changed by this audit.
+
+The existing same-version guard was executed directly with its documented
+`REPO_ROOT` environment. It returned zero for the published 0.18.0 binary
+against the newer 0.18.0 source. This confirms `bd-sxalp` without running a
+current-source suite or regenerating a golden under the wrong artifact.
+
+The pinned candidate command for this pass is:
+
+```bash
+scripts/rch_verify.sh --pinned-franken-stack \
+  --treeish 0a626d91277c08df3f5aff472cffe0c1cee1d41b \
+  --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
+  cargo test --locked -j 2 --no-fail-fast \
+    --test e2e_core_workflow --test e2e_backup_restore_roundtrip \
+    --test pack_quality_contracts --test integration_north_star
+```
+
+It uses the existing APFS export image on the external drive and retains
+wrapper proof plus an event log. The installed binary is used only for build
+admission. This command covers four targets, not all targets/features, clippy,
+the ignored concurrency oracle, all eight North Stars or a complete release
+capsule. At this checkpoint the cold build is still active and no target has
+reported a test result. The Rust test result remains **unmeasured**; this
+checkpoint is not a candidate approval.
+
+### 19.5 Bridge refinement: converge existing owners
+
+Initial tracker snapshot: **4,948 records**, comprising 4,628 closed, 268 open,
+16 in progress, 33 explicitly blocked and three deferred. The 320 nonclosed
+records include 27 P0, 90 P1, 166 P2, 36 P3 and one P4. The ready/blocked query
+counts use different predicates and must not be substituted for these status
+counts. No completion percentage is inferred from historical closures.
+
+The substantive gaps already have owners. Finishing them **against their full
+behavioral acceptance** can close the scoped vision. Closing the previously
+linked children alone was insufficient: the blocks-only closure of `.22`
+contained 108 nodes but omitted several later mandatory owners.
+
+Nine explicit `.22` blocking edges were added:
+
+- `bd-wubqf`: unresolved pack identity failure.
+- `bd-fy92m`: delivery coverage, transitively including
+  `bd-actions-disabled-repo-wide-33mfm`.
+- `bd-no-compile-gate-before-a-commit-lands-qdxc0`: compile library and test
+  targets before publishing a source verdict.
+- `bd-no-runnable-current-ee-binary-on-the-mac-wu6ay`: provide an executable
+  source-matched native verification route, or an explicit scoped equivalent.
+- `bd-z368i`: execute and reconcile the existing acceptance tests; retain
+  ignored/ungrounded outcomes separately.
+- `bd-qzr0v` and `bd-byte-compared-contracts-never-executed-feftl`: consume the
+  contracts that closures and claims rely upon.
+- `bd-sxalp` and new child `bd-sxalp.1`: source-bound binary admission and
+  independent proof using genuine matching and stale same-version binaries.
+
+The blocks-only closure now contains **120 nodes**. `br dep cycles` reports
+zero active cycles; one all-closed historical cycle is reported separately.
+`bv --robot-plan` completed with complete source authority but explicitly
+skipped cycle computation, so it is not the cycle proof. An attempted child
+blocking on its containing parent was rejected by `br` before mutation; the
+final graph uses direct rollup prerequisites and parent containment instead.
+The final `bv --robot-triage` also completed against all 4,949 records with
+complete, non-stale source authority. Its leading picks were the canonical
+verification owner `.5`, repository-wide Actions restoration, and hermetic
+inputs `.18`, consistent with the first workstream below.
+
+The existing `bd-sxalp` description was revised in place. Its former
+release-bump/development-version alternatives only shortened the stale interval.
+The new acceptance binds independently expected source, build state, target,
+features and dependency proof to the executed binary, accepts legitimate exact
+source cache reuse, refuses unknown identities, and detects replacement after
+admission. It preserves environment-only admission and explicitly labeled
+published-artifact audits. The companion tests must fail both a semver-only
+guard and a guard that refuses everything. No product bead was closed.
+
+Work order and concrete completion evidence:
+
+| Order | Existing files / owners | Required outcome |
+| --- | --- | --- |
+| 1. Trust the execution path | `scripts/lib/ee_binary_resolution.sh`, `scripts/verify.sh`, `scripts/rch_verify.sh`; `bd-sxalp`, `.5`, `.18`, native/compile/delivery owners | A verdict names one source and actually executes its required tests; absent infrastructure is unmeasured |
+| 2. Resolve identity/readiness defects | `src/core/index.rs`, `src/core/search.rs`, `src/core/context.rs`, model lifecycle and doctor; `.2`, `.3`, `.10`, `.66`, `bd-wubqf` | Reconcile already-landed producer checks first; reproduce remaining failures, attribute canonical inputs, then pass serial/concurrent/model-transition positive and negative controls |
+| 3. Prove recovery semantics already implemented | `src/core/backup.rs`, `backup_evidence_export.rs`, `tests/e2e_backup_restore_roundtrip.rs`; `.13`, `.14` | Mixed evolved store preserves required durable families; source/artifact histograms are distinguished; privacy withholding is explicit and authenticated |
+| 4. Finish usefulness and scale | `scripts/real_shape_corpus/probe.py`, existing CASS/curation/index tests; `.11`, `.12`, `.42`, `.46`–`.50`, `.57`, `.62` | Same-config real-corpus UTR/TTFUC/PAP/FAR/WCS plus held-out pack precision, recall and abstention, with nonempty denominators, stable scenario IDs and enforced thresholds |
+| 5. Reconcile and ship only proved claims | Existing README/AGENTS/bridge, manifest, release staging and probe; `.9`, `.19`–`.22`, `.51`, `.68` | One immutable complete capsule, matching native artifacts and assets, explicit publication authorization, post-public comparison |
+
+Orders 2–4 can proceed while the general proof machinery is being completed;
+they are not blocked behind an infrastructure epic merely for administrative
+convenience. Each still needs attributable local acceptance. Restoration must
+not promote withheld evidence to make counts match, and readiness must not
+treat every legitimate zero-result query as unhealthy.
+
+### 19.6 Ambition and refinement passes
+
+Three ambition passes changed the plan's emphasis:
+
+1. **Usefulness:** keep exact relevant IDs, irrelevant/denied controls and
+   downstream agent decisions as the objective; command count is only an
+   inventory. Preserve all five jobs and eight North Stars.
+2. **Trustworthy delivery:** make candidate identity and executable proof a
+   prerequisite of convergence. A new version label is not a substitute for
+   knowing which source ran.
+3. **Durable invariants:** use a fixed input snapshot for determinism,
+   source-to-artifact conservation for recovery, monotone privacy restrictions,
+   and tri-state measurement for health. These strengthen existing owners
+   without adding another policy layer or a new orchestration product.
+
+Five refinement passes then checked: (1) current scope versus historical plan
+and approved amendments; (2) duplicate owners and stale diagnoses; (3) positive,
+negative and mutation controls; (4) real blocking reachability and cycles;
+(5) executable budgets, source attribution and the boundary between audit,
+implementation and publication. The frozen bead-generation and refinement
+prompts from the skill were applied without replacing their requirements with
+smaller feature scope. Existing detailed owners were reused; only the missing
+independent source-identity proof child was added.
+
+The important corrections were substantive: current backup honesty is
+source-implemented, serial release stability is not concurrency closure, a
+version bump does not fix identity, PPR's production degradation is explicit,
+seven north-star tests are not eight scenario proofs, readable scaffolding-free
+content is not necessarily relevant, and a green inventory ratchet is not a
+completed product. Part III remains active under §15.
