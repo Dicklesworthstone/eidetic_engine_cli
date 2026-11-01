@@ -780,7 +780,7 @@ pub const WEAK_SEMANTIC_EVIDENCE_THRESHOLD: f32 = 0.35;
 /// these hold: no semantic backend executed or the hit is lexical; the query
 /// has content words (ask's tokenizer: stopwords and interrogatives removed);
 /// the hit's complete, untruncated content contains none of them, compared
-/// after light suffix stemming. An explicit relevance floor of 0 keeps every
+/// after English Snowball stemming. An explicit relevance floor of 0 keeps every
 /// hit, as it does for the floor itself.
 fn drop_stopword_only_lexical_hits(
     query: &str,
@@ -793,9 +793,14 @@ fn drop_stopword_only_lexical_hits(
     if user_floor_override == Some(0.0) {
         return;
     }
+    // Use the same normalization on both sides. Stripping "ing" alone made
+    // "releasing" -> "releas" disagree with "release", and stripping "ies"
+    // made "policies" -> "polic" disagree with "policy". These are content
+    // matches, not evidence that a lexical hit matched only stopwords.
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
     let query_terms = stopword_filter_terms(query)
         .iter()
-        .map(|token| light_stem(token).to_owned())
+        .map(|token| stemmer.stem(token).into_owned())
         .collect::<BTreeSet<_>>();
     if query_terms.is_empty() {
         return;
@@ -861,7 +866,7 @@ fn drop_stopword_only_lexical_hits(
         }
         stopword_filter_terms(&text)
             .iter()
-            .any(|token| query_terms.contains(light_stem(token)))
+            .any(|token| query_terms.contains(stemmer.stem(token).as_ref()))
     });
     let filtered = before - hits.len();
     if filtered > 0 {
@@ -887,20 +892,6 @@ fn stopword_filter_terms(text: &str) -> Vec<String> {
     terms.sort();
     terms.dedup();
     terms
-}
-
-/// Strip one common English inflection so "builds"/"building"/"built"-style
-/// variants of a query word still count as present. Deliberately crude: it
-/// only decides whether a hit shares *any* content word with the query.
-fn light_stem(token: &str) -> &str {
-    for suffix in ["ing", "ies", "es", "ed", "s"] {
-        if let Some(stem) = token.strip_suffix(suffix)
-            && stem.chars().count() >= 3
-        {
-            return stem;
-        }
-    }
-    token
 }
 
 /// The strongest semantic fast-tier score among `hits`, when it is below
@@ -29849,6 +29840,52 @@ mod tests {
             &mut degraded,
         );
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn stopword_filter_preserves_inflections_without_admitting_unrelated_hits() {
+        // Each pair disagreed under the old one-suffix stripping, in both
+        // query/document directions. Exercise the production admission path,
+        // including hash-backed hybrid hits and genuine lexical-only hits.
+        for (left, right) in [
+            ("releasing", "release"),
+            ("policies", "policy"),
+            ("running", "run"),
+        ] {
+            for (query, content) in [(left, right), (right, left)] {
+                for (backend, source) in [
+                    (EmbedBackend::HashFallback, ScoreSource::Hybrid),
+                    (EmbedBackend::NeuralLocal, ScoreSource::Lexical),
+                ] {
+                    let mut hits = vec![
+                        stopword_probe_hit("matching", source, content, false),
+                        stopword_probe_hit("unrelated", source, "sourdough starter bread", false),
+                        stopword_probe_hit("stopwords", source, "How do I do it?", false),
+                    ];
+                    let mut degraded = Vec::new();
+                    drop_stopword_only_lexical_hits(
+                        query,
+                        &mut hits,
+                        backend,
+                        None,
+                        None,
+                        &mut degraded,
+                    );
+                    assert_eq!(
+                        hits.iter()
+                            .map(|hit| hit.doc_id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["matching"],
+                        "query {query:?}, content {content:?}, backend {backend:?}",
+                    );
+                    assert_eq!(degraded.len(), 1);
+                    assert_eq!(
+                        degraded[0],
+                        SearchDegradation::lexical_stopword_only_filtered(2)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

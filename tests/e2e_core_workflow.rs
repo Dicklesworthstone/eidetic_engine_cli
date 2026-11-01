@@ -8,6 +8,9 @@
 #[path = "support/test_tracing.rs"]
 mod test_tracing;
 
+#[path = "support/isolated_ee.rs"]
+mod isolated_ee;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs;
@@ -269,6 +272,123 @@ fn init_publishes_ready_empty_search_index() -> TestResult {
         &search_json.pointer("/data/errors"),
         &Some(&serde_json::json!([])),
         "empty-index search errors",
+    )
+}
+
+#[test]
+fn stopword_filter_lexical_search_preserves_inflections_and_rejects_unrelated_queries() -> TestResult
+{
+    let root = tempfile::Builder::new()
+        .prefix("ee-lexical-inflections-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let run = |label: &str, args: &[&str]| -> Result<serde_json::Value, String> {
+        let output = isolated_ee::isolated_ee_command(&root)?
+            .env_remove("EE_AGENT_NAME")
+            .args([
+                "--workspace",
+                workspace.to_str().ok_or("workspace is not UTF-8")?,
+                "--json",
+            ])
+            .args(args)
+            .output()
+            .map_err(|error| format!("{label}: {error}"))?;
+        fs::write(root.join(format!("{label}.stdout")), &output.stdout)
+            .map_err(|error| error.to_string())?;
+        fs::write(root.join(format!("{label}.stderr")), &output.stderr)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            output.status.success(),
+            format!(
+                "{label} failed ({}); retained at {}\nstdout: {}\nstderr: {}",
+                output.status,
+                root.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        stdout_json(&output)
+    };
+    run("init", &["init"])?;
+    let release = run(
+        "release-memory",
+        &[
+            "remember",
+            "How do I release safely? Run cargo test before creating the tag.",
+            "--kind",
+            "fact",
+            "--level",
+            "semantic",
+        ],
+    )?;
+    let release_id = json_str(&release, "/data/memory_id", "release memory")?;
+    let unrelated = run(
+        "unrelated-memory",
+        &[
+            "remember",
+            "How do I bake sourdough bread? Feed the starter.",
+            "--kind",
+            "fact",
+            "--level",
+            "semantic",
+        ],
+    )?;
+    let unrelated_id = json_str(&unrelated, "/data/memory_id", "unrelated memory")?;
+    let query = "how do I approach releasing";
+    // Establish the index premise: both documents really match the common
+    // words. The zero floor disables admission only for this control.
+    let raw = run(
+        "unfiltered-candidates",
+        &[
+            "search",
+            query,
+            "--source-mode",
+            "lexical_only",
+            "--relevance-floor",
+            "0",
+        ],
+    )?;
+    let raw_ids = json_array(&raw, "/data/results", "unfiltered candidates")?
+        .iter()
+        .filter_map(|hit| hit["docId"].as_str())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        raw_ids.contains(release_id) && raw_ids.contains(unrelated_id),
+        format!("both seeded candidates must reach lexical admission: {raw}"),
+    )?;
+
+    let filtered = run(
+        "inflected-query",
+        &["search", query, "--source-mode", "lexical_only"],
+    )?;
+    let results = json_array(&filtered, "/data/results", "inflected query")?;
+    ensure(
+        results.len() == 1 && results[0]["docId"] == release_id,
+        format!("release must survive releasing; unrelated bread must not: {filtered}"),
+    )?;
+    ensure(
+        degraded_codes(&filtered).contains(&"lexical_stopword_only_filtered"),
+        format!("the dropped stopword-only hit must be reported: {filtered}"),
+    )?;
+
+    let negative = run(
+        "unrelated-query",
+        &[
+            "search",
+            "how do I repair espresso machines",
+            "--source-mode",
+            "lexical_only",
+        ],
+    )?;
+    ensure(
+        json_array(&negative, "/data/results", "unrelated query")?.is_empty(),
+        format!("common words must not admit unrelated memories: {negative}"),
     )
 }
 
