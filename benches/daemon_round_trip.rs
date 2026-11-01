@@ -27,10 +27,12 @@
 //! Observations may select 10/100/1,000/10,000 memories with
 //! `--fixture-memories N` and mixed admitted/quarantined evidence with
 //! `--fixture-evidence N`; a smaller fixture cannot satisfy the 10k gate.
-//! Pack acceleration currently requires an empty feedback ledger. The fixture
-//! asserts that precondition and reports it explicitly. A nonempty ledger uses
-//! the canonical local fallback and must fail the warm serving-path assertion;
+//! Pack fixtures default to repeated neutral/helpful/harmful feedback recorded
+//! through the supplied CLI before indexing. `--fixture-feedback empty|neutral|mixed`
+//! selects the ledger scenario, whose actual counts are checked and reported.
+//! A local fallback must fail the warm serving-path assertion in every scenario;
 //! its latency cannot be counted as verified daemon acceleration.
+#![allow(clippy::expect_used, reason = "bench assertions fail closed")]
 
 #[cfg(unix)]
 use std::hint::black_box;
@@ -64,7 +66,7 @@ use ee::daemon::server::{METHOD_CONTEXT, METHOD_ECHO, dispatch};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use ee::db::{
     CreateEvidenceSpanInput, CreateMemoryInput, CreateModelRegistryInput, CreateSessionInput,
-    CreateWorkspaceInput, DbConnection, EvidenceProducerKind,
+    CreateWorkspaceInput, DbConnection, EvidenceProducerKind, StoredFeedbackEvent,
 };
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use ee::models::{
@@ -117,6 +119,35 @@ impl Default for FixtureSize {
         Self {
             memories: SEARCH_DOCUMENT_COUNT,
             evidence: 0,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FeedbackScenario {
+    Empty,
+    Neutral,
+    Mixed,
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+impl FeedbackScenario {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Neutral => "neutral",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    const fn signals(self) -> &'static [&'static str] {
+        match self {
+            Self::Empty => &[],
+            Self::Neutral => &["neutral"],
+            Self::Mixed => &[
+                "neutral", "helpful", "helpful", "helpful", "harmful", "harmful",
+            ],
         }
     }
 }
@@ -262,6 +293,7 @@ struct PrebuiltSearchFixture {
     seed_ms: f64,
     index_ms: f64,
     size: FixtureSize,
+    feedback: JsonValue,
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -631,7 +663,11 @@ fn install_local_registry_source_and_read_fingerprint(
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn build_prebuilt_search_fixture(ee_binary: &Path, size: FixtureSize) -> PrebuiltSearchFixture {
+fn build_prebuilt_search_fixture(
+    ee_binary: &Path,
+    size: FixtureSize,
+    feedback_scenario: FeedbackScenario,
+) -> PrebuiltSearchFixture {
     assert!(
         matches!(std::env::var("EE_EMBED_DOWNLOAD").as_deref(), Ok("off")),
         "warm-search gate requires EE_EMBED_DOWNLOAD=off so measurement never performs network I/O"
@@ -757,9 +793,18 @@ fn build_prebuilt_search_fixture(ee_binary: &Path, size: FixtureSize) -> Prebuil
             .expect("inspect fixture feedback ledger")
             .count,
         0,
-        "the pack acceleration fixture requires an empty feedback ledger"
+        "feedback fixture must start from an empty ledger"
     );
     drop(connection);
+    let feedback = seed_feedback_fixture(
+        ee_binary,
+        &workspace,
+        &database,
+        &home,
+        &xdg_data,
+        size.memories,
+        feedback_scenario,
+    );
     let seed_ms = seed_started.elapsed().as_secs_f64() * 1_000.0;
 
     let index_started = Instant::now();
@@ -849,7 +894,153 @@ fn build_prebuilt_search_fixture(ee_binary: &Path, size: FixtureSize) -> Prebuil
         seed_ms,
         index_ms,
         size,
+        feedback,
     }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn feedback_target(signal: &str, memories: usize) -> String {
+    if signal == "harmful" && memories > 1 {
+        // Keep the planted positive result useful while penalizing a distractor.
+        format!("mem_{:026}", 0)
+    } else {
+        SEARCH_TARGET_MEMORY_ID.to_owned()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn assert_feedback_fixture(
+    events: &[StoredFeedbackEvent],
+    workspace_id: &str,
+    memories: usize,
+    scenario: FeedbackScenario,
+) {
+    assert_eq!(
+        events.len(),
+        scenario.signals().len(),
+        "feedback fixture event count drift"
+    );
+    for (index, signal) in scenario.signals().iter().enumerate() {
+        let id = format!("fb_{index:026}");
+        let event = events
+            .iter()
+            .find(|event| event.id == id)
+            .unwrap_or_else(|| panic!("feedback fixture omitted canonical event {id}"));
+        assert_eq!(event.workspace_id, workspace_id);
+        assert_eq!(event.target_type, "memory");
+        assert_eq!(event.target_id, feedback_target(signal, memories));
+        assert_eq!(event.signal, *signal, "feedback fixture signal drift");
+        assert_eq!(event.source_type, "outcome_observed");
+        assert_eq!(
+            event.source_id,
+            Some(format!("daemon-bench-feedback-{index}"))
+        );
+        assert!(
+            event.applied_at.is_some(),
+            "feedback fixture event was not applied"
+        );
+        assert!(event.weight.is_finite() && event.weight >= 0.0);
+        if *signal != "neutral" {
+            assert!(
+                event.weight > 0.0,
+                "scoring feedback must have positive weight"
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn seed_feedback_fixture(
+    ee_binary: &Path,
+    workspace: &Path,
+    database: &Path,
+    home: &Path,
+    xdg_data: &Path,
+    memories: usize,
+    scenario: FeedbackScenario,
+) -> JsonValue {
+    let started = Instant::now();
+    let mut confidence_changes = 0;
+    for (index, signal) in scenario.signals().iter().enumerate() {
+        let mut command = Command::new(ee_binary);
+        command
+            .arg("--workspace")
+            .arg(workspace)
+            .arg("--json")
+            .arg("outcome")
+            .arg(feedback_target(signal, memories))
+            .arg("--database")
+            .arg(database)
+            .arg("--signal")
+            .arg(signal)
+            .arg("--event-id")
+            .arg(format!("fb_{index:026}"))
+            .arg("--source-id")
+            .arg(format!("daemon-bench-feedback-{index}"))
+            .arg("--reason")
+            .arg("Daemon pack feedback benchmark fixture");
+        configure_hermetic_process(&mut command, home, xdg_data, None);
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("seed canonical feedback: {error}"));
+        assert!(
+            output.status.success(),
+            "feedback seed failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: JsonValue = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("feedback seed JSON: {error}"));
+        assert_eq!(payload["success"], true);
+        assert_eq!(
+            payload.pointer("/data/status").and_then(JsonValue::as_str),
+            Some("recorded"),
+            "quarantined, duplicate or dry-run feedback cannot seed the benchmark: {payload}"
+        );
+        assert_eq!(payload.pointer("/data/target/verified"), Some(&json!(true)));
+        let before = payload
+            .pointer("/data/confidence/before")
+            .and_then(JsonValue::as_f64)
+            .unwrap_or_else(|| panic!("feedback omitted prior confidence: {payload}"));
+        let after = payload
+            .pointer("/data/confidence/after")
+            .and_then(JsonValue::as_f64)
+            .unwrap_or_else(|| panic!("feedback omitted updated confidence: {payload}"));
+        let confidence_changed = before.to_bits() != after.to_bits();
+        match *signal {
+            "neutral" => assert!(
+                !confidence_changed,
+                "neutral fixture feedback changed confidence"
+            ),
+            "helpful" => assert!(
+                after > before,
+                "helpful fixture feedback did not improve confidence"
+            ),
+            "harmful" => assert!(
+                after < before,
+                "harmful fixture feedback did not reduce confidence"
+            ),
+            _ => unreachable!("fixture signals are closed"),
+        }
+        confidence_changes += usize::from(confidence_changed);
+    }
+    // Validate actual applied rows, including identities and signal payloads;
+    // the reported count is fixture metadata, never a freshness witness.
+    let connection = DbConnection::open_file_read_only(database)
+        .unwrap_or_else(|error| panic!("inspect feedback fixture: {error}"));
+    let workspace_id = stable_workspace_id(workspace);
+    let events = connection
+        .list_feedback_events(&workspace_id)
+        .unwrap_or_else(|error| panic!("read seeded feedback ledger: {error}"));
+    assert_feedback_fixture(&events, &workspace_id, memories, scenario);
+    let count_signal = |signal: &str| events.iter().filter(|event| event.signal == signal).count();
+    json!({
+        "scenario": scenario.as_str(), "events": events.len(),
+        "neutral": count_signal("neutral"), "helpful": count_signal("helpful"),
+        "harmful": count_signal("harmful"), "confidenceChanges": confidence_changes,
+        "seedMs": started.elapsed().as_secs_f64() * 1_000.0,
+        "recordedBy": "public_cli_outcome_before_indexing",
+    })
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1231,7 +1422,8 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     // its actual bytes once, before any fixture setup or timed samples.
     let cli_artifact = measured_cli_artifact(&ee_binary);
 
-    let fixture = build_prebuilt_search_fixture(&ee_binary, FixtureSize::default());
+    let fixture =
+        build_prebuilt_search_fixture(&ee_binary, FixtureSize::default(), FeedbackScenario::Empty);
     let daemon_started = Instant::now();
     let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
     let daemon_start_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
@@ -1643,6 +1835,24 @@ fn fixture_size_from_args() -> FixtureSize {
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn feedback_scenario_from_args(args: &[String]) -> FeedbackScenario {
+    let value = args
+        .iter()
+        .position(|arg| arg == "--fixture-feedback")
+        .map_or("mixed", |position| {
+            args.get(position + 1)
+                .map(String::as_str)
+                .unwrap_or_else(|| panic!("--fixture-feedback requires empty, neutral, or mixed"))
+        });
+    match value {
+        "empty" => FeedbackScenario::Empty,
+        "neutral" => FeedbackScenario::Neutral,
+        "mixed" => FeedbackScenario::Mixed,
+        _ => panic!("--fixture-feedback requires empty, neutral, or mixed; got {value}"),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn run_warm_pack_measurement(enforce_budgets: bool) {
     let ee_binary = std::env::var_os("EE_BENCH_EE_BIN")
         .map(PathBuf::from)
@@ -1661,7 +1871,8 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "ADR 0052 gate measures ordinary persisted pack; use observation for read-only"
         );
     }
-    let fixture = build_prebuilt_search_fixture(&ee_binary, size);
+    let feedback_scenario = feedback_scenario_from_args(&std::env::args().collect::<Vec<_>>());
+    let fixture = build_prebuilt_search_fixture(&ee_binary, size, feedback_scenario);
     let cold_first = run_pack_process(&ee_binary, &fixture, None, read_only);
     let daemon_started = Instant::now();
     let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
@@ -1731,7 +1942,8 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "operatingProfileSource": "workspace_config",
             "packProfile": BENCH_PACK_PROFILE,
             "fixture": { "memories": fixture.size.memories, "evidenceSpans": fixture.size.evidence,
-                "feedbackEvents": 0, "seedMs": fixture.seed_ms, "indexMs": fixture.index_ms,
+                "feedbackEvents": fixture.feedback["events"], "feedback": fixture.feedback,
+                "seedMs": fixture.seed_ms, "indexMs": fixture.index_ms,
                 "query": SEARCH_QUERY },
             "backend": { "embedBackend": "neural_local", "downloads": "disabled",
                 "modelId": fixture.fingerprint.model_id, "modelRevision": fixture.fingerprint.model_revision,
@@ -1763,6 +1975,71 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod pack_benchmark_contracts {
     use super::*;
+
+    fn neutral_feedback_event() -> StoredFeedbackEvent {
+        StoredFeedbackEvent {
+            id: format!("fb_{:026}", 0),
+            workspace_id: "workspace-fixture".to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: SEARCH_TARGET_MEMORY_ID.to_owned(),
+            signal: "neutral".to_owned(),
+            weight: 0.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: Some("daemon-bench-feedback-0".to_owned()),
+            reason: Some("Daemon pack feedback benchmark fixture".to_owned()),
+            evidence_json: None,
+            session_id: None,
+            applied_at: Some("2026-11-01T00:00:00Z".to_owned()),
+            created_at: "2026-11-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn pack_fixture_defaults_to_mixed_feedback_with_explicit_empty_control() {
+        assert_eq!(feedback_scenario_from_args(&[]), FeedbackScenario::Mixed);
+        for (value, expected) in [
+            ("empty", FeedbackScenario::Empty),
+            ("neutral", FeedbackScenario::Neutral),
+            ("mixed", FeedbackScenario::Mixed),
+        ] {
+            assert_eq!(
+                feedback_scenario_from_args(&["--fixture-feedback".to_owned(), value.to_owned()]),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "--fixture-feedback requires")]
+    fn invalid_feedback_scenario_cannot_silently_measure_empty_history() {
+        let _ = feedback_scenario_from_args(&["--fixture-feedback".to_owned(), "mixd".to_owned()]);
+    }
+
+    #[test]
+    fn feedback_fixture_requires_canonical_applied_rows() {
+        assert_feedback_fixture(
+            &[neutral_feedback_event()],
+            "workspace-fixture",
+            10,
+            FeedbackScenario::Neutral,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "feedback fixture event was not applied")]
+    fn unapplied_feedback_cannot_satisfy_the_fixture() {
+        let mut event = neutral_feedback_event();
+        event.applied_at = None;
+        assert_feedback_fixture(&[event], "workspace-fixture", 10, FeedbackScenario::Neutral);
+    }
+
+    #[test]
+    #[should_panic(expected = "feedback fixture signal drift")]
+    fn same_count_feedback_replacement_cannot_satisfy_the_fixture() {
+        let mut event = neutral_feedback_event();
+        event.signal = "harmful".to_owned();
+        assert_feedback_fixture(&[event], "workspace-fixture", 10, FeedbackScenario::Neutral);
+    }
 
     fn response() -> JsonValue {
         json!({"data": {
@@ -1821,11 +2098,11 @@ mod pack_benchmark_contracts {
 
     #[test]
     #[should_panic(expected = "warm pack used in_process_fallback")]
-    fn feedback_fallback_cannot_satisfy_daemon_acceleration_gate() {
+    fn stale_feedback_fallback_cannot_satisfy_daemon_acceleration_gate() {
         let fallback = json!({"data": {
             "servingPath": "in_process_fallback",
             "retrievalPath": "in_process",
-            "fallbackReason": "daemon_pack_search_feedback_unsupported"
+            "fallbackReason": "daemon_handoff_rejected"
         }});
         let _ = verified_pack_serving_path(&fallback, true);
     }

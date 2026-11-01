@@ -159,8 +159,9 @@ description = "Fresh ee CLI client using one already-running warm daemon over th
 
 [comparisons.daemon_pack_10k]
 description = "ADR 0052: ordinary persisted pack through fresh CLI clients, cold in-process versus repeated warm daemon retrieval over one prebuilt neural fixture"
-# Pack handoff currently supports an empty feedback ledger. A nonempty ledger
-# takes an explicit local fallback and cannot satisfy the warm serving-path gate.
+# Pack fixtures default to mixed neutral/helpful/harmful feedback. Empty and
+# neutral controls are explicit --fixture-feedback scenarios reported separately.
+# Any fallback still fails the warm serving-path gate, regardless of latency.
 # The fixture fixes operating profile=portable and pack profile=balanced for
 # indexing, cold clients, and the daemon; host-adaptive budget drift is excluded.
 bench = "daemon_round_trip"

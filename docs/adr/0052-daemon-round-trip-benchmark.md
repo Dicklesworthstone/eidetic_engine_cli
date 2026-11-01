@@ -145,41 +145,39 @@ claim cold-disk measurements. A green dispatch microbenchmark, a socket that
 accepts connections, or a machine that merely holds the model in RSS cannot
 satisfy this gate.
 
-### Feedback-ledger boundary and fallback control
+### 2026-11-01 amendment: feedback-aware handoff and qualification
 
-The pack acceleration fixture has **zero feedback events**, asserted during
-setup and recorded as `fixture.feedbackEvents: 0` in its result. This is a
-material scope limit: the current pack handoff can prove freshness only for an
-empty feedback ledger. Workspace generations do not cover every feedback
-mutation, and `(count, max_rowid)` cannot prove that an existing event is
-unchanged. Feedback can alter quality ranking and calibration before the
-daemon truncates its candidate set, so rechecking only returned items would
-not establish canonical parity.
+The v2 pack-search handoff replaces the empty-ledger restriction with a content
+witness for the entire workspace feedback ledger, the calibration input actually
+consumed by retrieval, and the scoring reference time. The client recomputes
+the witness on its pinned source snapshot and retains the source-generation,
+configuration and authority checks. This covers changes before ranking,
+calibration, floor filtering and candidate truncation; comparing row counts or
+only returned candidates would not establish parity. Daemon retrieval remains
+read-only, and the client remains the sole owner of pack persistence.
 
-A nonempty ledger therefore receives
-`daemon_pack_search_feedback_unsupported` before expensive daemon retrieval,
-then runs the canonical in-process pack path. Its public JSON must identify
-`servingPath: in_process_fallback`, `retrievalPath: in_process`, and that
-fallback reason. This avoids executing both complete retrieval paths; it does
-**not** establish daemon acceleration for workspaces with feedback history.
-Such a response must fail the warm benchmark's serving-path assertion even
-when its wall time happens to meet the numerical threshold.
+`--fixture-feedback empty|neutral|mixed` selects the benchmark history; pack
+measurements default to **mixed**. The supplied CLI records one neutral outcome
+and three helpful updates on the planted memory, plus two harmful updates on
+a distractor (the same memory only for a one-memory observation). Setup verifies
+that events were recorded, authorized and applied, with unchanged confidence
+for neutral and directional confidence changes for helpful/harmful outcomes.
+The index is published after these updates and before timing. The report retains
+the actual total in `fixture.feedbackEvents` and per-signal counts, scenario,
+confidence-change count and setup time in `fixture.feedback`. Search's fixture
+retains its empty-ledger baseline.
 
-Use a disposable initialized workspace, a ready daemon bound to it, and an
-existing memory as a manual negative control:
+Run the command above with `--fixture-feedback neutral` or
+`--fixture-feedback empty` for separate controls, and with `mixed` for the
+default qualification. Report each scenario separately: an empty-ledger result
+does not establish the mixed-history result. All scenarios still require
+ordinary persisted packs, 10,000 memories, 21 measured pairs, canonical selected
+content and explicit daemon retrieval with no fallback for the hard gate.
+Changed or unverifiable handoff state retains canonical local fallback with
+`daemon_handoff_rejected`; that response must fail the warm serving-path
+assertion even when its latency happens to meet the numerical threshold.
 
-```bash
-ee --workspace /path/to/disposable/workspace --json outcome MEMORY_ID \
-  --signal neutral --source-id daemon-87-control \
-  --reason 'Daemon handoff fallback control'
-ee --workspace /path/to/disposable/workspace --json pack 'release provenance' \
-  --use-daemon
-```
-
-Neutral feedback creates a ledger entry without changing memory quality. It
-must still produce the explicit fallback above. Verify canonical selected
-content against the same command without `--use-daemon`; do not include this
-case in the accepted warm-acceleration samples. Standard daemon search does
-not use the pack handoff's empty-ledger restriction. Extending pack reuse to
-nonempty ledgers requires a complete freshness witness for mutable feedback
-and calibration, or a handoff before feedback-dependent filtering and ranking.
+This amendment adds executable qualification coverage; it does **not** establish
+a speedup. Native RCH correctness runs and the 10,000-memory at-least-2.0x gate
+remain unverified where the required execution lane is unavailable. The October
+31 investigation's published-release measurements remain historical evidence.
