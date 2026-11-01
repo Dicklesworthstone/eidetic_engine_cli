@@ -1,5 +1,18 @@
 # AGENTS.md — ee (Eidetic Engine CLI)
 
+## Standing Policy: DSR Only — Never GitHub Actions
+
+GitHub Actions must NEVER be used for ANY purpose in this project, including CI,
+tests, builds, releases, publishing, scheduled jobs, and automation. This prohibition
+includes both GitHub-hosted runners and self-hosted runners registered with Actions.
+Use [dsr (Doodlestein Self-Releaser)](https://github.com/Dicklesworthstone/doodlestein_self_releaser)
+directly instead. Do not enable, dispatch, rerun, fund, or rely on Actions, even as
+a fallback. If DSR cannot run a required workload, report the exact blocker rather
+than switching to Actions. Local workflow YAML executed by dsr/act is allowed;
+preserve those definitions and their checks without invoking the GitHub Actions
+service. Historical Actions references below are reference material only, not
+permission to use it. This permanent policy overrides any older Actions guidance.
+
 > Guidelines for AI coding agents working in this Rust codebase.
 
 ---
@@ -167,7 +180,7 @@ Repeat offenders are killed and replaced.
 We only use **Cargo** in this project, NEVER any other package manager.
 
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
-- **Toolchain:** Nightly only. Never stable, beta, or a mixed rustup override. `rust-toolchain.toml` pins `channel = "nightly"`. CI uses `dtolnay/rust-toolchain@nightly`. DSR/release hosts must export `RUSTUP_TOOLCHAIN=nightly` so `rustc` and `cargo` cannot drift onto stable mid-build (that mix is E0514).
+- **Toolchain:** Nightly only. Never stable, beta, or a mixed rustup override. `rust-toolchain.toml` pins `channel = "nightly"`. Local DSR/act recipes may use `dtolnay/rust-toolchain@nightly`; never execute them through GitHub Actions. DSR/release hosts must export `RUSTUP_TOOLCHAIN=nightly` so `rustc` and `cargo` cannot drift onto stable mid-build (that mix is E0514).
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml only (single binary crate with library surface in the same package; not a workspace in phase 0)
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
