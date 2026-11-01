@@ -645,8 +645,8 @@ fn release_failure_scenario_contract_is_complete() -> TestResult {
         .filter_map(|branch| branch.get("code").and_then(Value::as_str))
         .collect();
     ensure(
-        degraded_codes.contains(&"semantic_disabled"),
-        "semantic_disabled branch",
+        degraded_codes.contains(&"embed_model_unavailable"),
+        "observed deterministic hash-fallback branch",
     )?;
     ensure(
         degraded_codes.contains(&"graph_snapshot_stale"),
