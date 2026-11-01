@@ -116,7 +116,7 @@ if [ -z "$guard_source_version" ]; then
 fi
 printf 'ok ee_source_version reads Cargo.toml (%s)\n' "$guard_source_version"
 
-# A binary reporting exactly the source version is accepted.
+# A version-only protocol fixture cannot prove source identity.
 cat >"$GUARD_BIN_DIR/ee-current" <<SH
 #!/bin/sh
 echo "ee $guard_source_version"
@@ -137,15 +137,17 @@ SH
 chmod +x "$GUARD_BIN_DIR/ee-current" "$GUARD_BIN_DIR/ee-stale" "$GUARD_BIN_DIR/ee-mute"
 
 guard_verdict() {
-    if ee_require_current_binary "$1" "guard-test" 2>/dev/null; then
+    local diagnostic
+    diagnostic="$(mktemp "$SCRATCH_ROOT/guard-diagnostic.XXXXXX")"
+    if ee_require_current_binary "$1" "guard-test" 2>"$diagnostic"; then
         printf 'accepted\n'
     else
         printf 'refused\n'
     fi
 }
 
-assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-current")" "accepted" \
-    "current-version binary is accepted (guard is not over-broad)"
+assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-current")" "refused" \
+    "same-version-only fixture is refused without source provenance"
 assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-stale")" "refused" \
     "stale binary is refused (bd-smxdr countermetric)"
 assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-mute")" "refused" \
@@ -153,18 +155,51 @@ assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-mute")" "refused" \
 assert_eq "$(guard_verdict "$GUARD_BIN_DIR/does-not-exist")" "refused" \
     "missing binary is refused"
 
-# Provenance must be printed even on the PASSING path, so a log reader can see
-# which binary produced a verdict. Asserting emptiness would prove nothing.
+# Path/version diagnostics must remain visible on the source-refusal path.
 guard_pass_log="$(ee_require_current_binary "$GUARD_BIN_DIR/ee-current" "guard-test" 2>&1 >/dev/null || true)"
 case "$guard_pass_log" in
     *"ee_binary=$GUARD_BIN_DIR/ee-current"*"binary_version=$guard_source_version"*"source_version=$guard_source_version"*)
-        printf 'ok passing path still records binary path and both versions\n'
+        printf 'ok source-refusal path still records binary path and both versions\n'
         ;;
     *)
-        printf 'FAIL passing path did not record provenance\nactual: %s\n' "$guard_pass_log" >&2
+        printf 'FAIL source-refusal path did not record provenance\nactual: %s\n' "$guard_pass_log" >&2
         exit 1
         ;;
 esac
+
+# Genuine-artifact controls are opt-in because this shell-only suite must not
+# compile locally. The caller supplies an independently exported source tree
+# and its commit; neither expectation is read from the executable under test.
+if [ -n "${EE_IDENTITY_TEST_MATCHING_BIN:-}" ]; then
+    : "${EE_IDENTITY_TEST_SOURCE_ROOT:?supply the matching committed source export}"
+    : "${EE_IDENTITY_TEST_SOURCE_COMMIT:?supply the independently known export commit}"
+    : "${EE_IDENTITY_TEST_STALE_SOURCE_ROOT:?supply the newer committed source export}"
+    : "${EE_IDENTITY_TEST_STALE_SOURCE_COMMIT:?supply its independently known commit}"
+    (
+        REPO_ROOT="$EE_IDENTITY_TEST_SOURCE_ROOT"
+        export EE_VERIFICATION_SOURCE_COMMIT="$EE_IDENTITY_TEST_SOURCE_COMMIT"
+        ee_require_current_binary "$EE_IDENTITY_TEST_MATCHING_BIN" real-matching-source
+        printf 'ok genuine matching source binary is accepted\n'
+        # The same executable and semver, a different independently expected
+        # commit: a semver-only guard fails this control.
+        REPO_ROOT="$EE_IDENTITY_TEST_STALE_SOURCE_ROOT"
+        export EE_VERIFICATION_SOURCE_COMMIT="$EE_IDENTITY_TEST_STALE_SOURCE_COMMIT"
+        if ee_require_current_binary "$EE_IDENTITY_TEST_MATCHING_BIN" real-stale-source; then
+            printf 'FAIL same-version stale source was admitted\n' >&2
+            exit 1
+        fi
+        printf 'ok genuine same-version stale source binary is refused\n'
+        REPO_ROOT="$EE_IDENTITY_TEST_SOURCE_ROOT"
+        unset EE_VERIFICATION_SOURCE_COMMIT
+        if ee_require_current_binary "$EE_IDENTITY_TEST_MATCHING_BIN" missing-source-expectation; then
+            printf 'FAIL unknown source expectation was admitted\n' >&2
+            exit 1
+        fi
+        printf 'ok missing independent source identity is refused\n'
+    )
+else
+    printf 'UNMEASURED genuine source-identity controls: supply EE_IDENTITY_TEST_MATCHING_BIN and its independent source export\n'
+fi
 
 # ---------------------------------------------------------------------------
 # bd-udjrq: wrong-PLATFORM guard. The staleness arms above all assume the

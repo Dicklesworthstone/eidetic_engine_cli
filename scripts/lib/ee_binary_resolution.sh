@@ -103,7 +103,7 @@ ee_resolve_binary() {
 # fails, because it carries the authority of a verification stage.
 # ---------------------------------------------------------------------------
 
-# Package version from Cargo.toml -- the authority for "current". Only the
+# Package version from Cargo.toml -- one part of the expected identity. Only the
 # `[package]` version starts at column 0; dependency versions live inside
 # inline tables, so the anchored match cannot pick one up by accident.
 ee_source_version() {
@@ -217,12 +217,72 @@ ee_binary_size() {
 # looks exactly like staleness. The guard would refuse good builds and wedge
 # every gate that calls it.
 #
-# A guard that fails closed on its own happy path is worse than the hole it
-# closes, so the within-version staleness hole stays OPEN and visible in the
-# log line above rather than being closed by a predicate that cannot tell
-# "stale" from "cached". Closing it properly needs build-commit identity
-# stamped into the binary, which is its own piece of work.
+# Build-commit identity is now stamped into the binary. Compare it with the
+# checkout, or the independently supplied committed-export identity. Neither
+# a newer source mtime nor a cached binary's older mtime changes that identity.
 # ---------------------------------------------------------------------------
+ee_require_binary_source_identity() {
+    local binary="${1:?binary path required}"
+    local label="${2:-ee}"
+    python3 - "$REPO_ROOT" "$binary" "$label" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+root, binary, label = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
+
+def refuse(message):
+    print(f"{label}: refusing source identity: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+def git(*args):
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+
+try:
+    top = git("rev-parse", "--show-toplevel")
+    exported = os.environ.get("EE_VERIFICATION_SOURCE_COMMIT", "")
+    if top.returncode == 0 and Path(top.stdout.strip()).resolve() == root:
+        head = git("rev-parse", "--verify", "HEAD^{commit}")
+        if head.returncode != 0:
+            refuse("cannot read the checkout commit")
+        expected = head.stdout.strip()
+        if exported and exported != expected:
+            refuse("export expectation disagrees with the checkout commit")
+        changes = git("diff", "--quiet", "HEAD", "--")
+        if changes.returncode != 0:
+            refuse("checkout has modified tracked inputs or cannot be inspected; verify a committed export")
+    else:
+        # Do not infer from an enclosing worker repository, a binary's answer,
+        # or VERGEN_GIT_SHA (the build stamp under test). RCH supplies this
+        # expectation from the commit it independently materialized.
+        expected = exported
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        refuse("no exact source commit; export with EE_VERIFICATION_SOURCE_COMMIT from the source harness")
+    result = subprocess.run([binary, "version", "--json"], capture_output=True, text=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    if result.returncode != 0:
+        refuse(f"version provenance command exited {result.returncode}")
+    envelope = json.loads(result.stdout)
+    if envelope.get("success") is not True:
+        refuse("version provenance did not report success")
+    data = envelope.get("data", {})
+    source = data.get("source", {})
+    actual = source.get("gitCommit")
+    print(f"{label}: expected_source_commit={expected} binary_source_commit={actual or 'unknown'} "
+          f"binary_source_state={source.get('state', 'unknown')}", file=sys.stderr)
+    if actual != expected:
+        refuse("binary commit does not match the independently expected source commit")
+    if source.get("gitDirty") is not False or source.get("state") != "clean":
+        refuse("binary is dirty or its build state is unknown")
+except (OSError, ValueError, TypeError, AttributeError) as error:
+    refuse(f"cannot establish provenance: {error}")
+PY
+}
+
 ee_require_current_binary() {
     local binary="${1:?ee_require_current_binary: binary path required}"
     local label="${2:-ee}"
@@ -246,11 +306,7 @@ ee_require_current_binary() {
 
     source_version="$(ee_source_version)"
     binary_version="$(ee_binary_version "$binary")"
-    # mtime and size accompany the versions because SEMVER EQUALITY IS NOT
-    # COMMIT IDENTITY: this guard passes for any binary declaring the same
-    # version, however stale within that version. It cannot refuse on that
-    # basis (see the note below), so it must at least leave enough in the log
-    # for a reader to notice. mtime+size are O(1); sha256 is deliberately not
+    # mtime and size are diagnostics, not source identity. sha256 is not
     # printed here even though ee_binary_sha256 exists, because a debug `ee` is
     # ~2 GB and this runs five-plus times per Gate 8.5.
     printf '%s: ee_binary=%s binary_version=%s source_version=%s mtime_epoch=%s size_bytes=%s\n' \
@@ -271,7 +327,7 @@ ee_require_current_binary() {
         return 1
     fi
 
-    return 0
+    ee_require_binary_source_identity "$binary" "$label"
 }
 
 # Hash the candidate binary. Prints the sha256 on stdout, or nothing and a

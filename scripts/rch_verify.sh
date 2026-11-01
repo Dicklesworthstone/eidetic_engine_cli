@@ -3227,6 +3227,11 @@ stamp_committed_tree_build_provenance() {
     commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
     [ -n "$commit" ] || return 0
 
+    # Expected source is independent of the build stamp being checked. Keep it
+    # even when an explicit VERGEN override intentionally builds a negative
+    # provenance control.
+    ENV_OVERRIDES+=("EE_VERIFICATION_SOURCE_COMMIT=$commit")
+
     for override in "${ENV_OVERRIDES[@]+"${ENV_OVERRIDES[@]}"}"; do
         case "$override" in
             VERGEN_GIT_*) return 0 ;;

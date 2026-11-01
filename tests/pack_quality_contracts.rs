@@ -92,8 +92,12 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
     ])?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("eval run --pack-quality failed: {stderr}"));
+        return Err(format!(
+            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
@@ -173,6 +177,17 @@ fn pack_quality_report_arrays_are_deterministically_sorted() -> TestResult {
         "usr_pre_task_brief",
     ])?;
 
+    for (label, output) in [("first", &output1), ("second", &output2)] {
+        if !output.status.success() {
+            return Err(format!(
+                "{label} evaluation failed before deterministic comparison (status {}):\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+    }
+
     let stdout1 =
         String::from_utf8(output1.stdout).map_err(|e| format!("stdout1 not UTF-8: {e}"))?;
     let stdout2 =
@@ -187,10 +202,9 @@ fn pack_quality_report_arrays_are_deterministically_sorted() -> TestResult {
     scrub_pack_quality_report(&mut v2);
 
     if v1 != v2 {
-        return Err(
-            "pack-quality reports differ between identical runs - ordering is not deterministic"
-                .to_string(),
-        );
+        return Err(format!(
+            "pack-quality reports differ between identical runs:\nfirst:\n{v1}\nsecond:\n{v2}"
+        ));
     }
 
     Ok(())
@@ -209,8 +223,12 @@ fn pack_quality_lexical_only_branch_is_reported() -> TestResult {
     ])?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("eval run --pack-quality failed: {stderr}"));
+        return Err(format!(
+            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
@@ -252,8 +270,12 @@ fn pack_quality_artifact_paths_are_reported() -> TestResult {
     ])?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("eval run --pack-quality failed: {stderr}"));
+        return Err(format!(
+            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
@@ -347,9 +369,11 @@ fn pack_quality_from_outcomes_reports_feedback_loop_metrics() -> TestResult {
     ])?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "eval run --pack-quality --from-outcomes failed: {stderr}"
+            "eval run --pack-quality --from-outcomes failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         ));
     }
 

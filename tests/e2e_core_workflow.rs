@@ -2031,6 +2031,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
                 ee::obs::normalize_pack_slo_measurements(&mut value)?,
                 "cache equivalence requires a validated producer SLO measurement",
             )?;
+            ee::obs::normalize_pack_envelope_timing(&mut value)?;
             Ok(value)
         };
     let mut readonly_args = pack_args.to_vec();
@@ -2052,10 +2053,18 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), label)?;
             assert_stderr_empty(output, label)?;
         }
+        let cached_json = stdout_json(&cached_pack)?;
+        let fresh_json = stdout_json(&fresh_readonly_pack)?;
+        let cached_hash = json_str(&cached_json, "/data/pack/hash", "cached pack hash")?;
         ensure_equal(
-            &normalize_pack_elapsed(stdout_json(&cached_pack)?)?,
-            &normalize_pack_elapsed(stdout_json(&fresh_readonly_pack)?)?,
-            "cache hit preserves every fresh read-only field except the three validated producer SLO measurements",
+            &cached_hash,
+            &json_str(&fresh_json, "/data/pack/hash", "fresh pack hash")?,
+            "cache hit preserves the raw canonical pack hash",
+        )?;
+        ensure_equal(
+            &normalize_pack_elapsed(cached_json)?,
+            &normalize_pack_elapsed(fresh_json)?,
+            "cache hit preserves every fresh read-only field outside the registered timing channel",
         )?;
         ensure_equal(
             &pack_database_snapshot()?,

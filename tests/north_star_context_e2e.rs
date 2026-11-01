@@ -502,7 +502,7 @@ fn north_star_5_cleanup_context_warns_about_dangers() -> TestResult {
     for expected in ["git clean -fd", "rm -rf", "WIP commit", "git reset --hard"] {
         ensure(
             stdout.contains(expected),
-            format!("cleanup pack must contain seeded guard {expected:?}"),
+            format!("cleanup pack must contain seeded guard {expected:?}; got:\n{stdout}"),
         )?;
     }
 
