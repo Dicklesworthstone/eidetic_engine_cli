@@ -1282,6 +1282,7 @@ dependencies = [
  "regex-lite",
  "ring",
  "roaring",
+ "rust-stemmers",
  "rustix",
  "serde",
  "serde_json",
