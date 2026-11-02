@@ -444,8 +444,8 @@ fn doctor_only_filters_real_findings_and_preserves_workspace_health() -> TestRes
             .ok_or("missing selected checks")?;
         let names = checks
             .iter()
-            .filter_map(|check| check["name"].as_str())
-            .collect::<Vec<_>>();
+            .map(|check| check["name"].as_str().ok_or("selected check has no name"))
+            .collect::<Result<Vec<_>, _>>()?;
         ensure(
             names == expected,
             "only requested checks are emitted in report order",
