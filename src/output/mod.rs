@@ -6179,6 +6179,60 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
     b.finish()
 }
 
+/// Render explicitly selected checks without unrelated diagnostic sections.
+/// The health verdict remains workspace-wide, even when its failing checks
+/// are outside the requested selection.
+#[must_use]
+pub fn render_doctor_selected_json(report: &DoctorReport, checks: &[&CheckResult]) -> String {
+    let mut b = JsonBuilder::with_capacity(384);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
+    b.field_bool("success", true);
+    b.field_raw("degraded", "[]");
+    b.field_str("fields", "doctor_filtered");
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("mode", "filtered");
+        d.field_str("version", report.version);
+        d.field_str("healthScope", "workspace");
+        d.field_str("posture", report.posture.as_str());
+        d.field_bool("healthy", report.overall_healthy);
+        d.field_str("fullCommand", "ee doctor --full --json");
+        d.field_array_of_objects("checks", checks, |obj, check| {
+            render_doctor_check_json(obj, check, true, true);
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_doctor_selected_human(report: &DoctorReport, checks: &[&CheckResult]) -> String {
+    let mut output = String::from("ee doctor (filtered checks)\n\n");
+    let _ = writeln!(
+        output,
+        "workspace posture: {} (healthy: {})",
+        report.posture.as_str(),
+        report.overall_healthy
+    );
+    for check in checks {
+        let _ = writeln!(
+            output,
+            "  - {} [{}]: {} — {}",
+            check.name,
+            check.tier.as_str(),
+            check.severity.as_str(),
+            check.message
+        );
+        if let Some(code) = check.error_code {
+            let _ = writeln!(output, "    code: {}", code.id);
+        }
+        if let Some(repair) = check.repair {
+            let _ = writeln!(output, "    repair: {repair}");
+        }
+    }
+    output.push_str("full: ee doctor --full --json\n");
+    output
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct DoctorAdvisoryCounts {
     total: usize,
@@ -6440,6 +6494,19 @@ pub fn render_doctor_concise_toon(report: &DoctorReport) -> String {
 /// Render a doctor report as a deterministic Mermaid diagram.
 #[must_use]
 pub fn render_doctor_mermaid(report: &DoctorReport) -> String {
+    render_doctor_mermaid_checks(report, report.checks.iter())
+}
+
+#[must_use]
+pub fn render_doctor_selected_mermaid(report: &DoctorReport, checks: &[&CheckResult]) -> String {
+    let diagram = render_doctor_mermaid_checks(report, checks.iter().copied());
+    format!("%% Displayed checks are filtered; health covers the workspace.\n{diagram}")
+}
+
+fn render_doctor_mermaid_checks<'a>(
+    report: &DoctorReport,
+    checks: impl Iterator<Item = &'a CheckResult>,
+) -> String {
     let mut output = String::from("flowchart TD\n");
     let summary = if report.overall_healthy {
         "ee doctor: healthy"
@@ -6451,7 +6518,7 @@ pub fn render_doctor_mermaid(report: &DoctorReport) -> String {
         escape_mermaid_label(summary)
     ));
 
-    for (index, check) in report.checks.iter().enumerate() {
+    for (index, check) in checks.enumerate() {
         let node_id = format!("check{}", index + 1);
         let label = format!("{}: {}", check.name, check.severity.as_str());
         output.push_str(&format!(

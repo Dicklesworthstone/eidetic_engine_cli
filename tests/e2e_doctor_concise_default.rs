@@ -366,6 +366,196 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
     )
 }
 
+// bd-nj49t: exercise actual findings from a fresh workspace, not canned
+// report JSON. Keep every command's complete output for failed-run diagnosis.
+#[test]
+fn doctor_only_filters_real_findings_and_preserves_workspace_health() -> TestResult {
+    let root = tempfile::Builder::new()
+        .prefix("ee-doctor-only-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_str().ok_or("workspace path must be UTF-8")?;
+    log_event("workspace", "doctor_only", json!({"artifacts": root}));
+    let run = |label: &str, args: &[&str]| -> Result<Output, String> {
+        let output = run_isolated(label, &root, args)?;
+        for (suffix, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+            std::fs::write(root.join(format!("{label}.{suffix}")), bytes)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(output)
+    };
+    let baseline = run(
+        "unfiltered",
+        &["--workspace", workspace_arg, "doctor", "--full", "--json"],
+    )?;
+    ensure(
+        baseline.status.success(),
+        "unfiltered doctor executes",
+        json!({"exit": baseline.status.code()}),
+    )?;
+    let baseline = parse_json("unfiltered", &baseline)?;
+    let full_checks = baseline["data"]["checks"]
+        .as_array()
+        .ok_or("missing full checks")?;
+    ensure(
+        full_checks
+            .iter()
+            .filter(|check| check["severity"] != "ok")
+            .count()
+            >= 2
+            && baseline["data"]["healthy"] == false,
+        "uninitialized workspace has at least two actual findings",
+        json!({"data": baseline["data"]}),
+    )?;
+    let database_code = check_by_name(&baseline, "database")
+        .and_then(|check| check["errorCode"].as_str())
+        .ok_or("database finding must expose its error code")?;
+    for (label, selectors, expected) in [
+        ("workspace", vec!["workspace"], vec!["workspace"]),
+        ("healthy_runtime", vec!["runtime"], vec!["runtime"]),
+        (
+            "advisory",
+            vec!["reranker_posture"],
+            vec!["reranker_posture"],
+        ),
+        (
+            "repeated",
+            vec!["database", "workspace", "workspace"],
+            vec!["workspace", "database"],
+        ),
+        ("error_code", vec![database_code], vec!["database"]),
+    ] {
+        let mut args = vec!["--workspace", workspace_arg, "doctor", "--json"];
+        for selector in selectors {
+            args.extend(["--only", selector]);
+        }
+        let output = run(label, &args)?;
+        ensure(
+            output.status.success() && output.stderr.is_empty(),
+            "filtered doctor executes cleanly",
+            json!({"case": label, "exit": output.status.code()}),
+        )?;
+        let value = parse_json(label, &output)?;
+        let checks = value["data"]["checks"]
+            .as_array()
+            .ok_or("missing selected checks")?;
+        let names = checks
+            .iter()
+            .filter_map(|check| check["name"].as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            names == expected,
+            "only requested checks are emitted in report order",
+            json!({"case": label, "actual": names, "expected": expected}),
+        )?;
+        ensure(
+            value["schema"] == "ee.response.v2"
+                && value["success"] == true
+                && value["data"]["mode"] == "filtered"
+                && value["data"]["healthScope"] == "workspace"
+                && value["data"]["healthy"] == baseline["data"]["healthy"]
+                && value["data"]["posture"] == baseline["data"]["posture"],
+            "selection never hides overall workspace failure",
+            json!({"case": label, "data": value["data"]}),
+        )?;
+        for omitted in [
+            "meshAutoEnrollment",
+            "rchWorkerPressure",
+            "actionable",
+            "advisories",
+            "coreChecks",
+        ] {
+            ensure(
+                value["data"].get(omitted).is_none(),
+                "no unfiltered diagnostic sections",
+                json!({"field": omitted}),
+            )?;
+        }
+        if label == "healthy_runtime" {
+            ensure(
+                checks[0]["severity"] == "ok",
+                "healthy selected check is shown despite unhealthy workspace",
+                json!({"checks": checks}),
+            )?;
+        }
+    }
+    for (label, args) in [
+        ("unknown", vec!["--only", "unknown-doctor-check"]),
+        (
+            "mixed_unknown",
+            vec!["--only", "runtime", "--only", "unknown-doctor-check"],
+        ),
+    ] {
+        let mut command = vec!["--workspace", workspace_arg, "doctor", "--json"];
+        command.extend(args);
+        let output = run(label, &command)?;
+        let value = parse_json(label, &output)?;
+        ensure(
+            output.status.code() == Some(1)
+                && value["schema"] == "ee.error.v2"
+                && value["error"]["code"] == "usage"
+                && value.get("data").is_none(),
+            "unknown selector is a usage error without partial report",
+            json!({"case": label, "exit": output.status.code(), "response": value}),
+        )?;
+    }
+    for format in ["human", "markdown", "toon", "mermaid"] {
+        let output = run(
+            format,
+            &[
+                "--workspace",
+                workspace_arg,
+                "doctor",
+                "--only",
+                "workspace",
+                "--format",
+                format,
+            ],
+        )?;
+        ensure(
+            output.status.success(),
+            "filtered output format executes",
+            json!({"format": format, "exit": output.status.code()}),
+        )?;
+        let text = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+        if format == "toon" {
+            let decoded = toon::try_decode(&text, None).map_err(|error| error.to_string())?;
+            let value = Value::from(decoded);
+            ensure(
+                value["data"]["checks"]
+                    .as_array()
+                    .is_some_and(|checks| checks.len() == 1 && checks[0]["name"] == "workspace"),
+                "TOON carries only the selected finding",
+                json!({"data": value["data"]}),
+            )?;
+        } else if format == "mermaid" {
+            ensure(
+                text.contains("workspace: warning")
+                    && !text.contains("database:")
+                    && text
+                        .lines()
+                        .filter(|line| line.contains(" --> check"))
+                        .count()
+                        == 1,
+                "Mermaid shows only the selected finding",
+                json!({"text": text}),
+            )?;
+        } else {
+            ensure(
+                text.contains("workspace [core]: warning")
+                    && text.contains("workspace posture:")
+                    && text.lines().filter(|line| line.starts_with("  - ")).count() == 1,
+                "human report shows only the selected finding and labels health scope",
+                json!({"text": text}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution() -> TestResult {
     let env_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;

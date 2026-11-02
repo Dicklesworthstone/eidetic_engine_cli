@@ -35,7 +35,7 @@ use crate::mesh::repair_action_graph::{
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, SingleFlightPostureReport, TrustClass,
+    DomainError, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, SingleFlightPostureReport, TrustClass,
 };
 use crate::search::lexical_ram_tier::{
     LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
@@ -227,6 +227,10 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
+    fn matches_selector(&self, selector: &str) -> bool {
+        self.name == selector || self.error_code.is_some_and(|code| code.id == selector)
+    }
+
     #[must_use]
     pub fn ok(name: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -308,6 +312,49 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
+    /// Select report checks by stable name or an error code present in this
+    /// report. Selection preserves report order and never changes workspace
+    /// health: hiding a failing check must not turn the overall verdict green.
+    pub fn select_checks(&self, selectors: &[String]) -> Result<Vec<&CheckResult>, DomainError> {
+        let selectors = selectors
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let unknown = selectors
+            .iter()
+            .copied()
+            .filter(|selector| {
+                !self
+                    .checks
+                    .iter()
+                    .any(|check| check.matches_selector(selector))
+            })
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(DomainError::Usage {
+                message: format!("Unknown doctor --only selector(s): {}", unknown.join(", ")),
+                repair: Some(format!(
+                    "Use a check name or an errorCode from ee doctor --full --json. Available checks: {}",
+                    self.checks
+                        .iter()
+                        .map(|check| check.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            });
+        }
+        Ok(self
+            .checks
+            .iter()
+            .filter(|check| {
+                selectors.is_empty()
+                    || selectors
+                        .iter()
+                        .any(|selector| check.matches_selector(selector))
+            })
+            .collect())
+    }
+
     /// Run all health checks and return a report.
     #[must_use]
     pub fn gather() -> Self {
@@ -6360,6 +6407,84 @@ mod tests {
             true,
             "database message includes canonical database path",
         )
+    }
+
+    #[test]
+    fn doctor_only_selects_names_and_codes_without_changing_health() -> TestResult {
+        let report = DoctorReport {
+            version: "0.18.0",
+            overall_healthy: false,
+            posture: Posture::Blocked,
+            singleflight_posture: singleflight_posture_report(),
+            qos_posture: super::gather_qos_posture(None),
+            rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            verification_posture: VerificationPostureReport::not_inspected(),
+            verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
+            host_calibration: None,
+            flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+                "obs/flight_recorder",
+            )),
+            checks: vec![
+                CheckResult::ok("runtime", "Ready"),
+                CheckResult::error(
+                    "workspace",
+                    "Invalid configuration",
+                    error_codes::CONFIG_INVALID_VALUE,
+                ),
+                CheckResult::warning(
+                    "shard_fanout",
+                    "Invalid shard configuration",
+                    error_codes::CONFIG_INVALID_VALUE,
+                )
+                .advisory(),
+            ],
+        };
+        let names = |selectors: &[&str]| -> Result<Vec<&str>, String> {
+            let selectors = selectors
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            report
+                .select_checks(&selectors)
+                .map(|checks| checks.iter().map(|check| check.name).collect())
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(names(&["runtime"])?, vec!["runtime"]);
+        assert_eq!(names(&["shard_fanout"])?, vec!["shard_fanout"]);
+        assert_eq!(
+            names(&["shard_fanout", "runtime", "runtime"])?,
+            vec!["runtime", "shard_fanout"]
+        );
+        assert_eq!(
+            names(&[error_codes::CONFIG_INVALID_VALUE.id, "workspace"])?,
+            vec!["workspace", "shard_fanout"]
+        );
+        assert_eq!(names(&[])?, vec!["runtime", "workspace", "shard_fanout"]);
+        for selectors in [vec!["missing"], vec!["runtime", "missing"], vec![""]] {
+            let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let error = report
+                .select_checks(&selectors)
+                .expect_err("unknown selector must fail atomically");
+            assert_eq!(error.exit_code(), crate::models::ProcessExitCode::Usage);
+            assert!(
+                error
+                    .repair()
+                    .is_some_and(|repair| repair.contains("ee doctor --full --json"))
+            );
+        }
+        assert_eq!(report.posture, Posture::Blocked);
+        assert!(!report.overall_healthy);
+        assert_eq!(report.checks.len(), 3);
+        let mut empty = report.clone();
+        empty.checks.clear();
+        assert!(
+            empty
+                .select_checks(&[])
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(empty.select_checks(&["runtime".to_owned()]).is_err());
+        Ok(())
     }
 
     #[test]

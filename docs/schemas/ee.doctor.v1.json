@@ -13,25 +13,37 @@
     "degraded": { "type": "array", "items": { "type": "object" } },
     "data": {
       "type": "object",
-      "required": [
-        "command",
-        "version",
-        "posture",
-        "healthy",
-        "singleFlight",
-        "flightRecorder",
-        "qos",
-        "rchWorkerPressure",
-        "verificationPosture",
-        "verificationLedger",
-        "hostCalibration",
-        "meshAutoEnrollment",
-        "advisories",
-        "checks"
-      ],
+      "required": ["command", "version", "posture", "healthy", "checks"],
+      "if": {
+        "required": ["mode"],
+        "properties": { "mode": { "const": "filtered" } }
+      },
+      "then": {
+        "required": ["healthScope", "fullCommand"]
+      },
+      "else": {
+        "required": [
+          "singleFlight",
+          "flightRecorder",
+          "qos",
+          "rchWorkerPressure",
+          "verificationPosture",
+          "verificationLedger",
+          "hostCalibration",
+          "meshAutoEnrollment",
+          "advisories"
+        ]
+      },
       "additionalProperties": false,
       "properties": {
         "command": { "type": "string", "const": "doctor" },
+        "mode": { "type": "string", "const": "filtered" },
+        "healthScope": {
+          "type": "string",
+          "const": "workspace",
+          "description": "Health remains workspace-wide; --only filters displayed checks, not diagnostics or the overall verdict."
+        },
+        "fullCommand": { "type": "string", "const": "ee doctor --full --json" },
         "version": { "type": "string" },
         "posture": { "type": "string" },
         "healthy": { "type": "boolean" },

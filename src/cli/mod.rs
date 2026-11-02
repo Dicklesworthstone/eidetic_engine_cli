@@ -9950,25 +9950,13 @@ pub struct DoctorArgs {
     )]
     pub full: bool,
 
-    /// Run only the named failure-mode detector (FM-style stable code,
-    /// e.g. `state_files_orphaned_sock`, `workspace_config_malformed_toml`).
-    /// May be repeated to filter to a subset. Mutually exclusive with
-    /// the report-only modes.
-    ///
-    /// NOT HONORED YET: the value is parsed and nothing reads it, so the
-    /// report you get back is the UNFILTERED one. Tracked by bd-nj49t, which
-    /// owns the choice between implementing the filter and rejecting the flag.
-    ///
-    /// This note used to defer to "the per-FM detectors that compose with
-    /// bd-tu4s8". That bead has since CLOSED, so the sentence told a reader who
-    /// checked it that the wiring had landed. It had not — `DoctorArgs::only`
-    /// has no reader anywhere in the tree. Pointing a deferral at a bead that
-    /// can close without the deferred work being done is how a stale promise
-    /// outlives its cause, so this one names the bead that owns the decision
-    /// instead.
+    /// Show only checks matching a name (e.g. `workspace`, `database`) or
+    /// an errorCode from `ee doctor --full --json`. Repeat to select several;
+    /// unknown selectors are usage errors. This filters the report, not the
+    /// diagnostic work. The overall health verdict still covers the workspace.
     #[arg(
         long = "only",
-        value_name = "FM_CODE",
+        value_name = "CHECK_OR_CODE",
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "full",
         ],
@@ -14519,6 +14507,39 @@ where
                 };
             }
             let report = DoctorReport::gather_for_workspace(&workspace);
+            if !args.only.is_empty() {
+                let checks = match report.select_checks(&args.only) {
+                    Ok(checks) => checks,
+                    Err(error) => {
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+                    }
+                };
+                if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+                    return write_stdout(
+                        stdout,
+                        &(output::render_doctor_selected_mermaid(&report, &checks) + "\n"),
+                    );
+                }
+                return match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                        stdout,
+                        &output::render_doctor_selected_human(&report, &checks),
+                    ),
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&output::render_doctor_selected_json(
+                            &report, &checks,
+                        )) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_doctor_selected_json(&report, &checks) + "\n"),
+                    ),
+                };
+            }
             let profile = if args.full && !cli.fields_explicit {
                 output::FieldProfile::Full
             } else {
@@ -84138,25 +84159,15 @@ mod tests {
 
     #[test]
     fn parser_accepts_doctor_only_repeated() -> TestResult {
-        let cli = Cli::try_parse_from([
-            "ee",
-            "doctor",
-            "--only",
-            "state_files_orphaned_sock",
-            "--only",
-            "workspace_config_malformed_toml",
-        ])
-        .map_err(|error| format!("parse --only failed: {:?}", error.kind()))?;
+        let cli = Cli::try_parse_from(["ee", "doctor", "--only", "database", "--only", "EE-E200"])
+            .map_err(|error| format!("parse --only failed: {:?}", error.kind()))?;
         let Some(Command::Doctor(args)) = cli.command else {
             return Err(format!("expected doctor command, got {:?}", cli.command));
         };
         ensure_equal(
             &args.only,
-            &vec![
-                "state_files_orphaned_sock".to_string(),
-                "workspace_config_malformed_toml".to_string(),
-            ],
-            "doctor --only collects repeated FM codes",
+            &vec!["database".to_string(), "EE-E200".to_string()],
+            "doctor --only collects repeated check names and error codes",
         )
     }
 
