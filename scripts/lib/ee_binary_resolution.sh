@@ -224,7 +224,7 @@ ee_binary_size() {
 ee_require_binary_source_identity() {
     local binary="${1:?binary path required}"
     local label="${2:-ee}"
-    python3 - "$REPO_ROOT" "$binary" "$label" <<'PY'
+    python3 - "$REPO_ROOT" "$binary" "$label" "$(ee_source_version)" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -233,13 +233,22 @@ import subprocess
 import sys
 
 root, binary, label = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
+expected_version = sys.argv[4]
+# `git -C` does not override GIT_DIR/GIT_WORK_TREE or an alternate index.
+# Resolve this exact checkout, even when called by a Git hook or wrapper that
+# exported repository-local settings. Keep PATH and ordinary user config.
+git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+git_env["GIT_OPTIONAL_LOCKS"] = "0"
 
 def refuse(message):
     print(f"{label}: refusing source identity: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 def git(*args):
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True,
+        env=git_env, stdin=subprocess.DEVNULL, timeout=10,
+    )
 
 try:
     top = git("rev-parse", "--show-toplevel")
@@ -261,7 +270,10 @@ try:
         expected = exported
     if not re.fullmatch(r"[0-9a-f]{40}", expected):
         refuse("no exact source commit; export with EE_VERIFICATION_SOURCE_COMMIT from the source harness")
-    result = subprocess.run([binary, "version", "--json"], capture_output=True, text=True)
+    result = subprocess.run(
+        [binary, "version", "--json"], capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=10,
+    )
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="")
     if result.returncode != 0:
@@ -270,6 +282,12 @@ try:
     if envelope.get("success") is not True:
         refuse("version provenance did not report success")
     data = envelope.get("data", {})
+    if (envelope.get("schema") != "ee.response.v2"
+            or data.get("schema") != "ee.version.provenance.v1"
+            or data.get("command") != "version"):
+        refuse("response is not the version provenance contract")
+    if not expected_version or data.get("version") != expected_version:
+        refuse("JSON provenance version does not match Cargo.toml")
     source = data.get("source", {})
     actual = source.get("gitCommit")
     print(f"{label}: expected_source_commit={expected} binary_source_commit={actual or 'unknown'} "
@@ -278,6 +296,11 @@ try:
         refuse("binary commit does not match the independently expected source commit")
     if source.get("gitDirty") is not False or source.get("state") != "clean":
         refuse("binary is dirty or its build state is unknown")
+except subprocess.TimeoutExpired as error:
+    if error.stderr:
+        diagnostic = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr
+        print(diagnostic, file=sys.stderr, end="")
+    refuse("source provenance inspection timed out after 10 seconds; inspect the Git checkout and binary")
 except (OSError, ValueError, TypeError, AttributeError) as error:
     refuse(f"cannot establish provenance: {error}")
 PY

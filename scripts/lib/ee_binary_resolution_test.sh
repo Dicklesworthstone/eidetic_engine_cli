@@ -167,6 +167,121 @@ case "$guard_pass_log" in
         ;;
 esac
 
+# These are protocol unit tests, not evidence that a real candidate was built.
+# Real Git repositories make the independent-source side of the check genuine;
+# the executable below deliberately serves controlled malformed responses.
+python3 - "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh" "$SCRATCH_ROOT" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+library, scratch = Path(sys.argv[1]), Path(sys.argv[2])
+fixture = scratch / "source-identity"
+fixture.mkdir()
+clean_env = dict(os.environ)
+for key in list(clean_env):
+    if key.startswith("GIT_") or key.startswith("EE_VERIFICATION_"):
+        clean_env.pop(key)
+
+def git(root, *args):
+    result = subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=Identity Test", "-c",
+         "user.email=identity@example.invalid", "-c", "commit.gpgsign=false", *args],
+        env=clean_env, capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
+
+def repository(name):
+    root = fixture / name
+    root.mkdir()
+    (root / "Cargo.toml").write_text('[package]\nname = "ee"\nversion = "0.18.0"\n')
+    git(root, "init", "--initial-branch=main")
+    git(root, "add", "--", "Cargo.toml")
+    git(root, "commit", "-m", name)
+    return root, git(root, "rev-parse", "HEAD")
+
+root, expected = repository("candidate")
+foreign_root, foreign_commit = repository("foreign")
+payload_path = fixture / "payload.json"
+binary = fixture / "protocol-fixture"
+binary.write_text('#!/bin/sh\ncat "$EE_SOURCE_IDENTITY_UNIT_PAYLOAD"\n')
+binary.chmod(0o755)
+
+def envelope(commit=expected):
+    return {
+        "schema": "ee.response.v2", "success": True,
+        "data": {
+            "command": "version", "schema": "ee.version.provenance.v1",
+            "version": "0.18.0",
+            "source": {"gitCommit": commit, "gitDirty": False, "state": "clean"},
+        },
+    }
+
+def check(label, payload, accepted, *, env_extra=None, repo=root, executable=binary, needle=None):
+    payload_path.write_text(json.dumps(payload))
+    env = dict(clean_env, EE_SOURCE_IDENTITY_UNIT_PAYLOAD=str(payload_path))
+    env.update(env_extra or {})
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; REPO_ROOT="$2"; ee_require_binary_source_identity "$3" unit',
+         "identity-unit", str(library), str(repo), str(executable)],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    (fixture / f"{label}.stdout").write_text(result.stdout)
+    (fixture / f"{label}.stderr").write_text(result.stderr)
+    if (result.returncode == 0) != accepted or (needle and needle not in result.stderr):
+        raise SystemExit(f"FAIL {label}: rc={result.returncode}\n{result.stdout}\n{result.stderr}")
+    print(f"ok source identity unit: {label}")
+
+check("clean-match", envelope(), True)
+check("stale-commit", envelope(foreign_commit), False)
+# GIT_DIR plus GIT_WORK_TREE can make `git -C candidate` report the foreign
+# HEAD and still compare identical file bytes as clean. Ignore that override.
+foreign_env = {"GIT_DIR": str(foreign_root / ".git"), "GIT_WORK_TREE": str(root)}
+check("foreign-git-cannot-nominate-source", envelope(foreign_commit), False, env_extra=foreign_env)
+check("matching-source-survives-foreign-git-env", envelope(), True, env_extra=foreign_env)
+check("conflicting-export", envelope(), False,
+      env_extra={"EE_VERIFICATION_SOURCE_COMMIT": foreign_commit})
+export = root / "export"
+export.mkdir()
+(export / "Cargo.toml").write_bytes((root / "Cargo.toml").read_bytes())
+check("enclosing-repository-is-not-export-identity", envelope(), False, repo=export)
+check("independent-export", envelope(), True, repo=export,
+      env_extra={"EE_VERIFICATION_SOURCE_COMMIT": expected})
+check("malformed-expected-commit", envelope(), False, repo=export,
+      env_extra={"EE_VERIFICATION_SOURCE_COMMIT": "short-sha"})
+for label, key, value in [
+    ("null-commit", "gitCommit", None),
+    ("dirty-build", "gitDirty", True),
+    ("string-dirty-flag", "gitDirty", "false"),
+    ("unknown-state", "state", "unknown"),
+]:
+    payload = envelope()
+    payload["data"]["source"][key] = value
+    check(label, payload, False)
+for label, key, value in [
+    ("wrong-command", "command", "search"),
+    ("wrong-version-schema", "schema", "ee.search.v1"),
+    ("conflicting-json-version", "version", "0.14.2"),
+]:
+    payload = envelope()
+    payload["data"][key] = value
+    check(label, payload, False)
+for label, payload in [("null-envelope", None), ("array-envelope", []),
+                       ("null-data", {"success": True, "data": None}),
+                       ("unsuccessful-envelope", {**envelope(), "success": False})]:
+    check(label, payload, False)
+hang = fixture / "hanging-provenance"
+hang.write_text('#!/bin/sh\nexec sleep 30\n')
+hang.chmod(0o755)
+check("bounded-provenance", envelope(), False, executable=hang, needle="timed out")
+os.utime(root / "Cargo.toml", None)
+check("fresh-source-mtime", envelope(), True)
+(root / "Cargo.toml").write_text('[package]\nname = "changed"\nversion = "0.18.0"\n')
+check("modified-tracked-input", envelope(), False)
+PY
+
 # Genuine-artifact controls are opt-in because this shell-only suite must not
 # compile locally. The caller supplies an independently exported source tree
 # and its commit; neither expectation is read from the executable under test.
