@@ -1302,7 +1302,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             && result
                 .pointer("/method_schemas/ee.daemon.pack_search/response")
                 .and_then(serde_json::Value::as_str)
-                == Some("ee.daemon.pack_search.response.v2"),
+                == Some("ee.daemon.pack_search.response.v3"),
         format!(
             "pack search capability must retain its workspace authorization and typed schemas: {result}"
         ),
@@ -2536,13 +2536,19 @@ fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes(
     )?;
     ensure(
         empty.get("schema").and_then(serde_json::Value::as_str)
-            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2)
+            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3)
             && empty
                 .pointer("/handoff/report/results")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|hits| !hits.is_empty()),
         format!("empty feedback ledger must still allow real daemon retrieval: {empty}"),
     )?;
+    for arm in ["lexical", "semantic", "graph"] {
+        ensure(
+            empty["handoff"]["fusion_weights"][arm].as_f64().is_some(),
+            format!("v3 pack handoff must carry the consumed {arm} fusion weight"),
+        )?;
+    }
 
     let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
     let workspace_id = stable_test_workspace_id(&workspace)?;
@@ -2603,8 +2609,8 @@ fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes(
                 "feedback handoff",
             )?;
             ensure(
-                result["schema"] == ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
-                "feedback witness requires the v2 handoff",
+                result["schema"] == ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+                "feedback and retrieval configuration witnesses require the v3 handoff",
             )?;
             let hits: Vec<SearchHit> =
                 serde_json::from_value(result["handoff"]["report"]["results"].clone())

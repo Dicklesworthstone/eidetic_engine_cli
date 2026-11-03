@@ -50635,6 +50635,23 @@ fn daemon_search_fallback_degradation(reason: DaemonSearchFallbackReason) -> Sea
 fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFallbackReason> {
     [
         (
+            matches!(args.memory_scope, MemoryScope::SelfOnly | MemoryScope::Team),
+            // Scope admission still resolves EE_AGENT_NAME in the executing
+            // process. The request's agent_id is an attribution field, not a
+            // replacement for that caller-owned scope context.
+            DaemonSearchFallbackReason::UnsupportedCliOption(
+                "agent-specific memory scopes remain in-process",
+            ),
+        ),
+        (
+            args.full && !args.explain_performance,
+            // The current daemon response contains already-truncated bodies;
+            // the client cannot reconstruct --full from those renderings.
+            DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--full requires canonical in-process rendering",
+            ),
+        ),
+        (
             args.recalibrate_now,
             DaemonSearchFallbackReason::UnsupportedCliOption(
                 "--recalibrate-now remains in-process",
@@ -50815,7 +50832,7 @@ fn search_daemon_response_before(
 ) -> Result<serde_json::Value, DaemonSearchFallbackReason> {
     use crate::daemon::protocol::DaemonRequest;
     use crate::daemon::server::{
-        ClientError, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        ClientError, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
         DaemonSearchParams, METHOD_CAPABILITIES, METHOD_PACK_SEARCH, METHOD_SEARCH,
         client_round_trip_before,
     };
@@ -50848,7 +50865,7 @@ fn search_daemon_response_before(
             capabilities,
             METHOD_PACK_SEARCH,
             DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
         )?;
     } else {
         validate_daemon_search_capabilities(capabilities)?;
@@ -51009,7 +51026,7 @@ fn pack_search_via_daemon(
         )
         .and_then(|value| {
             if value.get("schema").and_then(serde_json::Value::as_str)
-                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2)
+                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3)
                 || value.as_object().is_none_or(|object| object.len() != 2)
             {
                 return Err(DaemonSearchFallbackReason::SearchResponseDrift);
@@ -95274,6 +95291,114 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_agent_scopes_fall_back_before_contacting_a_peer() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let missing_socket = temp.path().join("missing-daemon.sock");
+        for scope in ["self", "team"] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "search",
+                "release",
+                "--use-daemon",
+                "--memory-scope",
+                scope,
+                "--daemon-socket",
+                missing_socket.to_str().ok_or("UTF-8 socket")?,
+            ])
+            .map_err(|error| error.to_string())?;
+            let Some(Command::Search(args)) = parsed.command else {
+                return Err("expected Search command".to_owned());
+            };
+            let options = SearchOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+                query: "release".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Default,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: None,
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::Hybrid,
+                strict_source_mode: false,
+                memory_scope: args.memory_scope,
+                strict_scope: false,
+            };
+            let reason = search_via_daemon(&args, &options, None)
+                .expect_err("caller-specific scopes must stay in the caller process");
+            ensure_equal(
+                &reason,
+                &DaemonSearchFallbackReason::UnsupportedCliOption(
+                    "agent-specific memory scopes remain in-process",
+                ),
+                "scope refusal must precede even the missing-socket probe",
+            )?;
+            let mut response = serde_json::json!({"data": {}});
+            crate::models::RequestServingMetadata::fallback(reason.code())
+                .apply_to_envelope(&mut response);
+            ensure_equal(
+                &response["data"]["fallbackReason"],
+                &serde_json::json!("unsupported_cli_option"),
+                "scope fallback remains explicit",
+            )?;
+        }
+        for scope in ["swarm", "workspace", "verified", "global"] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "search",
+                "release",
+                "--use-daemon",
+                "--memory-scope",
+                scope,
+            ])
+            .map_err(|error| error.to_string())?;
+            let Some(Command::Search(args)) = parsed.command else {
+                return Err("expected Search command".to_owned());
+            };
+            ensure_equal(
+                &daemon_search_unsupported_reason(&args),
+                &None,
+                "workspace-owned scopes retain daemon eligibility",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_search_full_body_requires_canonical_local_rendering() -> TestResult {
+        for (flags, expected) in [
+            (vec![], None),
+            (
+                vec!["--full"],
+                Some(DaemonSearchFallbackReason::UnsupportedCliOption(
+                    "--full requires canonical in-process rendering",
+                )),
+            ),
+            // Performance output contains no result bodies on either path.
+            (vec!["--full", "--explain-performance"], None),
+        ] {
+            let mut argv = vec!["ee", "search", "release", "--use-daemon"];
+            argv.extend(flags);
+            let parsed = Cli::try_parse_from(argv).map_err(|error| error.to_string())?;
+            let Some(Command::Search(args)) = parsed.command else {
+                return Err("expected Search command".to_owned());
+            };
+            ensure_equal(
+                &daemon_search_unsupported_reason(&args),
+                &expected,
+                "full bodies require local rendering; ordinary previews remain warm-eligible",
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn daemon_search_performance_preserves_reuse_and_all_timing_categories() -> TestResult {
         let renderings = crate::daemon::server::DaemonSearchRenderings {
@@ -96014,29 +96139,30 @@ mod tests {
     }
 
     #[test]
-    fn daemon_pack_capability_requires_feedback_witness_version_and_workspace_authority() {
+    fn daemon_pack_capability_requires_retrieval_witness_version_and_workspace_authority() {
         use crate::daemon::protocol::{
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            METHOD_PACK_SEARCH,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+            DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_PACK_SEARCH,
         };
         let mut capabilities = daemon_search_capabilities_fixture();
         capabilities["methods"] = serde_json::json!([METHOD_PACK_SEARCH]);
         capabilities["authorization"][METHOD_PACK_SEARCH] = serde_json::json!("same_uid_workspace");
         capabilities["method_schemas"][METHOD_PACK_SEARCH] = serde_json::json!({
             "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+            "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
         });
         let validate = |value: &serde_json::Value| {
             super::validate_daemon_method_capabilities(
                 value,
                 METHOD_PACK_SEARCH,
                 DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
             )
         };
         assert_eq!(validate(&capabilities), Ok(()));
         for incompatible in [
             "ee.daemon.pack_search.response.v1",
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
             "ee.daemon.pack_search.response.v99",
         ] {
             let mut legacy = capabilities.clone();

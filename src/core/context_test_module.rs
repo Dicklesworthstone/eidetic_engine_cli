@@ -998,6 +998,49 @@ mod tests {
         ))
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    fn assert_daemon_retry_performance(run: &super::ContextPackPerformanceRun) -> TestResult {
+        let timings = run.performance["data"]["timings"]
+            .as_array()
+            .ok_or("retry performance timings missing")?;
+        let mut spans = BTreeMap::new();
+        for timing in timings {
+            let name = timing["name"].as_str().ok_or("timing name missing")?;
+            let elapsed = timing["elapsedMs"]
+                .as_f64()
+                .ok_or("timing duration missing")?;
+            assert!(
+                spans.insert(name, elapsed).is_none(),
+                "repeated attempts must accumulate the {name} phase rather than duplicate it"
+            );
+        }
+        let span = |name| {
+            spans
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("retry lost the {name} phase"))
+        };
+        let rejected_ms = span("daemonHandoffRejected")?;
+        assert!(rejected_ms >= span("daemonRetrieval")? + span("daemonHandoffValidation")?);
+        assert!(
+            span("total")? >= rejected_ms + span("search")? + span("packPersistence")?,
+            "total must include the rejected attempt and the local retry"
+        );
+        assert_eq!(run.performance["data"]["dbReads"]["dbOpenCount"], 2);
+        assert!(
+            run.performance["data"]["fallbacks"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry["code"] == "daemon_search_fallback"
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("workspace changed"))
+                })),
+            "performance output must explain the rejected daemon handoff"
+        );
+        Ok(())
+    }
+
     // bd-2vq2z.11. The reserved "What NOT to do" slice admits only candidates
     // filed under PackSection::Failures, and the section comes from the
     // level/kind taxonomy. A procedural anti-pattern -- the natural way to store
@@ -1230,6 +1273,7 @@ mod tests {
         };
         let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
             .map_err(|error| error.to_string())?;
+        assert_daemon_retry_performance(&run)?;
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -1342,6 +1386,7 @@ mod tests {
         };
         let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
             .map_err(|error| error.to_string())?;
+        assert_daemon_retry_performance(&run)?;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
             run.response
@@ -1389,6 +1434,86 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             1
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_pack_runtime_profile_race_retries_before_persisting() -> TestResult {
+        let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        options.memory_scope = MemoryScope::Workspace;
+        options.persist_pack = true;
+        options.candidate_pool = Some(96);
+        options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let config_path = options.workspace_path.join(".ee/config.toml");
+        std::fs::write(&config_path, "[profile]\nselected = \"workstation\"\n")
+            .map_err(|error| error.to_string())?;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let provider = |search_options: &SearchOptions, _: bool| -> Result<_, SearchDegradation> {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                search_options.limit, 96,
+                "caller captured workstation budgets"
+            );
+            let connection = DbConnection::open_file_read_only(database)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            let generation = connection.get_workspace_generation(&workspace_id).unwrap();
+            std::fs::write(&config_path, "[profile]\nselected = \"constrained\"\n")
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            let handoff = crate::core::search::run_pack_search(search_options)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            assert_eq!(
+                handoff.report.runtime_profile.active_profile,
+                crate::core::profile::OperatingProfile::Constrained
+            );
+            assert!(
+                handoff.snapshot_matches(search_options, &connection),
+                "source and current policy match, but the caller captured different budgets"
+            );
+            assert_eq!(
+                connection.get_workspace_generation(&workspace_id).unwrap(),
+                generation
+            );
+            assert_eq!(connection.count_table_rows("pack_records").unwrap(), 0);
+            assert!(
+                connection
+                    .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                    .unwrap()
+                    .is_empty()
+            );
+            Ok(handoff)
+        };
+        let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
+            .map_err(|error| error.to_string())?;
+        assert_daemon_retry_performance(&run)?;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            run.performance["data"]["profileRuntime"]["activeProfile"],
+            "constrained"
+        );
+        assert!(
+            run.response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory_id)
+        );
+        let connection =
+            DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+        assert_eq!(connection.count_table_rows("pack_records").unwrap(), 1);
+        assert_eq!(
+            connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        options.persist_pack = false;
+        let canonical = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert_eq!(run.response.data.pack.items, canonical.data.pack.items);
+        assert_eq!(connection.count_table_rows("pack_records").unwrap(), 1);
         Ok(())
     }
 

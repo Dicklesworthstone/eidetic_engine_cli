@@ -961,6 +961,121 @@ fn handoff_rejects_new_or_mutated_feedback_and_changed_reference_time() {
 }
 
 #[test]
+fn handoff_rejects_config_only_fusion_changes_with_unchanged_source_and_feedback() {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(1, 1.0, 1.0, Utc::now());
+    fixture.harmful(&memory, 1);
+    let config_path = fixture.root.join(".ee/config.toml");
+    let config = "[memory]\ninclude_global = false\n[search]\nlexical_weight = 0.95\nsemantic_weight = 0.05\n";
+    std::fs::write(&config_path, config).unwrap();
+    let options = fixture.options();
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    assert_eq!(
+        handoff.fusion_weights,
+        resolved_search_fusion_weights(&fixture.root).unwrap()
+    );
+    let generation = fixture
+        .db
+        .get_workspace_generation(&fixture.workspace)
+        .unwrap();
+    let calibration_identity = handoff.snapshot.calibration_input_identity.clone();
+    assert!(calibration_identity.is_some());
+
+    // These same-size edits change ranking without changing any source rows,
+    // feedback bytes or domain-quality policy. File metadata is not a witness.
+    let modified = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+    std::fs::write(
+        &config_path,
+        "[memory]\ninclude_global = false\n[search]\nlexical_weight = 0.05\nsemantic_weight = 0.95\n",
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&config_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(
+        fixture
+            .db
+            .get_workspace_generation(&fixture.workspace)
+            .unwrap(),
+        generation
+    );
+    assert_eq!(
+        search_score_calibration_for_workspace_cached(
+            &fixture.root,
+            options.database_path.as_deref(),
+            Some(&fixture.db),
+        )
+        .input_identity(),
+        calibration_identity
+    );
+    assert_eq!(
+        resolved_search_scoring_config(&fixture.root)
+            .unwrap()
+            .policy_hash(),
+        handoff.quality_scoring_policy
+    );
+    assert!(!handoff.matches_request(&options));
+    assert!(!handoff.snapshot_matches(&options, &fixture.db));
+    let refreshed = run_pack_search(&options).unwrap();
+    assert!(refreshed.snapshot_matches(&options, &fixture.db));
+    assert_ne!(refreshed.fusion_weights, handoff.fusion_weights);
+
+    // An unrelated textual config edit with the same effective values remains
+    // reusable; the handoff binds retrieval settings, not a whole-file mtime.
+    std::fs::write(&config_path, format!("{config}# unrelated comment\n")).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    assert_eq!(fixture.db.count_table_rows("pack_records").unwrap(), 0);
+}
+
+#[test]
+fn handoff_rejects_config_only_rerank_mode_and_top_k_changes() {
+    let fixture = Fixture::new();
+    fixture.memory(1, 1.0, 1.0, Utc::now());
+    let config_path = fixture.root.join(".ee/config.toml");
+    std::fs::write(
+        &config_path,
+        "[memory]\ninclude_global = false\n[search]\nrerank = 'auto'\nrerank_top_k = 17\n",
+    )
+    .unwrap();
+    let options = fixture.options();
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.snapshot_matches(&options, &fixture.db));
+    assert_eq!(
+        handoff.report.rerank_configured_mode,
+        crate::config::SearchRerankMode::Auto
+    );
+    assert_eq!(handoff.report.rerank_configured_top_k, 17);
+    for (mode, top_k) in [("off", 17), ("auto", 19)] {
+        std::fs::write(
+            &config_path,
+            format!("[memory]\ninclude_global = false\n[search]\nrerank = '{mode}'\nrerank_top_k = {top_k}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved_search_fusion_weights(&fixture.root).unwrap(),
+            handoff.fusion_weights
+        );
+        assert_eq!(
+            resolved_search_scoring_config(&fixture.root)
+                .unwrap()
+                .policy_hash(),
+            handoff.quality_scoring_policy
+        );
+        assert!(!handoff.matches_request(&options));
+        assert!(!handoff.snapshot_matches(&options, &fixture.db));
+        assert!(
+            run_pack_search(&options)
+                .unwrap()
+                .snapshot_matches(&options, &fixture.db)
+        );
+    }
+}
+
+#[test]
 fn feedback_handoff_preserves_canonical_quality_order_before_candidate_truncation() {
     let fixture = Fixture::new();
     let now = Utc::now() - chrono::Duration::minutes(1);
@@ -1161,6 +1276,21 @@ fn handoff_rejects_changed_calibration_bytes_and_incompatible_snapshot_contracts
     let handoff = run_pack_search(&options).unwrap();
     assert!(handoff.snapshot_matches(&options, &fixture.db));
     let value = serde_json::to_value(&handoff).unwrap();
+    let mut missing_fusion_witness = value.clone();
+    missing_fusion_witness
+        .as_object_mut()
+        .unwrap()
+        .remove("fusion_weights");
+    assert!(PackSearchHandoff::from_value(missing_fusion_witness).is_err());
+    let mut incomplete_fusion_witness = value.clone();
+    incomplete_fusion_witness["fusion_weights"]
+        .as_object_mut()
+        .unwrap()
+        .remove("semantic");
+    assert!(PackSearchHandoff::from_value(incomplete_fusion_witness).is_err());
+    let mut unknown_fusion_witness = value.clone();
+    unknown_fusion_witness["fusion_weights"]["unrecognized_arm"] = serde_json::json!(0.1);
+    assert!(PackSearchHandoff::from_value(unknown_fusion_witness).is_err());
     let mut old_contract = value.clone();
     old_contract["snapshot"]
         .as_object_mut()

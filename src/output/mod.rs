@@ -3008,6 +3008,8 @@ pub fn render_context_response_json_with_options(
         return context_response_cached_json_with_top_level_degraded(
             cached_json,
             response.serving.as_ref(),
+            &response.data.degraded,
+            options,
         );
     }
 
@@ -3530,6 +3532,8 @@ fn build_pack_evidence_item(obj: &mut JsonBuilder, item: &PackEvidenceItem) {
 fn context_response_cached_json_with_top_level_degraded(
     cached_json: &str,
     serving: Option<&crate::models::RequestServingMetadata>,
+    delivery_degraded: &[ContextResponseDegradation],
+    options: ContextJsonRenderOptions,
 ) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(cached_json) else {
         return cached_json.to_owned();
@@ -3546,6 +3550,48 @@ fn context_response_cached_json_with_top_level_degraded(
             .map(response_degraded_from_data)
             .unwrap_or_else(|| serde_json::json!([]));
         object.insert("degraded".to_string(), degraded);
+    }
+    // A local retry can replay an L2 response and only then learn that the
+    // daemon handoff was rejected. These delivery diagnostics belong beside
+    // the cached result, without re-finalizing its prompt, hash or ledger.
+    // Use the ordinary renderer's filtering and field projection so cached
+    // delivery does not expose internal-only signals or Lean repair hints.
+    let additions = aggregate_context_degraded_with_repair_hints(
+        delivery_degraded.iter().filter(|entry| {
+            options.include_non_affecting_degradations || entry.category().included_by_default()
+        }),
+        options.include_degraded_repair_hints,
+    );
+    if !additions.is_empty() {
+        let mut rendered = JsonBuilder::new();
+        rendered.field_array_of_objects("degraded", &additions, build_aggregated_degradation);
+        if let Ok(rendered) = serde_json::from_str::<serde_json::Value>(&rendered.finish())
+            && let Some(additions) = rendered
+                .get("degraded")
+                .and_then(serde_json::Value::as_array)
+        {
+            let merge = |target: &mut serde_json::Value| {
+                if let Some(entries) = target.as_array_mut() {
+                    for entry in additions {
+                        if !entries.contains(entry) {
+                            entries.push(entry.clone());
+                        }
+                    }
+                }
+            };
+            if let Some(data) = object
+                .get_mut("data")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                merge(
+                    data.entry("degraded")
+                        .or_insert_with(|| serde_json::json!([])),
+                );
+            }
+            if let Some(degraded) = object.get_mut("degraded") {
+                merge(degraded);
+            }
+        }
     }
     if let Some(serving) = serving {
         serving.apply_to_envelope(&mut value);
@@ -23917,6 +23963,150 @@ mod tests {
             &parsed["degraded"][0]["code"].as_str(),
             &Some("template_repair_fixture"),
             "cached context response top-level degraded code",
+        )
+    }
+
+    #[test]
+    fn cached_context_delivery_preserves_pack_and_adds_daemon_fallback() -> TestResult {
+        let mut original = response_with_lexical_fallback_degradation()?;
+        original.data.pack.hash = Some(format!("blake3:{}", blake3::hash(b"cached pack").to_hex()));
+        original.data.finalized_text = Some("Previously finalized canonical prompt.".to_string());
+        let cached_json = render_context_response_json(&original);
+        let before: serde_json::Value =
+            serde_json::from_str(&cached_json).map_err(|error| error.to_string())?;
+        let mut cached =
+            ContextResponse::from_cached_json(original.data.request.clone(), cached_json.clone());
+        let fallback = crate::pack::ContextResponseDegradation::new(
+            "daemon_search_fallback",
+            crate::pack::ContextResponseSeverity::Low,
+            "Warm daemon search unavailable (workspace changed after daemon retrieval); used canonical in-process search.",
+            Some("ee daemon status --workspace . --json".to_string()),
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+        cached.data.degraded.extend([fallback.clone(), fallback]);
+        cached.serving = Some(crate::models::RequestServingMetadata::fallback(
+            "daemon_handoff_rejected",
+        ));
+
+        let rendered = render_context_response_json(&cached);
+        let after: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_top_level_degraded_mirrors_data_degraded(&after, "cached daemon fallback")?;
+        ensure_equal(
+            &after["data"]["pack"],
+            &before["data"]["pack"],
+            "delivery fallback preserves all canonical pack fields",
+        )?;
+        ensure_equal(
+            &degraded_entry_for(&after, "context_lexical_fallback"),
+            &degraded_entry_for(&before, "context_lexical_fallback"),
+            "cached degradation is preserved",
+        )?;
+        let entries = after["data"]["degraded"]
+            .as_array()
+            .ok_or("cached delivery degradations missing")?;
+        ensure_equal(
+            &entries.len(),
+            &2,
+            "one original and one aggregated delivery degradation",
+        )?;
+        let fallback = degraded_entry_for(&after, "daemon_search_fallback")
+            .ok_or("cached delivery lost daemon fallback")?;
+        ensure_equal(
+            &fallback["sources"],
+            &serde_json::json!(["context"]),
+            "rendered fallback sources",
+        )?;
+        ensure_equal(
+            &after["data"]["fallbackReason"],
+            &serde_json::json!("daemon_handoff_rejected"),
+            "current handoff rejection reason",
+        )?;
+        ensure_equal(
+            &after["data"]["servingPath"],
+            &serde_json::json!("in_process_fallback"),
+            "current serving path",
+        )?;
+        ensure_equal(
+            &cached.cached_json,
+            &Some(cached_json),
+            "rendering does not mutate cached source bytes",
+        )?;
+        ensure_equal(
+            &render_context_response_json(&cached),
+            &rendered,
+            "repeated rendering does not accumulate delivery entries",
+        )
+    }
+
+    #[test]
+    fn cached_context_delivery_uses_normal_degradation_filters_and_repair_options() -> TestResult {
+        let original = context_response_fixture()?;
+        let options = lean_render_options();
+        let cached_json = render_context_response_json_with_options(&original, options);
+        let before: serde_json::Value =
+            serde_json::from_str(&cached_json).map_err(|error| error.to_string())?;
+        let mut cached = ContextResponse::from_cached_json(original.data.request, cached_json);
+        for (code, message) in [
+            ("daemon_search_fallback", "daemon handoff rejected"),
+            ("search_index_stale", "non-affecting workspace state"),
+        ] {
+            cached.data.degraded.push(
+                crate::pack::ContextResponseDegradation::new(
+                    code,
+                    crate::pack::ContextResponseSeverity::Low,
+                    message,
+                    Some("ee index rebuild --workspace .".to_string()),
+                )
+                .map_err(|error| format!("degradation rejected: {error:?}"))?,
+            );
+        }
+
+        let rendered = render_context_response_json_with_options(&cached, options);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_top_level_degraded_mirrors_data_degraded(&parsed, "lean cached delivery")?;
+        let fallback = degraded_entry_for(&parsed, "daemon_search_fallback")
+            .ok_or("lean cached delivery must retain affecting fallback")?;
+        ensure_equal(&fallback.get("repair"), &None, "Lean omits delivery repair")?;
+        ensure_equal(
+            &fallback.get("repairKind"),
+            &None,
+            "Lean omits delivery repair kind",
+        )?;
+        ensure_equal(
+            &degraded_entry_for(&parsed, "search_index_stale"),
+            &None,
+            "default delivery filters non-affecting state",
+        )?;
+        ensure_equal(
+            &parsed["data"]["pack"],
+            &before["data"]["pack"],
+            "Lean cached pack unchanged",
+        )?;
+
+        let verbose = render_context_response_json_with_options(
+            &cached,
+            ContextJsonRenderOptions {
+                include_non_affecting_degradations: true,
+                include_degraded_repair_hints: true,
+                ..options
+            },
+        );
+        let verbose: serde_json::Value =
+            serde_json::from_str(&verbose).map_err(|error| error.to_string())?;
+        ensure_top_level_degraded_mirrors_data_degraded(&verbose, "verbose cached delivery")?;
+        ensure_equal(
+            &degraded_entry_for(&verbose, "search_index_stale").is_some(),
+            &true,
+            "explicit verbose delivery includes non-affecting state",
+        )?;
+        let fallback = degraded_entry_for(&verbose, "daemon_search_fallback")
+            .ok_or("verbose cached fallback missing")?;
+        ensure_equal(
+            &fallback["repair"],
+            &serde_json::json!("ee index rebuild --workspace ."),
+            "explicit repair hints are rendered",
         )
     }
 

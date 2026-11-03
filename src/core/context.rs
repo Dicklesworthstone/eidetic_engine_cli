@@ -1291,6 +1291,14 @@ struct ContextPerformanceTrace {
     timings: Vec<PerformanceTiming>,
 }
 
+/// A rejected retrieval handoff is still part of the same caller request.
+/// Keep its elapsed time and read work when canonical local admission retries.
+struct ContextPackAttempt {
+    total_start: Instant,
+    embedder_resolved_before: bool,
+    trace: ContextPerformanceTrace,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReadSnapshotTrace {
     pinned: bool,
@@ -1392,7 +1400,11 @@ impl ContextPerformanceTrace {
     }
 
     fn record_duration(&mut self, name: &'static str, elapsed: Duration) {
-        self.timings.push(PerformanceTiming { name, elapsed });
+        if let Some(timing) = self.timings.iter_mut().find(|timing| timing.name == name) {
+            timing.elapsed = timing.elapsed.saturating_add(elapsed);
+        } else {
+            self.timings.push(PerformanceTiming { name, elapsed });
+        }
     }
 
     fn record_pack_persistence_subspans(&mut self) {
@@ -2867,7 +2879,6 @@ fn reconstruct_not_retrieved_candidate(
     Ok(candidate)
 }
 
-#[allow(clippy::expect_used)]
 async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
@@ -2877,12 +2888,42 @@ async fn run_context_pack_with_performance_inner(
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     search_provider: Option<&ContextSearchProvider<'_>>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    let total_start = Instant::now();
-    // The default embedder loads once per process. Whether this request paid
-    // for it decides what the assembly SLO below may charge to the pack.
-    let embedder_resolved_before = crate::core::index::default_search_embedder_resolved();
+    let attempt = ContextPackAttempt {
+        total_start: Instant::now(),
+        // Capture once, before either daemon retrieval or a local retry.
+        embedder_resolved_before: crate::core::index::default_search_embedder_resolved(),
+        trace: ContextPerformanceTrace::default(),
+    };
+    run_context_pack_attempt(
+        options,
+        command,
+        determinism,
+        pack_record_persistence,
+        control,
+        fast_embedder_override,
+        search_provider,
+        attempt,
+    )
+    .await
+}
+
+#[allow(clippy::expect_used, clippy::too_many_arguments)]
+async fn run_context_pack_attempt(
+    options: &ContextPackOptions,
+    command: &'static str,
+    determinism: &mut Deterministic<Seed>,
+    pack_record_persistence: PackRecordPersistence,
+    control: ContextPackControl<'_>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    search_provider: Option<&ContextSearchProvider<'_>>,
+    attempt: ContextPackAttempt,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    let ContextPackAttempt {
+        total_start,
+        embedder_resolved_before,
+        mut trace,
+    } = attempt;
     control.check()?;
-    let mut trace = ContextPerformanceTrace::default();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let request_start = Instant::now();
@@ -3107,17 +3148,32 @@ async fn run_context_pack_with_performance_inner(
         .ok()
         .and_then(|connection| context_read_snapshot_generation(connection).ok());
 
-    if let Some(handoff) = &remote_search
-        && !handoff.snapshot_matches(
-            &search_options,
-            checked_context_read_snapshot(&read_pool, &read_snapshot)?,
-        )
-    {
-        // The source store changed after daemon retrieval. Release the old
+    let handoff_rejected = if let Some(handoff) = &remote_search {
+        let validation_start = Instant::now();
+        // The canonical local search uses the profile captured before the
+        // provider ran. A peer may have selected different budgets, even when
+        // the source generation and the current configuration still match.
+        // Candidate truncation under another profile cannot be undone here.
+        let matches = handoff.report.runtime_profile.active_profile
+            == runtime_profile.active_profile
+            && handoff.report.runtime_profile.budgets == runtime_profile.budgets
+            && handoff.snapshot_matches(
+                &search_options,
+                checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+            );
+        trace.record_elapsed("daemonHandoffValidation", validation_start);
+        !matches
+    } else {
+        false
+    };
+    if handoff_rejected {
+        // The source view or retrieval policy differs. Release the old
         // snapshot and perform the complete canonical path once, including
-        // reconciliation, without trying the daemon again.
+        // reconciliation, without trying the daemon again. The discarded
+        // work still counts toward the caller's total and elapsed SLO.
         drop(read_snapshot);
-        let mut run = Box::pin(run_context_pack_with_performance_inner(
+        trace.record_elapsed("daemonHandoffRejected", total_start);
+        let mut run = Box::pin(run_context_pack_attempt(
             options,
             command,
             determinism,
@@ -3125,13 +3181,29 @@ async fn run_context_pack_with_performance_inner(
             control,
             fast_embedder_override,
             None,
+            ContextPackAttempt {
+                total_start,
+                embedder_resolved_before,
+                trace,
+            },
         ))
         .await?;
         push_search_degradations(
             &mut run.response.data.degraded,
             &[crate::core::search::SearchDegradation::daemon_fallback(
-                "workspace changed after daemon retrieval",
+                "workspace changed after daemon retrieval (source, feedback, or retrieval policy)",
             )],
+        );
+        // Delivery fallback diagnostics must not change the finalized pack
+        // hash or its already-persisted ledger. Include them in the performance
+        // envelope as well, including when the local retry used the L2 cache.
+        run.performance["data"]["fallbacks"] = serde_json::json!(
+            run.response
+                .data
+                .degraded
+                .iter()
+                .map(context_degradation_json)
+                .collect::<Vec<_>>()
         );
         return Ok(run);
     }

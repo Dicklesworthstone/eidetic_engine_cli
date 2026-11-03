@@ -675,7 +675,8 @@ impl SearchSourceMode {
 /// Live fusion arm weights. Crate-visible so the shadow-tuning evaluator
 /// (bd-2tehh.2 S2) can re-fuse a replayed hit pool with candidate weight
 /// vectors using exactly the production adjustment math.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SearchFusionWeights {
     pub(crate) lexical: f32,
     pub(crate) semantic: f32,
@@ -1801,6 +1802,7 @@ impl SearchAdvisorySession {
 pub struct SearchPerformanceRun {
     pub report: SearchReport,
     pub quality_scoring_policy: String,
+    fusion_weights: SearchFusionWeights,
     pub performance: SearchPerformanceTrace,
     pub(crate) audit_facts: Option<SearchAuditFacts>,
     pack_snapshot: Option<PackSearchSnapshot>,
@@ -1815,6 +1817,9 @@ pub struct SearchPerformanceRun {
 pub(crate) struct PackSearchHandoff {
     pub report: SearchReport,
     pub(crate) quality_scoring_policy: String,
+    // Required v3 witness from the configuration actually used by retrieval.
+    // A config-file change does not advance the source database generation.
+    fusion_weights: SearchFusionWeights,
     quality_reference_time: Option<DateTime<Utc>>,
     pub audit_facts: Option<SearchAuditFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1957,8 +1962,17 @@ impl PackSearchHandoff {
             && options
                 .as_of
                 .is_none_or(|reference_time| reference_time == self.snapshot.scoring_reference_time)
-            && resolved_search_scoring_config(&options.workspace_path)
-                .is_ok_and(|config| config.policy_hash() == self.quality_scoring_policy)
+            && resolved_search_configuration(&options.workspace_path).is_ok_and(
+                |(fusion_weights, scoring_config)| {
+                    fusion_weights == self.fusion_weights
+                        && scoring_config.policy_hash() == self.quality_scoring_policy
+                },
+            )
+            && resolve_search_rerank_config(&options.workspace_path)
+                == (
+                    report.rerank_configured_mode,
+                    report.rerank_configured_top_k,
+                )
             && report.requested_limit == options.limit
             && report.source_mode_requested == options.source_mode
             && report.strict_source_mode == options.strict_source_mode
@@ -8172,6 +8186,7 @@ pub(crate) fn run_pack_search_with_cached_local_embedder(
     Ok(PackSearchHandoff {
         report,
         quality_scoring_policy: run.quality_scoring_policy,
+        fusion_weights: run.fusion_weights,
         quality_reference_time: options.as_of,
         audit_facts: run.audit_facts,
         cached_local_embedder: attestation,
@@ -10247,6 +10262,7 @@ async fn run_search_inner_with_performance(
         trace.finish_total(start, embedder_resolved_before);
         return Ok(SearchPerformanceRun {
             quality_scoring_policy,
+            fusion_weights,
             audit_facts: None,
             pack_snapshot: None,
             pack_calibration_identity: None,
@@ -10648,6 +10664,7 @@ async fn run_search_inner_with_performance(
             trace.finish_total(start, embedder_resolved_before);
             Ok(SearchPerformanceRun {
                 quality_scoring_policy,
+                fusion_weights,
                 audit_facts,
                 pack_snapshot: None,
                 pack_calibration_identity,
@@ -10703,6 +10720,7 @@ async fn run_search_inner_with_performance(
             trace.finish_total(start, embedder_resolved_before);
             Ok(SearchPerformanceRun {
                 quality_scoring_policy,
+                fusion_weights,
                 audit_facts: None,
                 pack_snapshot: None,
                 pack_calibration_identity: None,
@@ -21396,6 +21414,7 @@ mod tests {
                 false,
             ),
             quality_scoring_policy: SearchScoringConfig::default().policy_hash(),
+            fusion_weights: SearchFusionWeights::default(),
             quality_reference_time: options.as_of,
             audit_facts: None,
             cached_local_embedder: None,

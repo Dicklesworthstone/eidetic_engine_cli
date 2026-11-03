@@ -87,7 +87,7 @@ use super::protocol::{
     METHOD_RECALL, read_request, write_response,
 };
 pub use super::protocol::{
-    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
     DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_PACK_SEARCH,
     METHOD_SEARCH,
 };
@@ -4449,7 +4449,7 @@ fn dispatch_pack_search(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
-                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, "handoff": handoff }),
+                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, "handoff": handoff }),
             );
             if daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
                 response
@@ -4503,6 +4503,15 @@ fn dispatch_search(
             Ok(parts) => parts,
             Err(message) => return daemon_search_params_error(request, &message),
         };
+    if matches!(
+        options.memory_scope,
+        MemoryScope::SelfOnly | MemoryScope::Team
+    ) {
+        // Search scope resolves the executing process's EE_AGENT_NAME. Until
+        // caller identity is carried into the canonical scope context, a
+        // request agent_id must not silently use the daemon's own identity.
+        return daemon_search_params_error(request, "agent-specific memory scopes remain local");
+    }
     read_pools.retain(&options.resolve_database_path());
     let search_run =
         match run_search_with_performance_and_filters(&options, kind.as_deref(), &field_filters) {
@@ -6795,7 +6804,7 @@ fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Valu
             },
             "ee.daemon.pack_search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2
+                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
             }
         },
         // GH #37: lets a client tell "this daemon is still loading its model"
@@ -8762,6 +8771,49 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_search_rejects_agent_scopes_before_acquiring_a_reader() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let read_pools = DaemonReadPools::default();
+        let advisory_session = Mutex::new(SearchAdvisorySession::default());
+        for scope in ["self", "team"] {
+            for agent in ["caller-one", "caller-two"] {
+                let mut request = DaemonRequest::new(
+                    "agent-scope",
+                    agent,
+                    METHOD_SEARCH,
+                    serde_json::json!({
+                        "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                        "query": "release",
+                        "workspacePath": workspace_path,
+                        "sourceMode": "lexical_only",
+                        "memoryScope": scope,
+                    }),
+                );
+                request.workspace_id = Some(workspace_path.display().to_string());
+                let response = dispatch_search(
+                    &request,
+                    &AtomicBool::new(false),
+                    &advisory_session,
+                    &read_pools,
+                    false,
+                );
+                assert!(response.result.is_none());
+                let error = response.error.expect("agent-specific scope refused");
+                assert_eq!(error.code, DAEMON_SEARCH_PARAMS_INVALID_CODE);
+                assert!(
+                    error
+                        .message
+                        .contains("agent-specific memory scopes remain local")
+                );
+                assert_eq!(response.agent_id, agent);
+            }
+        }
+        assert!(read_pools.state.lock().unwrap().stores.is_empty());
+        assert_eq!(fs::read_dir(&workspace_path).unwrap().count(), 0);
+    }
+
+    #[test]
     fn daemon_search_request_v2_carries_explicit_performance_bit() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let params = DaemonSearchParams::from_value(&serde_json::json!({
@@ -8966,7 +9018,7 @@ mod tests {
             let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
             assert!(response.error.is_none(), "{response:?}");
             let result = response.result.expect("feedback retrieval");
-            assert_eq!(result["schema"], DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2);
+            assert_eq!(result["schema"], DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3);
             let handoff =
                 crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
                     .expect("versioned handoff");

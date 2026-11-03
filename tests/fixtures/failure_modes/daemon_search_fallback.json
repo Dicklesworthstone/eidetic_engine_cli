@@ -15,7 +15,7 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "An opt-in warm daemon search or pack retrieval cannot negotiate the exact envelope, method, authorization, and method-specific schemas, its round-trip fails, its scope requires local hydration, its pack handoff cannot prove matching source generation, complete feedback contents or calibration state, or the bounded capability-plus-retrieval attempt expires (five seconds by default). Nonempty feedback is supported when the v2 witness matches; legacy v1 handoffs and changed or unavailable witnesses fall back locally. The CLI executes canonical in-process search and records why the requested acceleration path was not used.",
+    "description": "An opt-in warm daemon search or pack retrieval cannot negotiate the exact envelope, method, authorization, and method-specific schemas, its round-trip fails, its scope or full-body output requires local rendering, its pack handoff cannot prove matching source generation, complete feedback contents, calibration state or retrieval policy, or the bounded capability-plus-retrieval attempt expires (five seconds by default). Nonempty feedback is supported when the v3 witness, reranking configuration and captured operating-profile budgets match; legacy v1/v2 handoffs and changed or unavailable witnesses fall back locally. The CLI executes canonical in-process search and records why the requested acceleration path was not used.",
     "setup_commands": ["(no compatible daemon currently running)"],
     "invocation": "ee search release --use-daemon --json"
   },
