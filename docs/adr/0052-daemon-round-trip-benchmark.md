@@ -105,6 +105,14 @@ The pack comparison has these controls:
   token budgets. Ordinary persisted calls may differ in record IDs, timestamps,
   time-derived scores and diagnostic hashes; raw hashes are retained in the
   report but are not substituted for content correctness assertions.
+- After each timed child exits, inspect the fixture ledger read-only. Require
+  exactly one new pack record for every ordinary invocation, including first
+  calls and warmups, and verify its response hash, workspace, query, profile,
+  token budget, selected count and integrity-checked selection ledger. Compare
+  persisted entity identities, revisions, ranks, sections, tokens, trust and
+  provenance with the response. Reject
+  `context_pack_persist_failed` even when the command reports success. Record
+  identity, not hash uniqueness, establishes exactly-once persistence.
 - Retain raw wall-time samples and compute cold p50 / warm p50. The hard gate
   still requires at least **2.0x** at **10,000 memories**, without a waiver.
 
@@ -115,12 +123,18 @@ The pack comparison has these controls:
 # Run through the repository's RCH verification lane. EE_BENCH_EE_BIN must
 # point to the release ee artifact built from the changed revision being tested,
 # available with the verified local model fixture on the measuring worker.
-EE_EMBED_DOWNLOAD=off \
-EE_EMBED_MODEL_FIXTURE_DIR=/path/to/verified/model \
-EE_BENCH_EE_BIN=/path/to/changed-revision/release/ee \
-scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-  cargo bench --locked --bench daemon_round_trip -- --warm-pack-gate
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --env EE_EMBED_DOWNLOAD=off \
+  --env EE_EMBED_MODEL_FIXTURE_DIR=/path/to/verified/model \
+  --env EE_BENCH_EE_BIN=/path/to/changed-revision/release/ee -- \
+  cargo bench --locked --bench daemon_round_trip -- \
+  --warm-pack-gate --fixture-memories 10000 --fixture-feedback mixed
 ```
+
+Use the wrapper's `--env` arguments to transport these settings to the measuring
+worker; the model and CLI paths must exist on that worker. Build the release
+binary with `cargo build --locked --release --bin ee` through the same pinned
+RCH lane and revision before qualification.
 
 Both warm search and pack JSON reports include `cliArtifact.path`,
 `cliArtifact.contentHash` (BLAKE3), and `cliArtifact.sizeBytes`. The executable
@@ -151,7 +165,7 @@ The v2 pack-search handoff replaces the empty-ledger restriction with a content
 witness for the entire workspace feedback ledger, the calibration input actually
 consumed by retrieval, and the scoring reference time. The client recomputes
 the witness on its pinned source snapshot and retains the source-generation,
-configuration and authority checks. This covers changes before ranking,
+quality-scoring-policy and authority checks. This covers changes before ranking,
 calibration, floor filtering and candidate truncation; comparing row counts or
 only returned candidates would not establish parity. Daemon retrieval remains
 read-only, and the client remains the sole owner of pack persistence.
@@ -181,3 +195,46 @@ This amendment adds executable qualification coverage; it does **not** establish
 a speedup. Native RCH correctness runs and the 10,000-memory at-least-2.0x gate
 remain unverified where the required execution lane is unavailable. The October
 31 investigation's published-release measurements remain historical evidence.
+
+### 2026-11-02 amendment: retrieval policy, persistence and fallback diagnostics
+
+The v3 pack-search response additionally requires the actual fusion weights
+consumed by retrieval. Admission compares those weights and the reported
+reranking mode/top-k with the caller's effective configuration, and compares
+the daemon's operating profile and budgets with the profile captured by the
+canonical pack request. Configuration-only changes do not necessarily change
+the workspace generation or feedback witness. Candidates ranked or truncated
+under a different policy must trigger local fallback; rescoring the returned
+subset cannot recover omitted candidates. Older v2 responses fail schema
+negotiation explicitly instead of being treated as this stronger contract.
+
+The persistence check covers all 50 pack invocations: two first calls, six
+warmups and 42 measured calls. The report retains the verified record IDs for
+first and measured calls and the total verified/persisted counts. Validation
+occurs outside the wall timer and does not replace ordinary pack writes with
+read-only operations. Explicit read-only observations instead require zero new
+records and remain ineligible for the hard gate. Missing, duplicate, replaced
+or corrupt records fail qualification even if the response content is usable.
+
+A handoff rejected after retrieval must retain the rejected attempt's timing
+and database-open counts when it retries canonical local admission. Performance
+output includes `daemonHandoffValidation`, `daemonHandoffRejected` and the
+fallback explanation; `total` includes both attempts. Repeated phase names
+accumulate their elapsed durations. The fallback notice is delivery metadata
+and must not retroactively change the finalized pack hash or persisted ledger.
+Ordinary persisted retries compute their elapsed SLO from the original request
+start, with the existing one-time model-load exclusion.
+Cached read-only JSON delivery merges newly appended fallback diagnostics into
+both degraded arrays without changing its cached pack payload or hash.
+
+Public search uses explicit local fallback for `self` and `team` memory scopes
+until caller identity is carried into canonical daemon scope admission. Direct
+search RPCs independently refuse those scopes instead of consulting the
+daemon's own agent identity. Search `--full` also uses local rendering while the
+daemon protocol contains only preview renderings; performance-only output is
+unaffected. These responses cannot count as warm qualification samples.
+
+These checks and corrections do not establish a performance result. Native
+correctness execution and the current-source mixed-feedback 10,000-memory gate
+still require an available RCH worker, pinned dependencies, a matching release
+CLI artifact and the verified local model fixture.

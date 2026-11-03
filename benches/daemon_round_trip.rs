@@ -34,6 +34,8 @@
 //! its latency cannot be counted as verified daemon acceleration.
 #![allow(clippy::expect_used, reason = "bench assertions fail closed")]
 
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::hint::black_box;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1626,6 +1628,204 @@ struct PackObservation {
     serving_path: String,
     signature: JsonValue,
     hash: JsonValue,
+    record_id: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+struct PackPersistenceVerifier {
+    database: PathBuf,
+    workspace_id: String,
+    record_ids: BTreeSet<String>,
+    calls: usize,
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn fixture_pack_record_ids(connection: &DbConnection, workspace_id: &str) -> BTreeSet<String> {
+    let count = connection
+        .count_table_rows("pack_records")
+        .expect("count benchmark pack records");
+    let limit = u32::try_from(count).expect("fixture pack count fits u32");
+    let ids: BTreeSet<_> = connection
+        .list_recent_pack_record_ids_for_workspace(workspace_id, limit)
+        .expect("inspect benchmark pack record identities")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        ids.len(),
+        usize::try_from(count).expect("fixture pack count fits usize"),
+        "benchmark pack records must all belong to the fixture workspace"
+    );
+    ids
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn verified_pack_record_delta(
+    previous: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+    read_only: bool,
+) -> Option<String> {
+    assert!(
+        previous.is_subset(current),
+        "a pack call removed or replaced an existing persisted record"
+    );
+    assert_eq!(
+        current.len() - previous.len(),
+        usize::from(!read_only),
+        "each persisted pack call must add exactly one record; read-only calls must add none"
+    );
+    current.difference(previous).next().cloned()
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn assert_pack_persistence_not_degraded(payload: &JsonValue) {
+    assert!(
+        !degradation_present(payload, "context_pack_persist_failed"),
+        "failed pack persistence cannot satisfy a persisted benchmark: {payload}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn assert_persisted_selection_matches_response(ledger: &JsonValue, signature: &JsonValue) {
+    let mut expected: Vec<_> = signature["items"]
+        .as_array()
+        .expect("signature items")
+        .iter()
+        .map(|item| {
+            let kind = item.get("entityKind").and_then(JsonValue::as_str).unwrap_or("memory");
+            let id_field = match kind {
+                "memory" => "memoryId",
+                "rule" => "ruleId",
+                "evidence_span" => "evidenceSpanId",
+                _ => panic!("unknown pack entity kind: {kind}"),
+            };
+            // Persistence hashes precisely the canonical uri/note entries.
+            // Render-only labels and locators are not stored ledger inputs.
+            // Keep the redacted output bytes instead of reparsing URIs.
+            let entries: Vec<_> = item["provenance"]
+                .as_array()
+                .expect("response provenance entries")
+                .iter()
+                .map(|source| json!({
+                    "uri": source["uri"].as_str().expect("provenance URI"),
+                    "note": source["note"].as_str().expect("provenance note"),
+                }))
+                .collect();
+            let provenance = json!({
+                "schema": ee::pack::PACK_ITEM_PROVENANCE_SCHEMA_V1,
+                "entries": entries,
+            })
+            .to_string();
+            json!({
+                "entityKind": kind,
+                "entityId": item[id_field].as_str().expect("typed pack entity identity"),
+                "entityRevision": item.get("entityRevision").unwrap_or(&JsonValue::Null),
+                "rank": item["rank"], "section": item["section"],
+                "estimatedTokens": item["estimatedTokens"],
+                "trustClass": item["trust"]["class"],
+                "trustSubclass": item["trust"].get("subclass").unwrap_or(&JsonValue::Null),
+                "provenanceHash": format!("blake3:{}", blake3::hash(provenance.as_bytes()).to_hex()),
+            })
+        })
+        .collect();
+    // The public output groups native entity kinds; the durable ledger orders
+    // them by the shared selection rank. Compare that semantic order without
+    // weakening the separate cold/warm response-array order assertion.
+    expected.sort_by_key(|item| item["rank"].as_u64().expect("response selection rank"));
+    let actual: Vec<_> = ee::db::pack_ledger_core_array(ledger, "selectedItems")
+        .expect("validated ledger selected items")
+        .iter()
+        .map(|item| {
+            json!({
+                "entityKind": item["entityKind"], "entityId": item["entityId"],
+                "entityRevision": item.get("entityRevision").unwrap_or(&JsonValue::Null),
+                "rank": item["rank"], "section": item["section"],
+                "estimatedTokens": item["estimatedTokens"],
+                "trustClass": item["trustClass"], "trustSubclass": item["trustSubclass"],
+                "provenanceHash": item["provenance"]["hash"],
+            })
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "persisted selection must match the response's typed entities, ranks, trust and provenance"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+impl PackPersistenceVerifier {
+    fn new(database: &Path, workspace_id: String) -> Self {
+        let connection = DbConnection::open_file_read_only(database)
+            .expect("inspect initial benchmark pack ledger");
+        let record_ids = fixture_pack_record_ids(&connection, &workspace_id);
+        assert!(
+            record_ids.is_empty(),
+            "fixture must start without pack records"
+        );
+        Self {
+            database: database.to_path_buf(),
+            workspace_id,
+            record_ids,
+            calls: 0,
+        }
+    }
+
+    // Reopen after the child exits, outside the measured wall interval. A
+    // successful response is insufficient: canonical pack deliberately returns
+    // usable content when persistence fails. Checking every transition also
+    // catches a missing write followed by a duplicate with the same pack hash.
+    fn verify(
+        &mut self,
+        payload: &JsonValue,
+        signature: &JsonValue,
+        read_only: bool,
+    ) -> Option<String> {
+        assert_pack_persistence_not_degraded(payload);
+        let connection = DbConnection::open_file_read_only(&self.database)
+            .expect("inspect completed benchmark pack ledger");
+        let current = fixture_pack_record_ids(&connection, &self.workspace_id);
+        let new_id = verified_pack_record_delta(&self.record_ids, &current, read_only);
+        if let Some(id) = &new_id {
+            let record = connection
+                .get_pack_record(id)
+                .expect("read benchmark persisted pack")
+                .expect("new benchmark pack record must exist");
+            assert_eq!(record.workspace_id, self.workspace_id);
+            assert_eq!(record.query, SEARCH_QUERY);
+            assert_eq!(record.profile, BENCH_PACK_PROFILE);
+            assert_eq!(
+                Some(record.pack_hash.as_str()),
+                payload
+                    .pointer("/data/pack/hash")
+                    .and_then(JsonValue::as_str),
+                "persisted pack hash must identify this invocation's response"
+            );
+            assert_eq!(json!(record.max_tokens), signature["maxTokens"]);
+            assert_eq!(json!(record.used_tokens), signature["usedTokens"]);
+            assert_eq!(
+                record.item_count as usize,
+                signature["items"]
+                    .as_array()
+                    .expect("signature items")
+                    .len(),
+                "persisted pack must retain every selected entity"
+            );
+            let ledger = ee::db::parse_stored_pack_ledger(&record);
+            assert!(
+                ledger.available_ledger().is_some(),
+                "persisted pack must have an integrity-checked, record-bound selection ledger: {:?}",
+                ledger.degraded
+            );
+            assert_persisted_selection_matches_response(
+                ledger
+                    .available_ledger()
+                    .expect("validated benchmark selection ledger"),
+                signature,
+            );
+        }
+        self.record_ids = current;
+        self.calls += 1;
+        new_id
+    }
 }
 
 /// The pack record ID, timestamps, timing diagnostics and time-derived scores
@@ -1726,6 +1926,7 @@ fn run_pack_process(
     fixture: &PrebuiltSearchFixture,
     daemon_socket: Option<&Path>,
     read_only: bool,
+    persistence: &mut PackPersistenceVerifier,
 ) -> PackObservation {
     let mut command = Command::new(ee_binary);
     command
@@ -1802,6 +2003,7 @@ fn run_pack_process(
             .any(|item| item["memoryId"].as_str() == Some(SEARCH_TARGET_MEMORY_ID)),
         "pack benchmark must select the planted relevant memory: {signature}"
     );
+    let record_id = persistence.verify(&payload, &signature, read_only);
     PackObservation {
         wall_ms,
         serving_path: serving_path.to_owned(),
@@ -1810,6 +2012,7 @@ fn run_pack_process(
             .pointer("/data/pack/hash")
             .cloned()
             .unwrap_or(JsonValue::Null),
+        record_id,
     }
 }
 
@@ -1873,12 +2076,19 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     }
     let feedback_scenario = feedback_scenario_from_args(&std::env::args().collect::<Vec<_>>());
     let fixture = build_prebuilt_search_fixture(&ee_binary, size, feedback_scenario);
-    let cold_first = run_pack_process(&ee_binary, &fixture, None, read_only);
+    let mut persistence =
+        PackPersistenceVerifier::new(&fixture.database, stable_workspace_id(&fixture.workspace));
+    let cold_first = run_pack_process(&ee_binary, &fixture, None, read_only, &mut persistence);
     let daemon_started = Instant::now();
     let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
     let daemon_ready_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
-    let daemon_first =
-        run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
+    let daemon_first = run_pack_process(
+        &ee_binary,
+        &fixture,
+        Some(daemon.socket_path()),
+        read_only,
+        &mut persistence,
+    );
     assert_eq!(
         cold_first.signature, daemon_first.signature,
         "first daemon pack differs from cold selection"
@@ -1886,7 +2096,8 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     let expected = cold_first.signature.clone();
     for _ in 0..SEARCH_WARMUP_SAMPLES {
         for socket in [None, Some(daemon.socket_path())] {
-            let observation = run_pack_process(&ee_binary, &fixture, socket, read_only);
+            let observation =
+                run_pack_process(&ee_binary, &fixture, socket, read_only, &mut persistence);
             assert_eq!(
                 observation.signature, expected,
                 "pack warmup selection drift"
@@ -1900,14 +2111,24 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
         // Alternate path order so a monotonic host-load/thermal trend does not
         // systematically favour the daemon path.
         let (direct, resident) = if sample % 2 == 0 {
-            let direct = run_pack_process(&ee_binary, &fixture, None, read_only);
-            let resident =
-                run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
+            let direct = run_pack_process(&ee_binary, &fixture, None, read_only, &mut persistence);
+            let resident = run_pack_process(
+                &ee_binary,
+                &fixture,
+                Some(daemon.socket_path()),
+                read_only,
+                &mut persistence,
+            );
             (direct, resident)
         } else {
-            let resident =
-                run_pack_process(&ee_binary, &fixture, Some(daemon.socket_path()), read_only);
-            let direct = run_pack_process(&ee_binary, &fixture, None, read_only);
+            let resident = run_pack_process(
+                &ee_binary,
+                &fixture,
+                Some(daemon.socket_path()),
+                read_only,
+                &mut persistence,
+            );
+            let direct = run_pack_process(&ee_binary, &fixture, None, read_only, &mut persistence);
             (direct, resident)
         };
         assert_eq!(
@@ -1924,8 +2145,14 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "sample": sample, "coldMs": direct.wall_ms, "warmMs": resident.wall_ms,
             "coldServingPath": direct.serving_path, "warmServingPath": resident.serving_path,
             "coldHash": direct.hash, "warmHash": resident.hash,
+            "coldPackRecordId": direct.record_id, "warmPackRecordId": resident.record_id,
         }));
     }
+    assert_eq!(
+        persistence.calls,
+        2 * (1 + SEARCH_WARMUP_SAMPLES + SEARCH_MEASURE_SAMPLES),
+        "persistence qualification must cover first, warmup and measured calls"
+    );
     let cold_p50_ms = p50(cold);
     let warm_p50_ms = p50(warm);
     let speedup = cold_p50_ms / warm_p50_ms;
@@ -1953,6 +2180,13 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "firstColdMs": cold_first.wall_ms,
             "firstDaemonMs": daemon_first.wall_ms,
             "firstDaemonServingPath": daemon_first.serving_path,
+            "persistence": {
+                "verifiedCalls": persistence.calls,
+                "persistedRecords": persistence.record_ids.len(),
+                "checksOutsideWallTime": true,
+                "firstColdPackRecordId": cold_first.record_id,
+                "firstDaemonPackRecordId": daemon_first.record_id,
+            },
             "coldP50Ms": cold_p50_ms, "warmP50Ms": warm_p50_ms, "p50Speedup": speedup,
             "minimumP50Speedup": PACK_MIN_P50_SPEEDUP,
             "warmupPerPath": SEARCH_WARMUP_SAMPLES, "measuredPerPath": SEARCH_MEASURE_SAMPLES,
@@ -1975,6 +2209,249 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod pack_benchmark_contracts {
     use super::*;
+
+    fn persistence_fixture() -> (TempDir, DbConnection, PackPersistenceVerifier, JsonValue) {
+        let root = TempDir::new().expect("persistence fixture directory");
+        let database = root.path().join("ee.db");
+        let connection = DbConnection::open_file(&database).expect("persistence fixture database");
+        connection.migrate().expect("migrate persistence fixture");
+        let workspace_id = "wsp_00000000000000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: root.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .expect("insert persistence fixture workspace");
+        connection
+            .insert_memory(
+                SEARCH_TARGET_MEMORY_ID,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "persisted benchmark fact".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.75,
+                    utility: 0.75,
+                    importance: 0.75,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("insert persistence fixture memory");
+        let verifier = PackPersistenceVerifier::new(&database, workspace_id.to_owned());
+        let payload = json!({"data": {"pack": {
+            "hash": format!("blake3:{}", blake3::hash(b"persistence fixture").to_hex()),
+            "budget": {"maxTokens": 400, "usedTokens": 10},
+            "items": [{"rank": 1, "memoryId": SEARCH_TARGET_MEMORY_ID,
+                "section": "facts", "content": "persisted benchmark fact",
+                "estimatedTokens": 10, "trust": {"class": "human_explicit"},
+                "provenance": [], "selectedIn": "mmr"}]
+        }}});
+        (root, connection, verifier, payload)
+    }
+
+    fn insert_fixture_pack(connection: &DbConnection, id: &str, payload: &JsonValue) {
+        connection
+            .insert_pack_record(
+                id,
+                &ee::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
+                    workspace_id: "wsp_00000000000000000000000001".to_owned(),
+                    query: SEARCH_QUERY.to_owned(),
+                    profile: BENCH_PACK_PROFILE.to_owned(),
+                    max_tokens: 400,
+                    used_tokens: 10,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: payload["data"]["pack"]["hash"]
+                        .as_str()
+                        .expect("fixture hash")
+                        .to_owned(),
+                    degraded_json: None,
+                    created_by: Some("ee context".to_owned()),
+                },
+                &[ee::db::CreatePackItemInput {
+                    pack_id: id.to_owned(),
+                    memory_id: SEARCH_TARGET_MEMORY_ID.to_owned(),
+                    rank: 1,
+                    section: "facts".to_owned(),
+                    estimated_tokens: 10,
+                    relevance: 0.75,
+                    utility: 0.75,
+                    combined_score: None,
+                    attempt_family_multiplicity: None,
+                    why: "persistence qualification".to_owned(),
+                    diversity_key: None,
+                    provenance_json: ee::pack::pack_item_provenance_json(&[]),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                }],
+                &[],
+            )
+            .expect("persist fixture pack and selection ledger");
+    }
+
+    #[test]
+    fn persisted_gate_verifies_each_new_record_even_when_hashes_repeat() {
+        let (_root, connection, mut verifier, payload) = persistence_fixture();
+        let signature = pack_content_signature(&payload);
+        for id in [
+            "pack_00000000000000000000000001",
+            "pack_00000000000000000000000002",
+        ] {
+            insert_fixture_pack(&connection, id, &payload);
+            assert_eq!(
+                verifier.verify(&payload, &signature, false).as_deref(),
+                Some(id)
+            );
+        }
+        assert_eq!(verifier.calls, 2);
+        assert_eq!(verifier.record_ids.len(), 2);
+        assert!(verifier.verify(&payload, &signature, true).is_none());
+        assert_eq!(verifier.calls, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "each persisted pack call must add exactly one record")]
+    fn persisted_gate_rejects_a_successful_response_without_a_write() {
+        let (_root, _connection, mut verifier, payload) = persistence_fixture();
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "each persisted pack call must add exactly one record")]
+    fn persisted_gate_rejects_duplicate_writes_for_one_response() {
+        let (_root, connection, mut verifier, payload) = persistence_fixture();
+        for id in [
+            "pack_00000000000000000000000001",
+            "pack_00000000000000000000000002",
+        ] {
+            insert_fixture_pack(&connection, id, &payload);
+        }
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "persisted pack hash must identify this invocation's response")]
+    fn persisted_gate_rejects_a_record_from_another_response() {
+        let (_root, connection, mut verifier, mut payload) = persistence_fixture();
+        insert_fixture_pack(&connection, "pack_00000000000000000000000001", &payload);
+        payload["data"]["pack"]["hash"] = json!("a-different-response");
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "persisted selection must match the response's typed entities")]
+    fn persisted_gate_rejects_a_valid_ledger_with_a_different_selection() {
+        let (_root, connection, mut verifier, mut payload) = persistence_fixture();
+        let id = "pack_00000000000000000000000001";
+        insert_fixture_pack(&connection, id, &payload);
+        let stored = connection
+            .get_pack_record(id)
+            .expect("read valid record")
+            .expect("stored record");
+        assert!(
+            ee::db::parse_stored_pack_ledger(&stored)
+                .available_ledger()
+                .is_some()
+        );
+        // Hash, count and budget still agree, and the stored ledger is valid.
+        // Only the selected entity differs from the public response.
+        payload["data"]["pack"]["items"][0]["memoryId"] = json!("mem_00000000000000000000000002");
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), false);
+    }
+
+    #[test]
+    fn persisted_selection_detects_rank_budget_trust_and_provenance_changes() {
+        let (_root, connection, _verifier, payload) = persistence_fixture();
+        let id = "pack_00000000000000000000000001";
+        insert_fixture_pack(&connection, id, &payload);
+        let record = connection
+            .get_pack_record(id)
+            .expect("read record")
+            .expect("stored record");
+        let parsed = ee::db::parse_stored_pack_ledger(&record);
+        let ledger = parsed.available_ledger().expect("valid selection ledger");
+        let baseline = pack_content_signature(&payload);
+        assert_persisted_selection_matches_response(ledger, &baseline);
+        for (pointer, changed) in [
+            ("/items/0/rank", json!(2)),
+            ("/items/0/section", json!("warnings")),
+            ("/items/0/estimatedTokens", json!(11)),
+            ("/items/0/trust/class", json!("cass_evidence")),
+            (
+                "/items/0/provenance",
+                json!([{"uri": "file://wrong.rs", "note": "wrong source"}]),
+            ),
+        ] {
+            let mut changed_signature = baseline.clone();
+            *changed_signature
+                .pointer_mut(pointer)
+                .expect("signature mutation") = changed;
+            assert!(
+                std::panic::catch_unwind(|| assert_persisted_selection_matches_response(
+                    ledger,
+                    &changed_signature
+                ))
+                .is_err(),
+                "missed persisted selection change at {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "integrity-checked, record-bound selection ledger")]
+    fn persisted_gate_rejects_a_corrupt_selection_ledger() {
+        let (_root, connection, mut verifier, payload) = persistence_fixture();
+        insert_fixture_pack(&connection, "pack_00000000000000000000000001", &payload);
+        connection
+            .execute_raw(
+                "UPDATE pack_records SET ledger_hash = 'not-the-ledger-hash' \
+                 WHERE id = 'pack_00000000000000000000000001'",
+            )
+            .expect("corrupt fixture ledger hash");
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "read-only calls must add none")]
+    fn read_only_observation_rejects_persisted_writes() {
+        let (_root, connection, mut verifier, payload) = persistence_fixture();
+        insert_fixture_pack(&connection, "pack_00000000000000000000000001", &payload);
+        let _ = verifier.verify(&payload, &pack_content_signature(&payload), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "removed or replaced an existing persisted record")]
+    fn persisted_gate_rejects_replaced_record_identities() {
+        let previous = BTreeSet::from(["original".to_owned()]);
+        let current = BTreeSet::from(["replacement".to_owned(), "new".to_owned()]);
+        let _ = verified_pack_record_delta(&previous, &current, false);
+    }
+
+    #[test]
+    fn persisted_gate_rejects_reported_persistence_failure_at_either_envelope_depth() {
+        for pointer in ["degraded", "data"] {
+            let degradation = json!([{"code": "context_pack_persist_failed"}]);
+            let payload = if pointer == "data" {
+                json!({"success": true, "data": {"degraded": degradation}})
+            } else {
+                json!({"success": true, "degraded": degradation})
+            };
+            assert!(
+                std::panic::catch_unwind(|| assert_pack_persistence_not_degraded(&payload))
+                    .is_err()
+            );
+        }
+    }
 
     fn neutral_feedback_event() -> StoredFeedbackEvent {
         StoredFeedbackEvent {
