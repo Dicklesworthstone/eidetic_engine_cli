@@ -18,15 +18,15 @@ use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, EMBEDDING_DOWNLOAD_TIMEOUT, EmbeddingPosture, IndexHealth,
-    IndexStatusOptions, active_embedding_registry_input_with_source, current_embedding_posture,
-    default_embedder_model_root, get_index_status_in_current_snapshot,
+    IndexStatusOptions, IndexStatusReport, active_embedding_registry_input_with_source,
+    current_embedding_posture, default_embedder_model_root, get_index_status_in_current_snapshot,
     get_index_status_with_connection, load_model2vec_model, model2vec_model_destination_dir,
     model2vec_model_dir_verification, model2vec_model_name, selected_embedding_registry_model_id,
     verified_default_local_model_available_for_workspace,
 };
 // Test-only: constructed by the inline `#[cfg(test)]` suites below.
 #[cfg(test)]
-use crate::core::index::{IndexStatusReport, POTION_MODEL_NAME, potion_model_destination_dir};
+use crate::core::index::{POTION_MODEL_NAME, potion_model_destination_dir};
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
     ModelRegistryUpsertOutcome, StoredModelRegistryEntry,
@@ -1071,6 +1071,16 @@ fn lifecycle_degraded_data_json(
     out
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static MODEL_LIFECYCLE_INDEX_STATUS_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn model_lifecycle_index_status_probes_for_test() -> u64 {
+    MODEL_LIFECYCLE_INDEX_STATUS_PROBES.get()
+}
+
 /// `caller_holds_snapshot` must be true when `connection` belongs to a caller
 /// that already owns the active read transaction (search, pack, and recall
 /// run inside a pinned read snapshot). The standalone status probe opens its
@@ -1087,6 +1097,9 @@ fn build_model_lifecycle_report(
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
     cached_default_model_available: bool,
 ) -> ModelLifecycleReport {
+    #[cfg(test)]
+    MODEL_LIFECYCLE_INDEX_STATUS_PROBES
+        .set(MODEL_LIFECYCLE_INDEX_STATUS_PROBES.get().saturating_add(1));
     let status_options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(database_path.to_path_buf()),
@@ -2622,6 +2635,32 @@ pub fn build_model_lifecycle_report_for_workspace(
                 verified_default_local_model_available_for_workspace(connection, workspace_id)?,
             ))
         },
+        None,
+    )
+}
+
+/// Reuse an index inspection made on this caller's pinned source snapshot.
+/// The caller must retain the lease for `index_status.index_dir` through this
+/// call. Registry selection and model assets are still inspected here; only
+/// the duplicate index probe is omitted. In particular, the selected retained
+/// generation must not be replaced with a probe of the default live path.
+pub(crate) fn build_model_lifecycle_report_for_workspace_with_index_status(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    connection: &DbConnection,
+    index_status: IndexStatusReport,
+) -> Result<ModelLifecycleReport, DomainError> {
+    build_model_lifecycle_report_for_workspace_with_selection(
+        workspace_path,
+        database_path,
+        Some(connection),
+        |connection, workspace_id| {
+            Ok((
+                selected_embedding_registry_model_id(connection, workspace_id)?,
+                verified_default_local_model_available_for_workspace(connection, workspace_id)?,
+            ))
+        },
+        Some(index_status),
     )
 }
 
@@ -2633,6 +2672,7 @@ fn build_model_lifecycle_report_for_workspace_with_selection(
     database_path: Option<&Path>,
     connection: Option<&DbConnection>,
     resolve_selection: impl FnOnce(&DbConnection, &str) -> Result<(Option<String>, bool), DbError>,
+    index_status: Option<IndexStatusReport>,
 ) -> Result<ModelLifecycleReport, DomainError> {
     let workspace_path = resolve_workspace_path(workspace_path)?;
     let database_path = if connection.is_some() {
@@ -2685,15 +2725,25 @@ fn build_model_lifecycle_report_for_workspace_with_selection(
 
     // A caller-supplied connection owns its transaction state; the probe must
     // never open a nested read snapshot on it (GH#32).
-    Ok(build_model_lifecycle_report(
-        &workspace_path,
-        &database_path,
-        connection,
-        caller_holds_snapshot,
-        &entries,
-        selected_embedding_entry,
-        cached_default_model_available,
-    ))
+    Ok(match index_status {
+        Some(index_status) => build_model_lifecycle_report_with_index_status(
+            &workspace_path,
+            &database_path,
+            &entries,
+            selected_embedding_entry,
+            cached_default_model_available,
+            Ok(index_status),
+        ),
+        None => build_model_lifecycle_report(
+            &workspace_path,
+            &database_path,
+            connection,
+            caller_holds_snapshot,
+            &entries,
+            selected_embedding_entry,
+            cached_default_model_available,
+        ),
+    })
 }
 
 /// Build a `ee model status` report.
@@ -4831,6 +4881,7 @@ mod tests {
             Some(database_path),
             connection,
             |_, _| Ok((Some(model_id.to_owned()), false)),
+            None,
         )
     }
 
@@ -5519,6 +5570,100 @@ mod tests {
             surface.repair.as_deref() == Some("ee model status --workspace . --json"),
             format!("not-probed repair must point at the standalone probe: {surface:?}"),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_snapshot_status_reuse_still_inspects_live_model_assets() -> TestResult {
+        const MODEL_ID: &str = "mdl_01HQ3K5Z000000000000000061";
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        let writer = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        ensure_bundled_embedding_model_registered(&writer, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let asset_path = workspace_path.join("model-fixture.json");
+        fs::write(&asset_path, b"before").map_err(|error| error.to_string())?;
+        writer
+            .insert_model_registry_entry(
+                MODEL_ID,
+                &CreateModelRegistryInput {
+                    workspace_id: workspace_id.clone(),
+                    provider: ModelProvider::Hash,
+                    model_name: "hash-128".to_owned(),
+                    purpose: ModelPurpose::Embedding,
+                    dimension: Some(128),
+                    distance_metric: Some(ModelDistanceMetric::Cosine),
+                    status: ModelRegistryStatus::Available,
+                    version: Some("v1".to_owned()),
+                    source_uri: Some("model-fixture.json".to_owned()),
+                    content_hash: Some(format!("blake3:{}", blake3::hash(b"before").to_hex())),
+                    metadata_json: None,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let generation = writer
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("source generation")?;
+        write_index_metadata(&workspace_path, generation)?;
+        let index_dir = workspace_path.join(".ee").join("index");
+        let lease = crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("fixture runtime context missing")?;
+            crate::core::index::IndexGenerationLease::read(&cx, &index_dir)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string())??;
+        let connection =
+            DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let index_status = get_index_status_in_current_snapshot(
+            &IndexStatusOptions {
+                workspace_path: workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir),
+            },
+            &connection,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(index_status.health, IndexHealth::Ready);
+        let probes_before = model_lifecycle_index_status_probes_for_test();
+
+        // A same-length asset edit after index inspection must still be read
+        // and rejected. The index lease does not freeze model files.
+        fs::write(&asset_path, b"after!").map_err(|error| error.to_string())?;
+        let report = build_model_lifecycle_report_for_workspace_with_selection(
+            &workspace_path,
+            Some(&database_path),
+            Some(&connection),
+            |_, _| Ok((Some(MODEL_ID.to_owned()), false)),
+            Some(index_status),
+        )
+        .map_err(|error| format!("reused lifecycle report: {error:?}"))?;
+        assert_eq!(
+            model_lifecycle_index_status_probes_for_test(),
+            probes_before
+        );
+        let model = report
+            .models
+            .iter()
+            .find(|model| model.model_id == MODEL_ID)
+            .ok_or("selected lifecycle model")?;
+        assert_eq!(model.state, "corrupt");
+        assert!(
+            model
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == "model_asset_corrupt")
+        );
+        connection
+            .commit_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        drop(lease);
+        Ok(())
     }
 
     /// Synthetic assets exercise lifecycle inspection and rendering through an

@@ -3148,29 +3148,34 @@ async fn run_context_pack_attempt(
         .ok()
         .and_then(|connection| context_read_snapshot_generation(connection).ok());
 
-    let handoff_rejected = if let Some(handoff) = &remote_search {
+    let validated_handoff_feedback = if let Some(handoff) = &remote_search {
         let validation_start = Instant::now();
         // The canonical local search uses the profile captured before the
         // provider ran. A peer may have selected different budgets, even when
         // the source generation and the current configuration still match.
         // Candidate truncation under another profile cannot be undone here.
-        let matches = handoff.report.runtime_profile.active_profile
+        let profile_matches = handoff.report.runtime_profile.active_profile
             == runtime_profile.active_profile
-            && handoff.report.runtime_profile.budgets == runtime_profile.budgets
-            && handoff.snapshot_matches(
+            && handoff.report.runtime_profile.budgets == runtime_profile.budgets;
+        let validated = if profile_matches {
+            handoff.validate_snapshot(
                 &search_options,
                 checked_context_read_snapshot(&read_pool, &read_snapshot)?,
-            );
+            )
+        } else {
+            None
+        };
         trace.record_elapsed("daemonHandoffValidation", validation_start);
-        !matches
+        validated
     } else {
-        false
+        None
     };
-    if handoff_rejected {
+    if remote_search.is_some() && validated_handoff_feedback.is_none() {
         // The source view or retrieval policy differs. Release the old
         // snapshot and perform the complete canonical path once, including
         // reconciliation, without trying the daemon again. The discarded
         // work still counts toward the caller's total and elapsed SLO.
+        drop(validated_handoff_feedback);
         drop(read_snapshot);
         trace.record_elapsed("daemonHandoffRejected", total_start);
         let mut run = Box::pin(run_context_pack_attempt(
@@ -3239,7 +3244,11 @@ async fn run_context_pack_attempt(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
-        search_preloaded_memories = handoff.revalidate(&search_options, read_connection);
+        search_preloaded_memories = handoff.revalidate_with_feedback(
+            &search_options,
+            read_connection,
+            validated_handoff_feedback.as_ref(),
+        );
         request.quality_scoring_policy = Some(handoff.quality_scoring_policy.clone());
         if let Some(connection) = &context_write_connection {
             handoff.record_audit(&search_options, connection);
@@ -3282,6 +3291,7 @@ async fn run_context_pack_attempt(
             Err(error) => return Err(ContextPackError::Search(error)),
         }
     };
+    drop(validated_handoff_feedback);
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
     control.check()?;

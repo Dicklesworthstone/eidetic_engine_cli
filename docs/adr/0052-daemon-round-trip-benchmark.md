@@ -227,6 +227,23 @@ start, with the existing one-time model-load exclusion.
 Cached read-only JSON delivery merges newly appended fallback diagnostics into
 both degraded arrays without changing its cached pack payload or hash.
 
+Within one pinned search request, model-lifecycle diagnostics reuse the
+successful index-status report for the selected, still-leased generation.
+Fresh-connection retries, shared status-cache entries and unpinned handles do
+not supply reusable snapshot evidence. Registry and model-asset admission still
+run, and `search::modelLifecycle` measures that remaining work separately from
+source-mode resolution.
+
+Calibration's complete feedback row load also supplies harmful-feedback counts
+for that same pinned request after memory ownership is established from source
+rows. The daemon and client each retain their own full-ledger hash and exact
+calibration-file read. The retained rows are neither serialized into the
+handoff nor cached across requests; mismatched source connections or workspaces
+retain the existing SQL path. The counts preserve harmful-signal aliases,
+RFC 3339 instants, malformed-time handling and observed-zero semantics. These
+changes remove duplicate queries and index inspection, but their end-to-end
+latency effect still requires the qualification below.
+
 Public search uses explicit local fallback for `self` and `team` memory scopes
 until caller identity is carried into canonical daemon scope admission. Direct
 search RPCs independently refuse those scopes instead of consulting the

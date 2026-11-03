@@ -898,6 +898,277 @@ fn unavailable_feedback_is_neutral_and_never_claims_observed_zero_harm() {
 }
 
 #[test]
+fn pinned_feedback_rows_match_sql_counts_and_quality_scores() {
+    let fixture = Fixture::new();
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let memory = fixture.memory(1, 1.0, 1.0, reference - chrono::Duration::days(1));
+    let zero = fixture.memory(2, 1.0, 1.0, reference - chrono::Duration::days(1));
+    let mut options = fixture.options();
+    // The unpublished fixture supports current live retrieval, not historical
+    // index selection. Seed source-owned hits independently of the runner's
+    // clock, then apply the fixed instant only to the feedback/scoring oracle.
+    options.include_future = true;
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    let mut hits = run_search_with_read_connection(&options, &reader)
+        .unwrap()
+        .results;
+    assert_eq!(hits.len(), 2);
+    drop(reader);
+    let missing = MemoryId::from_uuid(uuid::Uuid::from_u128(3)).to_string();
+    let mut unowned = hits[0].clone();
+    unowned.doc_id = missing.clone();
+    hits.push(unowned);
+    for (number, (target_type, target, signal, created_at)) in [
+        ("memory", &memory, "negative", "2026-09-28T00:00:00Z"),
+        ("memory", &memory, "harmful", "2026-09-28T02:00:00+02:00"),
+        (
+            "memory",
+            &memory,
+            "contradiction",
+            "2026-09-28T12:00:00.123456789Z",
+        ),
+        (
+            "memory",
+            &memory,
+            "inaccurate",
+            "2026-09-28T12:00:00.123456789Z",
+        ),
+        (
+            "memory",
+            &memory,
+            "negative",
+            "2026-09-28T12:00:00.123456789Z",
+        ),
+        (
+            "memory",
+            &memory,
+            "harmful",
+            "2026-09-28T12:00:00.123456790Z",
+        ),
+        ("memory", &memory, "inaccurate", "2026-09-28T11:00:00-02:00"),
+        ("memory", &memory, "negative", "2026-09-28T13:00:00+02:00"),
+        ("memory", &memory, "positive", "unrelated nonharmful time"),
+        ("memory", &zero, "neutral", "unrelated neutral time"),
+        ("rule", &memory, "harmful", "unrelated rule time"),
+        ("memory", &missing, "harmful", "unowned memory time"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fixture
+            .db
+            .insert_feedback_event_for_recovery(&StoredFeedbackEvent {
+                id: format!("fb_{number:026}"),
+                workspace_id: fixture.workspace.clone(),
+                target_type: target_type.to_owned(),
+                target_id: target.clone(),
+                signal: signal.to_owned(),
+                weight: if number % 2 == 0 { 0.0 } else { 10.0 },
+                source_type: "human_explicit".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+                applied_at: (number % 2 == 0).then(|| reference.to_rfc3339()),
+                created_at: created_at.to_owned(),
+            })
+            .unwrap();
+    }
+    reader.begin_read_snapshot().unwrap();
+    let (_, feedback) = search_score_calibration_with_feedback(
+        &fixture.root,
+        fixture.options().database_path.as_deref(),
+        Some(&reader),
+    );
+    let feedback = feedback.unwrap();
+    let ids = [memory.as_str(), zero.as_str(), memory.as_str()];
+    let expected = reader
+        .memory_harmful_feedback_counts_at(&fixture.workspace, &ids, reference)
+        .unwrap();
+    assert_eq!(expected.get(&memory), Some(&6));
+    assert_eq!(expected.get(&zero), Some(&0));
+    assert_eq!(
+        feedback.harmful_counts_at(&ids, reference).unwrap(),
+        expected
+    );
+
+    let mut sql_hits = hits.clone();
+    let mut sql_degraded = Vec::new();
+    apply_quality_scoring(
+        &fixture.options(),
+        &mut sql_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        &mut sql_degraded,
+    );
+    let mut reused_degraded = Vec::new();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&feedback),
+        &mut reused_degraded,
+    );
+    assert_eq!(
+        serde_json::to_value(&hits).unwrap(),
+        serde_json::to_value(&sql_hits).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&reused_degraded).unwrap(),
+        serde_json::to_value(&sql_degraded).unwrap()
+    );
+    let foreign_feedback = SearchFeedbackSnapshot {
+        connection: &reader,
+        workspace_id: "wsp_other".to_owned(),
+        events: Vec::new(),
+    };
+    let mut foreign_hits = sql_hits.clone();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut foreign_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&foreign_feedback),
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        serde_json::to_value(&foreign_hits).unwrap(),
+        serde_json::to_value(&sql_hits).unwrap(),
+        "another workspace's ledger must not establish observed zeroes"
+    );
+    drop(foreign_feedback);
+    let unowned = hits.iter().find(|hit| hit.doc_id == missing).unwrap();
+    assert!(unowned.ranking_components_json().unwrap()["inputs"]["harmfulCount"].is_null());
+    drop(feedback);
+    reader.rollback_read_snapshot().unwrap();
+}
+
+#[test]
+fn feedback_reuse_rejects_malformed_matching_time_and_different_source_views() {
+    let fixture = Fixture::new();
+    let reference = Utc::now() + chrono::Duration::minutes(1);
+    let memory = fixture.memory(1, 1.0, 1.0, Utc::now());
+    fixture.harmful(&memory, 1);
+    let hits = fixture.search().results;
+    let reader =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    reader.begin_read_snapshot().unwrap();
+    let (_, feedback) = search_score_calibration_with_feedback(
+        &fixture.root,
+        fixture.options().database_path.as_deref(),
+        Some(&reader),
+    );
+    let feedback = feedback.unwrap();
+    fixture
+        .db
+        .execute_raw("UPDATE feedback_events SET signal = 'neutral'")
+        .unwrap();
+    let fresh =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    let mut fresh_hits = hits.clone();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut fresh_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&fresh),
+        None,
+        None,
+        Some(&feedback),
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        fresh_hits[0].ranking_components_json().unwrap()["inputs"]["harmfulCount"],
+        0,
+        "feedback from another connection must not replace a fresh authority read"
+    );
+    assert_eq!(
+        feedback
+            .harmful_counts_at(&[memory.as_str()], reference)
+            .unwrap()
+            .get(&memory),
+        Some(&1)
+    );
+    drop(feedback);
+    reader.rollback_read_snapshot().unwrap();
+
+    fixture
+        .db
+        .execute_raw("UPDATE feedback_events SET signal = 'harmful', created_at = 'invalid-time'")
+        .unwrap();
+    reader.begin_read_snapshot().unwrap();
+    let (_, feedback) = search_score_calibration_with_feedback(
+        &fixture.root,
+        fixture.options().database_path.as_deref(),
+        Some(&reader),
+    );
+    let feedback = feedback.unwrap();
+    assert!(
+        reader
+            .memory_harmful_feedback_counts_at(&fixture.workspace, &[memory.as_str()], reference)
+            .is_err()
+    );
+    assert!(
+        feedback
+            .harmful_counts_at(&[memory.as_str()], reference)
+            .is_err()
+    );
+    let mut reused_hits = hits.clone();
+    let mut reused_degraded = Vec::new();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut reused_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&feedback),
+        &mut reused_degraded,
+    );
+    let mut sql_hits = hits;
+    let mut sql_degraded = Vec::new();
+    apply_quality_scoring(
+        &fixture.options(),
+        &mut sql_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        &mut sql_degraded,
+    );
+    assert_eq!(
+        serde_json::to_value(&reused_hits).unwrap(),
+        serde_json::to_value(&sql_hits).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&reused_degraded).unwrap(),
+        serde_json::to_value(&sql_degraded).unwrap()
+    );
+    assert!(reused_hits[0].ranking_components_json().unwrap()["inputs"]["harmfulCount"].is_null());
+    assert!(
+        reused_degraded
+            .iter()
+            .any(|entry| entry.code == "search_quality_signals_unavailable")
+    );
+    drop(feedback);
+    reader.rollback_read_snapshot().unwrap();
+}
+
+#[test]
 fn quality_reorders_reranked_hits_and_preserves_bonus_distinctions_in_pack_projection() {
     let fixture = Fixture::new();
     let now = Utc::now();
@@ -1205,6 +1476,7 @@ fn feedback_handoff_is_bound_to_pinned_snapshot_during_concurrent_edits() {
     let snapshot = pool.pin_snapshot().unwrap();
     let reader = snapshot.checked_connection().unwrap();
     assert!(handoff.snapshot_matches(&options, reader));
+    let feedback = handoff.validate_snapshot(&options, reader).unwrap();
     let before = serde_json::to_value(&handoff.report.results).unwrap();
     let database = options.resolve_database_path();
     std::thread::spawn(move || {
@@ -1219,11 +1491,12 @@ fn feedback_handoff_is_bound_to_pinned_snapshot_during_concurrent_edits() {
         handoff.snapshot_matches(&options, reader),
         "assembly continues against its admitted source view"
     );
-    handoff.revalidate(&options, reader);
+    handoff.revalidate_with_feedback(&options, reader, Some(&feedback));
     assert_eq!(
         serde_json::to_value(&handoff.report.results).unwrap(),
         before
     );
+    drop(feedback);
     snapshot.commit().unwrap();
     let fresh = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
     assert!(

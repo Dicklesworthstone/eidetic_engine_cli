@@ -1848,41 +1848,61 @@ impl PackSearchHandoff {
         ) && self.report.embed_backend == EmbedBackend::NeuralLocal
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_matches(
         &self,
         options: &SearchOptions,
         connection: &DbConnection,
     ) -> bool {
-        self.matches_request(options)
-            && self.snapshot.workspace_id
-                == bound_search_workspace_id(
+        self.validate_snapshot(options, connection).is_some()
+    }
+
+    /// The caller keeps this source snapshot pinned through revalidation. The
+    /// returned rows belong only to that connection and never enter the wire
+    /// handoff or the cross-request calibration cache.
+    pub(crate) fn validate_snapshot<'a>(
+        &self,
+        options: &SearchOptions,
+        connection: &'a DbConnection,
+    ) -> Option<SearchFeedbackSnapshot<'a>> {
+        if !self.matches_request(options)
+            || self.snapshot.workspace_id
+                != bound_search_workspace_id(
                     &options.workspace_path,
                     options.database_path.as_deref(),
                     Some(connection),
                 )
-            && connection
+            || !connection
                 .get_workspace_generation(&self.snapshot.workspace_id)
                 .is_ok_and(|generation| generation == Some(self.snapshot.generation))
-            && self
-                .snapshot
-                .calibration_input_identity
-                .as_ref()
-                .is_some_and(|identity| {
-                    search_score_calibration_for_workspace_cached(
-                        &options.workspace_path,
-                        options.database_path.as_deref(),
-                        Some(connection),
-                    )
-                    .input_identity()
-                    .as_ref()
-                        == Some(identity)
-                })
+        {
+            return None;
+        }
+        let identity = self.snapshot.calibration_input_identity.as_ref()?;
+        let (calibration, feedback) = search_score_calibration_with_feedback(
+            &options.workspace_path,
+            options.database_path.as_deref(),
+            Some(connection),
+        );
+        (calibration.input_identity().as_ref() == Some(identity))
+            .then_some(feedback)
+            .flatten()
     }
 
+    #[cfg(test)]
     pub(crate) fn revalidate(
         &mut self,
         options: &SearchOptions,
         connection: &DbConnection,
+    ) -> BTreeMap<String, StoredMemory> {
+        self.revalidate_with_feedback(options, connection, None)
+    }
+
+    pub(crate) fn revalidate_with_feedback(
+        &mut self,
+        options: &SearchOptions,
+        connection: &DbConnection,
+        feedback: Option<&SearchFeedbackSnapshot<'_>>,
     ) -> BTreeMap<String, StoredMemory> {
         let mut memories = BTreeMap::new();
         let hits = std::mem::take(&mut self.report.results);
@@ -1903,7 +1923,7 @@ impl PackSearchHandoff {
             rule_admission::admit_hits(options, hits, &mut self.report.degraded, Some(connection));
         match resolved_search_scoring_config(&options.workspace_path) {
             Ok(config) if config.policy_hash() == self.quality_scoring_policy => {
-                apply_quality_scoring(
+                apply_quality_scoring_with_feedback(
                     options,
                     &mut self.report.results,
                     config,
@@ -1911,6 +1931,7 @@ impl PackSearchHandoff {
                     Some(connection),
                     Some(&memories),
                     None,
+                    feedback,
                     &mut self.report.degraded,
                 );
             }
@@ -4681,6 +4702,48 @@ struct SearchScoreCalibrationFeedbackEvents {
     unavailable_reason: Option<String>,
 }
 
+/// Complete feedback rows borrowed by one pinned request. The connection and
+/// workspace binding prevent another source view from claiming observed zeroes.
+pub(crate) struct SearchFeedbackSnapshot<'a> {
+    connection: &'a DbConnection,
+    workspace_id: String,
+    events: Vec<StoredFeedbackEvent>,
+}
+
+impl SearchFeedbackSnapshot<'_> {
+    fn harmful_counts_at(
+        &self,
+        source_owned_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>, ()> {
+        let mut counts: BTreeMap<String, u32> = source_owned_ids
+            .iter()
+            .map(|id| ((*id).to_owned(), 0))
+            .collect();
+        for event in &self.events {
+            if event.workspace_id != self.workspace_id
+                || event.target_type != "memory"
+                || !matches!(
+                    event.signal.as_str(),
+                    "negative" | "harmful" | "contradiction" | "inaccurate"
+                )
+            {
+                continue;
+            }
+            let Some(count) = counts.get_mut(&event.target_id) else {
+                continue;
+            };
+            let created_at = DateTime::parse_from_rfc3339(&event.created_at).map_err(|_| ())?;
+            // Match the authoritative SQL helper: neither weight nor applied_at
+            // gates an accepted feedback event, and sub-millisecond time matters.
+            if created_at.with_timezone(&Utc) <= reference_time {
+                *count = count.checked_add(1).ok_or(())?;
+            }
+        }
+        Ok(counts)
+    }
+}
+
 impl SearchScoreCalibrationFeedbackEvents {
     fn available(events: Vec<StoredFeedbackEvent>) -> Self {
         Self {
@@ -4762,6 +4825,14 @@ fn search_score_calibration_for_workspace_cached(
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
 ) -> SearchScoreCalibration {
+    search_score_calibration_with_feedback(workspace_path, database_path, read_connection).0
+}
+
+fn search_score_calibration_with_feedback<'a>(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    read_connection: Option<&'a DbConnection>,
+) -> (SearchScoreCalibration, Option<SearchFeedbackSnapshot<'a>>) {
     let workspace_id = bound_search_workspace_id(workspace_path, database_path, read_connection);
     let default_database_path = default_workspace_database_path(workspace_path);
     let resolved_database_path = database_path.unwrap_or(&default_database_path);
@@ -4793,16 +4864,25 @@ fn search_score_calibration_for_workspace_cached(
         .map(|feedback_content_hash| SearchScoreCalibrationCacheKey {
             workspace_path: workspace_path.to_path_buf(),
             database_path: resolved_database_path.to_path_buf(),
-            workspace_id,
+            workspace_id: workspace_id.clone(),
             feedback_content_hash: feedback_content_hash.clone(),
             jsonl_fingerprint: search_score_calibration_jsonl_cache_fingerprint(&jsonl_load),
         });
+    let request_feedback = |feedback_events: SearchScoreCalibrationFeedbackEvents| {
+        read_connection
+            .filter(|_| feedback_events.unavailable_reason.is_none())
+            .map(|connection| SearchFeedbackSnapshot {
+                connection,
+                workspace_id: workspace_id.clone(),
+                events: feedback_events.events,
+            })
+    };
     let cache = SEARCH_SCORE_CALIBRATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     if let Some(cache_key) = &cache_key
         && let Ok(cache_guard) = cache.read()
         && let Some(calibration) = cache_guard.get(cache_key)
     {
-        return calibration.clone();
+        return (calibration.clone(), request_feedback(feedback_events));
     }
 
     #[cfg(test)]
@@ -4817,7 +4897,7 @@ fn search_score_calibration_for_workspace_cached(
     let calibration = SearchScoreCalibration::from_jsonl_load_with_feedback_event_status(
         jsonl_load,
         &feedback_events.events,
-        feedback_events.unavailable_reason,
+        feedback_events.unavailable_reason.clone(),
         feedback_content_hash,
     );
     if let Some(cache_key) = cache_key
@@ -4833,7 +4913,7 @@ fn search_score_calibration_for_workspace_cached(
         });
         cache_guard.insert(cache_key, calibration.clone());
     }
-    calibration
+    (calibration, request_feedback(feedback_events))
 }
 
 impl SearchScoreCalibration {
@@ -5496,6 +5576,14 @@ fn annotate_hits_with_score_calibration(
         database_path,
         read_connection,
     );
+    annotate_hits_with_loaded_score_calibration(&calibration, hits, degraded)
+}
+
+fn annotate_hits_with_loaded_score_calibration(
+    calibration: &SearchScoreCalibration,
+    hits: &mut [SearchHit],
+    degraded: &mut Vec<SearchDegradation>,
+) -> Option<String> {
     if let Some(reason) = calibration.feedback_event_unavailable_reason.as_deref() {
         degraded.push(SearchDegradation::search_score_calibration_unreadable(
             reason,
@@ -5549,7 +5637,8 @@ fn annotate_hits_with_score_calibration(
     // A residual quantile can exist even when the JSONL was corrupt,
     // unreadable, or oversized (because feedback supplied enough samples).
     // Never claim a coverage guarantee for a degraded evidence set.
-    let calibrated = search_calibration_is_eligible_for_coverage(&calibration);
+    let calibrated = search_calibration_is_eligible_for_coverage(calibration);
+    let calibration_metadata = calibration.data_json();
     for hit in hits {
         let interval = if calibrated {
             calibration.interval_for_score(hit.relevance_score())
@@ -5574,7 +5663,7 @@ fn annotate_hits_with_score_calibration(
                 serde_json::Value::Null
             },
         );
-        metadata.insert("scoreCalibration".to_string(), calibration.data_json());
+        metadata.insert("scoreCalibration".to_string(), calibration_metadata.clone());
         hit.metadata = Some(serde_json::Value::Object(metadata));
     }
     calibration.input_identity()
@@ -10143,12 +10232,14 @@ async fn run_search_inner_with_performance(
         || crate::config::workspace_output_redaction_enabled(&options.workspace_path),
         |state| state.output_redaction_enabled,
     );
-    let (mut degraded, index_freshness) = search_degradations_with_connection(
-        options,
-        &index_dir,
-        read_connection,
-        fast_embedder_override.as_deref(),
-    );
+    let (mut degraded, index_freshness, snapshot_index_status) =
+        search_degradations_with_connection(
+            options,
+            &index_dir,
+            read_connection,
+            fast_embedder_override.as_deref(),
+            source_snapshot.is_some(),
+        );
     if producer_selection_error.is_some() {
         // The stale advisory promises lexical fallback results. A refused
         // producer runs no retrieval; keep the freshness object and report
@@ -10231,8 +10322,25 @@ async fn run_search_inner_with_performance(
         // Lexical-only retrieval executes no neural backend.
         EmbedBackend::HashFallback
     };
-    push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
+    // Reuse only this request's snapshot observation while the selected
+    // generation is still leased. A retry through another connection is not
+    // evidence for this source snapshot.
+    #[cfg(unix)]
+    let lifecycle_index_status = generation_lease.as_ref().and(snapshot_index_status);
+    #[cfg(not(unix))]
+    let lifecycle_index_status = {
+        let _ = snapshot_index_status;
+        None
+    };
+    let lifecycle_start = Instant::now();
+    push_model_lifecycle_search_degradation(
+        options,
+        read_connection,
+        lifecycle_index_status,
+        &mut degraded,
+    );
+    trace.record_elapsed("search::modelLifecycle", lifecycle_start);
     let rerank_resolve_start = Instant::now();
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
@@ -10443,10 +10551,16 @@ async fn run_search_inner_with_performance(
                 &mut degraded,
             );
             let calibration_start = Instant::now();
-            let pack_calibration_identity = annotate_hits_with_score_calibration(
+            let (calibration, feedback_snapshot) = search_score_calibration_with_feedback(
                 &options.workspace_path,
                 options.database_path.as_deref(),
                 read_connection,
+            );
+            // Unpinned read/write library handles retain the SQL scoring path.
+            // Only the held source view may reuse this request's ledger rows.
+            let feedback_snapshot = feedback_snapshot.filter(|_| source_snapshot.is_some());
+            let pack_calibration_identity = annotate_hits_with_loaded_score_calibration(
+                &calibration,
                 &mut raw_hits,
                 &mut degraded,
             );
@@ -10495,7 +10609,7 @@ async fn run_search_inner_with_performance(
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             trace.record_elapsed("search::meshVisibility", mesh_start);
             let quality_start = Instant::now();
-            apply_quality_scoring(
+            apply_quality_scoring_with_feedback(
                 options,
                 &mut above_floor,
                 scoring_config,
@@ -10503,8 +10617,10 @@ async fn run_search_inner_with_performance(
                 read_connection,
                 preloaded_memories.as_deref(),
                 Some(&admitted_global_ids),
+                feedback_snapshot.as_ref(),
                 &mut degraded,
             );
+            drop(feedback_snapshot);
             trace.record_elapsed("search::qualityScoring", quality_start);
             let truncate_start = Instant::now();
             truncate_hits_to_limit(&mut above_floor, effective_limit);
@@ -11028,28 +11144,39 @@ async fn run_diag_search_in_snapshot(
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
-    let (mut degraded, mut index_freshness) = search_degradations_with_connection(
-        options,
-        &index_dir,
-        read_connection,
-        fast_embedder_override.as_deref(),
-    );
+    let (mut degraded, mut index_freshness, snapshot_index_status) =
+        search_degradations_with_connection(
+            options,
+            &index_dir,
+            read_connection,
+            fast_embedder_override.as_deref(),
+            read_connection.is_some(),
+        );
     // Ordinary search only needs an explicit freshness object when degraded.
     // Diagnostics must also identify the healthy generation actually selected,
     // including a retained generation serving an older source snapshot. Read
     // the selected directory while its lease is held, never the live pointer.
     if source_generation.is_some() && index_freshness.is_none() {
-        let status = cached_index_status_for_search(
-            options,
-            &index_dir,
-            read_connection,
-            fast_embedder_override.as_deref(),
-        )
-        .map_err(|_| {
-            SearchError::Index(
-                "Diagnostic index generation could not be verified; results withheld".to_owned(),
+        let status = snapshot_index_status
+            .clone()
+            .map_or_else(
+                || {
+                    cached_index_status_for_search(
+                        options,
+                        &index_dir,
+                        read_connection,
+                        fast_embedder_override.as_deref(),
+                    )
+                    .map(|probe| probe.report)
+                },
+                Ok,
             )
-        })?;
+            .map_err(|_| {
+                SearchError::Index(
+                    "Diagnostic index generation could not be verified; results withheld"
+                        .to_owned(),
+                )
+            })?;
         let (Some(db_generation), Some(index_generation)) =
             (status.db_generation, status.index_generation)
         else {
@@ -11098,7 +11225,19 @@ async fn run_diag_search_in_snapshot(
     } else {
         EmbedBackend::HashFallback
     };
-    push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
+    #[cfg(unix)]
+    let lifecycle_index_status = snapshot_index_status;
+    #[cfg(not(unix))]
+    let lifecycle_index_status = {
+        let _ = snapshot_index_status;
+        None
+    };
+    push_model_lifecycle_search_degradation(
+        options,
+        read_connection,
+        lifecycle_index_status,
+        &mut degraded,
+    );
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
             options.limit,
@@ -11305,7 +11444,9 @@ fn search_degradations(
     options: &SearchOptions,
     index_dir: &Path,
 ) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
-    search_degradations_with_connection(options, index_dir, None, None)
+    let (degraded, freshness, _) =
+        search_degradations_with_connection(options, index_dir, None, None, false);
+    (degraded, freshness)
 }
 
 /// Connection-reusing variant of [`search_degradations`].
@@ -11319,35 +11460,48 @@ fn search_degradations_with_connection(
     index_dir: &Path,
     connection: Option<&DbConnection>,
     fast_embedder: Option<&dyn crate::search::Embedder>,
-) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
-    let index_status =
-        match cached_index_status_for_search(options, index_dir, connection, fast_embedder) {
-            Ok(status) => status,
-            Err(crate::core::index::IndexStatusError::SourceInspectionDeferred {
-                db_generation,
-                index_generation,
-            }) => {
-                return (
-                    vec![SearchDegradation::stale_index(
-                        Some(db_generation),
-                        index_generation,
-                    )],
-                    Some(SearchIndexFreshness {
-                        stale: true,
-                        db_generation: Some(db_generation),
-                        index_generation,
-                        generation_gap: index_generation
-                            .map(|generation| db_generation.saturating_sub(generation)),
-                        large_gap: index_generation.is_some_and(|generation| {
-                            search_index_gap_is_large(db_generation, generation)
-                        }),
+    caller_holds_snapshot: bool,
+) -> (
+    Vec<SearchDegradation>,
+    Option<SearchIndexFreshness>,
+    Option<IndexStatusReport>,
+) {
+    let probe = match cached_index_status_for_search(options, index_dir, connection, fast_embedder)
+    {
+        Ok(status) => status,
+        Err(crate::core::index::IndexStatusError::SourceInspectionDeferred {
+            db_generation,
+            index_generation,
+        }) => {
+            return (
+                vec![SearchDegradation::stale_index(
+                    Some(db_generation),
+                    index_generation,
+                )],
+                Some(SearchIndexFreshness {
+                    stale: true,
+                    db_generation: Some(db_generation),
+                    index_generation,
+                    generation_gap: index_generation
+                        .map(|generation| db_generation.saturating_sub(generation)),
+                    large_gap: index_generation.is_some_and(|generation| {
+                        search_index_gap_is_large(db_generation, generation)
                     }),
-                );
-            }
-            Err(_) => return (vec![SearchDegradation::index_status_probe_failed()], None),
-        };
+                }),
+                None,
+            );
+        }
+        Err(_) => {
+            return (
+                vec![SearchDegradation::index_status_probe_failed()],
+                None,
+                None,
+            );
+        }
+    };
 
-    match index_status.health {
+    let index_status = probe.report;
+    let (degraded, freshness) = match index_status.health {
         IndexHealth::Ready => (Vec::new(), None),
         IndexHealth::Stale => {
             let mut degraded = vec![SearchDegradation::stale_index(
@@ -11390,22 +11544,39 @@ fn search_degradations_with_connection(
             )],
             None,
         ),
-    }
+    };
+    (
+        degraded,
+        freshness,
+        (caller_holds_snapshot && probe.used_caller_connection).then_some(index_status),
+    )
 }
 
 fn push_model_lifecycle_search_degradation(
     options: &SearchOptions,
     connection: Option<&DbConnection>,
+    snapshot_index_status: Option<IndexStatusReport>,
     degraded: &mut Vec<SearchDegradation>,
 ) {
     if options.source_mode == SearchSourceMode::LexicalOnly {
         return;
     }
-    let Ok(report) = crate::core::model::build_model_lifecycle_report_for_workspace(
-        &options.workspace_path,
-        options.database_path.as_deref(),
-        connection,
-    ) else {
+    let report = match (connection, snapshot_index_status) {
+        (Some(connection), Some(index_status)) => {
+            crate::core::model::build_model_lifecycle_report_for_workspace_with_index_status(
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                connection,
+                index_status,
+            )
+        }
+        _ => crate::core::model::build_model_lifecycle_report_for_workspace(
+            &options.workspace_path,
+            options.database_path.as_deref(),
+            connection,
+        ),
+    };
+    let Ok(report) = report else {
         return;
     };
     let Some(degradation) = report.semantic_surface_degradation("search") else {
@@ -11890,6 +12061,27 @@ fn lexical_search_available(_index_dir: &Path) -> bool {
     false
 }
 
+struct SearchIndexStatusProbe {
+    report: IndexStatusReport,
+    // The caller separately proves it holds a pinned source snapshot. A
+    // fresh-connection retry or shared TTL entry cannot borrow that authority.
+    used_caller_connection: bool,
+}
+
+impl SearchIndexStatusProbe {
+    fn independent(report: IndexStatusReport) -> Self {
+        Self {
+            report,
+            used_caller_connection: false,
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SEARCH_SNAPSHOT_INDEX_STATUS_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Index-status probe for the search hot path, with process-local TTL caching.
 ///
 /// When `connection` is `Some`, the underlying [`get_index_status_with_connection`]
@@ -11908,7 +12100,7 @@ fn cached_index_status_for_search(
     index_dir: &Path,
     connection: Option<&DbConnection>,
     fast_embedder: Option<&dyn crate::search::Embedder>,
-) -> Result<IndexStatusReport, IndexStatusError> {
+) -> Result<SearchIndexStatusProbe, IndexStatusError> {
     let status_options = IndexStatusOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
@@ -11920,6 +12112,9 @@ fn cached_index_status_for_search(
     // cache entry was populated, and never let this request repopulate the
     // cache with an observation older than a concurrent writer's invalidation.
     if let Some(connection) = connection {
+        #[cfg(test)]
+        SEARCH_SNAPSHOT_INDEX_STATUS_PROBES
+            .set(SEARCH_SNAPSHOT_INDEX_STATUS_PROBES.get().saturating_add(1));
         let status = match (options.source_mode, fast_embedder) {
             (SearchSourceMode::LexicalOnly, _) => {
                 crate::core::index::get_index_status_for_lexical_search(
@@ -11937,7 +12132,12 @@ fn cached_index_status_for_search(
             (_, None) => get_index_status_in_current_snapshot(&status_options, connection),
         };
         match status {
-            Ok(status) => return Ok(status),
+            Ok(report) => {
+                return Ok(SearchIndexStatusProbe {
+                    report,
+                    used_caller_connection: true,
+                });
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "ee::search::index_freshness",
@@ -11955,7 +12155,8 @@ fn cached_index_status_for_search(
             &status_options,
             None,
             false,
-        );
+        )
+        .map(SearchIndexStatusProbe::independent);
     }
 
     // The shared cache describes the process-default expectation. A supplied
@@ -11967,7 +12168,8 @@ fn cached_index_status_for_search(
             None,
             false,
             embedder,
-        );
+        )
+        .map(SearchIndexStatusProbe::independent);
     }
 
     let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
@@ -11981,7 +12183,7 @@ fn cached_index_status_for_search(
                 <= INDEX_STATUS_CACHE_TTL
         });
         if let Some(cached) = guard.get(&cache_key) {
-            return Ok(cached.report.clone());
+            return Ok(SearchIndexStatusProbe::independent(cached.report.clone()));
         }
     }
 
@@ -12002,7 +12204,7 @@ fn cached_index_status_for_search(
         );
     }
 
-    Ok(index_status)
+    Ok(SearchIndexStatusProbe::independent(index_status))
 }
 
 /// Replace a stale or unpublished generation with one complete, current lexical
@@ -12973,6 +13175,31 @@ pub(crate) fn apply_quality_scoring(
     admitted_global_ids: Option<&BTreeSet<String>>,
     degraded: &mut Vec<SearchDegradation>,
 ) {
+    apply_quality_scoring_with_feedback(
+        options,
+        hits,
+        config,
+        reference_time,
+        read_connection,
+        preloaded_memories,
+        admitted_global_ids,
+        None,
+        degraded,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_quality_scoring_with_feedback(
+    options: &SearchOptions,
+    hits: &mut [SearchHit],
+    config: SearchScoringConfig,
+    reference_time: DateTime<Utc>,
+    read_connection: Option<&DbConnection>,
+    preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+    admitted_global_ids: Option<&BTreeSet<String>>,
+    feedback_snapshot: Option<&SearchFeedbackSnapshot<'_>>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
     let workspace_id = bound_search_workspace_id(
         &options.workspace_path,
         options.database_path.as_deref(),
@@ -13013,11 +13240,16 @@ pub(crate) fn apply_quality_scoring(
     let harmful_counts = if local_ids.is_empty() {
         Some(BTreeMap::new())
     } else if let Some(connection) = read_connection {
-        match connection.memory_harmful_feedback_counts_at(
-            &workspace_id,
-            &local_ids,
-            reference_time,
-        ) {
+        let counts = if let Some(feedback) = feedback_snapshot.filter(|feedback| {
+            std::ptr::eq(feedback.connection, connection) && feedback.workspace_id == workspace_id
+        }) {
+            feedback.harmful_counts_at(&local_ids, reference_time)
+        } else {
+            connection
+                .memory_harmful_feedback_counts_at(&workspace_id, &local_ids, reference_time)
+                .map_err(|_| ())
+        };
+        match counts {
             Ok(counts) => Some(counts),
             Err(_) => {
                 unavailable = true;
@@ -13600,7 +13832,7 @@ async fn global_store_frankensearch_hits(
     };
     let index_status =
         match cached_index_status_for_search(&global_options, &paths.index_dir, None, None) {
-            Ok(status) => status,
+            Ok(probe) => probe.report,
             Err(error) => {
                 degraded.push(SearchDegradation::global_index_unavailable(&format!(
                     "index status probe failed: {error}"
@@ -18376,12 +18608,14 @@ mod tests {
         assert_eq!(SearchStatus::IndexError.as_str(), "index_error");
     }
 
-    /// GH#32: hybrid search builds the model-lifecycle report while holding
-    /// a pinned read snapshot. The probe must read the real index metadata on
-    /// that connection and never stamp `embed_model_unavailable` with a
-    /// fabricated "does not record a vector dimension" reason.
-    #[test]
-    fn lifecycle_search_degradation_under_pinned_read_snapshot_is_not_fabricated() -> TestResult {
+    fn lifecycle_search_fixture() -> Result<
+        (
+            SearchOptions,
+            DbConnection,
+            crate::core::index::TestWorkspaceEmbedderStackGuard,
+        ),
+        String,
+    > {
         let root = unique_test_dir("lifecycle-snapshot");
         let workspace = root.join("workspace");
         let dot_ee = workspace.join(".ee");
@@ -18395,33 +18629,48 @@ mod tests {
 
         let connection = DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
-        let workspace_id = "wsp_lifecycle_snapshot_0000000";
+        let workspace_id = format!("wsp_{}", &uuid::Uuid::now_v7().simple().to_string()[..26]);
         connection
             .insert_workspace(
-                workspace_id,
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: workspace.to_string_lossy().into_owned(),
                     name: Some("lifecycle-snapshot".to_owned()),
                 },
             )
             .map_err(|e| e.to_string())?;
+        crate::core::model::ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let embedder = Arc::new(HashEmbedder::new(
+            128,
+            frankensearch::HashAlgorithm::FnvModular,
+        ));
+        let model_name = embedder.id().to_owned();
+        let selection = crate::core::index::install_test_workspace_embedder(
+            &workspace_id,
+            crate::search::EmbedderStack::from_parts(embedder.clone(), None),
+        );
+        let mut metadata = crate::models::model_registry::EmbeddingMetadataRecord::new(
+            128,
+            crate::models::model_registry::ModelDistanceMetric::Cosine,
+        );
+        metadata.deterministic = true;
         connection
-            .insert_model_registry_entry(
+            .insert_embedding_metadata_record(
                 "mdl_lifecycle_snapshot_0000000",
-                &crate::db::CreateModelRegistryInput {
-                    workspace_id: workspace_id.to_owned(),
+                &crate::db::CreateEmbeddingMetadataInput {
+                    workspace_id: workspace_id.clone(),
                     provider: crate::models::model_registry::ModelProvider::Hash,
-                    model_name: "hash-128".to_owned(),
-                    purpose: crate::models::model_registry::ModelPurpose::Embedding,
-                    dimension: Some(128),
-                    distance_metric: Some(
-                        crate::models::model_registry::ModelDistanceMetric::Cosine,
-                    ),
+                    model_name: model_name.clone(),
+                    dimension: 128,
+                    distance_metric: crate::models::model_registry::ModelDistanceMetric::Cosine,
                     status: crate::models::model_registry::ModelRegistryStatus::Available,
                     version: Some("v1".to_owned()),
                     source_uri: None,
-                    content_hash: None,
-                    metadata_json: None,
+                    content_hash: Some(crate::core::index::embedding_model_content_hash(
+                        embedder.as_ref(),
+                    )),
+                    metadata,
                     last_checked_at: None,
                 },
             )
@@ -18430,7 +18679,10 @@ mod tests {
             index_dir.join("meta.json"),
             serde_json::json!({
                 "schema": crate::core::index::INDEX_METADATA_SCHEMA_V2,
-                "sourceGeneration": 0,
+                "sourceGeneration": connection
+                    .get_workspace_generation(&workspace_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("fixture workspace generation missing")?,
                 "corpusRevision": crate::core::index::expected_index_corpus_revision().as_str(),
                 "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
                 "documentCount": 0,
@@ -18449,11 +18701,23 @@ mod tests {
                 "lastRebuildAt": "2026-01-01T00:00:00Z",
                 "storedDimension": 128,
                 "storedDistanceMetric": "cosine",
-                "storedVectorDtype": "f32"
+                "storedVectorDtype": "float32"
             })
             .to_string(),
         )
         .map_err(|e| e.to_string())?;
+        frankensearch::VectorIndex::create(&index_dir.join("vector.fast.idx"), &model_name, 128)
+            .and_then(|writer| writer.finish())
+            .map_err(|error| error.to_string())?;
+        #[cfg(feature = "lexical-bm25")]
+        crate::core::run_cli_future(async {
+            use crate::search::LexicalWrite;
+            let cx = asupersync::Cx::current().ok_or("fixture runtime context missing")?;
+            let lexical = crate::search::TantivyIndex::create(&index_dir.join("lexical"))
+                .map_err(|error| error.to_string())?;
+            lexical.commit(&cx).await.map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string())??;
 
         let options = SearchOptions {
             workspace_path: workspace.clone(),
@@ -18475,7 +18739,18 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
         };
+        Ok((options, connection, selection))
+    }
 
+    /// GH#32: hybrid search builds the model-lifecycle report while holding
+    /// a pinned read snapshot. The probe must read the real index metadata on
+    /// that connection and never stamp `embed_model_unavailable` with a
+    /// fabricated "does not record a vector dimension" reason.
+    #[test]
+    fn lifecycle_search_degradation_under_pinned_read_snapshot_is_not_fabricated() -> TestResult {
+        let (options, connection, _selection) = lifecycle_search_fixture()?;
+        let workspace = &options.workspace_path;
+        let database_path = options.resolve_database_path();
         // Same shape as the search hot path: the lifecycle probe runs on a
         // connection that already holds the read snapshot.
         connection
@@ -18499,7 +18774,7 @@ mod tests {
             ),
         )?;
         let mut degraded = Vec::new();
-        push_model_lifecycle_search_degradation(&options, Some(&connection), &mut degraded);
+        push_model_lifecycle_search_degradation(&options, Some(&connection), None, &mut degraded);
         connection
             .commit_read_snapshot()
             .map_err(|e| format!("commit read snapshot: {e}"))?;
@@ -18524,6 +18799,134 @@ mod tests {
                 .any(|degradation| degradation.code == "model_lifecycle_unknown"),
             format!("a healthy store must not report an unprobed lifecycle: {degraded:?}"),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_reuses_one_snapshot_probe_and_the_selected_generation() -> TestResult {
+        let (options, writer, _selection) = lifecycle_search_fixture()?;
+        let live_index_dir = options.resolve_index_dir();
+        let selected_index_dir = live_index_dir.with_file_name("index.retained-lifecycle");
+        std::fs::rename(&live_index_dir, &selected_index_dir).map_err(|error| error.to_string())?;
+        // The live pointer now describes different, incomplete bytes. Reuse
+        // must keep the selected generation's metadata, not inspect this path.
+        std::fs::create_dir_all(&live_index_dir).map_err(|error| error.to_string())?;
+        let mut live_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(selected_index_dir.join("meta.json"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        live_metadata["storedDimension"] = serde_json::json!(256);
+        live_metadata["sourceGeneration"] = serde_json::json!(
+            live_metadata["sourceGeneration"]
+                .as_u64()
+                .ok_or("source generation")?
+                + 1
+        );
+        std::fs::write(live_index_dir.join("meta.json"), live_metadata.to_string())
+            .map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file_read_only(&options.resolve_database_path())
+            .map_err(|error| error.to_string())?;
+        connection
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let lease = crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("fixture runtime context missing")?;
+            pin_search_generation(&cx, &live_index_dir)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string())??;
+        let probes_before = SEARCH_SNAPSHOT_INDEX_STATUS_PROBES.get();
+        let lifecycle_probes_before =
+            crate::core::model::model_lifecycle_index_status_probes_for_test();
+        let (mut degraded, freshness, snapshot_status) = search_degradations_with_connection(
+            &options,
+            &selected_index_dir,
+            Some(&connection),
+            None,
+            true,
+        );
+        let snapshot_status = snapshot_status.ok_or("direct snapshot status was not retained")?;
+        assert_eq!(snapshot_status.health, IndexHealth::Ready);
+        assert_eq!(snapshot_status.index_dir, selected_index_dir);
+        assert_eq!(
+            snapshot_status.index_generation,
+            snapshot_status.db_generation
+        );
+        assert!(freshness.is_none());
+        let report =
+            crate::core::model::build_model_lifecycle_report_for_workspace_with_index_status(
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                &connection,
+                snapshot_status.clone(),
+            )
+            .map_err(|error| format!("reuse lifecycle report: {error:?}"))?;
+        let index_row = report.indexes.first().ok_or("lifecycle index row")?;
+        assert_eq!(index_row.stored_dimension, Some(128));
+        assert_eq!(index_row.dimension_compatibility.compatible, Some(true));
+        push_model_lifecycle_search_degradation(
+            &options,
+            Some(&connection),
+            Some(snapshot_status),
+            &mut degraded,
+        );
+        assert_eq!(SEARCH_SNAPSHOT_INDEX_STATUS_PROBES.get() - probes_before, 1);
+        assert_eq!(
+            crate::core::model::model_lifecycle_index_status_probes_for_test(),
+            lifecycle_probes_before,
+            "lifecycle rendering must not perform a second index-status probe",
+        );
+        assert!(!degraded.iter().any(|entry| matches!(
+            entry.code.as_str(),
+            "model_dimension_mismatch" | "model_lifecycle_unknown"
+        )));
+        drop(lease);
+        connection
+            .commit_read_snapshot()
+            .map_err(|error| error.to_string())?;
+
+        // A result produced without the caller's snapshot must never be
+        // carried forward as reusable snapshot evidence.
+        let (_, _, independent_status) =
+            search_degradations_with_connection(&options, &selected_index_dir, None, None, false);
+        assert!(independent_status.is_none());
+        let (_, _, unpinned_status) = search_degradations_with_connection(
+            &options,
+            &selected_index_dir,
+            Some(&writer),
+            None,
+            false,
+        );
+        assert!(unpinned_status.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_status_retry_keeps_independent_connection_provenance() -> TestResult {
+        let (options, _writer, _selection) = lifecycle_search_fixture()?;
+        // The supplied connection cannot inspect the source schema. The
+        // existing fresh-connection retry may still diagnose the real store,
+        // but its result is not evidence from the failed caller snapshot.
+        let failed_connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        failed_connection
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let probe = cached_index_status_for_search(
+            &options,
+            &options.resolve_index_dir(),
+            Some(&failed_connection),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(probe.report.health, IndexHealth::Ready);
+        assert!(!probe.used_caller_connection);
+        failed_connection
+            .commit_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]
