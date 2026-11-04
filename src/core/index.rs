@@ -28898,3 +28898,7 @@ mod index_rebuild_timeout_override_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "index_memory_lifecycle_tests.rs"]
+mod memory_lifecycle_tests;

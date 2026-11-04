@@ -34043,12 +34043,16 @@ impl DbConnection {
         reason: Option<&str>,
     ) -> Result<Option<String>> {
         self.with_transaction(|| {
-            self.tombstone_memory_audited_in_current_transaction(
+            let audit_id = self.tombstone_memory_audited_in_current_transaction(
                 memory_id,
                 workspace_id,
                 actor,
                 reason,
-            )
+            )?;
+            if audit_id.is_some() {
+                self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
+            }
+            Ok(audit_id)
         })
     }
 
@@ -34135,6 +34139,7 @@ impl DbConnection {
                 },
             )?;
 
+            self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
             Ok(Some(audit_id))
         })
     }
@@ -64362,6 +64367,164 @@ UPDATE memories
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn manual_memory_tombstone_and_restore_queue_only_changed_rows() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OTHER_WORKSPACE: &str = "wsp_11234567890123456789012345";
+        const MEMORY: &str = "mem_01234567890123456789012345";
+        const MISSING_MEMORY: &str = "mem_11234567890123456789012345";
+        for restore in [false, true] {
+            let connection = DbConnection::open_memory()?;
+            connection.migrate()?;
+            setup_workspace(&connection)?;
+            connection.insert_workspace(
+                OTHER_WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: "/tmp/manual-lifecycle-other".to_owned(),
+                    name: None,
+                },
+            )?;
+            connection.insert_memory(
+                MEMORY,
+                &test_memory_input(WORKSPACE, "Manual memory lifecycle keeps search current."),
+            )?;
+            if restore {
+                assert!(connection.tombstone_memory(MEMORY)?);
+            }
+            let transition = |memory_id: &str, workspace_id: &str| {
+                if restore {
+                    connection.untombstone_memory_audited(
+                        memory_id,
+                        workspace_id,
+                        Some("test:manual-lifecycle"),
+                        "2026-11-04T00:00:00Z",
+                        r#"{"reason":"restore reviewed memory"}"#,
+                    )
+                } else {
+                    connection.tombstone_memory_audited(
+                        memory_id,
+                        workspace_id,
+                        Some("test:manual-lifecycle"),
+                        Some("retire reviewed memory"),
+                    )
+                }
+            };
+
+            let before = connection.get_memory(MEMORY)?;
+            let generation_before = connection.get_workspace_generation(WORKSPACE)?;
+            let audit_count_before = connection.count_table_rows("audit_log")?;
+            assert!(transition(MISSING_MEMORY, WORKSPACE)?.is_none());
+            assert!(transition(MEMORY, OTHER_WORKSPACE)?.is_none());
+            assert_eq!(connection.get_memory(MEMORY)?, before);
+            assert_eq!(
+                connection.get_workspace_generation(WORKSPACE)?,
+                generation_before
+            );
+            assert_eq!(
+                connection.count_table_rows("audit_log")?,
+                audit_count_before
+            );
+            assert_eq!(connection.count_table_rows("search_index_jobs")?, 0);
+
+            assert!(transition(MEMORY, WORKSPACE)?.is_some());
+            let jobs = connection.list_pending_search_index_jobs(WORKSPACE, None)?;
+            assert_eq!(jobs.len(), 1, "restore={restore}: {jobs:?}");
+            assert_eq!(jobs[0].workspace_id, WORKSPACE);
+            assert_eq!(
+                jobs[0].job_type_enum(),
+                Some(super::SearchIndexJobType::SingleDocument)
+            );
+            assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+            assert_eq!(jobs[0].document_id.as_deref(), Some(MEMORY));
+            assert_eq!(jobs[0].documents_total, 1);
+            let changed = connection.get_memory(MEMORY)?;
+            let changed_generation = connection.get_workspace_generation(WORKSPACE)?;
+            let changed_audits = connection.count_table_rows("audit_log")?;
+            assert_ne!(changed, before);
+            assert!(changed_generation > generation_before);
+            assert!(changed_audits > audit_count_before);
+
+            assert!(transition(MEMORY, WORKSPACE)?.is_none());
+            assert_eq!(connection.get_memory(MEMORY)?, changed);
+            assert_eq!(
+                connection.get_workspace_generation(WORKSPACE)?,
+                changed_generation
+            );
+            assert_eq!(connection.count_table_rows("audit_log")?, changed_audits);
+            assert_eq!(connection.count_table_rows("search_index_jobs")?, 1);
+            assert_eq!(
+                connection.list_pending_search_index_jobs(WORKSPACE, None)?[0].id,
+                jobs[0].id
+            );
+            connection.close()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn manual_memory_tombstone_and_restore_roll_back_when_index_enqueue_fails() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const MEMORY: &str = "mem_01234567890123456789012345";
+        for restore in [false, true] {
+            let connection = DbConnection::open_memory()?;
+            connection.migrate()?;
+            setup_workspace(&connection)?;
+            connection.insert_memory(
+                MEMORY,
+                &test_memory_input(
+                    WORKSPACE,
+                    "Memory lifecycle and index work commit together.",
+                ),
+            )?;
+            if restore {
+                assert!(connection.tombstone_memory(MEMORY)?);
+            }
+            let before = connection.get_memory(MEMORY)?;
+            let generation_before = connection.get_workspace_generation(WORKSPACE)?;
+            let audit_count_before = connection.count_table_rows("audit_log")?;
+            connection.execute_raw(
+                "CREATE TRIGGER reject_manual_memory_reindex BEFORE INSERT ON search_index_jobs
+                 BEGIN SELECT RAISE(ABORT, 'manual lifecycle index queue failure fixture'); END;",
+            )?;
+
+            let result = if restore {
+                connection.untombstone_memory_audited(
+                    MEMORY,
+                    WORKSPACE,
+                    Some("test:manual-lifecycle"),
+                    "2026-11-04T00:00:00Z",
+                    r#"{"reason":"restore reviewed memory"}"#,
+                )
+            } else {
+                connection.tombstone_memory_audited(
+                    MEMORY,
+                    WORKSPACE,
+                    Some("test:manual-lifecycle"),
+                    Some("retire reviewed memory"),
+                )
+            };
+            let error = result.expect_err("a rejected queue insert must fail the mutation");
+            assert!(
+                error
+                    .to_string()
+                    .contains("manual lifecycle index queue failure fixture"),
+                "restore={restore}: {error}"
+            );
+            assert_eq!(connection.get_memory(MEMORY)?, before);
+            assert_eq!(
+                connection.get_workspace_generation(WORKSPACE)?,
+                generation_before
+            );
+            assert_eq!(
+                connection.count_table_rows("audit_log")?,
+                audit_count_before
+            );
+            assert_eq!(connection.count_table_rows("search_index_jobs")?, 0);
+            connection.close()?;
+        }
         Ok(())
     }
 
