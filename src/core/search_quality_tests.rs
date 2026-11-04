@@ -976,6 +976,9 @@ fn pinned_feedback_rows_match_sql_counts_and_quality_scores() {
             })
             .unwrap();
     }
+    // The initial hit reader was dropped before seeding feedback. Open a new
+    // source view so the pinned SQL and reused-row paths observe that ledger.
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
     reader.begin_read_snapshot().unwrap();
     let (_, feedback) = search_score_calibration_with_feedback(
         &fixture.root,
