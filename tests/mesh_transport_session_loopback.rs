@@ -7,14 +7,14 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
@@ -358,6 +358,76 @@ where
 {
     ee::core::run_cli_with_cx(timeout, operation)
         .map_err(|error| format!("asupersync runtime failed: {error}"))?
+}
+
+/// Keep the watchdog outside the runtime under test: another async timeout
+/// could re-poll a parked socket and deliver cancellation for the broken path.
+fn session_io_test_child(test_name: &str) -> TestResult<bool> {
+    const CHILD_MARKER: &str = "EE_MESH_SESSION_IO_TEST_CHILD";
+    if std::env::var(CHILD_MARKER).as_deref() == Ok(test_name) {
+        return Ok(true);
+    }
+    let mut child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(CHILD_MARKER, test_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start session I/O regression {test_name}: {error}"))?;
+    let started = Instant::now();
+    let watchdog = Duration::from_secs(45);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !output.status.success()
+                || !stdout.contains(&format!("test {test_name} ... ok"))
+                || !stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+            {
+                return Err(format!(
+                    "session I/O regression {test_name} did not pass exactly one test: {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    stdout,
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+            return Ok(false);
+        }
+        if started.elapsed() >= watchdog {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+            return Err(format!(
+                "session I/O regression {test_name} exceeded {watchdog:?}; stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+async fn notify_first_pending<F: Future>(future: F, ready: mpsc::SyncSender<()>) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut ready = Some(ready);
+    poll_fn(|cx| {
+        let result = future.as_mut().poll(cx);
+        if result.is_pending()
+            && let Some(ready) = ready.take()
+        {
+            let _ = ready.send(());
+        }
+        result
+    })
+    .await
 }
 
 fn spawn_server<H, Fut, T>(
@@ -1522,6 +1592,309 @@ fn deadlines_and_cancellation_fail_before_application_mutation() -> TestResult {
         }
         Ok(())
     })
+}
+
+#[test]
+fn stalled_handshake_cancels_promptly_and_keeps_original_timeout() -> TestResult {
+    if !session_io_test_child("stalled_handshake_cancels_promptly_and_keeps_original_timeout")? {
+        return Ok(());
+    }
+    for cancel in [true, false] {
+        let (opened_tx, opened_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (address, server) = spawn_server(move |_cx, mut stream| async move {
+            decode_session_open(&read_packet(&mut stream).await?)
+                .map_err(|error| error.to_string())?;
+            if cancel {
+                opened_tx.send(()).map_err(|error| error.to_string())?;
+            }
+            // Read the real session_open, then keep the socket open and silent
+            // until the client returns. Peer EOF cannot wake its blocked read.
+            release_rx
+                .recv_timeout(Duration::from_secs(7))
+                .map_err(|error| format!("stalled handshake never returned: {error}"))?;
+            let mut byte = [0_u8; 1];
+            if stream
+                .read(&mut byte)
+                .await
+                .map_err(|error| error.to_string())?
+                != 0
+            {
+                return Err("failed handshake sent more bytes instead of closing".to_owned());
+            }
+            Ok(())
+        })?;
+        let client_result = run_runtime(|cx| async move {
+            let canceller = cancel.then(|| {
+                let cancel = cx.clone();
+                thread::spawn(move || {
+                    opened_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .map_err(|error| format!("peer never received session_open: {error}"))?;
+                    // Allow the client to park in session_confirm read; the
+                    // asserted error phase below also rejects earlier failure.
+                    thread::sleep(Duration::from_millis(150));
+                    let cancelled_at = Instant::now();
+                    cancel.cancel_with(CancelKind::User, Some("stop stalled session handshake"));
+                    Ok::<_, String>(cancelled_at)
+                })
+            });
+            let io_timeout = if cancel {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(175)
+            };
+            let started = Instant::now();
+            let result = connect_authenticated_session(
+                &cx,
+                address,
+                initiator_config(SessionChannelLimits {
+                    io_timeout,
+                    ..limits()
+                }),
+            )
+            .await;
+            let finished_at = Instant::now();
+            let _ = release_tx.send(());
+            if let Some(canceller) = canceller {
+                let cancelled_at = canceller
+                    .join()
+                    .map_err(|_| "handshake canceller panicked".to_owned())??;
+                let elapsed = finished_at.saturating_duration_since(cancelled_at);
+                if !matches!(
+                    result,
+                    Err(SessionChannelError::Cancelled {
+                        phase: "session_confirm read",
+                        ..
+                    })
+                ) || elapsed >= Duration::from_secs(1)
+                {
+                    return Err(format!(
+                        "stalled handshake cancellation: {result:?}, {elapsed:?}"
+                    ));
+                }
+            } else {
+                let elapsed = finished_at.duration_since(started);
+                if !matches!(
+                    result,
+                    Err(SessionChannelError::Timeout {
+                        phase: "session_confirm read"
+                    })
+                ) || elapsed < Duration::from_millis(125)
+                    || elapsed >= Duration::from_secs(1)
+                {
+                    return Err(format!(
+                        "handshake I/O deadline changed: {result:?}, {elapsed:?}"
+                    ));
+                }
+            }
+            Ok(())
+        });
+        let server_result = join_server(server);
+        client_result?;
+        server_result?;
+    }
+    Ok(())
+}
+
+#[test]
+fn stalled_authenticated_response_cancels_promptly_and_closes_session() -> TestResult {
+    if !session_io_test_child("stalled_authenticated_response_cancels_promptly_and_closes_session")?
+    {
+        return Ok(());
+    }
+    let custom_limits = SessionChannelLimits {
+        io_timeout: Duration::from_secs(5),
+        ..limits()
+    };
+    let (request_tx, request_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let mut session = accept_loopback_session(&cx, stream, custom_limits)
+            .await
+            .map_err(|error| error.to_string())?;
+        let inbound = session
+            .receive_request(&cx)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("stalled-response peer closed before request")?;
+        if inbound.correlation_id != "stalled-response" {
+            return Err(format!("unexpected stalled-response request: {inbound:?}"));
+        }
+        request_tx.send(()).map_err(|error| error.to_string())?;
+        release_rx
+            .recv_timeout(Duration::from_secs(7))
+            .map_err(|error| format!("stalled response never returned: {error}"))?;
+        if session
+            .receive_request(&cx)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err("cancelled session sent another request instead of closing".to_owned());
+        }
+        Ok(())
+    })?;
+    let client_result = run_runtime(|cx| async move {
+        let mut session =
+            connect_authenticated_session(&cx, address, initiator_config(custom_limits))
+                .await
+                .map_err(|error| error.to_string())?;
+        session
+            .send_request(&cx, request("stalled-response", json!({"read": true})))
+            .await
+            .map_err(|error| error.to_string())?;
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let cancel = cx.clone();
+        let canceller = thread::spawn(move || {
+            pending_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("response read never parked: {error}"))?;
+            request_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("peer never verified request: {error}"))?;
+            let cancelled_at = Instant::now();
+            cancel.cancel_with(CancelKind::Shutdown, Some("stop stalled session response"));
+            Ok::<_, String>(cancelled_at)
+        });
+        let result = notify_first_pending(
+            session.receive_response(&cx, "stalled-response"),
+            pending_tx,
+        )
+        .await;
+        let finished_at = Instant::now();
+        let _ = release_tx.send(());
+        let cancelled_at = canceller
+            .join()
+            .map_err(|_| "response canceller panicked".to_owned())??;
+        let elapsed = finished_at.saturating_duration_since(cancelled_at);
+        if !matches!(
+            result,
+            Err(SessionChannelError::Cancelled {
+                phase: "frame read",
+                ..
+            })
+        ) || elapsed >= Duration::from_secs(1)
+        {
+            return Err(format!(
+                "stalled response cancellation: {result:?}, {elapsed:?}"
+            ));
+        }
+        let retry = session
+            .send_request(&cx, request("after-cancel", json!({})))
+            .await;
+        if !matches!(retry, Err(SessionChannelError::Closed)) {
+            return Err(format!("cancelled session remained usable: {retry:?}"));
+        }
+        Ok(())
+    });
+    let server_result = join_server(server);
+    client_result?;
+    server_result
+}
+
+#[test]
+fn authenticated_frame_preserves_partial_reads_across_cancellation_ticks() -> TestResult {
+    if !session_io_test_child(
+        "authenticated_frame_preserves_partial_reads_across_cancellation_ticks",
+    )? {
+        return Ok(());
+    }
+    let (prefix_tx, prefix_rx) = mpsc::sync_channel(1);
+    let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let mut session = accept_loopback_session(&cx, stream, limits())
+            .await
+            .map_err(|error| error.to_string())?;
+        // Ensure the partial prefix reaches a parked production read before
+        // the peer sends the rest, even if either runtime starts slowly.
+        prefix_rx
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|error| format!("peer never sent the partial prefix: {error}"))?;
+        let inbound = notify_first_pending(session.receive_request(&cx), pending_tx)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("fragmented frame was mistaken for a clean half-close")?;
+        if inbound != request("fragmented-frame", json!({"message": "keep every byte"})) {
+            return Err(format!(
+                "fragmented frame changed its authenticated contents: {inbound:?}"
+            ));
+        }
+        session
+            .send_response(
+                &cx,
+                request(&inbound.correlation_id, json!({"accepted": true})),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    })?;
+    let client_result = run_runtime(|cx| async move {
+        let (mut stream, mut established) = raw_initiator(address).await?;
+        let frame = sign_frame(
+            &established.binding,
+            &established.keys,
+            FrameDraft {
+                direction: SessionDirection::InitiatorToResponder,
+                counter: established.next_outbound,
+                correlation_id: "fragmented-frame".to_owned(),
+                kind: FrameKind::Request,
+                capability: FrameCapability::Summary,
+                requested_budget_ms: 250,
+                payload: json!({"message": "keep every byte"}),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&frame).map_err(|error| error.to_string())?;
+        let prefix = u32::try_from(bytes.len())
+            .map_err(|error| error.to_string())?
+            .to_be_bytes();
+        stream
+            .write_all(&prefix[..2])
+            .await
+            .map_err(|error| error.to_string())?;
+        prefix_tx.send(()).map_err(|error| error.to_string())?;
+        pending_rx
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|error| format!("partial authenticated frame never parked: {error}"))?;
+        asupersync::time::sleep(cx.now(), Duration::from_millis(150)).await;
+        stream
+            .write_all(&prefix[2..])
+            .await
+            .map_err(|error| error.to_string())?;
+        let split = bytes.len() / 2;
+        stream
+            .write_all(&bytes[..split])
+            .await
+            .map_err(|error| error.to_string())?;
+        asupersync::time::sleep(cx.now(), Duration::from_millis(150)).await;
+        stream
+            .write_all(&bytes[split..])
+            .await
+            .map_err(|error| error.to_string())?;
+        let response =
+            decode_frame(&read_packet(&mut stream).await?).map_err(|error| error.to_string())?;
+        verify_frame(
+            &response,
+            &established.binding,
+            SessionDirection::ResponderToInitiator,
+            &mut established.inbound,
+            &established.keys,
+            &NegotiatedExtensions::none(),
+        )
+        .map_err(|error| error.to_string())?;
+        if response.kind != FrameKind::Response
+            || response.correlation_id != "fragmented-frame"
+            || response.payload != json!({"accepted": true})
+        {
+            return Err(format!(
+                "fragmented frame produced the wrong response: {response:?}"
+            ));
+        }
+        Ok(())
+    });
+    let server_result = join_server(server);
+    client_result?;
+    server_result
 }
 
 #[test]

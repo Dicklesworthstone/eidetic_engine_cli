@@ -3485,8 +3485,10 @@ async fn await_io<T, F>(
 where
     F: Future<Output = io::Result<T>>,
 {
+    const CANCEL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+
     checkpoint(cx, phase)?;
-    let now = wall_now();
+    let now = cx.now();
     let effective_duration = cx
         .budget()
         .remaining_duration(now)
@@ -3496,7 +3498,18 @@ where
         return Err(SessionChannelError::Timeout { phase });
     }
     let _ambient = Cx::set_current(Some(cx.clone()));
-    match timeout(now, effective_duration, future).await {
+    // A parked TCP read/write in the pinned runtime registers socket
+    // readiness, not a cancellation wake. Keep the entire timed operation
+    // pinned while short waits recheck the request. Dropping only the borrow
+    // preserves partial packet progress and never renews the I/O deadline.
+    let mut operation = std::pin::pin!(timeout(now, effective_duration, future));
+    let result = loop {
+        checkpoint(cx, phase)?;
+        if let Ok(result) = timeout(cx.now(), CANCEL_CHECK_INTERVAL, operation.as_mut()).await {
+            break result;
+        }
+    };
+    match result {
         Ok(Ok(value)) => {
             checkpoint(cx, phase)?;
             Ok(value)
