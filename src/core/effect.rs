@@ -1263,6 +1263,11 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "migrate shard-fanout",
     "note",
     "outcome",
+    // Added by hand (GH #86). The release handler previews read-only under
+    // `--dry-run`, but the Clap walk cannot resolve this display path (the
+    // subcommand is renamed `outcome-quarantine`), so the roster never listed
+    // it and the guard refused the flag.
+    "outcome quarantine release",
     "plan recipe save",
     "playbook export",
     "playbook extract",

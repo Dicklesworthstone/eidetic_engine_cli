@@ -101428,6 +101428,27 @@ demos:
         )
     }
 
+    /// GH #86: `ee outcome quarantine release --dry-run` previews the release
+    /// read-only, but `DRY_RUN_CAPABLE` missed the command, so this guard
+    /// refused the flag. `mutating_dry_run_declarations_match_the_parser`
+    /// cannot resolve this display path, so only a direct check catches it.
+    #[test]
+    fn outcome_quarantine_release_dry_run_is_not_refused() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+        let release = manifest
+            .get("outcome quarantine release")
+            .ok_or("outcome quarantine release must be declared")?;
+        ensure(
+            release.default_effect.is_mutating(),
+            "fixture must be a mutating command for this to mean anything",
+        )?;
+        ensure_equal(
+            &super::dry_run_refusal_message(&manifest, "outcome quarantine release"),
+            &None,
+            "outcome quarantine release accepts --dry-run and previews read-only",
+        )
+    }
+
     #[test]
     fn review_session_propose_resolves_to_durable_effect() -> TestResult {
         // bd-d67os.17: `ee review session --propose` persists curation candidates
@@ -101602,9 +101623,12 @@ demos:
                 continue;
             }
             checked += 1;
-            let mut argv: Vec<String> = vec!["ee".to_owned()];
-            argv.extend(effect.command_path.split_whitespace().map(str::to_owned));
-            argv.push("--dry-run".to_owned());
+            let mut argv: Vec<OsString> = vec![OsString::from("ee")];
+            argv.extend(effect.command_path.split_whitespace().map(OsString::from));
+            argv.push(OsString::from("--dry-run"));
+            // Parse what `run` parses: it rewrites `outcome quarantine` to the
+            // renamed `outcome-quarantine` subcommand before Clap sees argv.
+            let argv = super::normalize_outcome_quarantine_args(argv);
 
             match Cli::try_parse_from(&argv) {
                 Ok(_) => {}
