@@ -2695,7 +2695,65 @@ mod tests {
     }
 
     #[test]
-    fn fallback_hits_report_no_raw_lexical_score() -> TestResult {
+    fn fallback_score_preserves_inflections_without_question_only_matches() {
+        let unrelated = scored_memory("episodic", "note", "Sourdough starter bread.");
+        let question_only = scored_memory("episodic", "note", "How should I do it?");
+        for (left, right) in [
+            ("releasing", "release"),
+            ("policies", "policy"),
+            ("running", "run"),
+        ] {
+            for (query, content) in [(left, right), (right, left)] {
+                let query_terms = super::lexical_terms(&format!("How should I {query}?"));
+                let relevant = scored_memory("procedural", "rule", content);
+                assert_eq!(
+                    super::lexical_memory_score(&relevant, &query_terms),
+                    Some(1.0),
+                    "index-free recall must retain {query:?} / {content:?}"
+                );
+                for rejected in [&unrelated, &question_only] {
+                    assert_eq!(
+                        super::lexical_memory_score(rejected, &query_terms),
+                        None,
+                        "question scaffolding must not admit {:?}",
+                        rejected.content
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_score_normalizes_unicode_case_and_identifier_parts() {
+        for (query, content) in [
+            ("ÉQUILIBRE", "équilibre"),
+            ("request", "request_timeout"),
+            ("timeout", "request_timeout"),
+            ("request_timeout", "request timeout"),
+            ("request timeout", "request_timeout"),
+        ] {
+            let query_terms = super::lexical_terms(query);
+            let memory = scored_memory("episodic", "note", content);
+            assert_eq!(
+                super::lexical_memory_score(&memory, &query_terms),
+                Some(1.0),
+                "fallback and indexed admission must agree for {query:?} / {content:?}"
+            );
+        }
+        let query_terms = super::lexical_terms("how should I do it?");
+        assert!(query_terms.is_empty());
+        assert_eq!(
+            super::lexical_memory_score(
+                &scored_memory("episodic", "note", "how should I do it?"),
+                &query_terms
+            ),
+            None,
+            "contentless questions must not turn into full-store fallback matches"
+        );
+    }
+
+    #[test]
+    fn fallback_hits_preserve_content_recall_without_claiming_bm25_scores() -> TestResult {
         // `lexicalScore` is contractually the raw engine BM25 value behind the
         // normalized `relevanceScore`. This path never runs Frankensearch, so
         // it has no BM25 value to report and must not echo the coverage ratio
@@ -2727,10 +2785,32 @@ mod tests {
             .insert_memory(
                 &memory_id,
                 &CreateMemoryInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     level: "episodic".to_owned(),
                     kind: "note".to_owned(),
                     content: "Hedging exposure was reviewed this quarter.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let unrelated_id = MemoryId::from_uuid(uuid::Uuid::from_u128(4_707)).to_string();
+        connection
+            .insert_memory(
+                &unrelated_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "How should I do this with sourdough starter bread?".to_owned(),
                     workflow_id: None,
                     confidence: 0.9,
                     utility: 0.8,
@@ -2749,7 +2829,7 @@ mod tests {
         let hits = super::lexical_memory_fallback_hits(
             &connection,
             &workspace,
-            "hedging exposure",
+            "How should I hedge exposures?",
             10,
             false,
             None,
@@ -2759,12 +2839,21 @@ mod tests {
             Vec::new(),
             &mut degraded,
         );
+        ensure_equal(
+            &hits
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec![memory_id.as_str()],
+            "persisted fallback must recall inflected content and reject question-only overlap",
+        )?;
 
         let hit = hits
             .iter()
             .find(|hit| hit.doc_id == memory_id)
             .ok_or_else(|| format!("expected fallback hit for {memory_id}, got {hits:?}"))?;
 
+        ensure_equal(&hit.score, &1.0, "content-word coverage")?;
         ensure_equal(
             &hit.lexical_score,
             &None,

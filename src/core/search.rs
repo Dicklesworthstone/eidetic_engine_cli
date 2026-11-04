@@ -794,15 +794,7 @@ fn drop_stopword_only_lexical_hits(
     if user_floor_override == Some(0.0) {
         return;
     }
-    // Use the same normalization on both sides. Stripping "ing" alone made
-    // "releasing" -> "releas" disagree with "release", and stripping "ies"
-    // made "policies" -> "polic" disagree with "policy". These are content
-    // matches, not evidence that a lexical hit matched only stopwords.
-    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
-    let query_terms = stopword_filter_terms(query)
-        .iter()
-        .map(|token| stemmer.stem(token).into_owned())
-        .collect::<BTreeSet<_>>();
+    let query_terms = normalized_lexical_terms(query);
     if query_terms.is_empty() {
         return;
     }
@@ -843,6 +835,7 @@ fn drop_stopword_only_lexical_hits(
         _ => BTreeMap::new(),
     };
     let before = hits.len();
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
     hits.retain(|hit| {
         if !lexical_only(hit) {
             return true;
@@ -865,6 +858,8 @@ fn drop_stopword_only_lexical_hits(
                 text.push_str(extra);
             }
         }
+        // Admission only needs one overlapping term. Avoid stemming and
+        // allocating a complete set for every long evidence span.
         stopword_filter_terms(&text)
             .iter()
             .any(|token| query_terms.contains(stemmer.stem(token).as_ref()))
@@ -873,6 +868,21 @@ fn drop_stopword_only_lexical_hits(
     if filtered > 0 {
         degraded.push(SearchDegradation::lexical_stopword_only_filtered(filtered));
     }
+}
+
+/// Content terms shared by lexical admission and degraded context retrieval.
+///
+/// Keep both query and document normalization identical across the two paths:
+/// whole-word comparison loses "releasing" / "release", while stripping one
+/// suffix loses "policies" / "policy". Stopwords carry no content evidence,
+/// including when they are the only words a fallback candidate shares with the
+/// request. This is an overlap guard, not a replacement for engine scoring.
+pub(crate) fn normalized_lexical_terms(text: &str) -> BTreeSet<String> {
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+    stopword_filter_terms(text)
+        .iter()
+        .map(|token| stemmer.stem(token).into_owned())
+        .collect()
 }
 
 /// Content words for the stopword-only filter, seen the way the lexical index

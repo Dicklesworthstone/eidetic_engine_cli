@@ -5817,11 +5817,10 @@ fn stable_context_workspace_id(path: &Path) -> String {
 }
 
 fn lexical_terms(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|term| term.len() >= 2)
-        .map(str::to_ascii_lowercase)
-        .collect()
+    // Indexed admission also retains a joined identifier as an alias. Coverage
+    // must count its component words only once, so request_timeout and
+    // "request timeout" have the same denominator on this fallback path.
+    crate::core::search::normalized_lexical_terms(&text.replace('_', " "))
 }
 
 /// Term-coverage score for the degraded, index-free memory fallback
@@ -5839,7 +5838,9 @@ fn lexical_terms(text: &str) -> BTreeSet<String> {
 /// 2. Matching was `haystack.contains(term)`, an unanchored substring test, so
 ///    a short query term like `ucu` matched `document` and `succumb`. Both
 ///    sides are now tokenized with [`lexical_terms`] and compared as whole
-///    words, which is the same boundary the query itself is split on.
+///    content words using the same stemming as indexed lexical admission.
+///    Otherwise an index failure loses matches such as `releasing`/`release`
+///    while admitting unrelated memories that only share question scaffolding.
 ///
 /// The result stays a plain matched/total ratio in `0.0..=1.0`. It is a
 /// coverage fraction, not BM25 and not a calibrated probability — see
