@@ -9575,6 +9575,182 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn context_read_pool_telemetry_preserves_diagnostics_without_changing_pack_identity()
+    -> TestResult {
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        request.reference_time = Some(query_time("2026-09-28T12:00:00Z"));
+        let threshold_ns = READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos();
+
+        for include_non_affecting_degradations in [false, true] {
+            let options = super::ContextPackOutputOptions {
+                include_non_affecting_degradations,
+                ..super::ContextPackOutputOptions::default()
+            };
+            let render_json = |response: &crate::pack::ContextResponse| {
+                serde_json::from_str::<serde_json::Value>(
+                    &crate::output::render_context_response_json_with_options(
+                        response,
+                        crate::output::ContextJsonRenderOptions::from(options),
+                    ),
+                )
+                .map_err(|error| error.to_string())
+            };
+            let mut baseline =
+                crate::pack::ContextResponse::new(request.clone(), draft.clone(), Vec::new())
+                    .map_err(|error| error.to_string())?;
+            super::finalize_context_response(&mut baseline, options, Some(17), None);
+            assert_finalized_text_contract(&baseline)?;
+            let baseline_json = render_json(&baseline)?;
+            let baseline_components = baseline
+                .data
+                .pack_hash_components
+                .as_ref()
+                .ok_or("baseline components")?;
+
+            for (p99_ns, bypass_count) in [
+                (0, 0),
+                (threshold_ns, 0),
+                (threshold_ns + 1, 0),
+                (0, 1),
+                (0, 2),
+                (threshold_ns + 1, 1),
+                (threshold_ns + 1, 2),
+            ] {
+                let stats = PoolStats {
+                    ad_hoc_bypass_count: bypass_count,
+                    acquire_wait: AcquireWaitStats {
+                        samples: READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
+                        p50_ns: 0,
+                        p99_ns,
+                    },
+                    ..PoolStats::default()
+                };
+                let mut telemetry = Vec::new();
+                super::push_context_read_pool_degradations(&mut telemetry, &stats, bypass_count);
+                assert_eq!(
+                    telemetry.len(),
+                    usize::from(bypass_count > 0) + usize::from(p99_ns >= threshold_ns)
+                );
+                let mut response = crate::pack::ContextResponse::new(
+                    request.clone(),
+                    draft.clone(),
+                    telemetry.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                super::finalize_context_response(&mut response, options, Some(17), None);
+                assert_finalized_text_contract(&response)?;
+
+                assert_eq!(response.data.degraded, telemetry);
+                assert_eq!(response.data.pack.hash, baseline.data.pack.hash);
+                assert_eq!(
+                    response.data.pack_hash_components.as_ref(),
+                    Some(baseline_components)
+                );
+                assert_eq!(response.data.finalized_text, baseline.data.finalized_text);
+
+                let json = render_json(&response)?;
+                assert_eq!(json["degraded"], json["data"]["degraded"]);
+                assert_eq!(
+                    json["data"]["pack"]["text"],
+                    baseline_json["data"]["pack"]["text"]
+                );
+                assert_eq!(
+                    json["data"]["pack"]["advisoryBanner"],
+                    baseline_json["data"]["pack"]["advisoryBanner"]
+                );
+                let serialized = json["degraded"].as_array().ok_or("JSON diagnostics")?;
+                assert_eq!(serialized.len(), telemetry.len());
+                for signal in &telemetry {
+                    let serialized_signal = serialized
+                        .iter()
+                        .find(|entry| entry["code"].as_str() == Some(signal.code.as_str()))
+                        .ok_or("read-pool telemetry retained in JSON")?;
+                    assert_eq!(serialized_signal["severity"], signal.severity.as_str());
+                    assert_eq!(serialized_signal["message"], signal.message);
+                    assert_eq!(
+                        serialized_signal["repair"],
+                        "increase storage.read_pool.size"
+                    );
+                    assert!(
+                        !baseline
+                            .data
+                            .finalized_text
+                            .as_deref()
+                            .ok_or("text")?
+                            .contains(&signal.message)
+                    );
+                }
+
+                if p99_ns == threshold_ns + 1 && bypass_count == 2 {
+                    assert!(telemetry.iter().any(|signal| {
+                        signal
+                            .message
+                            .contains("opened 2 ad-hoc read connections for this request")
+                    }));
+                    assert!(
+                        telemetry
+                            .iter()
+                            .any(|signal| signal.message.contains(&format!(
+                                "p99={p99_ns}ns over {} samples",
+                                READ_POOL_UNDERSIZED_SAMPLE_FLOOR
+                            )))
+                    );
+
+                    let mut changed_content = response.clone();
+                    changed_content.data.pack.items[0]
+                        .content
+                        .push_str("; preserve the selected source content");
+                    super::finalize_context_response(&mut changed_content, options, Some(17), None);
+                    assert_finalized_text_contract(&changed_content)?;
+                    let changed_components = changed_content
+                        .data
+                        .pack_hash_components
+                        .as_ref()
+                        .ok_or("changed content components")?;
+                    assert_ne!(changed_content.data.pack.hash, response.data.pack.hash);
+                    assert_ne!(changed_components.items, baseline_components.items);
+                    assert_ne!(
+                        changed_components.rendered_text,
+                        baseline_components.rendered_text
+                    );
+                    assert_eq!(changed_content.data.degraded, telemetry);
+
+                    let mut changed_admission = response.clone();
+                    changed_admission
+                        .data
+                        .degraded
+                        .push(ContextResponseDegradation {
+                            code: "context_lexical_fallback".to_owned(),
+                            severity: ContextResponseSeverity::Medium,
+                            message: "Semantic retrieval was unavailable for this response."
+                                .to_owned(),
+                            repair: Some("ee index rebuild".to_owned()),
+                        });
+                    super::finalize_context_response(
+                        &mut changed_admission,
+                        options,
+                        Some(17),
+                        None,
+                    );
+                    assert_finalized_text_contract(&changed_admission)?;
+                    let changed_components = changed_admission
+                        .data
+                        .pack_hash_components
+                        .as_ref()
+                        .ok_or("changed admission components")?;
+                    assert_ne!(changed_admission.data.pack.hash, response.data.pack.hash);
+                    assert_ne!(changed_components.degraded, baseline_components.degraded);
+                    assert_ne!(
+                        changed_components.rendered_text,
+                        baseline_components.rendered_text
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pinned_snapshot_prevents_revise_generation_mixing_in_pack_candidates() -> Result<(), String>
     {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;

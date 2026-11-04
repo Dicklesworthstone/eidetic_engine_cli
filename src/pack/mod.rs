@@ -3927,8 +3927,14 @@ pub const PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE: &str = "pack_assembly_elapsed_
 /// Degradation codes that are operational telemetry, not canonical pack state
 /// (ADR 0087 §5). They may appear in the envelope's `degraded[]`, but the pack
 /// hash drops them by construction, so no call order can let one in.
-pub const NON_CANONICAL_TELEMETRY_DEGRADATION_CODES: &[&str] =
-    &[PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+/// Successful read-pool fallback and sizing advice report per-run acquisition
+/// waits and connection counts; they do not change the admitted source view
+/// or selected content. Keep their full diagnostics outside canonical text.
+pub const NON_CANONICAL_TELEMETRY_DEGRADATION_CODES: &[&str] = &[
+    PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+    "read_pool_acquire_timeout",
+    "read_pool_undersized",
+];
 
 #[must_use]
 pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {

@@ -837,7 +837,10 @@ fn is_elapsed_key(key: &str) -> bool {
 // swarm_heavy warning), so a sufficiently loaded host crosses any profile's
 // threshold. Pinning would only make the flake rarer, and a rare flake whose
 // first green reading looks like proof is worse than a red test.
-const TIMING_DEGRADED_CODES: &[&str] = &[ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+// Share the product registry so read-pool pressure diagnostics follow the same
+// boundary. Canonical text and banners already exclude all of these codes;
+// normalization removes only their retained envelope diagnostics.
+const TIMING_DEGRADED_CODES: &[&str] = ee::pack::NON_CANONICAL_TELEMETRY_DEGRADATION_CODES;
 
 /// Opening words of the timing degradation as rendered into markdown.
 ///

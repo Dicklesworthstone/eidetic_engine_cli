@@ -3962,9 +3962,9 @@ pub(crate) fn render_context_markdown_for_finalization(
     include_non_affecting: bool,
     footer_hash: &str,
 ) -> String {
-    // ADR 0087 §1: `pack.text` is canonical, so non-canonical telemetry
-    // (the elapsed-budget overrun) never reaches it, nor the counts and
-    // banner derived from this slice. It stays in the envelope's `degraded[]`.
+    // ADR 0087 §1: `pack.text` is canonical, so elapsed-budget and read-pool
+    // pressure telemetry never reach it, nor the counts and banner derived
+    // from this slice. Full diagnostics stay in the envelope's `degraded[]`.
     let filtered = input
         .degraded
         .iter()
