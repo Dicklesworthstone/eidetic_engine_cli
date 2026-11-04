@@ -1268,6 +1268,209 @@ fn blocked_accept_observes_request_deadline_without_a_peer() -> TestResult {
 }
 
 #[test]
+fn stalled_bootstrap_frame_observes_cancellation_then_shutdown() -> TestResult {
+    if !lifecycle_test_child("stalled_bootstrap_frame_observes_cancellation_then_shutdown")? {
+        return Ok(());
+    }
+    // Exercise both a partial length prefix and a partial body. Neither peer
+    // sends more bytes or closes until the cancellation result is observed.
+    for partial in [&[0_u8, 0][..], &[0_u8, 0, 0, 4, b'x'][..]] {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let local_api_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+        let port = available_nonprivileged_port()?;
+        let bind_address = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut registered = route(workspace.path().to_path_buf(), port);
+        registered.limits.io_timeout = Duration::from_secs(5);
+        let registry =
+            ResponderRouteRegistry::new([registered]).map_err(|error| error.to_string())?;
+        run_runtime(|cx| async move {
+            let mut broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let mut peer = std::net::TcpStream::connect(bind_address)
+                .map_err(|error| format!("connect stalled bootstrap: {error}"))?;
+            peer.write_all(partial).map_err(|error| error.to_string())?;
+            let cancel = cx.clone();
+            let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+            let canceller = thread::spawn(move || {
+                pending_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .map_err(|error| format!("bootstrap never became pending: {error}"))?;
+                let cancelled_at = Instant::now();
+                cancel.cancel_with(CancelKind::Shutdown, Some("stop stalled bootstrap"));
+                Ok::<_, String>(cancelled_at)
+            });
+            let result = notify_first_pending(broker.accept_authenticated(&cx), pending_tx).await;
+            let cancelled_at = canceller
+                .join()
+                .map_err(|_| "bootstrap canceller panicked".to_owned())??;
+            if !matches!(result, Err(ResponderBrokerError::Cancelled))
+                || cancelled_at.elapsed() >= Duration::from_secs(1)
+            {
+                return Err(format!(
+                    "stalled bootstrap did not cancel promptly: {result:?}, {:?}",
+                    cancelled_at.elapsed()
+                ));
+            }
+            let status = broker.status();
+            let audit = broker.recent_audit_events();
+            if status.accepted_connections != 1
+                || status.authenticated_sessions != 0
+                || status.preauth_inflight != 0
+                || audit.len() != 1
+                || audit[0].outcome != "cancelled"
+                || audit[0].authenticated
+                || audit[0].route_selected
+            {
+                return Err(format!(
+                    "cancelled bootstrap retained admission or claimed authentication: {status:?} {audit:?}"
+                ));
+            }
+            broker.shutdown();
+            let rebound = StdTcpListener::bind(bind_address)
+                .map_err(|error| format!("cancelled bootstrap retained its listener: {error}"))?;
+            drop(rebound);
+            drop(peer);
+            fake.finish()?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn stalled_local_api_response_observes_cancellation() -> TestResult {
+    if !lifecycle_test_child("stalled_local_api_response_observes_cancellation")? {
+        return Ok(());
+    }
+    let local_api_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let socket_path = local_api_dir.path().join("tailscaled.sock");
+    let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+    run_runtime(|cx| async move {
+        let cancel = cx.clone();
+        let (finish_tx, finish_rx) = mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let request = read_http_request(&mut stream)?;
+            if !request.starts_with("GET /localapi/v0/whois?") {
+                return Err(format!("unexpected stalled LocalAPI request: {request}"));
+            }
+            // Let the client park on the empty response, then cancel without
+            // waking it through socket readiness. Keep the stream open.
+            thread::sleep(Duration::from_millis(150));
+            let cancelled_at = Instant::now();
+            cancel.cancel_with(CancelKind::Shutdown, Some("stop stalled LocalAPI"));
+            finish_rx
+                .recv_timeout(Duration::from_secs(7))
+                .map_err(|error| format!("LocalAPI cancellation never returned: {error}"))?;
+            drop(stream);
+            Ok::<_, String>(cancelled_at)
+        });
+        let client = TailscaleLocalApiClient::new(socket_path, Duration::from_secs(5));
+        let result = client
+            .who_is(&cx, SocketAddr::from(([127, 0, 0, 2], 42000)))
+            .await;
+        let _ = finish_tx.send(());
+        let cancelled_at = server
+            .join()
+            .map_err(|_| "stalled LocalAPI thread panicked".to_owned())??;
+        if !matches!(result, Err(ResponderBrokerError::Cancelled))
+            || cancelled_at.elapsed() >= Duration::from_secs(1)
+        {
+            return Err(format!(
+                "stalled LocalAPI did not cancel promptly: {result:?}, {:?}",
+                cancelled_at.elapsed()
+            ));
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn bootstrap_preserves_partial_frames_across_cancellation_ticks() -> TestResult {
+    if !lifecycle_test_child("bootstrap_preserves_partial_frames_across_cancellation_ticks")? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address = SocketAddr::from(([127, 0, 0, 1], port));
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    run_runtime(|cx| async move {
+        let broker = ResponderBroker::bind(
+            &cx,
+            bind_address,
+            TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+            registry,
+            PreAuthAdmissionLimits::default(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let request = build_request(
+            "fragmented-bootstrap",
+            "nodekey:initiator",
+            env!("CARGO_PKG_VERSION"),
+            vec!["workspace-initiator".to_owned()],
+            vec!["hello".to_owned()],
+            Vec::new(),
+        );
+        let bytes = encode_envelope(
+            BootstrapCapability::Hello,
+            serde_json::to_value(&request).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let prefix = u32::try_from(bytes.len())
+            .map_err(|error| error.to_string())?
+            .to_be_bytes();
+        let mut peer =
+            std::net::TcpStream::connect(bind_address).map_err(|error| error.to_string())?;
+        peer.set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|error| error.to_string())?;
+        peer.write_all(&prefix[..2])
+            .map_err(|error| error.to_string())?;
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let client = thread::spawn(move || {
+            pending_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("fragmented bootstrap never parked: {error}"))?;
+            thread::sleep(Duration::from_millis(150));
+            peer.write_all(&prefix[2..])
+                .map_err(|error| error.to_string())?;
+            let split = bytes.len() / 2;
+            peer.write_all(&bytes[..split])
+                .map_err(|error| error.to_string())?;
+            thread::sleep(Duration::from_millis(150));
+            peer.write_all(&bytes[split..])
+                .map_err(|error| error.to_string())?;
+            let reply = read_test_framed(&mut peer)?;
+            let reply = decode_envelope(&reply).map_err(|error| error.to_string())?;
+            if reply.capability != BootstrapCapability::Hello {
+                return Err(format!("unexpected fragmented bootstrap reply: {reply:?}"));
+            }
+            Ok(())
+        });
+        let result = notify_first_pending(broker.accept_authenticated(&cx), pending_tx).await;
+        client
+            .join()
+            .map_err(|_| "fragmented bootstrap peer panicked".to_owned())??;
+        if !matches!(result, Err(ResponderBrokerError::BootstrapHelloAnswered)) {
+            return Err(format!("partial bootstrap frame was lost: {result:?}"));
+        }
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
 fn cancelled_owner_releases_tcp_and_control_before_drop() -> TestResult {
     if !lifecycle_test_child("cancelled_owner_releases_tcp_and_control_before_drop")? {
         return Ok(());

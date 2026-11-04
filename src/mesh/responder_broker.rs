@@ -3433,16 +3433,9 @@ where
     F: Future<Output = io::Result<T>>,
 {
     checkpoint(cx, "tailscale localapi")?;
-    let now = wall_now();
-    let effective = cx
-        .budget()
-        .remaining_duration(now)
-        .map_or(duration, |remaining| remaining.min(duration));
-    if effective.is_zero() {
-        return Err(ResponderBrokerError::Cancelled);
-    }
-    let _ambient = Cx::set_current(Some(cx.clone()));
-    match timeout(now, effective, future).await {
+    // Keep the operation's timeout distinct from the request deadline. The
+    // outer wait checks cancellation without discarding a partial socket I/O.
+    match await_cancellable(cx, timeout(cx.now(), duration, future)).await? {
         Ok(Ok(value)) => {
             checkpoint(cx, "tailscale localapi")?;
             Ok(value)
@@ -3461,16 +3454,7 @@ async fn read_asupersync_framed(
     duration: Duration,
 ) -> Result<Vec<u8>, ResponderBrokerError> {
     checkpoint(cx, "bootstrap frame read")?;
-    let now = wall_now();
-    let effective = cx
-        .budget()
-        .remaining_duration(now)
-        .map_or(duration, |remaining| remaining.min(duration));
-    if effective.is_zero() {
-        return Err(ResponderBrokerError::Cancelled);
-    }
-    let _ambient = Cx::set_current(Some(cx.clone()));
-    let bytes = match timeout(now, effective, async {
+    let operation = async {
         let mut prefix = [0_u8; 4];
         AsyncReadExt::read_exact(stream, &mut prefix).await?;
         let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| {
@@ -3490,9 +3474,8 @@ async fn read_asupersync_framed(
         let mut body = vec![0_u8; length];
         AsyncReadExt::read_exact(stream, &mut body).await?;
         Ok(body)
-    })
-    .await
-    {
+    };
+    let bytes = match await_cancellable(cx, timeout(cx.now(), duration, operation)).await? {
         Ok(Ok(body)) => body,
         Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
             return Err(ResponderBrokerError::Cancelled);
@@ -3516,22 +3499,12 @@ async fn write_asupersync_framed(
     let prefix = u32::try_from(bytes.len())
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?
         .to_be_bytes();
-    let now = wall_now();
-    let effective = cx
-        .budget()
-        .remaining_duration(now)
-        .map_or(duration, |remaining| remaining.min(duration));
-    if effective.is_zero() {
-        return Err(ResponderBrokerError::Cancelled);
-    }
-    let _ambient = Cx::set_current(Some(cx.clone()));
-    match timeout(now, effective, async {
+    let operation = async {
         AsyncWriteExt::write_all(stream, &prefix).await?;
         AsyncWriteExt::write_all(stream, bytes).await?;
         AsyncWriteExt::flush(stream).await
-    })
-    .await
-    {
+    };
+    match await_cancellable(cx, timeout(cx.now(), duration, operation)).await? {
         Ok(Ok(())) => {}
         Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
             return Err(ResponderBrokerError::Cancelled);
