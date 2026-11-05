@@ -3421,3 +3421,171 @@ version bump does not fix identity, PPR's production degradation is explicit,
 seven north-star tests are not eight scenario proofs, readable scaffolding-free
 content is not necessarily relevant, and a green inventory ratchet is not a
 completed product. Part III remains active under §15.
+
+## 20. Reality check and remediation — 2026-11-05
+
+### 20.1 The convergence signal: 43 commits, zero closures
+
+§19 baselined at `0a626d91` on 2026-10-31. Five days later, measured against
+the same tracker:
+
+| | §19 (10-31) | 11-05 |
+| --- | ---: | ---: |
+| Closed | 4,628 | **4,628** |
+| Open | 268 | 266 |
+| In progress | 16 | 19 |
+| Blocked / deferred | 33 / 3 | 33 / 3 |
+| P0 nonclosed | 27 | **27** |
+
+Forty-three commits landed in that window, twenty of them `fix`, and the
+closed count did not move. `br stats` reported `total_changes: 0` over the
+preceding 24 hours.
+
+**This is not stalled work, and reading it as such would send the next pass
+in the wrong direction.** The fixes target §19's own findings precisely.
+`f25f546c7` removes the `"selected for context pack"` prose that §19 caught
+contradicting `selected: false`, and adds the oracle §19 asked for —
+`assert!(!report.selected)` plus `!note.contains("selected") &&
+note.contains("evidenceFreshness=")`, where the second clause is a positive
+control so the assertion cannot pass vacuously on an empty provenance list.
+`b69f9f424`, `0020c40a6` and `29422691c` address the lexical-admission miss,
+the pack-quality isolation red and source-bound binary admission.
+
+What cannot happen is CLOSURE. Close criteria here require an execution, not
+a compile, and the tracker commits name the cause themselves: "pending
+verification", "blocked Rust verification". **The binding constraint has
+moved from implementation to verification capacity.**
+
+### 20.2 Four rails, measured, zero verdicts
+
+| Rail | Measured state |
+| --- | --- |
+| `scripts/verify.sh` | Refuses before stage one in every mode including `--ci-smoke`. It correctly identifies `CARGO_TARGET_DIR/debug/ee` as `ELF 64-bit LSB pie, x86-64`. Zero stages ran. |
+| Hosted Actions | `enabled: false` repo-wide. Last run of any workflow 2026-10-08, `conclusion=failure`. |
+| Pinned `rch_verify.sh` | Blocked by a NEW failure: the APFS export volume is `Not Mounted` and `mount_apfs` returns `Input/output error`, with 140.6 GB of cached bundles stranded. `~/.zshenv:62` then silently supplies the ExFAT base, which the wrapper correctly refuses as the AppleDouble shim. |
+| `rch exec --job` | Works, with friction. Three refusal classes observed in one session: namespace-init `status Some(73)`, `RCH_SYNC_LIVE_CHECKOUT_REFUSED`, and `RCH-E330 remote_build_disk_budget_exceeded`. One dispatch sat 12 minutes in `state=queued phase=admission` before admission. |
+
+Also measured: **11 of 12 durable leases report `running/finalize` with dead
+wrapper PIDs** (the condition `bd-6d6c8` describes), and `/` held 7.4 GiB free.
+
+**Mid-session the external USB volume dropped**, taking the toolchain symlink
+with it, so `cargo` died with the EEXIST-through-dangling-symlink error AGENTS.md
+documents. That makes `bd-export-base-apfs-volume-eio-reverts-to-exfat-w4sb2`
+unfixable from this host for now: a replacement sparse image needs that volume,
+and `/` cannot hold a 27 GB export root against 7.4 GiB free.
+
+### 20.3 One positive verdict, and why its denominator mattered
+
+`cargo check --locked --all-targets -j 2` at `59aa07a13`, dispatched remotely:
+`Finished dev profile ... in 19m 40s`, exit 0, **zero** error lines, 187
+`Checking` + 97 `Compiling` units. No test or bench target was broken at that
+sha — the failure `bd-g3obb` exists to catch.
+
+Two readings that the status alone would have gotten wrong:
+
+- `Checking eidetic-engine` appears **0** times, which reads as "the crate's own
+  targets were skipped". The crate has a `build.rs`, so cargo logs `Compiling
+  eidetic-engine v0.18.0`. A wrong-spelling zero, not an absence. Proof that
+  `--all-targets` reached non-lib targets is in the warning attributions:
+  `(test "integration_a_d")` and `(bench "daemon_round_trip")`.
+- A LATER dispatch returned `Finished: 0, errors: 0, warnings: 0` and was
+  **unrun** — refused by `RCH-E330` with rch still exiting 0. Zero warnings
+  without a `Finished` line is not a clean gate; it is no gate. The
+  pre-registered "0 warnings = fixed" tell was void and the `Finished` count is
+  what said so.
+
+### 20.4 A dated lint regression, and the fix that was not a deletion
+
+The same green run emitted 6 real warnings in two targets. CLAUDE.md dates the
+lint gate green at `2f5e6fa21` (2026-10-30, subject "clearing the lint gate")
+with zero warnings; `git merge-base --is-ancestor` confirms it is an ancestor,
+and nine commits since then touched exactly those two files. The gate runs
+`-- -D warnings`, which denies all six. Filed as
+`bd-lint-gate-regression-daemon-targets-since-2f5e6f-pwmeo`.
+
+**The obvious repair would have destroyed live fixtures.** Five warnings were
+`function ... is never used` in `benches/daemon_round_trip.rs`. Those functions
+have 13, 10, 6, 3 and 2 real call sites. `Cargo.toml` declares the bench
+`harness = false`, so when the bench target itself is checked the
+`#[cfg(all(test, ...))] mod pack_benchmark_contracts` block compiles, its 23
+`#[test]` functions are never collected for want of a harness, and the fixtures
+they call look unreachable. The same module IS harnessed through
+`tests/bench_contracts.rs`, which `#[path]`-includes this file and 16 sibling
+benches. Deleting the "dead" code would have deleted fixtures for 23 executing
+tests. Repaired with the file-level `#![allow(dead_code)]` that
+`benches/context.rs` and `benches/remember.rs` already carry for the same
+structural reason.
+
+The sixth was not a cycle but a recursion-limit exhaustion: proving
+`DaemonServerHandle: Send` walks `Arc<DaemonReadPools>` → `Mutex<State>` →
+`BTreeMap<PathBuf, (Instant, Arc<ProcessReadPoolResidency>)>` →
+`Mutex<Vec<Arc<ReadConnectionPool>>>` → "and so on". rustc emitted
+`recursion_depth_exceeding_limit`, which is `future_incompatible` and "will
+become a hard error in a future release" (rust-lang/rust#159228), is attached to
+the whole crate, and cannot be silenced per function. Repaired with
+`#![recursion_limit = "256"]` on the shard — the value `src/lib.rs` and
+`tests/contracts.rs` already declare. That raises the limit so the solver
+discharges the obligation rather than masking the lint.
+
+### 20.5 Remediation landed
+
+| Change | Verification |
+| --- | --- |
+| Regenerated `docs/degraded_codes.md` | `--check` exit 1 → 0; one line at 4312; 615 fixtures indexed |
+| Dropped two CI badges; added a factual verification paragraph | Nine doc-scanning gates re-run green |
+| Corrected the PPR capability claim + a Limitations row | `context.rs` pushes `graph_ppr_upstream_unavailable` unconditionally when PPR is requested; no branch computes it |
+| Documented exit codes 9 and 130 in all three tables | Descriptions copied from the `EXIT_CODES` registry, not paraphrased |
+| **New gate** `scripts/check-exit-code-docs.py` | 9/9 self-test; red direction proven end-to-end against the real README, restored SHA-256 identical; wired into verify.sh with measured budget rows; drift guard green at 137/136/136 |
+| Corrected a 49-day-stale blocker note in the orphan baseline | `e2e_invocation_audit` unchanged at 52/212, `--self-test` 17/17 |
+
+Checked and found CLEAN, recorded so it is not re-derived: AGENTS.md's claim
+that every `EE_*` variable is both registered and documented holds — 133
+registry names, 137 documented, zero registry-only, and the four documented-only
+names (`EE_BUILD_TARGET`, `EE_FRANKEN_STACK`, `EE_RELEASE_CHANNEL`,
+`EE_TRACE_BEAD_ID`) are compile-time stamps in their own documented block,
+legitimately outside a runtime `std::env::var` registry.
+
+### 20.6 Two reds deliberately NOT repaired, with reasons
+
+**`search_deterministic_golden`.** `src/core/search.rs:15577` emits
+`provenanceChainHashVersion` (landed `673487f93`, 2026-10-29); the byte-compared
+golden was last touched 2026-10-22 and contains zero occurrences. Red for seven
+days. It was not repaired here because the value is a per-memory DB field, not a
+constant, so hand-editing is guessing, and CLAUDE.md records that regenerating
+under the released v0.18.0 binary writes the PRE-field shape — locally green,
+red on the lane, and wrong in a way that looks reviewed. The clean path for
+whoever holds a source-matched binary: `assert_golden` emits `line_diff` into
+the failure message, so a dispatched run prints the exact needed line. The
+repair is coupled to `bd-sxalp` / the native-binary owner, not independent of it.
+
+**The closure-audit violation.** `closure-lint.sh --audit` still exits 1 with the
+single violation §19 found: closed `.67` carries `implements-surface:probe-fail-closed`
+and `tests/golden/probe-fail-closed.snap` does not exist. Not repaired here
+because the correct fix is a design decision interacting with three separate
+rules at once — closure-lint's existence requirement, `check-golden-consumption`'s
+deliberately enforced floor of two, and §19's "a decorative snapshot is not
+acceptance". closure-lint's own comments record that 22 of 113 files in
+`tests/golden` are empty, 21 read by nothing, and all arrived in one commit
+"precisely the closure an existence-only check rewards". Adding a 114th unread
+snap would reproduce that. It belongs to `bd-qzr0v`, which already owns the
+redesign.
+
+### 20.7 What would most move convergence
+
+Unchanged from §19's work order, now with measurements behind the ranking:
+
+1. **Restore an export base and a source-matched native binary.** These are the
+   same blocker wearing two hats: the golden cannot be regenerated, `verify.sh`
+   and its 34 callers cannot start, and no behavioural closure can cite an
+   execution. The APFS recreation is one `hdiutil create` once the USB volume is
+   back.
+2. **Make the degraded-codes `--check` cheap enough to be unconditional.** It
+   costs 84s today because it regenerates 524 KB to diff; a fixture-set
+   fingerprint recorded in the generated doc would make it milliseconds and fit
+   the 608s ceiling.
+3. **Prefer Python gates for doc-and-registry contracts.** Both drifts found this
+   pass were invisible locally for exactly one reason: their only enforcement was
+   a Rust assertion behind a dispatch. The exit-code gate demonstrates the
+   alternative at 56ms.
+
+Part III remains active under §15.
