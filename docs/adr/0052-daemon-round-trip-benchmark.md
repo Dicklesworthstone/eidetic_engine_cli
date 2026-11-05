@@ -255,3 +255,68 @@ These checks and corrections do not establish a performance result. Native
 correctness execution and the current-source mixed-feedback 10,000-memory gate
 still require an available RCH worker, pinned dependencies, a matching release
 CLI artifact and the verified local model fixture.
+
+### 2026-11-05 amendment: separate public pack phase probes
+
+The existing warm-pack modes now collect one in-process and one daemon-backed
+`--explain-performance` invocation **after** the 50 ordinary calls. Both probes
+reuse the ordinary command builder, fixture, profiles, candidate pool, source
+mode and persistence setting. They are not warmups or percentile samples; the
+21 measured pairs and the 2.0x hard gate are unchanged. Diagnostic rendering and
+its additional inspection work therefore cannot improve or inflate the reported
+ordinary-call speedup.
+
+`performanceProbes.cold` and `performanceProbes.daemon` retain each probe's
+subprocess `wallMs`, `packRecordId` and complete public `performance` envelope.
+The envelope excludes query text and memory content. Its phase timings expose
+model preparation, database admission, daemon retrieval and handoff validation,
+search, candidate resolution, assembly and persistence, together with the
+existing database counters and persistence subspans. The harness rejects missing
+or invalid required timing fields instead of substituting zero. It also rejects
+source-mode fallback, the wrong serving or retrieval path, profile drift, model
+unavailability and reported persistence failure.
+
+Use these probes to attribute costs, not as another speedup sample. Compare the
+process wall time with the report's request `total`; neither is a substitute for
+the other. Phase and persistence subspans can overlap or contain other spans,
+so do not sum them as independent costs. In particular, the persistence
+`connectionOpen` subspan includes the initial writable connection opened before
+retrieval and any later retry open. The top-level `packPersistence` phase includes
+that initial open plus the final persistence stage; a retry open already belongs
+to the final stage and is counted only once. Search timing begins after initial
+writer setup. Pack audit timing is recorded separately after that phase.
+`daemonReadyMs` and the first ordinary calls remain separate
+startup observations. A steady-state diagnostic call cannot establish startup
+latency or production-scale performance on its own.
+
+For a daemon-backed pack, `daemonRetrieval` remains an aggregate of transport
+and daemon search. The pack handoff does not carry the daemon's internal search
+or deferred-audit trace, so the probe's local `search` timings must not be
+described as those daemon subphases. The existing public search diagnostics
+provide a separate control workload for investigating model, index and query
+costs; their timings cannot be substituted for the pack round trip.
+
+Every diagnostic call must report `data.search.embedBackend: neural_local`,
+the backend identity from its actual search report. A missing backend or a
+hash-fallback backend fails qualification independently of the 50 ordinary
+responses, which retain their own `neural_local` requirement. The requested
+`usesEmbeddings` flag alone does not establish which backend executed retrieval.
+
+Each persisted diagnostic call must add exactly one new record, and the same
+read-only verifier checks its workspace, query, profile, budget, selected count
+and integrity-checked selection ledger against the ordinary-call baseline.
+Performance output intentionally omits the pack hash and selected content, so
+the verifier does not fabricate a response or compare a missing hash. A valid
+ledger with different entity identities, ranks, trust or provenance still fails.
+The probe's reported persistence attempt, success and write count must also
+agree with the requested mode. Read-only diagnostics require zero writes and
+compare reported counts and budgets; they cannot establish an additional exact
+selection comparison without a persisted ledger and remain observation-only.
+
+`persistence.verifiedCalls` remains 50 and `persistence.persistedRecords` counts
+only those ordinary calls. `performanceProbes` separately reports two verified
+calls and their zero or two new records. Contract tests cover missing timing
+evidence, fallback, storage failure, record reuse and a valid ledger with the
+wrong selection. These additions improve qualification evidence; native tests,
+the 10,000-memory gate and the contributor's larger workload still require
+actual execution before any acceleration or resolution claim.

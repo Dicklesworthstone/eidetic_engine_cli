@@ -999,6 +999,90 @@ mod tests {
     }
 
     #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn persisted_pack_measures_the_writer_open_reused_after_retrieval() -> TestResult {
+        for via_handoff in [false, true] {
+            let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+            options.memory_scope = MemoryScope::Workspace;
+            options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+            let database = options.database_path.clone().ok_or("fixture database")?;
+            let provider = |search_options: &SearchOptions, _: bool| {
+                crate::core::search::run_pack_search(search_options)
+                    .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))
+            };
+            for persist_pack in [false, true] {
+                options.persist_pack = persist_pack;
+                let run = if via_handoff {
+                    super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
+                } else {
+                    super::run_context_pack_with_performance(&options, PACK_COMMAND)
+                }
+                .map_err(|error| error.to_string())?;
+                assert!(
+                    run.response
+                        .data
+                        .pack
+                        .items
+                        .iter()
+                        .any(|item| item.memory_id.to_string() == memory_id),
+                    "writer timing must exercise a real selected memory"
+                );
+                assert!(
+                    !run.response.data.degraded.iter().any(|entry| matches!(
+                        entry.code.as_str(),
+                        "daemon_search_fallback" | "context_pack_persist_failed"
+                    )),
+                    "the fixture must use its requested retrieval and persistence path"
+                );
+                let persistence = &run.performance["data"]["pack"]["persistence"];
+                assert_eq!(persistence["attempted"], persist_pack);
+                assert_eq!(persistence["succeeded"], persist_pack);
+                let open_ms = persistence["subspans"]["connectionOpen"]["elapsedMs"]
+                    .as_f64()
+                    .ok_or("writer-open timing missing")?;
+                let timings = run.performance["data"]["timings"]
+                    .as_array()
+                    .ok_or("pack timings missing")?;
+                let flat_open = timings
+                    .iter()
+                    .find(|timing| timing["name"] == "packPersistence::connectionOpen");
+                if persist_pack {
+                    // No latency ceiling: the regression is lost work reported
+                    // as exactly zero when final persistence borrows the writer.
+                    assert!(open_ms.is_finite() && open_ms > 0.0);
+                    assert_eq!(
+                        flat_open.and_then(|timing| timing["elapsedMs"].as_f64()),
+                        Some(open_ms)
+                    );
+                    let persistence_ms = timings
+                        .iter()
+                        .find(|timing| timing["name"] == "packPersistence")
+                        .and_then(|timing| timing["elapsedMs"].as_f64())
+                        .ok_or("persistence phase timing missing")?;
+                    assert!(persistence_ms >= open_ms);
+                } else {
+                    assert_eq!(open_ms, 0.0);
+                    assert!(flat_open.is_none(), "read-only packing opens no writer");
+                }
+                let connection = DbConnection::open_file_read_only(&database)
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(
+                    connection
+                        .count_table_rows("pack_records")
+                        .map_err(|error| error.to_string())?,
+                    i64::from(persist_pack),
+                    "diagnostic accounting must preserve exactly-once persistence"
+                );
+                let records = connection
+                    .list_recent_pack_record_ids_for_workspace(&workspace_id, 2)
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(records.len(), usize::from(persist_pack));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
     fn assert_daemon_retry_performance(run: &super::ContextPackPerformanceRun) -> TestResult {
         let timings = run.performance["data"]["timings"]
             .as_array()
@@ -7171,6 +7255,7 @@ pub fn unrelated_context() -> u64 {{
 
         assert_eq!(json["schema"], PERFORMANCE_EXPLAIN_SCHEMA_V1);
         assert_eq!(json["data"]["command"], "pack");
+        assert_eq!(json["data"]["search"]["embedBackend"], "hash_fallback");
         assert_eq!(json["data"]["query"]["textIncluded"], false);
         assert_eq!(
             json["data"]["queryPlan"]["sourceModeRequested"],

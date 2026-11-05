@@ -3235,12 +3235,17 @@ async fn run_context_pack_attempt(
         && search_provider.is_none();
 
     control.check()?;
-    let search_start = Instant::now();
-    let mut context_write_connection = if options.persist_pack {
-        DbConnection::open_file(&database_path).ok()
+    // Ordinary packs open their writer before search so retrieval audit and
+    // the pack ledger share one connection. Account for that storage setup
+    // even when persistence later reuses the writer; it is not retrieval work.
+    let (mut context_write_connection, context_write_connection_open) = if options.persist_pack {
+        let connection_open_start = Instant::now();
+        let connection = DbConnection::open_file(&database_path).ok();
+        (connection, connection_open_start.elapsed())
     } else {
-        None
+        (None, Duration::ZERO)
     };
+    let search_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
@@ -4464,7 +4469,10 @@ async fn run_context_pack_attempt(
     if options.persist_pack {
         trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
     }
-    let mut pack_persistence = PackPersistenceSubspans::default();
+    let mut pack_persistence = PackPersistenceSubspans {
+        connection_open: context_write_connection_open,
+        ..PackPersistenceSubspans::default()
+    };
     let mut persist_connection = None;
     let persist_result = if options.persist_pack {
         match context_write_connection.take() {
@@ -4504,7 +4512,9 @@ async fn run_context_pack_attempt(
                 let connection_open_start = Instant::now();
                 match DbConnection::open_file(&database_path) {
                     Ok(connection) => {
-                        pack_persistence.connection_open = connection_open_start.elapsed();
+                        pack_persistence.connection_open = pack_persistence
+                            .connection_open
+                            .saturating_add(connection_open_start.elapsed());
                         let result = match pack_record_persistence {
                             PackRecordPersistence::Ambient => persist_pack_record_measured(
                                 &connection,
@@ -4538,7 +4548,9 @@ async fn run_context_pack_attempt(
                     }
                     Err(error) => {
                         pack_persistence.attempted = true;
-                        pack_persistence.connection_open = connection_open_start.elapsed();
+                        pack_persistence.connection_open = pack_persistence
+                            .connection_open
+                            .saturating_add(connection_open_start.elapsed());
                         Err(error.to_string())
                     }
                 }
@@ -4579,7 +4591,12 @@ async fn run_context_pack_attempt(
         );
     }
     trace.pack_persistence = pack_persistence;
-    trace.record_elapsed("packPersistence", persist_start);
+    // This phase includes the earlier writer open plus final persistence.
+    // A retry open is already inside persist_start and must not be added twice.
+    trace.record_duration(
+        "packPersistence",
+        context_write_connection_open.saturating_add(persist_start.elapsed()),
+    );
     trace.record_read_snapshot(&read_snapshot, read_snapshot_generation);
 
     // GH49 / bd-jikgj: surface an elapsed-budget overrun in `degraded[]`, so a
@@ -4913,6 +4930,7 @@ fn context_search_json(
     let metrics = search_report.retrieval_metrics();
     serde_json::json!({
         "status": search_report.status.as_str(),
+        "embedBackend": search_report.embed_backend.as_str(),
         "requestedLimit": search_report.requested_limit,
         "candidateBudget": speed.candidate_limit(),
         "returnedHits": search_report.results.len(),

@@ -1257,16 +1257,18 @@ fn command_for_search(
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn degradation_present(payload: &JsonValue, code: &str) -> bool {
-    ["/degraded", "/data/degraded"].iter().any(|pointer| {
-        payload
-            .pointer(pointer)
-            .and_then(JsonValue::as_array)
-            .is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|entry| entry.get("code").and_then(JsonValue::as_str) == Some(code))
-            })
-    })
+    ["/degraded", "/data/degraded", "/data/fallbacks"]
+        .iter()
+        .any(|pointer| {
+            payload
+                .pointer(pointer)
+                .and_then(JsonValue::as_array)
+                .is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|entry| entry.get("code").and_then(JsonValue::as_str) == Some(code))
+                })
+        })
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1780,6 +1782,38 @@ impl PackPersistenceVerifier {
         read_only: bool,
     ) -> Option<String> {
         assert_pack_persistence_not_degraded(payload);
+        let response_hash = if read_only {
+            None
+        } else {
+            Some(
+                payload
+                    .pointer("/data/pack/hash")
+                    .and_then(JsonValue::as_str)
+                    .expect("persisted pack response must expose its hash"),
+            )
+        };
+        self.verify_record(signature, read_only, response_hash)
+    }
+
+    // Performance output deliberately omits content and the pack hash. Its
+    // new, integrity-checked ledger must still match the ordinary-call
+    // baseline; never substitute a fabricated response for that evidence.
+    fn verify_diagnostic(
+        &mut self,
+        payload: &JsonValue,
+        signature: &JsonValue,
+        read_only: bool,
+    ) -> Option<String> {
+        assert_pack_persistence_not_degraded(payload);
+        self.verify_record(signature, read_only, None)
+    }
+
+    fn verify_record(
+        &mut self,
+        signature: &JsonValue,
+        read_only: bool,
+        response_hash: Option<&str>,
+    ) -> Option<String> {
         let connection = DbConnection::open_file_read_only(&self.database)
             .expect("inspect completed benchmark pack ledger");
         let current = fixture_pack_record_ids(&connection, &self.workspace_id);
@@ -1792,13 +1826,12 @@ impl PackPersistenceVerifier {
             assert_eq!(record.workspace_id, self.workspace_id);
             assert_eq!(record.query, SEARCH_QUERY);
             assert_eq!(record.profile, BENCH_PACK_PROFILE);
-            assert_eq!(
-                Some(record.pack_hash.as_str()),
-                payload
-                    .pointer("/data/pack/hash")
-                    .and_then(JsonValue::as_str),
-                "persisted pack hash must identify this invocation's response"
-            );
+            if let Some(response_hash) = response_hash {
+                assert_eq!(
+                    record.pack_hash, response_hash,
+                    "persisted pack hash must identify this invocation's response"
+                );
+            }
             assert_eq!(json!(record.max_tokens), signature["maxTokens"]);
             assert_eq!(json!(record.used_tokens), signature["usedTokens"]);
             assert_eq!(
@@ -1912,6 +1945,12 @@ fn verified_pack_serving_path(payload: &JsonValue, daemon_expected: bool) -> &st
         );
     } else {
         assert_eq!(serving_path, "in_process");
+        assert_eq!(
+            payload
+                .pointer("/data/retrievalPath")
+                .and_then(JsonValue::as_str),
+            Some("in_process")
+        );
     }
     assert_eq!(
         payload.pointer("/data/fallbackReason"),
@@ -1921,13 +1960,12 @@ fn verified_pack_serving_path(payload: &JsonValue, daemon_expected: bool) -> &st
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn run_pack_process(
+fn command_for_pack(
     ee_binary: &Path,
     fixture: &PrebuiltSearchFixture,
     daemon_socket: Option<&Path>,
     read_only: bool,
-    persistence: &mut PackPersistenceVerifier,
-) -> PackObservation {
+) -> Command {
     let mut command = Command::new(ee_binary);
     command
         .arg("--workspace")
@@ -1958,6 +1996,18 @@ fn run_pack_process(
     if read_only {
         command.arg("--read-only");
     }
+    command
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn run_pack_process(
+    ee_binary: &Path,
+    fixture: &PrebuiltSearchFixture,
+    daemon_socket: Option<&Path>,
+    read_only: bool,
+    persistence: &mut PackPersistenceVerifier,
+) -> PackObservation {
+    let mut command = command_for_pack(ee_binary, fixture, daemon_socket, read_only);
     let started = Instant::now();
     let output = command
         .output()
@@ -2014,6 +2064,215 @@ fn run_pack_process(
             .unwrap_or(JsonValue::Null),
         record_id,
     }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn required_pack_phase_ms(payload: &JsonValue, name: &str) -> f64 {
+    let matches: Vec<_> = payload
+        .pointer("/data/timings")
+        .and_then(JsonValue::as_array)
+        .expect("pack performance report must expose phase timings")
+        .iter()
+        .filter(|timing| timing["name"].as_str() == Some(name))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "pack performance report must expose one accumulated {name} timing"
+    );
+    let elapsed_ms = matches[0]["elapsedMs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("pack performance phase {name} must expose elapsedMs"));
+    assert!(
+        elapsed_ms.is_finite() && elapsed_ms >= 0.0,
+        "pack performance phase {name} has invalid elapsedMs"
+    );
+    elapsed_ms
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn assert_pack_performance_report(
+    payload: &JsonValue,
+    signature: &JsonValue,
+    daemon_expected: bool,
+    read_only: bool,
+) {
+    assert_eq!(payload["schema"], "ee.explain.performance.v1");
+    assert_eq!(payload["success"], true);
+    assert_fixed_operating_profile(payload);
+    let _ = verified_pack_serving_path(payload, daemon_expected);
+    assert_eq!(payload.pointer("/data/command"), Some(&json!("pack")));
+    assert_eq!(
+        payload.pointer("/data/queryPlan/profile"),
+        Some(&json!(BENCH_PACK_PROFILE))
+    );
+    assert_eq!(
+        payload.pointer("/data/queryPlan/requestedCandidatePool"),
+        Some(&json!(100))
+    );
+    assert_eq!(
+        payload.pointer("/data/queryPlan/maxTokens"),
+        Some(&signature["maxTokens"])
+    );
+    for field in ["sourceModeRequested", "sourceModeApplied"] {
+        assert_eq!(
+            payload.pointer(&format!("/data/queryPlan/{field}")),
+            Some(&json!("hybrid")),
+            "pack performance probe must retain hybrid retrieval"
+        );
+    }
+    assert_eq!(
+        payload.pointer("/data/queryPlan/strictSourceMode"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        payload.pointer("/data/queryPlan/fallbackApplied"),
+        Some(&json!(false))
+    );
+    // Verify the backend that actually produced this probe's search report,
+    // independently of the preceding ordinary calls and requested speed.
+    assert_eq!(
+        payload.pointer("/data/search/embedBackend"),
+        Some(&json!("neural_local"))
+    );
+    assert_eq!(
+        payload.pointer("/data/search/usesEmbeddings"),
+        Some(&json!(true))
+    );
+    assert!(
+        payload.pointer("/data/fallbacks").is_some_and(JsonValue::is_array),
+        "pack performance probe must report degradations"
+    );
+    assert!(!degradation_present(payload, "embed_model_unavailable"));
+    assert!(!degradation_present(payload, "daemon_search_fallback"));
+    assert_pack_persistence_not_degraded(payload);
+    assert_eq!(
+        payload.pointer("/data/redaction/memoryContentIncluded"),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        payload.pointer("/data/redaction/queryTextIncluded"),
+        Some(&json!(false))
+    );
+    for name in [
+        "requestValidate",
+        "dbOpen",
+        "search",
+        "candidateResolution",
+        "packAssembly",
+        "packPersistence",
+        "total",
+    ] {
+        let _ = required_pack_phase_ms(payload, name);
+    }
+    if daemon_expected {
+        let _ = required_pack_phase_ms(payload, "daemonRetrieval");
+        let _ = required_pack_phase_ms(payload, "daemonHandoffValidation");
+    } else {
+        let _ = required_pack_phase_ms(payload, "embedderPrepare");
+    }
+    let selected = signature["items"].as_array().expect("baseline pack items").len();
+    assert_eq!(
+        payload.pointer("/data/pack/hashPresent"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        payload.pointer("/data/pack/selectedCount"),
+        Some(&json!(selected)),
+        "pack performance probe must retain the baseline selection count"
+    );
+    assert_eq!(
+        payload.pointer("/data/pack/tokenBudget/limit"),
+        Some(&signature["maxTokens"])
+    );
+    assert_eq!(
+        payload.pointer("/data/pack/tokenBudget/used"),
+        Some(&signature["usedTokens"])
+    );
+    let writes = usize::from(!read_only);
+    assert_eq!(
+        payload.pointer("/data/pack/persistence/itemCount"),
+        Some(&json!(if read_only { 0 } else { selected })),
+        "pack performance probe must report every persisted selected item"
+    );
+    for pointer in [
+        "/data/pack/persistence/attempted",
+        "/data/pack/persistence/succeeded",
+    ] {
+        assert_eq!(
+            payload.pointer(pointer),
+            Some(&json!(!read_only)),
+            "pack performance probe has incorrect persistence state at {pointer}"
+        );
+    }
+    for pointer in [
+        "/data/pack/persistence/packRecordWrites",
+        "/data/dbReads/packRecordWrites",
+    ] {
+        assert_eq!(
+            payload.pointer(pointer),
+            Some(&json!(writes)),
+            "pack performance probe has incorrect persistence count at {pointer}"
+        );
+    }
+    // Keep the complete public report, including nested spans that separate
+    // writer initialization from writes. The parent packPersistence duration
+    // includes that early open; overlapping spans must not be summed.
+    for name in [
+        "connectionOpen",
+        "workspaceLookup",
+        "packHash",
+        "ledgerSerialization",
+        "recordWrite",
+        "itemWrites",
+        "omissionWrites",
+        "transaction",
+        "transactionOverhead",
+        "audit",
+    ] {
+        let elapsed_ms = payload
+            .pointer(&format!("/data/pack/persistence/subspans/{name}/elapsedMs"))
+            .and_then(JsonValue::as_f64)
+            .unwrap_or_else(|| panic!("pack performance report lacks persistence {name} timing"));
+        assert!(
+            elapsed_ms.is_finite() && elapsed_ms >= 0.0,
+            "pack persistence {name} has invalid elapsedMs"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn run_pack_performance_probe(
+    ee_binary: &Path,
+    fixture: &PrebuiltSearchFixture,
+    daemon_socket: Option<&Path>,
+    read_only: bool,
+    signature: &JsonValue,
+    persistence: &mut PackPersistenceVerifier,
+) -> JsonValue {
+    let mut command = command_for_pack(ee_binary, fixture, daemon_socket, read_only);
+    command.arg("--explain-performance");
+    let started = Instant::now();
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("spawn ee pack performance probe: {error}"));
+    let wall_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert!(
+        output.status.success(),
+        "ee pack performance probe failed with {:?}: stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: JsonValue = serde_json::from_slice(&output.stdout)
+        .expect("pack performance probe must return public JSON");
+    assert_pack_performance_report(&payload, signature, daemon_socket.is_some(), read_only);
+    let record_id = persistence.verify_diagnostic(&payload, signature, read_only);
+    json!({
+        "wallMs": wall_ms,
+        "packRecordId": record_id,
+        "performance": payload,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -2157,6 +2416,27 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     let warm_p50_ms = p50(warm);
     let speedup = cold_p50_ms / warm_p50_ms;
     let passed = speedup >= PACK_MIN_P50_SPEEDUP;
+    let verified_normal_calls = persistence.calls;
+    let normal_persisted_records = persistence.record_ids.len();
+    // Diagnostic rendering changes the measured workload. Collect it only
+    // after all ordinary calls, never as a warmup or percentile sample.
+    let cold_performance = run_pack_performance_probe(
+        &ee_binary,
+        &fixture,
+        None,
+        read_only,
+        &expected,
+        &mut persistence,
+    );
+    let daemon_performance = run_pack_performance_probe(
+        &ee_binary,
+        &fixture,
+        Some(daemon.socket_path()),
+        read_only,
+        &expected,
+        &mut persistence,
+    );
+    assert_eq!(persistence.calls, verified_normal_calls + 2);
     println!("ee_pack_cli_cold_p50_ms={cold_p50_ms:.3}");
     println!("ee_pack_daemon_warm_p50_ms={warm_p50_ms:.3}");
     println!("ee_pack_daemon_p50_speedup={speedup:.3}");
@@ -2181,11 +2461,26 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "firstDaemonMs": daemon_first.wall_ms,
             "firstDaemonServingPath": daemon_first.serving_path,
             "persistence": {
-                "verifiedCalls": persistence.calls,
-                "persistedRecords": persistence.record_ids.len(),
+                "verifiedCalls": verified_normal_calls,
+                "persistedRecords": normal_persisted_records,
                 "checksOutsideWallTime": true,
                 "firstColdPackRecordId": cold_first.record_id,
                 "firstDaemonPackRecordId": daemon_first.record_id,
+            },
+            "performanceProbes": {
+                "afterMeasuredCalls": true,
+                "includedInP50": false,
+                "verifiedCalls": persistence.calls - verified_normal_calls,
+                "persistedRecords": persistence.record_ids.len() - normal_persisted_records,
+                "checksOutsideWallTime": true,
+                "selectionParity": if read_only {
+                    "reported_count_and_budget_only_no_persisted_ledger"
+                } else {
+                    "integrity_checked_persisted_selection_matches_ordinary_baseline"
+                },
+                "backendVerification": "each_probe_requires_search_embed_backend_neural_local",
+                "cold": cold_performance,
+                "daemon": daemon_performance,
             },
             "coldP50Ms": cold_p50_ms, "warmP50Ms": warm_p50_ms, "p50Speedup": speedup,
             "minimumP50Speedup": PACK_MIN_P50_SPEEDUP,
@@ -2297,6 +2592,160 @@ mod pack_benchmark_contracts {
                 &[],
             )
             .expect("persist fixture pack and selection ledger");
+    }
+
+    fn pack_performance_fixture(daemon: bool, read_only: bool) -> JsonValue {
+        let mut phases = vec![
+            "requestValidate", "dbOpen", "search", "candidateResolution",
+            "packAssembly", "packPersistence", "total",
+        ];
+        if daemon {
+            phases.extend(["daemonRetrieval", "daemonHandoffValidation"]);
+        } else {
+            phases.push("embedderPrepare");
+        }
+        let timings: Vec<_> = phases
+            .into_iter()
+            .map(|name| json!({"name": name, "elapsedMs": 0.25}))
+            .collect();
+        let subspans: serde_json::Map<_, _> = [
+            "connectionOpen", "workspaceLookup", "packHash", "ledgerSerialization",
+            "recordWrite", "itemWrites", "omissionWrites", "transaction",
+            "transactionOverhead", "audit",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), json!({"elapsedMs": 0.0})))
+        .collect();
+        json!({
+            "schema": "ee.explain.performance.v1", "success": true,
+            "data": {
+                "command": "pack",
+                "profileRuntime": {
+                    "activeProfile": BENCH_OPERATING_PROFILE, "source": "workspace_config",
+                },
+                "queryPlan": {
+                    "profile": BENCH_PACK_PROFILE, "requestedCandidatePool": 100,
+                    "maxTokens": 400, "sourceModeRequested": "hybrid",
+                    "sourceModeApplied": "hybrid", "strictSourceMode": true,
+                    "fallbackApplied": false,
+                },
+                "servingPath": if daemon { "hybrid" } else { "in_process" },
+                "retrievalPath": if daemon { "daemon" } else { "in_process" },
+                "fallbackReason": null,
+                "search": {"embedBackend": "neural_local", "usesEmbeddings": true},
+                "dbReads": {"packRecordWrites": usize::from(!read_only)},
+                "pack": {
+                    "hashPresent": true, "selectedCount": 1,
+                    "tokenBudget": {"limit": 400, "used": 10},
+                    "persistence": {
+                        "attempted": !read_only, "succeeded": !read_only,
+                        "packRecordWrites": usize::from(!read_only),
+                        "itemCount": usize::from(!read_only), "subspans": subspans,
+                    },
+                },
+                "timings": timings, "fallbacks": [],
+                "redaction": {"memoryContentIncluded": false, "queryTextIncluded": false},
+            },
+        })
+    }
+
+    #[test]
+    fn pack_performance_probes_check_the_same_workload_and_persistence_mode() {
+        let (_root, _connection, _verifier, response) = persistence_fixture();
+        let signature = pack_content_signature(&response);
+        for daemon in [false, true] {
+            for read_only in [false, true] {
+                assert_pack_performance_report(
+                    &pack_performance_fixture(daemon, read_only),
+                    &signature,
+                    daemon,
+                    read_only,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_performance_probes_reject_missing_or_misleading_evidence() {
+        let (_root, _connection, _verifier, response) = persistence_fixture();
+        let signature = pack_content_signature(&response);
+        for (pointer, changed) in [
+            ("/data/timings", json!([])),
+            ("/data/timings/0/elapsedMs", json!(-1.0)),
+            ("/data/pack/persistence/subspans/connectionOpen", JsonValue::Null),
+            ("/data/profileRuntime/source", json!("host_probe")),
+            ("/data/queryPlan/sourceModeApplied", json!("lexical_only")),
+            ("/data/search/embedBackend", JsonValue::Null),
+            ("/data/search/embedBackend", json!("hash_fallback")),
+            ("/data/search/usesEmbeddings", json!(false)),
+            ("/data/retrievalPath", json!("in_process")),
+            ("/data/servingPath", json!("in_process_fallback")),
+            ("/data/fallbackReason", json!("daemon_handoff_rejected")),
+            ("/data/fallbacks", json!([{"code": "daemon_search_fallback"}])),
+            ("/data/fallbacks", json!([{"code": "embed_model_unavailable"}])),
+            ("/data/fallbacks", json!([{"code": "context_pack_persist_failed"}])),
+            ("/data/pack/persistence/succeeded", json!(false)),
+            ("/data/pack/persistence/packRecordWrites", json!(0)),
+            ("/data/dbReads/packRecordWrites", json!(2)),
+            ("/data/pack/selectedCount", json!(0)),
+            ("/data/pack/tokenBudget/used", json!(11)),
+        ] {
+            let mut changed_report = pack_performance_fixture(true, false);
+            *changed_report.pointer_mut(pointer).expect("diagnostic field") = changed;
+            assert!(
+                std::panic::catch_unwind(|| assert_pack_performance_report(
+                    &changed_report, &signature, true, false
+                ))
+                .is_err(),
+                "pack performance probe accepted changed evidence at {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacted_diagnostic_calls_verify_new_records_and_read_only_zero_writes() {
+        let (_root, connection, mut verifier, response) = persistence_fixture();
+        let signature = pack_content_signature(&response);
+        let diagnostic = pack_performance_fixture(true, false);
+        assert!(diagnostic.pointer("/data/pack/hash").is_none());
+        assert!(diagnostic.pointer("/data/pack/items").is_none());
+        let id = "pack_00000000000000000000000001";
+        insert_fixture_pack(&connection, id, &response);
+        assert_eq!(
+            verifier.verify_diagnostic(&diagnostic, &signature, false).as_deref(),
+            Some(id)
+        );
+        assert!(
+            verifier
+                .verify_diagnostic(&pack_performance_fixture(true, true), &signature, true)
+                .is_none()
+        );
+        assert_eq!(verifier.calls, 2);
+        assert_eq!(verifier.record_ids.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "each persisted pack call must add exactly one record")]
+    fn redacted_diagnostic_cannot_reuse_the_previous_normal_calls_record() {
+        let (_root, connection, mut verifier, response) = persistence_fixture();
+        let signature = pack_content_signature(&response);
+        insert_fixture_pack(&connection, "pack_00000000000000000000000001", &response);
+        let _ = verifier.verify(&response, &signature, false);
+        let _ = verifier.verify_diagnostic(
+            &pack_performance_fixture(true, false), &signature, false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "persisted selection must match")]
+    fn redacted_diagnostic_rejects_a_valid_ledger_with_a_different_selection() {
+        let (_root, connection, mut verifier, response) = persistence_fixture();
+        insert_fixture_pack(&connection, "pack_00000000000000000000000001", &response);
+        let mut baseline = pack_content_signature(&response);
+        baseline["items"][0]["memoryId"] = json!("mem_another_baseline_selection");
+        let _ = verifier.verify_diagnostic(
+            &pack_performance_fixture(true, false), &baseline, false,
+        );
     }
 
     #[test]
