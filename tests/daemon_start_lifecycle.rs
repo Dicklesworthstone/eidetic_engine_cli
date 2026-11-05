@@ -30,7 +30,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -107,6 +107,7 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
         .args(["daemon", "start", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,6 +473,45 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
                  last error: {last_err:?}"
             ),
         )?;
+
+        // The parent has exited. A malformed request executes the daemon's
+        // warn-level stderr event before returning this refusal. RUST_LOG is
+        // set by run_daemon_start, so this exercises logging after detachment
+        // rather than merely connecting to an idle listener. Startup reporting
+        // must not leave a pipe whose vanished reader breaks that log write.
+        let mut stream = UnixStream::connect(&socket_path)
+            .map_err(|error| format!("connect for post-detach log probe: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("bound log probe read: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("bound log probe write: {error}"))?;
+        stream
+            .write_all(&[0, 0, 0, 1, b'{'])
+            .map_err(|error| format!("send malformed log probe: {error}"))?;
+        let mut length = [0; 4];
+        stream
+            .read_exact(&mut length)
+            .map_err(|error| format!("read log probe frame: {error}"))?;
+        let length = usize::try_from(u32::from_be_bytes(length))
+            .map_err(|error| format!("log probe frame length: {error}"))?;
+        ensure(length <= 16 * 1024, "log probe response must be bounded")?;
+        let mut body = vec![0; length];
+        stream
+            .read_exact(&mut body)
+            .map_err(|error| format!("read log probe response: {error}"))?;
+        let response: Value = serde_json::from_slice(&body)
+            .map_err(|error| format!("parse log probe response: {error}"))?;
+        ensure(
+            response.pointer("/error/code").and_then(Value::as_str)
+                == Some("daemon_request_decode_failed"),
+            format!("post-detach request must reach the logging refusal path: {response}"),
+        )?;
+        ensure(
+            UnixStream::connect(&socket_path).is_ok(),
+            "daemon must remain connectable after its post-detach stderr write",
+        )?;
         Ok(())
     })();
 
@@ -613,19 +653,9 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
                 "unbindable start must carry daemon_start_failed; got degraded codes {codes:?}"
             ),
         )?;
-        // DISTINGUISH THE FIXTURE'S FAILURE FROM A SLOW HOST'S. The detached
-        // start surface cannot report WHY the child failed -- it discards the
-        // child's stderr and emits one of exactly two messages, "exited before
-        // its socket became connectable" or "did not become connectable within
-        // the readiness-probe deadline" (src/cli/mod.rs ~:64586). So asserting
-        // the blocker by name is impossible here; `--foreground` is the surface
-        // that carries startup output.
-        //
-        // What IS assertable is that the child died FAST. An unbindable parent
-        // fails at bind, so the child exits early; a loaded host that merely
-        // misses the 5s probe deadline produces the other message. Previously
-        // this test accepted both, so a worker slow enough to blow the deadline
-        // satisfied it without the blocker ever mattering.
+        // Preserve the early-exit/deadline distinction AND attribute the
+        // failure to the fixture's blocker. Generic readiness prose alone
+        // cannot establish why startup failed (bd-detached-daemon-start-opacity-a57es).
         let messages: Vec<&str> = envelope
             .pointer("/degraded")
             .and_then(Value::as_array)
@@ -645,6 +675,20 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
                  the readiness deadline -- a deadline miss means a slow host satisfied this \
                  test without the blocker; got degraded messages {messages:?}"
             ),
+        )?;
+        let blocker_path = blocker.display().to_string();
+        ensure(
+            messages.iter().any(|message| {
+                message.contains("Startup error:") && message.contains(&blocker_path)
+            }),
+            format!(
+                "detached startup must retain the child's actual blocker path {blocker_path}; \
+                 got degraded messages {messages:?}"
+            ),
+        )?;
+        ensure(
+            fs::read(&blocker).map_err(|error| format!("read blocker: {error}"))? == b"blocker",
+            "failed daemon startup must preserve the blocking file",
         )?;
         Ok(())
     })();

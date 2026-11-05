@@ -65331,6 +65331,62 @@ fn daemon_already_running_error(socket_path: &Path) -> DomainError {
 }
 
 #[cfg(unix)]
+const DAEMON_STARTUP_REPORT_MAX_BYTES: u64 = 16 * 1024;
+
+#[cfg(unix)]
+fn daemon_startup_report() -> io::Result<(fs::File, fs::File)> {
+    let report = tempfile::tempfile()?;
+    let output = report.try_clone()?;
+    Ok((report, output))
+}
+
+/// Read only the child's structured startup error, never its tracing output.
+/// The anonymous file is shared with the child's stdout, so rewind after the
+/// child exits and bound the read independently of the reported file length.
+#[cfg(unix)]
+fn read_daemon_startup_failure(report: &mut fs::File) -> io::Result<Option<String>> {
+    use std::io::Seek;
+
+    report.rewind()?;
+    let mut bytes = Vec::new();
+    report
+        .take(DAEMON_STARTUP_REPORT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > DAEMON_STARTUP_REPORT_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daemon startup report exceeds the 16 KiB diagnostic limit",
+        ));
+    }
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid daemon startup report"))?;
+    let Some(message) = envelope
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|_| envelope["schema"] == "ee.error.v2")
+    else {
+        // A timeout can race with the child's success report. It does not
+        // explain the failed readiness probe and must not be called an error.
+        return Ok(None);
+    };
+    let message: String = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let message = message.trim();
+    Ok((!message.is_empty()).then(|| message.to_owned()))
+}
+
+#[cfg(unix)]
 fn daemon_foreground_shutdown_signals() -> Result<signal_hook::iterator::Signals, DomainError> {
     signal_hook::iterator::Signals::new([
         signal_hook::consts::signal::SIGINT,
@@ -65746,10 +65802,30 @@ where
             }
         };
 
+        // Capture the structured startup report in an owner-only anonymous
+        // file. A pipe for stderr would tie the daemon's later logging to its
+        // exited parent. Logging stays on /dev/null; this regular-file stdout
+        // has no reader lifetime, no public path, and no EPIPE on detachment.
+        let (mut startup_report, startup_output) = match daemon_startup_report() {
+            Ok(report) => report,
+            Err(error) => {
+                let domain_error = DomainError::Configuration {
+                    message: format!("Failed to create a private daemon startup report: {error}"),
+                    repair: Some(
+                        "Inspect the temporary directory's permissions and free space, or run \
+                         `ee daemon start --foreground` to inspect startup output."
+                            .to_owned(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+            }
+        };
+
         let mut command = std::process::Command::new(&exe);
         command
             .arg("--workspace")
             .arg(&workspace_path)
+            .arg("--json")
             .arg("daemon")
             .arg("start")
             .arg("--foreground")
@@ -65757,7 +65833,7 @@ where
             .arg("--socket")
             .arg(&socket_path)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(startup_output))
             .stderr(std::process::Stdio::null());
 
         let mut child = match command.spawn() {
@@ -65837,6 +65913,11 @@ where
         } else {
             "Daemon child process did not become connectable within the readiness-probe deadline."
         };
+        let startup_detail = match read_daemon_startup_failure(&mut startup_report) {
+            Ok(Some(message)) => format!(" Startup error: {message}"),
+            Ok(None) => String::new(),
+            Err(error) => format!(" Startup diagnostics unavailable: {error}."),
+        };
         let payload = serde_json::json!({
             "schema": "ee.response.v2",
             "success": false,
@@ -65848,7 +65929,7 @@ where
             "degraded": [{
                 "code": DAEMON_START_FAILED_CODE,
                 "severity": "high",
-                "message": format!("{why} (deadline: {elapsed_ms}ms)"),
+                "message": format!("{why} (deadline: {elapsed_ms}ms){startup_detail}"),
                 "repair": "Run `ee daemon start --foreground` to bind in-process and inspect startup output, then retry."
             }]
         });
@@ -74822,6 +74903,82 @@ mod tests {
             socket_path.exists(),
             "daemon stop must not remove regular files passed via --socket",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_startup_report_retains_only_a_bounded_private_error() -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let (mut report, mut output) = super::daemon_startup_report()?;
+        let metadata = report.metadata()?;
+        assert_eq!(
+            metadata.mode() & 0o077,
+            0,
+            "startup diagnostics must be private"
+        );
+        assert_eq!(
+            metadata.nlink(),
+            0,
+            "startup report must have no public path"
+        );
+        let error = super::DomainError::Configuration {
+            message: "Failed to start daemon:\n/tmp/not-a-dir is not a directory.\u{1b}".to_owned(),
+            repair: Some("Run the foreground daemon.".to_owned()),
+        };
+        let mut stderr = Vec::new();
+        super::write_domain_error(&error, true, &mut output, &mut stderr);
+        drop(output);
+        assert!(
+            stderr.is_empty(),
+            "startup errors must use the private JSON report"
+        );
+        assert_eq!(
+            super::read_daemon_startup_failure(&mut report)?,
+            Some("Failed to start daemon: /tmp/not-a-dir is not a directory.".to_owned()),
+            "the parent must rewind the shared cursor and retain the child's cause without control bytes"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_startup_report_distinguishes_no_error_from_unreadable_diagnostics() -> io::Result<()>
+    {
+        for payload in [
+            "",
+            "{\"schema\":\"ee.response.v2\",\"success\":true}",
+            "{\"schema\":\"unrelated\",\"error\":{\"message\":\"not a startup error\"}}",
+        ] {
+            let (mut report, mut output) = super::daemon_startup_report()?;
+            output.write_all(payload.as_bytes())?;
+            assert_eq!(super::read_daemon_startup_failure(&mut report)?, None);
+        }
+        let (mut report, mut output) = super::daemon_startup_report()?;
+        output.write_all(b"incomplete private diagnostics")?;
+        let error = super::read_daemon_startup_failure(&mut report)
+            .expect_err("malformed diagnostics must not be quoted as the child's cause");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "invalid daemon startup report");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_startup_report_caps_reads_before_parsing() -> io::Result<()> {
+        use std::io::Seek;
+
+        let (mut report, mut output) = super::daemon_startup_report()?;
+        output.write_all(&[b'x'; 32 * 1024])?;
+        let error = super::read_daemon_startup_failure(&mut report)
+            .expect_err("oversized startup report must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            report.stream_position()?,
+            super::DAEMON_STARTUP_REPORT_MAX_BYTES + 1,
+            "the read itself must be bounded, not only the eventual displayed text"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
