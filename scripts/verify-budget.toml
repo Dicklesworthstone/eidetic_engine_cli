@@ -535,6 +535,20 @@ name = "Degraded Code Classification Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+# bd-undocumented-exit-codes-9-and-130-zop31. MEASURED 2026-11-05, not
+# estimated: the lint arm ran in 56ms on this host, so both arms declare the
+# 1s floor this file uses for sub-second checks. +2s against a 608s ceiling
+# that had headroom after bd-2di61 broadened the opt-in exclusion.
+[[stage]]
+name = "Exit Code Docs Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Exit Code Docs Lint"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 [[stage]]
 name = "ee Spawn Isolation Ratchet"
 expected_seconds_p50 = 1
