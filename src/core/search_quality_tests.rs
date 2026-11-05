@@ -1515,6 +1515,266 @@ fn feedback_handoff_is_bound_to_pinned_snapshot_during_concurrent_edits() {
     );
 }
 
+fn native_handoff_entities(fixture: &Fixture) -> (Vec<String>, String) {
+    let rules = [1.0, 0.9, 0.1]
+        .into_iter()
+        .enumerate()
+        .map(|(index, confidence)| {
+            let id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(201 + index as u128))
+                .to_string();
+            fixture
+                .db
+                .insert_procedural_rule(
+                    &id,
+                    &CreateProceduralRuleInput {
+                        workspace_id: fixture.workspace.clone(),
+                        content: format!("qualityquasar release checklist item {index}."),
+                        confidence,
+                        utility: 1.0,
+                        importance: 0.5,
+                        trust_class: "human_explicit".to_owned(),
+                        scope: if index == 1 { "global" } else { "workspace" }.to_owned(),
+                        scope_pattern: None,
+                        maturity: "validated".to_owned(),
+                        protected: false,
+                        source_memory_ids: Vec::new(),
+                        tags: Vec::new(),
+                    },
+                )
+                .unwrap();
+            id
+        })
+        .collect::<Vec<_>>();
+    let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(204)).to_string();
+    fixture
+        .db
+        .insert_session(
+            &session,
+            &crate::db::CreateSessionInput {
+                workspace_id: fixture.workspace.clone(),
+                cass_session_id: "native-handoff-session".to_owned(),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                ended_at: Some("2026-01-01T01:00:00Z".to_owned()),
+                message_count: 1,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(session.as_bytes()).to_hex()),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    let evidence = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(205)).to_string();
+    let excerpt = "The qualityquasar release checklist review completed successfully.";
+    fixture
+        .db
+        .insert_evidence_span(
+            &evidence,
+            &crate::db::CreateEvidenceSpanInput {
+                workspace_id: fixture.workspace.clone(),
+                session_id: session,
+                memory_id: None,
+                producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                cass_span_id: "native-handoff-span".to_owned(),
+                span_kind: crate::cass::CassSpanKind::Message.as_str().to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                excerpt: excerpt.to_owned(),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .unwrap();
+    (rules, evidence)
+}
+
+fn native_handoff_pack_options(
+    fixture: &Fixture,
+    reference_time: DateTime<Utc>,
+) -> crate::core::context::ContextPackOptions {
+    crate::core::context::ContextPackOptions {
+        bead_id: None,
+        task_paths: Vec::new(),
+        workspace_path: fixture.root.clone(),
+        database_path: Some(fixture.root.join(".ee/ee.db")),
+        index_dir: None,
+        query: "qualityquasar".to_owned(),
+        speed: SpeedMode::Instant,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: true,
+        filters: crate::models::QueryFilters::default(),
+        profile: Some(ContextPackProfile::Balanced),
+        max_tokens: Some(4000),
+        candidate_pool: Some(16),
+        max_results: Some(16),
+        include_tombstoned: false,
+        as_of: Some(reference_time),
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        // Exercise the default calibrated-hit exemption from elbow admission.
+        relevance_floor: None,
+        redaction_level: crate::models::RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Workspace,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        task_lens: None,
+        require_fresh_sentinels: false,
+        output_options: Default::default(),
+        persist_pack: false,
+        baseline_write: None,
+        no_lod: true,
+    }
+}
+
+#[test]
+fn handoff_native_rehydration_preserves_calibration_and_exact_pack_selection() {
+    let fixture = Fixture::new();
+    let (rules, evidence) = native_handoff_entities(&fixture);
+    let _embedder = fixture.publish_index();
+    let reference_time = Utc::now() + chrono::Duration::minutes(1);
+    let pack_options = native_handoff_pack_options(&fixture, reference_time);
+    let mut search_options = fixture.options();
+    search_options.as_of = Some(reference_time);
+    search_options.explain = false;
+    search_options.strict_source_mode = true;
+    let persistence_before = ["audit_log", "pack_records"]
+        .map(|table| fixture.db.count_table_rows(table).unwrap());
+
+    let calibration_path = search_score_calibration_jsonl_path(&fixture.root);
+    std::fs::create_dir_all(calibration_path.parent().unwrap()).unwrap();
+    // Insufficient evidence is the negative control: the low-confidence rule
+    // must still be excluded by the uncalibrated heuristic. A real calibration
+    // then exempts the same native candidates without changing their scores.
+    for sample_count in [1, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES] {
+        std::fs::write(
+            &calibration_path,
+            "{\"score\":0.8,\"groundTruthRelevance\":0.78}\n".repeat(sample_count),
+        )
+        .unwrap();
+        let calibrated = sample_count >= MIN_SEARCH_SCORE_CALIBRATION_SAMPLES;
+        for scope in [
+            MemoryScope::Workspace,
+            MemoryScope::Verified,
+            MemoryScope::Global,
+        ] {
+            search_options.memory_scope = scope;
+            let mut handoff = run_pack_search(&search_options).unwrap();
+            assert!(handoff.can_reuse_for_pack());
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == rules[1])
+            );
+            if scope == MemoryScope::Workspace {
+                for id in rules.iter().chain(std::iter::once(&evidence)) {
+                    let hit = handoff
+                        .report
+                        .results
+                        .iter()
+                        .find(|hit| &hit.doc_id == id)
+                        .unwrap();
+                    assert_eq!(hit.metadata.as_ref().unwrap()["calibrated"], calibrated);
+                }
+            }
+            // Canonical scope admission can also replace native metadata.
+            // Preserve exactly the annotations that survived it; this handoff
+            // repair must not introduce a missing calibration or scope.
+            let before_results = serde_json::to_value(&handoff.report.results).unwrap();
+            let before_degraded = serde_json::to_value(&handoff.report.degraded).unwrap();
+            let pool = registered_process_read_pool(
+                DatabaseConfig::file(search_options.resolve_database_path()),
+                PoolConfig::default_single(),
+            );
+            let snapshot = pool.pin_snapshot().unwrap();
+            let reader = snapshot.checked_connection().unwrap();
+            let validated = handoff.validate_snapshot(&search_options, reader).unwrap();
+            let (_, queries) = crate::db::capture_query_sql_for_test(|| {
+                handoff.revalidate_with_feedback(&search_options, reader, Some(&validated));
+            });
+            assert_eq!(
+                serde_json::to_value(&handoff.report.results).unwrap(),
+                before_results
+            );
+            assert_eq!(
+                serde_json::to_value(&handoff.report.degraded).unwrap(),
+                before_degraded
+            );
+            assert!(
+                !queries.iter().any(|sql| sql.contains(
+                    "FROM feedback_events WHERE workspace_id = ?1 ORDER BY created_at ASC, id ASC"
+                )),
+                "native rehydration must reuse the validated calibration and ledger"
+            );
+            drop(validated);
+            snapshot.commit().unwrap();
+        }
+
+        let canonical =
+            crate::core::context::run_context_pack_with_performance(&pack_options, "pack")
+                .unwrap();
+        let calls = AtomicUsize::new(0);
+        let provider = |options: &SearchOptions, require_cached_local: bool| {
+            assert!(!require_cached_local);
+            calls.fetch_add(1, Ordering::SeqCst);
+            let handoff = run_pack_search(options)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            // Exercise the versioned typed payload used by the actual daemon.
+            PackSearchHandoff::from_value(serde_json::to_value(handoff).unwrap())
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))
+        };
+        let remote = crate::core::context::run_context_pack_with_search_provider(
+            &pack_options,
+            "pack",
+            &provider,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !remote
+                .response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "daemon_search_fallback")
+        );
+        assert_eq!(remote.response.data.pack, canonical.response.data.pack);
+        let selected = &canonical.response.data.pack.rule_items;
+        assert!(selected.iter().any(|item| item.rule_id == rules[0]));
+        assert_eq!(
+            selected.iter().any(|item| item.rule_id == rules[2]),
+            calibrated,
+            "calibration must control the native rule's elbow exemption"
+        );
+        assert!(
+            canonical
+                .response
+                .data
+                .pack
+                .evidence_items
+                .iter()
+                .any(|item| item.evidence_id == evidence)
+        );
+    }
+    assert_eq!(
+        ["audit_log", "pack_records"].map(|table| fixture.db.count_table_rows(table).unwrap()),
+        persistence_before,
+        "read-only local and daemon handoff paths must not persist packs or audits"
+    );
+}
+
 #[test]
 fn handoff_rejects_changed_calibration_bytes_and_incompatible_snapshot_contracts() {
     let fixture = Fixture::new();

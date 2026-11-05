@@ -218,3 +218,127 @@ warm search/pack performance modes. Run the evidence-heavy scenario separately.
 There is no 10,000-memory waiver and no measured after-change result in this
 report. Issue #87 should not be considered performance-verified from these
 commits alone.
+
+## 2026-11-05 follow-up: correctness and qualification, without new measurements
+
+The November 4 issue update and main at
+`8b370dd8044f106945795f1f50455cef71740dd4` were reviewed against the comprehensive
+plan, ADR 0052, and the relevant work records. Serving-path provenance, retained
+daemon readers/index generations, feedback-aware single retrieval, and the
+existing query-reuse changes were already present. This follow-up builds on
+those changes and on `benches/daemon_round_trip.rs`; it does not replace them.
+
+### Round-trip failures and exact-result regressions
+
+Two repeated-search tests compared complete results while allowing each request
+to choose a new scoring reference time. Recency and final quality scores can
+therefore differ even when the source and resident process are unchanged.
+`daemon_search_reuses_one_process_and_returns_stable_results` and
+`daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales`
+now supply one `asOf` value for each equality sequence. Exact array comparisons,
+rebuild/restart checks and transport deadlines remain intact. A negative control
+advances only `asOf` by one day and requires both recency and final score to
+decrease, so the repair does not disable time-sensitive scoring.
+
+The retained evidence does not identify or reproduce all five failures reported
+in the November 4 update. The other three remain unclassified here. In particular,
+`bd-0kpjq`'s description of a 400k-row gap is not supported by its fixture:
+`plant_large_index_gap(..., 400_000, ...)` uses 400,000 as an ID offset and inserts
+`SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1` rows, currently 51. Its deadline failure
+still needs a native reproduction; neither a larger deadline nor a
+production-scale conclusion follows from that description.
+
+Source inspection also found two independent pack-parity defects. These are not
+claimed to be the three unclassified failures:
+
+- Successful local source reads controlled admission and scoring but did not
+  replace a same-ID global memory already in the request preload. Pack assembly
+  could consume the global body for the local row. Batched and point-read
+  hydration and the scope collector now preserve local precedence in the
+  returned preload as well. A successfully read local row also clears a stale
+  global-store lane marker and its synthetic scope labels, so it is not
+  incorrectly excluded from the local persistence ledger. Regressions compare
+  complete stored rows, an empty preload, malformed-neighbor fallback, source
+  classification, and genuine global-only membership.
+- Native rule/evidence rehydration replaced metadata from a validated daemon
+  handoff, losing calibration fields used by the pack's default relevance
+  filter. The client now retains the already validated calibration with the
+  request's feedback snapshot and restores calibration for native results that
+  carried it before rehydration. It also retains an existing native scope
+  annotation only when it equals the already matched request scope. It does
+  not reload feedback, duplicate calibration degradations, or change previously
+  uncalibrated scope behavior.
+  Regressions compare native result metadata and canonical local/handoff packs,
+  including an uncalibrated selection control.
+
+Non-passthrough native-rule scope admission can also drop calibration before
+the canonical result is produced. That separate behavior remains unchanged;
+the new Verified/Global comparisons require the handoff to preserve the current
+canonical result rather than introduce a new scope-specific selection policy.
+
+### Attributing the next realistic run
+
+The initial writable connection for an ordinary pack is opened before search
+and reused for persistence. Previously its cost was included in `search`, while
+`pack.persistence.subspans.connectionOpen` reported zero for that reuse path.
+The timings now charge initial and retry writer opens to persistence and exclude
+the initial open from retrieval. This changes accounting, not database opens,
+write ordering, audit ownership or exactly-once persistence. Pack performance
+output also reports the actual search `embedBackend`.
+
+The existing benchmark retains its 10,000-memory, mixed-feedback, 21-pair,
+at-least-2.0x p50 contract. It now runs two separate public pack performance
+probes after the 50 ordinary invocations. Diagnostic rendering is outside the
+p50 sample set. Each probe requires explicit retrieval provenance, a verified
+local neural backend, the same workload settings, required phase/storage
+timings, and the expected persistence transition. Persisted diagnostic records
+must have integrity-checked selections matching the ordinary baseline. Full
+selected-content equivalence remains checked on all ordinary calls; redacted
+read-only diagnostic output can establish only counts and budgets.
+
+Use the probes to distinguish process wall time, startup-to-ready, first calls,
+model preparation, source admission, handoff validation, candidate construction,
+assembly and storage. `daemonRetrieval` still includes transport and daemon
+search together; the handoff does not carry the daemon's internal timing trace.
+The separate search diagnostic workload is useful context, not a substitute for
+an ordinary persisted pack measurement.
+
+Two source-established costs remain candidates for measurement, not proven
+dominant bottlenecks. Local candidate rows are independently hydrated for
+tombstone admission, scope and quality scoring. Safely sharing them would need
+to retain snapshot identity, local ownership, authoritative absence and read
+failure distinctions; a plain map is insufficient. Complete feedback-ledger
+loading and hashing also remain per-request work under the existing content
+witness. Replacing that witness with a count or last timestamp would miss
+in-place changes and weaken correctness. Writer initialization, ledger
+serialization, transactions and audit must likewise be measured before
+claiming that resident retrieval eliminates ordinary pack latency.
+
+### Verification boundary
+
+No native test, benchmark, formatter or after-change latency measurement was
+run for this follow-up. The available environment has no Rust toolchain,
+RCH/DSR client, configured worker credentials or built `ee` binary. The
+repository requires its pinned RCH verification lane and forbids local Cargo
+fallback; no GitHub Actions run was used. Static diff and commit-hygiene checks
+are recorded separately from the pending native results.
+
+A bounded invocation of the required wrapper targeted
+`integration_a_d`'s
+`daemon_uds_rpc_round_trip::daemon_failed_delivery_does_not_consume_stale_warning_episode`.
+It exited 1 before RCH dispatch: the wrapper's committed-source inspection
+(`git ls-tree -r -l -z --full-tree` at
+`62d9d624f5fe4a7b8cbda54a5503c9e06e01088b`) exceeded its own ten-second subprocess
+timeout. The outer 55-second bound did not fire. This is a preflight failure,
+not a failed or successful Rust test, and produced no completed verification
+proof. An earlier attempt with an incorrect test-target name was interrupted
+without executing native tests.
+
+Required native coverage includes `bench_contracts`, the focused pack/search
+regressions, and `integration_a_d`'s daemon UDS tests. Then build the matching
+release CLI and run ADR 0052's mixed-feedback 10,000-memory gate with the
+verified model fixture, followed by the separate evidence-heavy and larger
+workspace observations. Attribute the CLI artifact hash and source revision.
+The published-release measurements earlier in this report remain historical;
+none establish the performance of these changes. No remaining performance bead
+or issue #87 is closed on this evidence.

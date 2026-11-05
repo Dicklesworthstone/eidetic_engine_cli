@@ -1874,7 +1874,7 @@ impl PackSearchHandoff {
         &self,
         options: &SearchOptions,
         connection: &'a DbConnection,
-    ) -> Option<SearchFeedbackSnapshot<'a>> {
+    ) -> Option<ValidatedPackSearchSnapshot<'a>> {
         if !self.matches_request(options)
             || self.snapshot.workspace_id
                 != bound_search_workspace_id(
@@ -1894,9 +1894,13 @@ impl PackSearchHandoff {
             options.database_path.as_deref(),
             Some(connection),
         );
-        (calibration.input_identity().as_ref() == Some(identity))
-            .then_some(feedback)
-            .flatten()
+        if calibration.input_identity().as_ref() != Some(identity) {
+            return None;
+        }
+        Some(ValidatedPackSearchSnapshot {
+            calibration,
+            feedback: feedback?,
+        })
     }
 
     #[cfg(test)]
@@ -1912,9 +1916,26 @@ impl PackSearchHandoff {
         &mut self,
         options: &SearchOptions,
         connection: &DbConnection,
-        feedback: Option<&SearchFeedbackSnapshot<'_>>,
+        validated: Option<&ValidatedPackSearchSnapshot<'_>>,
     ) -> BTreeMap<String, StoredMemory> {
         let mut memories = BTreeMap::new();
+        let mut native_calibration_ids = BTreeSet::new();
+        let mut native_scope_ids = BTreeSet::new();
+        for hit in &self.report.results {
+            if !hit.doc_id.starts_with("ev_") && !rule_admission::is_rule_hit(hit) {
+                continue;
+            }
+            if let Some(metadata) = &hit.metadata {
+                if metadata.get("scoreCalibration").is_some() {
+                    native_calibration_ids.insert(hit.doc_id.clone());
+                }
+                if metadata.get("memory_scope").and_then(serde_json::Value::as_str)
+                    == Some(options.memory_scope.as_str())
+                {
+                    native_scope_ids.insert(hit.doc_id.clone());
+                }
+            }
+        }
         let hits = std::mem::take(&mut self.report.results);
         let hits = apply_tombstone_visibility_with_connection(
             options,
@@ -1931,6 +1952,40 @@ impl PackSearchHandoff {
         );
         self.report.results =
             rule_admission::admit_hits(options, hits, &mut self.report.degraded, Some(connection));
+        if let Some(validated) = validated {
+            // Native admission replaces every indexed metadata field. Restore
+            // the calibration already validated against this source snapshot:
+            // pack's default elbow policy must not mistake calibrated rules or
+            // evidence for uncalibrated candidates. Do not reread the ledger or
+            // repeat calibration degradations. Restore only annotations that
+            // canonical retrieval carried through its scope admission. Other
+            // hits retain intervals fitted before mesh trust adjustment.
+            if !native_calibration_ids.is_empty() {
+                annotate_hits_with_calibration_metadata(
+                    &validated.calibration,
+                    self.report
+                        .results
+                        .iter_mut()
+                        .filter(|hit| native_calibration_ids.contains(&hit.doc_id)),
+                );
+            }
+            // Scope admission used the same bound request and pinned source.
+            // Preserve its existing annotation without assigning a scope to a
+            // native entity that did not already carry one.
+            for hit in &mut self.report.results {
+                if native_scope_ids.contains(&hit.doc_id)
+                    && let Some(metadata) = hit
+                        .metadata
+                        .as_mut()
+                        .and_then(serde_json::Value::as_object_mut)
+                {
+                    metadata.insert(
+                        "memory_scope".to_owned(),
+                        serde_json::json!(options.memory_scope.as_str()),
+                    );
+                }
+            }
+        }
         match resolved_search_scoring_config(&options.workspace_path) {
             Ok(config) if config.policy_hash() == self.quality_scoring_policy => {
                 apply_quality_scoring_with_feedback(
@@ -1941,7 +1996,7 @@ impl PackSearchHandoff {
                     Some(connection),
                     Some(&memories),
                     None,
-                    feedback,
+                    validated.map(|snapshot| &snapshot.feedback),
                     &mut self.report.degraded,
                 );
             }
@@ -4720,6 +4775,13 @@ pub(crate) struct SearchFeedbackSnapshot<'a> {
     events: Vec<StoredFeedbackEvent>,
 }
 
+/// The exact calibration and ledger accepted for a pack handoff. Keeping both
+/// avoids a second ledger read after native source metadata is rehydrated.
+pub(crate) struct ValidatedPackSearchSnapshot<'a> {
+    calibration: SearchScoreCalibration,
+    feedback: SearchFeedbackSnapshot<'a>,
+}
+
 impl SearchFeedbackSnapshot<'_> {
     fn harmful_counts_at(
         &self,
@@ -5637,6 +5699,14 @@ fn annotate_hits_with_loaded_score_calibration(
         SearchScoreCalibrationStatus::Absent | SearchScoreCalibrationStatus::Calibrated => {}
     }
 
+    annotate_hits_with_calibration_metadata(calibration, hits.iter_mut());
+    calibration.input_identity()
+}
+
+fn annotate_hits_with_calibration_metadata<'a>(
+    calibration: &SearchScoreCalibration,
+    hits: impl IntoIterator<Item = &'a mut SearchHit>,
+) {
     // bd-1h4nu: only advertise a calibrated coverage probability when a
     // conformal residual quantile actually exists. Without one,
     // `interval_for_score` returns the trivial [0,1] band; pairing that with a
@@ -5676,7 +5746,6 @@ fn annotate_hits_with_loaded_score_calibration(
         metadata.insert("scoreCalibration".to_string(), calibration_metadata.clone());
         hit.metadata = Some(serde_json::Value::Object(metadata));
     }
-    calibration.input_identity()
 }
 
 fn search_score_calibration_feedback_events(
@@ -15179,6 +15248,36 @@ fn apply_tombstone_visibility_collecting(
     )
 }
 
+/// A successful local read owns an ID collision with the user-global store.
+/// Keep downstream provenance and pack-ledger classification aligned with that
+/// source decision without replacing retrieval scores or calibration metadata.
+fn normalize_local_memory_store_identity(hit: &mut SearchHit, memory: &StoredMemory) {
+    let Some(metadata) = hit
+        .metadata
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if metadata.get("storeLane").and_then(serde_json::Value::as_str)
+        != Some(super::global_store::GLOBAL_PROVENANCE_LANE)
+    {
+        return;
+    }
+    metadata.remove("storeLane");
+    metadata.insert(
+        "workspaceId".to_owned(),
+        serde_json::json!(&memory.workspace_id),
+    );
+    metadata.insert(
+        "workspace_id".to_owned(),
+        serde_json::json!(&memory.workspace_id),
+    );
+    // These are synthetic global-store annotations, not local scope authority.
+    metadata.remove("memory_scope");
+    metadata.remove("tags");
+}
+
 fn apply_tombstone_visibility_with_connection(
     options: &SearchOptions,
     hits: Vec<SearchHit>,
@@ -15216,9 +15315,9 @@ fn apply_tombstone_visibility_with_connection(
         (batch_memories.as_ref(), preloaded_memories.as_deref_mut())
     {
         for (memory_id, memory) in memories {
-            preloaded
-                .entry(memory_id.clone())
-                .or_insert_with(|| memory.clone());
+            // Local rows decide admission below and must also supply the body
+            // consumed by pack assembly when a global preload has the same ID.
+            preloaded.insert(memory_id.clone(), memory.clone());
         }
     }
     let mut visible_hits = Vec::with_capacity(hits.len());
@@ -15309,10 +15408,11 @@ fn apply_tombstone_visibility_with_connection(
             };
 
         if let Some(memories) = batch_memories.as_ref() {
-            for hit in hits {
+            for mut hit in hits {
                 if !hit.doc_id.starts_with("mem_") {
                     visible_hits.push(hit);
                 } else if let Some(memory) = memories.get(&hit.doc_id) {
+                    normalize_local_memory_store_identity(&mut hit, memory);
                     if let Some(hit) = handle_loaded_memory(hit, memory) {
                         visible_hits.push(hit);
                     }
@@ -15328,7 +15428,7 @@ fn apply_tombstone_visibility_with_connection(
                 }
             }
         } else {
-            for hit in hits {
+            for mut hit in hits {
                 if !hit.doc_id.starts_with("mem_") {
                     visible_hits.push(hit);
                     continue;
@@ -15336,10 +15436,11 @@ fn apply_tombstone_visibility_with_connection(
                 match connection.get_memory(&hit.doc_id) {
                     Ok(Some(memory)) => {
                         if let Some(preloaded) = preloaded_memories.as_deref_mut() {
-                            preloaded
-                                .entry(hit.doc_id.clone())
-                                .or_insert_with(|| memory.clone());
+                            // Preserve the batch path's local-source precedence
+                            // when a malformed neighbor requires point reads.
+                            preloaded.insert(hit.doc_id.clone(), memory.clone());
                         }
+                        normalize_local_memory_store_identity(&mut hit, &memory);
                         if let Some(hit) = handle_loaded_memory(hit, &memory) {
                             visible_hits.push(hit);
                         }
@@ -15641,7 +15742,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
 
 fn apply_memory_scope_visibility_with_connection(
     options: &SearchOptions,
-    hits: Vec<SearchHit>,
+    mut hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
     scope_context: &MemoryScopeContext,
     mut stats: MemoryScopeStats,
@@ -15659,6 +15760,13 @@ fn apply_memory_scope_visibility_with_connection(
         Ok(memories) => (memories, None),
         Err(error) => (BTreeMap::new(), Some(error.to_string())),
     };
+    // This map still contains only positively read local rows. Normalize
+    // ownership before merging any separately admitted global preloads.
+    for hit in hits.iter_mut().filter(|hit| hit.doc_id.starts_with("mem_")) {
+        if let Some(memory) = scope_memories.get(&hit.doc_id) {
+            normalize_local_memory_store_identity(hit, memory);
+        }
+    }
     let mut global_source_rows = BTreeSet::new();
     if let Some(preloaded) = preloaded_memories.as_deref() {
         for memory_id in &hit_doc_ids {
@@ -15690,9 +15798,9 @@ fn apply_memory_scope_visibility_with_connection(
         };
     if let Some(preloaded) = preloaded_memories.as_deref_mut() {
         for (memory_id, memory) in &scope_memories {
-            preloaded
-                .entry(memory_id.clone())
-                .or_insert_with(|| memory.clone());
+            // Keep the reusable body aligned with the local row that won
+            // source precedence above, including global-store ID collisions.
+            preloaded.insert(memory_id.clone(), memory.clone());
         }
     }
 
@@ -21667,6 +21775,420 @@ mod tests {
             metadata: Some(serde_json::json!({ "content": content })),
             explanation: None,
         }
+    }
+
+    struct MemoryPreloadCollisionFixture {
+        _workspace: tempfile::TempDir,
+        connection: DbConnection,
+        options: SearchOptions,
+        local_memory: StoredMemory,
+        global_memories: BTreeMap<String, StoredMemory>,
+    }
+
+    impl MemoryPreloadCollisionFixture {
+        const LOCAL_ID: &str = "mem_00000000000000000000000923";
+        const GLOBAL_ONLY_ID: &str = "mem_00000000000000000000000924";
+        const MALFORMED_ID: &str = "mem_00000000000000000000000925";
+
+        fn new() -> Result<Self, String> {
+            const LOCAL_WORKSPACE: &str = "wsp_00000000000000000000000923";
+            const GLOBAL_WORKSPACE: &str = "wsp_00000000000000000000000924";
+            let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace_path = workspace
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    LOCAL_WORKSPACE,
+                    &CreateWorkspaceInput {
+                        path: workspace_path.display().to_string(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let mut local_input = test_memory_input(LOCAL_WORKSPACE, "authoritative local body");
+            local_input.confidence = 0.4;
+            local_input.utility = 0.3;
+            local_input.valid_from = Some("2026-01-01T00:00:00Z".to_owned());
+            local_input.valid_to = Some("2027-01-01T00:00:00Z".to_owned());
+            local_input.tags = vec!["global".to_owned()];
+            connection
+                .insert_memory(Self::LOCAL_ID, &local_input)
+                .map_err(|error| error.to_string())?;
+            let local_memory = connection
+                .get_memory(Self::LOCAL_ID)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "local collision fixture missing".to_owned())?;
+
+            let global = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            global.migrate().map_err(|error| error.to_string())?;
+            global
+                .insert_workspace(
+                    GLOBAL_WORKSPACE,
+                    &CreateWorkspaceInput {
+                        path: workspace_path.join("global").display().to_string(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for (id, content) in [
+                (Self::LOCAL_ID, "different global body for the same ID"),
+                (Self::GLOBAL_ONLY_ID, "independently admitted global-only body"),
+            ] {
+                let mut input = test_memory_input(GLOBAL_WORKSPACE, content);
+                if id == Self::GLOBAL_ONLY_ID {
+                    input.valid_from = Some("2026-02-01T00:00:00Z".to_owned());
+                    input.valid_to = Some("2028-01-01T00:00:00Z".to_owned());
+                } else {
+                    // Keep stale-index validity filtering independent of the
+                    // body/ownership collision this fixture exercises.
+                    input.valid_from = local_input.valid_from.clone();
+                    input.valid_to = local_input.valid_to.clone();
+                }
+                global
+                    .insert_memory(id, &input)
+                    .map_err(|error| error.to_string())?;
+            }
+            let global_memories = global
+                .get_memories_batch(&[Self::LOCAL_ID, Self::GLOBAL_ONLY_ID])
+                .map_err(|error| error.to_string())?;
+            assert_ne!(global_memories[Self::LOCAL_ID], local_memory);
+            let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+            options.workspace_path = workspace_path;
+            options.as_of = Some(
+                "2026-06-01T00:00:00Z"
+                    .parse::<DateTime<Utc>>()
+                    .map_err(|error| error.to_string())?,
+            );
+            Ok(Self {
+                _workspace: workspace,
+                connection,
+                options,
+                local_memory,
+                global_memories,
+            })
+        }
+
+        fn global_hit(&self, memory_id: &str) -> SearchHit {
+            let mut hit = memory_visibility_hit(memory_id, "global index projection");
+            let mut metadata = global_store_search_metadata(
+                &self.global_memories[memory_id],
+                self.options
+                    .as_of
+                    .expect("fixture has a fixed reference time"),
+            );
+            metadata["calibrated"] = serde_json::json!(true);
+            metadata["scoreCalibration"] = serde_json::json!({ "sampleCount": 12 });
+            hit.metadata = Some(metadata);
+            hit
+        }
+    }
+
+    #[test]
+    fn memory_visibility_preloads_local_rows_over_global_collisions() -> TestResult {
+        let fixture = MemoryPreloadCollisionFixture::new()?;
+        let mut malformed_neighbor_inserted = false;
+        for (point_read_fallback, global_hit_won) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let local_hit = if global_hit_won {
+                fixture.global_hit(MemoryPreloadCollisionFixture::LOCAL_ID)
+            } else {
+                memory_visibility_hit(
+                    MemoryPreloadCollisionFixture::LOCAL_ID,
+                    "indexed local body is not preload authority",
+                )
+            };
+            let original_calibration = local_hit
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("scoreCalibration"))
+                .cloned();
+            let original_score = local_hit.score;
+            let mut local_hits = vec![local_hit.clone()];
+            let mut hits = vec![
+                local_hit,
+                fixture.global_hit(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID),
+            ];
+            if point_read_fallback && !malformed_neighbor_inserted {
+                fixture
+                    .connection
+                    .insert_memory(
+                        MemoryPreloadCollisionFixture::MALFORMED_ID,
+                        &test_memory_input(&fixture.local_memory.workspace_id, "malformed neighbor"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                fixture
+                    .connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET content = X'ff' WHERE id = '{}'",
+                        MemoryPreloadCollisionFixture::MALFORMED_ID
+                    ))
+                    .map_err(|error| error.to_string())?;
+                assert!(
+                    fixture
+                        .connection
+                        .get_memories_batch(&[
+                            MemoryPreloadCollisionFixture::LOCAL_ID,
+                            MemoryPreloadCollisionFixture::MALFORMED_ID,
+                        ])
+                        .is_err()
+                );
+                malformed_neighbor_inserted = true;
+            }
+            if point_read_fallback {
+                let malformed = memory_visibility_hit(
+                    MemoryPreloadCollisionFixture::MALFORMED_ID,
+                    "a failed source read must remain withheld",
+                );
+                local_hits.push(malformed.clone());
+                hits.push(malformed);
+            }
+
+            // Empty-map revalidation and in-process global preloads must agree
+            // on every field of the local row, not only the selected hit ID.
+            let mut empty_preload = BTreeMap::new();
+            let mut local_degraded = Vec::new();
+            let local_visible = apply_tombstone_visibility_collecting(
+                &fixture.options,
+                local_hits,
+                &mut local_degraded,
+                Some(&fixture.connection),
+                Some(&mut empty_preload),
+            );
+            let mut preloaded = fixture.global_memories.clone();
+            let mut degraded = Vec::new();
+            let visible = apply_tombstone_visibility_collecting(
+                &fixture.options,
+                hits,
+                &mut degraded,
+                Some(&fixture.connection),
+                Some(&mut preloaded),
+            );
+            assert_eq!(local_visible.len(), 1);
+            assert_eq!(visible.len(), 2);
+            assert_eq!(
+                serde_json::json!(visible[0]),
+                serde_json::json!(local_visible[0])
+            );
+            assert_eq!(visible[0].score, original_score);
+            let local_metadata = visible[0].metadata.as_ref().expect("live local metadata");
+            assert!(local_metadata.get("storeLane").is_none());
+            assert_eq!(
+                local_metadata.get("scoreCalibration"),
+                original_calibration.as_ref()
+            );
+            if global_hit_won {
+                assert_eq!(
+                    local_metadata["workspaceId"],
+                    fixture.local_memory.workspace_id
+                );
+                assert_eq!(
+                    local_metadata["workspace_id"],
+                    fixture.local_memory.workspace_id
+                );
+                assert!(local_metadata.get("memory_scope").is_none());
+                assert!(local_metadata.get("tags").is_none());
+                assert_eq!(local_metadata["calibrated"], true);
+            }
+            assert_eq!(
+                visible[1].doc_id,
+                MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID
+            );
+            let global_metadata = visible[1].metadata.as_ref().expect("live global metadata");
+            assert_eq!(
+                global_metadata["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            assert_eq!(global_metadata["memory_scope"], "global");
+            assert_eq!(global_metadata["tags"], serde_json::json!(["global"]));
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::LOCAL_ID),
+                Some(&fixture.local_memory)
+            );
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::LOCAL_ID),
+                empty_preload.get(MemoryPreloadCollisionFixture::LOCAL_ID)
+            );
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID),
+                fixture
+                    .global_memories
+                    .get(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID)
+            );
+            assert_eq!(
+                degraded
+                    .iter()
+                    .map(|entry| entry.code.as_str())
+                    .collect::<Vec<_>>(),
+                if point_read_fallback {
+                    vec!["tombstone_visibility_unavailable"]
+                } else {
+                    Vec::new()
+                }
+            );
+            assert_eq!(serde_json::json!(degraded), serde_json::json!(local_degraded));
+            assert_eq!(
+                fixture
+                    .connection
+                    .get_memory(MemoryPreloadCollisionFixture::LOCAL_ID)
+                    .map_err(|error| error.to_string())?
+                    .as_ref(),
+                Some(&fixture.local_memory),
+                "preload hydration must not mutate the authoritative row"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_scope_preloads_local_rows_over_global_collisions() -> TestResult {
+        let mut fixture = MemoryPreloadCollisionFixture::new()?;
+        fixture.options.memory_scope = MemoryScope::Global;
+        let scope_context = MemoryScopeContext::for_workspace_with_connection(
+            &fixture.options.workspace_path,
+            fixture.options.memory_scope,
+            fixture.options.strict_scope,
+            Some(&fixture.connection),
+        );
+        for global_hit_won in [false, true] {
+            let local_hit = if global_hit_won {
+                fixture.global_hit(MemoryPreloadCollisionFixture::LOCAL_ID)
+            } else {
+                memory_visibility_hit(
+                    MemoryPreloadCollisionFixture::LOCAL_ID,
+                    "indexed local body is not preload authority",
+                )
+            };
+            let original_score = local_hit.score;
+            let original_calibration = local_hit
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("scoreCalibration"))
+                .cloned();
+            let mut empty_preload = BTreeMap::new();
+            let mut local_degraded = Vec::new();
+            let (local_visible, _) = apply_memory_scope_visibility_with_connection(
+                &fixture.options,
+                vec![local_hit.clone()],
+                &mut local_degraded,
+                &scope_context,
+                scope_context.stats(),
+                false,
+                &fixture.connection,
+                Some(&mut empty_preload),
+                None,
+            );
+            let global_ids = fixture.global_memories.keys().cloned().collect();
+            let mut preloaded = fixture.global_memories.clone();
+            let mut degraded = Vec::new();
+            let (visible, _) = apply_memory_scope_visibility_with_connection(
+                &fixture.options,
+                vec![
+                    local_hit,
+                    fixture.global_hit(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID),
+                ],
+                &mut degraded,
+                &scope_context,
+                scope_context.stats(),
+                false,
+                &fixture.connection,
+                Some(&mut preloaded),
+                Some(&global_ids),
+            );
+            assert_eq!(local_visible.len(), 1);
+            assert_eq!(visible.len(), 2);
+            assert_eq!(
+                serde_json::json!(visible[0]),
+                serde_json::json!(local_visible[0])
+            );
+            assert_eq!(visible[0].score, original_score);
+            let local_metadata = visible[0].metadata.as_ref().expect("live local metadata");
+            // The pack ledger uses this exact marker to exclude global rows.
+            assert!(local_metadata.get("storeLane").is_none());
+            assert_eq!(
+                local_metadata.get("scoreCalibration"),
+                original_calibration.as_ref()
+            );
+            if global_hit_won {
+                assert_eq!(
+                    local_metadata["workspaceId"],
+                    fixture.local_memory.workspace_id
+                );
+                assert_eq!(
+                    local_metadata["workspace_id"],
+                    fixture.local_memory.workspace_id
+                );
+                assert!(local_metadata.get("tags").is_none());
+                assert_eq!(local_metadata["calibrated"], true);
+            }
+            assert_eq!(local_metadata["memory_scope"], "global");
+            assert_eq!(
+                visible[1].doc_id,
+                MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID
+            );
+            let global_metadata = visible[1].metadata.as_ref().expect("live global metadata");
+            assert_eq!(
+                global_metadata["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            assert_eq!(global_metadata["tags"], serde_json::json!(["global"]));
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::LOCAL_ID),
+                Some(&fixture.local_memory)
+            );
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::LOCAL_ID),
+                empty_preload.get(MemoryPreloadCollisionFixture::LOCAL_ID)
+            );
+            assert_eq!(
+                preloaded.get(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID),
+                fixture
+                    .global_memories
+                    .get(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID)
+            );
+            assert!(local_degraded.is_empty());
+            assert!(degraded.is_empty());
+        }
+
+        // Global source membership and its synthetic tags cannot override a
+        // successful local lookup whose live tags do not admit Global scope.
+        fixture
+            .connection
+            .remove_memory_tags(
+                MemoryPreloadCollisionFixture::LOCAL_ID,
+                &["global".to_owned()],
+            )
+            .map_err(|error| error.to_string())?;
+        let global_ids = fixture.global_memories.keys().cloned().collect();
+        let mut preloaded = fixture.global_memories.clone();
+        let mut degraded = Vec::new();
+        let (visible, stats) = apply_memory_scope_visibility_with_connection(
+            &fixture.options,
+            vec![
+                fixture.global_hit(MemoryPreloadCollisionFixture::LOCAL_ID),
+                fixture.global_hit(MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID),
+            ],
+            &mut degraded,
+            &scope_context,
+            scope_context.stats(),
+            false,
+            &fixture.connection,
+            Some(&mut preloaded),
+            Some(&global_ids),
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].doc_id,
+            MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID
+        );
+        assert_eq!(stats.candidates_excluded_by_scope, 1);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "scope_excluded_evidence");
+        Ok(())
     }
 
     #[test]
