@@ -209,6 +209,7 @@ fn path_rules_keep_verified_and_self_scope_authority() {
                 strict_scope: false,
                 current_agent: Some("Alice".to_owned()),
                 team_members: BTreeSet::new(),
+                team_roster_read_error: None,
             })
         },
         || Ok(()),

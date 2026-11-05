@@ -67,6 +67,7 @@ pub(crate) fn load_command_advice_corpus(
         strict_scope: false,
         current_agent: None,
         team_members: BTreeSet::new(),
+        team_roster_read_error: None,
     };
     let native_sources = load_rules(connection, workspace_id, &scope, &[], &mut candidates)?;
     snapshot.finish()?;
@@ -139,6 +140,7 @@ fn scope_context(
         strict_scope: false,
         current_agent: crate::core::memory_scope::current_agent_name(),
         team_members: BTreeSet::new(),
+        team_roster_read_error: None,
     };
     if scope == MemoryScope::Team {
         admission::require_workspace_roster(connection, workspace_id)?;
@@ -180,6 +182,7 @@ fn load_corpus_with_boundary(
                 strict_scope: false,
                 current_agent: None,
                 team_members: BTreeSet::new(),
+                team_roster_read_error: None,
             })
         },
         after_memory_read,

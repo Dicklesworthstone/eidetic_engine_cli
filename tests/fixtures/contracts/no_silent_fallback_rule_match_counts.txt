@@ -816,13 +816,12 @@
 #     LABEL, not these two fields. Its unreachability leg is now proven instead.
 #
 # Three sites keep safe behaviour but discard a Result's REASON -> bd-p42mq.
-# One collapses storage error and absent binding into one value -> bd-m3fe7.
+# The bd-m3fe7 roster default was removed; read failures now remain observable.
 # One is a provably-unreachable default on the FAIL-OPEN side of a security
 # predicate (DOWNLOAD-SHELL-PROGRAM); justified because unreachable, written
 # down because the polarity is unforgiving.
 1	NSF-DB-EVIDENCE-READER-VIEWS
 1	NSF-CORE-SUBSCRIBE-DELTA-TAGS
-1	NSF-CORE-TEAM-ROSTER-ABSENCE
 8	NSF-CLI-CONTEXT-DELTA-RULE-PROJECTION
 2	NSF-CORE-RULE-ADMISSION-RELATIONS
 1	NSF-CORE-SCOPE-RULE-SOURCE-TAGS

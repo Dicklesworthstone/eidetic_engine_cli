@@ -255,6 +255,7 @@ mod tests {
             strict_scope: false,
             current_agent: Some("Alice".to_owned()),
             team_members: BTreeSet::from(["Bob".to_owned()]),
+            team_roster_read_error: None,
         }
     }
 

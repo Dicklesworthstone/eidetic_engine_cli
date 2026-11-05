@@ -3379,8 +3379,8 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     //
     // Headline from judging all 39: ZERO were correctness or safety defects.
     // The three that discard a Result's REASON while keeping safe behaviour
-    // are bd-p42mq; the storage-error/absence collapse under
-    // load_team_members is bd-m3fe7.
+    // are bd-p42mq. The former load_team_members classification was removed
+    // when bd-m3fe7 began preserving and reporting roster read failures.
     // ----------------------------------------------------------------------
     allowed_in(
         "NSF-DB-EVIDENCE-READER-VIEWS",
@@ -3395,13 +3395,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "hydrate_tags",
         "delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();",
         "An Option from a map lookup, not a swallowed failure. get_memory_tags_batch's own error is propagated by `.map_err(storage_error)?` two lines above, so by this point the batch read has SUCCEEDED and a missing key means the memory genuinely carries no tags. The bulk reader returns rows only for memories that have tags, so absence is the ordinary case for an untagged memory and the empty Vec is its correct value rather than a fabricated one. Same construct and same reasoning as the already-accepted NSF-CORE-RESUME-ADMISSION-TAGS.",
-    ),
-    allowed_in(
-        "NSF-CORE-TEAM-ROSTER-ABSENCE",
-        "src/core/memory_scope.rs",
-        "load_team_members",
-        "let members = bound_team_members(workspace_path, connection).unwrap_or_default();",
-        "Empty IS the correct value, because the roster is admission-only and strictly additive: memory_in_scope_with_tags admits a Team-scoped memory when the producer is the current agent OR is in this set, so a SMALLER roster admits strictly FEWER memories. An empty set therefore fails CLOSED -- it hides team memories and cannot admit one that should have been excluded -- which is also bound_team_members' own documented contract, \"No matching binding is absence of authority\". KNOWN RESIDUAL, recorded rather than papered over and filed as bd-m3fe7: the callee reaches None by three distinct routes -- a storage error on addressed_workspace_row, a genuinely absent workspace row, and a storage error on list_all_team_members -- so a database failure is indistinguishable from an unbound workspace here. The polarity above bounds the consequence to under-admission, which makes it a diagnostic gap rather than an authorization defect.",
     ),
     allowed_in(
         "NSF-CLI-CONTEXT-DELTA-RULE-PROJECTION",

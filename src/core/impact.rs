@@ -355,6 +355,13 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         options.strict_scope,
         Some(&connection),
     );
+    if let Some(error) = scope_context.team_roster_read_error() {
+        return Err(DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: format!("Could not verify impact team scope: {error}"),
+        }
+        .into());
+    }
     let admission =
         graph_neighbors::MemoryAdmission::new(&connection, &workspace_id, &scope_context);
     let mut scope_stats = scope_context.stats();
@@ -698,6 +705,54 @@ mod tests {
         assert_eq!(data["results"][0]["matchType"], "exact_anchor");
         let anchor_block = data["results"][0]["anchor"].to_string();
         assert!(!anchor_block.contains("src/core/impact.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn impact_team_scope_reports_an_unreadable_roster_before_anchor_selection() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let db_path = workspace.join(".ee/ee.db");
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        seed_anchor_database(&connection, &workspace).map_err(|error| error.to_string())?;
+        let mut options = ImpactOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: None,
+            surface: ImpactSurfaceQuery {
+                kind: MemoryAnchorKind::Path,
+                value: "src/core/impact.rs".to_owned(),
+            },
+            limit: 0,
+            speed: SpeedMode::Instant,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Team,
+            strict_scope: false,
+        };
+        assert!(
+            run_impact(&options)
+                .map_err(|error| error.to_string())?
+                .results
+                .is_empty()
+        );
+        connection
+            .execute_raw("ALTER TABLE team_members RENAME TO unavailable_team_members")
+            .map_err(|error| error.to_string())?;
+        let error = run_impact(&options).expect_err("a failed roster read must be reported");
+        assert!(matches!(&error, ImpactError::Storage(_)));
+        assert!(error.to_string().contains("team roster members"));
+        options.memory_scope = MemoryScope::Workspace;
+        assert!(
+            run_impact(&options)
+                .map_err(|error| error.to_string())?
+                .results
+                .is_empty()
+        );
         Ok(())
     }
 

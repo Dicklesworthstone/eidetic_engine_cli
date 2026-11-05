@@ -10355,6 +10355,7 @@ mod tests {
             strict_scope: false,
             current_agent: Some("local".to_owned()),
             team_members: std::collections::BTreeSet::from(["Analysts".to_owned()]),
+            team_roster_read_error: None,
         };
         assert!(
             context.memory_in_scope(&stored),

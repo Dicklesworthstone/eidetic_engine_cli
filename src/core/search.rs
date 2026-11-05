@@ -9288,6 +9288,13 @@ async fn run_similar_with_cx_and_posture(
         options.strict_scope,
         Some(&connection),
     );
+    if let Some(error) = scope_context.team_roster_read_error() {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("Could not verify similar-memory team scope: {error}"),
+        }
+        .into());
+    }
     let target = resolve_similar_seed_memory(&connection, options, &workspace_id, &scope_context)?;
     let index_dir = options.resolve_index_dir();
     let posture_is_overridden = embedding_posture_override.is_some();
@@ -9626,6 +9633,9 @@ impl SearchRerankTextProvider {
     }
 
     fn text_for_rerank(&self, doc_id: &str) -> Result<Option<String>, SearchDegradation> {
+        if let Some(error) = self.scope_context.team_roster_read_error() {
+            return Err(SearchDegradation::scope_metadata_unavailable(error));
+        }
         if let Some(degradation) = self.storage_failure.get() {
             return Err(degradation.clone());
         }
@@ -15657,6 +15667,9 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
         options.strict_scope,
         read_connection,
     );
+    if let Some(error) = scope_context.team_roster_read_error() {
+        degraded.push(SearchDegradation::scope_metadata_unavailable(error));
+    }
     let mut stats = scope_context.stats();
     if hits.is_empty() {
         return (hits, stats);
@@ -16359,6 +16372,43 @@ mod tests {
     use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn team_scope_reports_roster_failure_even_without_search_hits() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.join(".ee/ee.db")).map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        options.workspace_path = workspace;
+        for scope in [MemoryScope::Team, MemoryScope::Workspace] {
+            options.memory_scope = scope;
+            let mut degraded = Vec::new();
+            let (hits, stats) = apply_memory_scope_visibility_with_metadata_mode(
+                &options,
+                Vec::new(),
+                &mut degraded,
+                None,
+                false,
+            );
+            assert!(hits.is_empty());
+            assert_eq!(stats.candidates_total, 0);
+            if scope == MemoryScope::Team {
+                assert_eq!(degraded.len(), 1);
+                assert_eq!(degraded[0].code, "scope_metadata_unavailable");
+                assert!(degraded[0].message.contains("team roster"));
+                assert_eq!(degraded[0].repair.as_deref(), Some("ee doctor --json"));
+            } else {
+                assert!(
+                    degraded.is_empty(),
+                    "workspace scope does not use the roster"
+                );
+            }
+        }
+        Ok(())
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
@@ -31499,6 +31549,11 @@ pub fn run_family_retrieval(
         options.memory_scope,
         options.strict_scope,
     );
+    if let Some(error) = scope_context.team_roster_read_error() {
+        return Err(storage_error(format!(
+            "Could not verify family retrieval team scope: {error}"
+        )));
+    }
     let mut admitted = Vec::new();
     let mut scope_filtered_count = 0_u32;
     let missing_current_revision_count = u32::try_from(

@@ -13,6 +13,38 @@ const OLD: &str = "2020-01-01T00:00:00Z";
 const NEW: &str = "2025-01-01T00:00:00Z";
 const BOUND: &str = "2023-01-01T00:00:00Z";
 
+#[test]
+fn team_roster_failure_remains_visible_in_an_empty_context_pack() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    std::fs::create_dir_all(workspace.join(".ee/ee.db")).unwrap();
+    let connection = DbConnection::open_memory().unwrap();
+    for scope in [MemoryScope::Team, MemoryScope::Workspace] {
+        let scope_context = MemoryScopeContext::for_workspace(&workspace, scope, false);
+        let mut degraded = Vec::new();
+        let stats = filter_candidates_by_memory_scope(
+            &connection,
+            &mut Vec::new(),
+            &scope_context,
+            &mut degraded,
+            None,
+            &BTreeSet::new(),
+        );
+        assert_eq!(stats.candidates_total, 0);
+        if scope == MemoryScope::Team {
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "scope_metadata_unavailable");
+            assert!(degraded[0].message.contains("team roster"));
+            assert_eq!(degraded[0].repair.as_deref(), Some("ee doctor --json"));
+        } else {
+            assert!(
+                degraded.is_empty(),
+                "workspace scope does not use the roster"
+            );
+        }
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     workspace: PathBuf,
@@ -351,6 +383,7 @@ fn verified_scope_uses_rule_class_without_inheriting_parent_authority() {
             strict_scope: false,
             current_agent: None,
             team_members: BTreeSet::new(),
+            team_roster_read_error: None,
         },
         &mut resolved.degraded,
     );

@@ -48,6 +48,9 @@ pub struct MemoryScopeContext {
     pub strict_scope: bool,
     pub current_agent: Option<String>,
     pub team_members: BTreeSet<String>,
+    /// Failed roster measurement is distinct from a successfully empty roster.
+    /// Members stay empty on failure, so this cannot broaden admission.
+    pub team_roster_read_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1188,11 +1191,27 @@ impl MemoryScopeContext {
         strict_scope: bool,
         connection: Option<&crate::db::DbConnection>,
     ) -> Self {
+        let (team_members, team_roster_read_error) =
+            match load_team_members(workspace_path, connection) {
+                Ok(members) => (members, None),
+                Err(error) => (BTreeSet::new(), Some(error)),
+            };
         Self {
             scope,
             strict_scope,
             current_agent: current_agent_name(),
-            team_members: load_team_members(workspace_path, connection),
+            team_members,
+            team_roster_read_error,
+        }
+    }
+
+    /// Only Team retrieval depends on the roster; other scopes are unaffected.
+    #[must_use]
+    pub fn team_roster_read_error(&self) -> Option<&str> {
+        if self.scope == MemoryScope::Team {
+            self.team_roster_read_error.as_deref()
+        } else {
+            None
         }
     }
 
@@ -1275,14 +1294,19 @@ pub fn is_verified_memory(memory: &StoredMemory) -> bool {
 fn load_team_members(
     workspace_path: &Path,
     read_connection: Option<&crate::db::DbConnection>,
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>, String> {
     // Bound-read config so symlink/oversize paths stay fail-closed. The
     // unauthenticated [trust] team_members list is not an authorization
     // source; Team scope admits only durable team_members rows.
     let _ = read_memory_scope_config(&workspace_path.join(".ee").join("config.toml"));
     let database_path = workspace_path.join(".ee").join("ee.db");
-    if !database_path.is_file() {
-        return BTreeSet::new();
+    match std::fs::symlink_metadata(&database_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err("team roster database is not a regular file".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(BTreeSet::new());
+        }
+        Err(error) => return Err(format!("could not inspect team roster database: {error}")),
     }
     // Exact lexical identity is deliberately conservative. A different store
     // (or an unrecognized alias) retains the normal workspace-roster lookup.
@@ -1290,22 +1314,31 @@ fn load_team_members(
         matches!(connection.location(), crate::db::DatabaseLocation::File(path) if path == &database_path)
     });
     let owned = if supplied.is_none() {
-        crate::db::DbConnection::open_file_read_only(&database_path).ok()
+        Some(
+            crate::db::DbConnection::open_file_read_only(&database_path)
+                .map_err(|error| format!("could not open team roster database: {error}"))?,
+        )
     } else {
         None
     };
     let Some(connection) = supplied.or(owned.as_ref()) else {
-        return BTreeSet::new();
+        return Err("team roster database connection is unavailable".to_owned());
     };
     // A read-only connection alone does not pin the workspace binding and its
     // roster to the same source state. Borrow an existing request snapshot;
     // otherwise own and release only the snapshot opened on this connection.
-    if owned.is_some() && connection.begin_read_snapshot().is_err() {
-        return BTreeSet::new();
+    if owned.is_some() {
+        connection
+            .begin_read_snapshot()
+            .map_err(|error| format!("could not pin team roster snapshot: {error}"))?;
     }
-    let members = bound_team_members(workspace_path, connection).unwrap_or_default();
-    if owned.is_some() && connection.rollback_read_snapshot().is_err() {
-        return BTreeSet::new();
+    let members = bound_team_members(workspace_path, connection);
+    // Always release an owned snapshot, including after a failed roster read.
+    // Never roll back a snapshot borrowed from the enclosing request.
+    if owned.is_some() {
+        connection
+            .rollback_read_snapshot()
+            .map_err(|error| format!("could not release team roster snapshot: {error}"))?;
     }
     members
 }
@@ -1317,14 +1350,24 @@ fn load_team_members(
 fn bound_team_members(
     workspace_path: &Path,
     connection: &crate::db::DbConnection,
-) -> Option<BTreeSet<String>> {
-    let workspace = crate::core::workspace::addressed_workspace_row(
+) -> Result<BTreeSet<String>, String> {
+    let Some(workspace) = crate::core::workspace::addressed_workspace_row(
         connection,
         workspace_path,
         &workspace_path.join(".ee").join("ee.db"),
     )
-    .ok()??;
-    let rows = connection.list_all_team_members().ok()?;
+    .map_err(|error| {
+        format!(
+            "could not resolve team roster workspace: {}",
+            error.message()
+        )
+    })?
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let rows = connection
+        .list_all_team_members()
+        .map_err(|error| format!("could not read team roster members: {error}"))?;
     let mut members = BTreeSet::new();
     for row in rows {
         if row.workspace_id == workspace.id && row.state == "active" {
@@ -1336,7 +1379,7 @@ fn bound_team_members(
             }
         }
     }
-    Some(members)
+    Ok(members)
 }
 
 /// Hard cap on the byte length of `<workspace>/.ee/config.toml` when
@@ -2125,6 +2168,7 @@ mod tests {
             strict_scope: false,
             current_agent: None,
             team_members: BTreeSet::new(),
+            team_roster_read_error: None,
         };
 
         assert!(context.memory_in_scope(&memory_with_scope(TrustClass::HumanExplicit, None)));
@@ -2140,6 +2184,7 @@ mod tests {
             strict_scope: false,
             current_agent: Some("BlueLake".to_owned()),
             team_members: BTreeSet::new(),
+            team_roster_read_error: None,
         };
 
         assert!(context.memory_in_scope(&memory_with_scope(
@@ -2159,6 +2204,7 @@ mod tests {
             strict_scope: false,
             current_agent: Some("BlueLake".to_owned()),
             team_members: BTreeSet::from(["GreenField".to_owned()]),
+            team_roster_read_error: None,
         };
 
         assert!(context.memory_in_scope(&memory_with_scope(
@@ -2365,6 +2411,7 @@ mod tests {
             strict_scope: false,
             current_agent: None,
             team_members: BTreeSet::new(),
+            team_roster_read_error: None,
         };
         let memory = memory_with_scope(TrustClass::AgentAssertion, Some("agent=RedStone"));
 
@@ -2513,6 +2560,7 @@ team_members = ["OutsideAgent"]
             strict_scope: false,
             current_agent: None,
             team_members: BTreeSet::new(),
+            team_roster_read_error: None,
         };
         let memory = memory_with_scope(TrustClass::AgentAssertion, Some("agent=RedStone"));
 
@@ -4168,6 +4216,7 @@ max_bytes = 0
             let before = fixture.writer.count_table_rows("audit_log").unwrap();
             for supplied in [None, Some(&fixture.writer)] {
                 let context = fixture.context(supplied);
+                assert!(context.team_roster_read_error().is_none());
                 assert_eq!(
                     context.team_members,
                     BTreeSet::from(["LocalAgent".to_owned(), "node_roster_81".to_owned()])
@@ -4194,6 +4243,7 @@ max_bytes = 0
             fixture.member(82, OTHER, "ReturningAgent", "active");
             let context = fixture.context(None);
             assert!(context.team_members.is_empty());
+            assert!(context.team_roster_read_error().is_none());
             assert!(!context.memory_in_scope(&memory_with_scope(
                 TrustClass::PeerHumanAttested,
                 Some("agent:ReturningAgent")
@@ -4250,15 +4300,94 @@ max_bytes = 0
                 .execute_raw("ALTER TABLE workspaces RENAME TO unavailable_roster_workspaces")
                 .unwrap();
             assert_eq!(fixture.writer.list_all_team_members().unwrap().len(), 1);
-            assert!(fixture.context(None).team_members.is_empty());
-            assert!(
-                fixture
-                    .context(Some(&fixture.writer))
-                    .team_members
-                    .is_empty()
-            );
+            for supplied in [None, Some(&fixture.writer)] {
+                let context = fixture.context(supplied);
+                assert!(context.team_members.is_empty());
+                assert!(
+                    context
+                        .team_roster_read_error()
+                        .is_some_and(|error| error.contains("team roster workspace"))
+                );
+            }
             fixture.writer.begin_read_snapshot().unwrap();
             fixture.writer.rollback_read_snapshot().unwrap();
+        }
+
+        #[test]
+        fn failed_roster_query_is_reported_and_never_authorizes_a_peer() {
+            let fixture = Fixture::new(true);
+            fixture.member(81, OWN, "LocalAgent", "active");
+            let peer = memory_with_scope(TrustClass::PeerHumanAttested, Some("agent:LocalAgent"));
+            assert!(fixture.context(None).memory_in_scope(&peer));
+            fixture
+                .writer
+                .execute_raw("ALTER TABLE team_members RENAME TO unavailable_team_members")
+                .unwrap();
+
+            for supplied in [None, Some(&fixture.writer)] {
+                let mut context = fixture.context(supplied);
+                assert!(context.team_members.is_empty());
+                assert!(
+                    context
+                        .team_roster_read_error()
+                        .is_some_and(|error| error.contains("team roster members"))
+                );
+                assert!(!context.memory_in_scope(&peer));
+                context.current_agent = Some("CurrentAgent".to_owned());
+                assert!(context.memory_in_scope(&memory_with_scope(
+                    TrustClass::AgentAssertion,
+                    Some("agent:CurrentAgent")
+                )));
+                context.scope = MemoryScope::Workspace;
+                assert!(context.team_roster_read_error().is_none());
+                assert!(context.memory_in_scope(&peer));
+            }
+            fixture.writer.begin_read_snapshot().unwrap();
+            fixture.writer.rollback_read_snapshot().unwrap();
+        }
+
+        #[test]
+        fn empty_roster_and_absent_binding_are_measured_without_a_read_failure() {
+            let fixture = Fixture::new(true);
+            for supplied in [None, Some(&fixture.writer)] {
+                let context = fixture.context(supplied);
+                assert!(context.team_members.is_empty());
+                assert!(context.team_roster_read_error().is_none());
+            }
+
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().canonicalize().unwrap();
+            let context = MemoryScopeContext::for_workspace(&path, MemoryScope::Team, false);
+            assert!(context.team_members.is_empty());
+            assert!(context.team_roster_read_error().is_none());
+            std::fs::create_dir(path.join(".ee")).unwrap();
+            let writer = DbConnection::open_file(&path.join(".ee/ee.db")).unwrap();
+            writer.migrate().unwrap();
+            assert!(writer.list_workspaces().unwrap().is_empty());
+            for supplied in [None, Some(&writer)] {
+                let context = MemoryScopeContext::for_workspace_with_connection(
+                    &path,
+                    MemoryScope::Team,
+                    false,
+                    supplied,
+                );
+                assert!(context.team_members.is_empty());
+                assert!(context.team_roster_read_error().is_none());
+            }
+        }
+
+        #[test]
+        fn non_regular_roster_database_is_not_reported_as_an_absent_store() {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().canonicalize().unwrap();
+            std::fs::create_dir_all(path.join(".ee/ee.db")).unwrap();
+            let context = MemoryScopeContext::for_workspace(&path, MemoryScope::Team, false);
+            assert!(context.team_members.is_empty());
+            assert_eq!(
+                context.team_roster_read_error(),
+                Some("team roster database is not a regular file")
+            );
+            assert!(path.join(".ee/ee.db").is_dir());
         }
     }
 }

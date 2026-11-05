@@ -13468,6 +13468,15 @@ fn filter_candidates_by_memory_scope(
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
     global_store_memory_ids: &BTreeSet<String>,
 ) -> MemoryScopeStats {
+    if let Some(error) = scope_context.team_roster_read_error() {
+        push_degradation(
+            degraded,
+            "scope_metadata_unavailable",
+            ContextResponseSeverity::Medium,
+            format!("Context could not verify team membership: {error}"),
+            Some("ee doctor --json".to_owned()),
+        );
+    }
     let mut stats = scope_context.stats();
     if candidates.is_empty() {
         return stats;
