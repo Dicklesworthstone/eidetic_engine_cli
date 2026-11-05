@@ -852,10 +852,39 @@ it** without deleting anything and without touching the internal disk. Same
 archive: ExFAT 50 sidecars, APFS 0, 40 real `.rs` in both. `hdiutil info` shows
 this machine already uses sparse APFS images for release work.
 
+**THE IMAGE TO ATTACH IS NOW `-2`, AND ATTACHING THE ORIGINAL WASTES AN HOUR.**
+Measured 2026-11-05: `ee-rch-export.sparseimage` — the image the first line
+below created — is PERMANENTLY DAMAGED. Its APFS volume attaches and then
+refuses to mount:
+
+```text
+diskutil mount disk8s1   ->  Volume on disk8s1 failed to mount
+/sbin/mount_apfs         ->  volume could not be mounted: Input/output error
+```
+
+Confirmed twice, hours apart, including after the USB drive was re-plugged, so
+this is not a symptom of the drive having dropped. 140.6 GB of cached bundles
+are stranded inside it. **The file is retained unmodified per RULE 1** and the
+deletion decision belongs to the operator; do not reach for `fsck_apfs -y`,
+which is a destructive-class repair needing explicit authorization.
+
+The replacement is `ee-rch-export-2.sparseimage`, same `EERCHExport` volname so
+every path below is unchanged. **The hazard is that attaching the ORIGINAL
+succeeds** — `hdiutil attach` returns 0 and the container appears — and only the
+VOLUME fails, after which `RCH_VERIFY_COMMITTED_TREE_BASE` falls through to the
+ExFAT default from `~/.zshenv:62` and every pinned dispatch is refused as an
+AppleDouble shim. The refusal names the right fix in its last sentence ("If that
+image is configured already, it is not currently attached"), but it reads as a
+filesystem problem rather than a dead volume. `ls -d /Volumes/EERCHExport` after
+attaching is the one-command check.
+
 ```bash
+# Create ONLY if ee-rch-export-2.sparseimage does not already exist. Never
+# overwrite an existing image: it may hold cached bundles.
 hdiutil create -size 240g -type SPARSE -fs APFS -volname EERCHExport \
-    /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export
-hdiutil attach /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export.sparseimage
+    /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2
+hdiutil attach /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2.sparseimage
+ls -d /Volumes/EERCHExport   # MUST exist; attach can succeed while the volume does not mount
 RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/EERCHExport/rch-committed-tree \
 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
     --pinned-franken-stack --treeish <sha> \
@@ -868,7 +897,21 @@ TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
 needs no code change. Do NOT point it at `/` instead: one export root is 27 GB
 against 29 GB free there, and a `.recovery-1` slot can double it — filling `/`
 already killed a 50-minute run (bd-to1fr). The image must be re-attached after
-a reboot. See bd-r4iwj.
+a reboot. See bd-r4iwj and, for the damaged original,
+bd-export-base-apfs-volume-eio-reverts-to-exfat-w4sb2.
+
+**VERIFIED END TO END on the replacement, 2026-11-05, both directions.** The
+materialized export carried **0** AppleDouble files against **8,771** real
+`.rs` and 101,976 files total — the nonzero denominator matters, because a
+zero-sidecar count on an export that failed to materialize reads identically.
+The ExFAT base measured 20,000+ sidecars on the same probe. A `--dry-run
+--no-write` pinned invocation was refused on the env default (exit 1,
+`rch_verify_committed_tree_base_appledouble_shim`) and accepted on the new base
+(exit 0, `blocking_codes: []`, export `status: "created"`). Note that `xattr -w`
+returned **0 on both filesystems** — it succeeds on ExFAT precisely because the
+shim writes the sidecar — so the sidecar COUNT is the only reading that
+separates them, exactly as the guard at `scripts/rch_verify.sh:3156` already
+documents.
 
 **THIS IS NOT A REMEDY YOU REACH FOR AFTER AN E410 — IT IS MANDATORY ON EVERY
 PINNED DISPATCH, because the DEFAULT on this host is the broken filesystem.**
