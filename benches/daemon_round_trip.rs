@@ -33,6 +33,28 @@
 //! A local fallback must fail the warm serving-path assertion in every scenario;
 //! its latency cannot be counted as verified daemon acceleration.
 #![allow(clippy::expect_used, reason = "bench assertions fail closed")]
+// This file is compiled TWICE and only one of the two compilations has a test
+// harness. `Cargo.toml` declares this bench `harness = false`, so when the
+// bench target itself is checked (`cargo check --all-targets` enables
+// `cfg(test)` for it) the `#[cfg(all(test, ...))] mod pack_benchmark_contracts`
+// block compiles, its 23 `#[test]` functions are never collected because there
+// is no libtest harness to collect them, and the private fixtures those tests
+// call therefore look unreachable. The same module IS harnessed and DOES run
+// through `tests/bench_contracts.rs`, which `#[path]`-includes this file along
+// with 16 sibling benches, so the fixtures are genuinely used.
+//
+// Measured 2026-11-05 at 59aa07a13: without this allow, `cargo check --locked
+// --all-targets` reports `persistence_fixture`, `insert_fixture_pack`,
+// `pack_performance_fixture`, `neutral_feedback_event` and `response` as never
+// used — 5 of the 6 warnings that regressed the `-D warnings` lint gate from
+// its 2026-10-30 zero-warning baseline. Deleting them would have deleted live
+// fixtures for 23 executing tests. `benches/context.rs` and
+// `benches/remember.rs` already carry this same file-level allow for the same
+// structural reason.
+#![allow(
+    dead_code,
+    reason = "harness = false means the bench compilation never collects this file's #[test] fns, so their fixtures look dead; tests/bench_contracts.rs harnesses them for real"
+)]
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use std::collections::BTreeSet;
@@ -2140,7 +2162,9 @@ fn assert_pack_performance_report(
         Some(&json!(true))
     );
     assert!(
-        payload.pointer("/data/fallbacks").is_some_and(JsonValue::is_array),
+        payload
+            .pointer("/data/fallbacks")
+            .is_some_and(JsonValue::is_array),
         "pack performance probe must report degradations"
     );
     assert!(!degradation_present(payload, "embed_model_unavailable"));
@@ -2171,7 +2195,10 @@ fn assert_pack_performance_report(
     } else {
         let _ = required_pack_phase_ms(payload, "embedderPrepare");
     }
-    let selected = signature["items"].as_array().expect("baseline pack items").len();
+    let selected = signature["items"]
+        .as_array()
+        .expect("baseline pack items")
+        .len();
     assert_eq!(
         payload.pointer("/data/pack/hashPresent"),
         Some(&json!(true))
@@ -2596,8 +2623,13 @@ mod pack_benchmark_contracts {
 
     fn pack_performance_fixture(daemon: bool, read_only: bool) -> JsonValue {
         let mut phases = vec![
-            "requestValidate", "dbOpen", "search", "candidateResolution",
-            "packAssembly", "packPersistence", "total",
+            "requestValidate",
+            "dbOpen",
+            "search",
+            "candidateResolution",
+            "packAssembly",
+            "packPersistence",
+            "total",
         ];
         if daemon {
             phases.extend(["daemonRetrieval", "daemonHandoffValidation"]);
@@ -2609,9 +2641,16 @@ mod pack_benchmark_contracts {
             .map(|name| json!({"name": name, "elapsedMs": 0.25}))
             .collect();
         let subspans: serde_json::Map<_, _> = [
-            "connectionOpen", "workspaceLookup", "packHash", "ledgerSerialization",
-            "recordWrite", "itemWrites", "omissionWrites", "transaction",
-            "transactionOverhead", "audit",
+            "connectionOpen",
+            "workspaceLookup",
+            "packHash",
+            "ledgerSerialization",
+            "recordWrite",
+            "itemWrites",
+            "omissionWrites",
+            "transaction",
+            "transactionOverhead",
+            "audit",
         ]
         .into_iter()
         .map(|name| (name.to_owned(), json!({"elapsedMs": 0.0})))
@@ -2672,7 +2711,10 @@ mod pack_benchmark_contracts {
         for (pointer, changed) in [
             ("/data/timings", json!([])),
             ("/data/timings/0/elapsedMs", json!(-1.0)),
-            ("/data/pack/persistence/subspans/connectionOpen", JsonValue::Null),
+            (
+                "/data/pack/persistence/subspans/connectionOpen",
+                JsonValue::Null,
+            ),
             ("/data/profileRuntime/source", json!("host_probe")),
             ("/data/queryPlan/sourceModeApplied", json!("lexical_only")),
             ("/data/search/embedBackend", JsonValue::Null),
@@ -2681,9 +2723,18 @@ mod pack_benchmark_contracts {
             ("/data/retrievalPath", json!("in_process")),
             ("/data/servingPath", json!("in_process_fallback")),
             ("/data/fallbackReason", json!("daemon_handoff_rejected")),
-            ("/data/fallbacks", json!([{"code": "daemon_search_fallback"}])),
-            ("/data/fallbacks", json!([{"code": "embed_model_unavailable"}])),
-            ("/data/fallbacks", json!([{"code": "context_pack_persist_failed"}])),
+            (
+                "/data/fallbacks",
+                json!([{"code": "daemon_search_fallback"}]),
+            ),
+            (
+                "/data/fallbacks",
+                json!([{"code": "embed_model_unavailable"}]),
+            ),
+            (
+                "/data/fallbacks",
+                json!([{"code": "context_pack_persist_failed"}]),
+            ),
             ("/data/pack/persistence/succeeded", json!(false)),
             ("/data/pack/persistence/packRecordWrites", json!(0)),
             ("/data/dbReads/packRecordWrites", json!(2)),
@@ -2691,10 +2742,15 @@ mod pack_benchmark_contracts {
             ("/data/pack/tokenBudget/used", json!(11)),
         ] {
             let mut changed_report = pack_performance_fixture(true, false);
-            *changed_report.pointer_mut(pointer).expect("diagnostic field") = changed;
+            *changed_report
+                .pointer_mut(pointer)
+                .expect("diagnostic field") = changed;
             assert!(
                 std::panic::catch_unwind(|| assert_pack_performance_report(
-                    &changed_report, &signature, true, false
+                    &changed_report,
+                    &signature,
+                    true,
+                    false
                 ))
                 .is_err(),
                 "pack performance probe accepted changed evidence at {pointer}"
@@ -2712,7 +2768,9 @@ mod pack_benchmark_contracts {
         let id = "pack_00000000000000000000000001";
         insert_fixture_pack(&connection, id, &response);
         assert_eq!(
-            verifier.verify_diagnostic(&diagnostic, &signature, false).as_deref(),
+            verifier
+                .verify_diagnostic(&diagnostic, &signature, false)
+                .as_deref(),
             Some(id)
         );
         assert!(
@@ -2731,9 +2789,8 @@ mod pack_benchmark_contracts {
         let signature = pack_content_signature(&response);
         insert_fixture_pack(&connection, "pack_00000000000000000000000001", &response);
         let _ = verifier.verify(&response, &signature, false);
-        let _ = verifier.verify_diagnostic(
-            &pack_performance_fixture(true, false), &signature, false,
-        );
+        let _ =
+            verifier.verify_diagnostic(&pack_performance_fixture(true, false), &signature, false);
     }
 
     #[test]
@@ -2743,9 +2800,8 @@ mod pack_benchmark_contracts {
         insert_fixture_pack(&connection, "pack_00000000000000000000000001", &response);
         let mut baseline = pack_content_signature(&response);
         baseline["items"][0]["memoryId"] = json!("mem_another_baseline_selection");
-        let _ = verifier.verify_diagnostic(
-            &pack_performance_fixture(true, false), &baseline, false,
-        );
+        let _ =
+            verifier.verify_diagnostic(&pack_performance_fixture(true, false), &baseline, false);
     }
 
     #[test]

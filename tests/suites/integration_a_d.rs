@@ -1,5 +1,22 @@
 //! Integration modules A–D. Filter with `cargo test --test integration_a_d <module>::`.
 
+// Measured 2026-11-05 at 59aa07a13: proving `DaemonServerHandle: Send` for the
+// `thread::spawn` at daemon_uds_rpc_round_trip.rs:3614 walks a chain the
+// default limit cannot finish — Arc<DaemonReadPools> -> Mutex<State> ->
+// BTreeMap<PathBuf, (Instant, Arc<ProcessReadPoolResidency>)> ->
+// Mutex<Vec<Arc<ReadConnectionPool>>> -> "and so on". rustc abandoned the
+// obligation and emitted `recursion_depth_exceeding_limit`, which is
+// `future_incompatible`: "this was previously accepted by the compiler but is
+// being phased out; it will become a hard error in a future release"
+// (rust-lang/rust#159228). It is attached to the whole crate and cannot be
+// silenced per function, so the fix belongs here.
+//
+// This raises the limit rather than masking the lint: the solver then actually
+// discharges the obligation instead of giving up on it. The value matches the
+// existing house convention in src/lib.rs and tests/contracts.rs, which both
+// already declare 256 for the same structural reason.
+#![recursion_limit = "256"]
+
 mod inventory;
 
 #[path = "../adr_0028_docs.rs"]
