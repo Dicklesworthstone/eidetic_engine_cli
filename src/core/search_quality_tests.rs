@@ -370,7 +370,9 @@ fn lexical_status_neither_consumes_nor_replaces_semantic_readiness_cache() {
             report: semantic,
         },
     );
-    let lexical = cached_index_status_for_search(&options, &index, None, None).unwrap();
+    let lexical = cached_index_status_for_search(&options, &index, None, None)
+        .unwrap()
+        .report;
     assert_eq!(lexical.health, IndexHealth::Ready);
     assert!(lexical.embedding.is_none());
     assert!(lexical.last_check_error.is_none());
