@@ -2101,8 +2101,12 @@ run_stage "Degraded Code Classification Contract" "python3 scripts/check-degrade
 # variants; the three prose tables published ten, so `EvalFailure = 9` and
 # `Cancelled = 130` were returnable and documented nowhere. The equivalent Rust
 # assertion is reachable only through a dispatch, which is how the sibling
-# docs/degraded_codes.md drift stayed invisible, so this one is Python: 56ms,
-# no toolchain. Both arms declare 1s.
+# docs/degraded_codes.md drift stayed invisible, so this one is Python and
+# needs no toolchain. MEASURED 2026-11-05: lint 73ms, self-test 321ms (17
+# arms). Both rows declare the manifest's 1s floor for sub-second checks.
+# It also mirrors exit_codes_match_process_exit_code_contract, which is
+# authoritative but likewise dispatch-only, so the whole
+# docs <-> registry <-> enum chain is checkable here.
 run_stage "Exit Code Docs Contract" "python3 scripts/check-exit-code-docs.py --self-test"
 run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"

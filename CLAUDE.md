@@ -853,9 +853,9 @@ archive: ExFAT 50 sidecars, APFS 0, 40 real `.rs` in both. `hdiutil info` shows
 this machine already uses sparse APFS images for release work.
 
 **THE IMAGE TO ATTACH IS NOW `-2`, AND ATTACHING THE ORIGINAL WASTES AN HOUR.**
-Measured 2026-11-05: `ee-rch-export.sparseimage` — the image the first line
-below created — is PERMANENTLY DAMAGED. Its APFS volume attaches and then
-refuses to mount:
+Measured 2026-11-05: `ee-rch-export.sparseimage` — the image this recipe named
+until today, and the one bd-r4iwj was closed on — is PERMANENTLY DAMAGED. Its
+APFS volume attaches and then refuses to mount:
 
 ```text
 diskutil mount disk8s1   ->  Volume on disk8s1 failed to mount
@@ -896,7 +896,11 @@ TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
 `resolve_committed_tree_export_base` (`scripts/rch_verify.sh:3103`), so this
 needs no code change. Do NOT point it at `/` instead: one export root is 27 GB
 against 29 GB free there, and a `.recovery-1` slot can double it — filling `/`
-already killed a 50-minute run (bd-to1fr). The image must be re-attached after
+already killed a 50-minute run (bd-to1fr). **That 29 GB is the figure measured
+then and it has since HALVED four times over: re-measured 2026-11-05, `/` holds
+7.4 GiB free against the same 27 GB export root.** The old number reads as
+"barely fits" and the current one cannot fit at all, so this is a hard refusal
+now rather than a tight squeeze. The image must be re-attached after
 a reboot. See bd-r4iwj and, for the damaged original,
 bd-export-base-apfs-volume-eio-reverts-to-exfat-w4sb2.
 

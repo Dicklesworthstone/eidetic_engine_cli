@@ -3465,8 +3465,15 @@ moved from implementation to verification capacity.**
 | Pinned `rch_verify.sh` | Blocked by a NEW failure: the APFS export volume is `Not Mounted` and `mount_apfs` returns `Input/output error`, with 140.6 GB of cached bundles stranded. `~/.zshenv:62` then silently supplies the ExFAT base, which the wrapper correctly refuses as the AppleDouble shim. |
 | `rch exec --job` | Works, with friction. Three refusal classes observed in one session: namespace-init `status Some(73)`, `RCH_SYNC_LIVE_CHECKOUT_REFUSED`, and `RCH-E330 remote_build_disk_budget_exceeded`. One dispatch sat 12 minutes in `state=queued phase=admission` before admission. |
 
-Also measured: **11 of 12 durable leases report `running/finalize` with dead
-wrapper PIDs** (the condition `bd-6d6c8` describes), and `/` held 7.4 GiB free.
+Also measured, and stated precisely because the first version of this sentence
+conflated two different counts: of **12** durable leases, **11 had dead wrapper
+PIDs** and **8 of those sat in `running/finalize`** — the condition `bd-6d6c8`
+describes. Re-measured later the same day after this session's own dispatches
+added rows: **18 leases, all 18 with dead wrapper PIDs, 10 in
+`running/finalize`**, the remainder `finished/finished` (4),
+`failed_before_admission` (3) and `queued/admission` (1). The condition is
+pre-existing; this session added to it rather than discovering it. `/` held
+7.4 GiB free.
 
 **Mid-session the external USB volume dropped**, taking the toolchain symlink
 with it, so `cargo` died with the EEXIST-through-dangling-symlink error AGENTS.md

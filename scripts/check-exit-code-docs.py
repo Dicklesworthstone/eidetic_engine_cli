@@ -13,11 +13,20 @@ status of a cooperative cancellation, which the product documents as a feature.
 
 THE MACHINE SURFACE WAS ALREADY RIGHT, WHICH IS WHY THIS GATE READS IT. The
 `EXIT_CODES` registry in src/core/agent_docs.rs carries all twelve with
-descriptions, and `exit_codes_match_process_exit_code_contract` already pins
-that registry to the enum. Nothing compared the registry to the MARKDOWN, so
-the drift could only exist in prose. This gate closes that one edge, and it
-deliberately does not re-derive the enum: duplicating that comparison here
-would give two answers to one question.
+descriptions, so the drift could only ever have existed in prose: nothing
+compared the registry to the MARKDOWN.
+
+IT CHECKS THE WHOLE CHAIN, docs <-> registry <-> enum, and the second link is
+a deliberate MIRROR rather than a duplicate.
+`exit_codes_match_process_exit_code_contract` (src/core/agent_docs.rs) already
+pins the registry to `ProcessExitCode` and remains authoritative. But it is a
+`#[test]`, so on this host it is reachable only through a Cargo dispatch. Were
+this gate to check only docs-against-registry, a variant added to the enum and
+not to the registry would leave it reporting GREEN -- the code would be
+undocumented because it was unregistered, and the one assertion that notices
+runs on a rail that is frequently unavailable. Mirroring an otherwise
+unreachable Rust assertion in Python is the established pattern in this family;
+see scripts/check-boundary-inventory-coverage.py.
 
 WHY IT IS PYTHON AND NOT A #[test]. The equivalent Rust assertion is reachable
 only through a Cargo dispatch, and on this host every Cargo subcommand but
@@ -42,11 +51,16 @@ succeeds when its subject disappears converts a deleted contract into a green
 run.
 
 EXIT CODES
-  0  every registry code appears in every documented exit-code table
-  1  a table omits a registry code, or publishes a code the registry does not
-  2  --self-test failed
-  3  environment error (registry or a documented table unreadable/absent) --
-     never reported as clean
+  0  the whole chain agrees: every ProcessExitCode variant is in the registry,
+     and every registry code is a row in every documented exit-code table
+  1  a link in that chain is broken -- a table omits a registry code or
+     publishes one the registry does not; the registry and the enum disagree
+     in either direction; or an enum variant declares no discriminant, so its
+     numeric value cannot be checked at all
+  2  --self-test failed, i.e. this detector's own controls are broken
+  3  cannot answer -- the registry, the enum source, or a documented file is
+     unreadable or absent, or its declaration shape changed, or the arguments
+     were not understood. Never reported as clean.
 """
 
 from __future__ import annotations
@@ -57,6 +71,7 @@ import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REGISTRY = REPO_ROOT / "src" / "core" / "agent_docs.rs"
+ENUM_SOURCE = REPO_ROOT / "src" / "models" / "mod.rs"
 
 # Files that publish the exit-code contract in prose. Each must contain at
 # least one exit-code table; AGENTS.md deliberately contains two (the agent-UX
@@ -72,16 +87,30 @@ REGISTRY_ENTRY = re.compile(
     re.S,
 )
 
+ENUM_BLOCK = re.compile(
+    r"pub enum ProcessExitCode\s*\{(.*?)\n\}",
+    re.S,
+)
+# `Variant = 9,` — discriminants are explicit for every variant in this enum,
+# which is what makes a text parse honest here. A variant WITHOUT one would be
+# invisible to this regex, so `parse_enum` checks for that case separately
+# rather than silently reporting a short list.
+ENUM_VARIANT = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\s*=\s*(\d+)\s*,", re.M)
+ENUM_BARE_VARIANT = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\s*,\s*$", re.M)
+
 # A markdown table row: | <cell> | <cell> ... |. The code cell may be
 # backticked (README) or bare (AGENTS.md).
 ROW = re.compile(r"^\|(?P<cells>.*)\|\s*$")
 CODE_CELL = re.compile(r"^`?(\d+)`?$")
 
 PREDICATE = (
-    "predicate: a documented exit-code table is a contiguous run of markdown "
-    "table rows containing a row whose code cell is 0 and whose description "
-    "cell is 'success'; every ExitCodeEntry in src/core/agent_docs.rs must "
-    "appear as a row in every such table"
+    "predicate, two links: (1) every ProcessExitCode variant in "
+    "src/models/mod.rs must appear in the EXIT_CODES registry in "
+    "src/core/agent_docs.rs, and vice versa, with every variant carrying an "
+    "explicit discriminant; (2) every registry code must appear as a row in "
+    "every documented exit-code table, where such a table is a contiguous run "
+    "of markdown table rows, OUTSIDE any code fence, containing a row whose "
+    "code cell is 0 and whose description cell is 'success'"
 )
 
 
@@ -96,6 +125,22 @@ def parse_registry(text: str) -> dict[int, str]:
     return {
         int(code): name for code, name in REGISTRY_ENTRY.findall(block.group(1))
     }
+
+
+def parse_enum(text: str) -> tuple[dict[int, str], list[str]]:
+    """Return ({discriminant: variant}, [variants with no discriminant]).
+
+    The second element is the honest-gap channel. A variant declared without
+    `= N` still exists and is still returnable, so reporting only the first
+    element would let such a variant pass unexamined.
+    """
+    block = ENUM_BLOCK.search(text)
+    if block is None:
+        return {}, []
+    body = block.group(1)
+    codes = {int(value): name for name, value in ENUM_VARIANT.findall(body)}
+    bare = ENUM_BARE_VARIANT.findall(body)
+    return codes, bare
 
 
 def _cells(line: str) -> list[str] | None:
@@ -129,8 +174,21 @@ def find_exit_code_tables(text: str) -> list[dict[int, str]]:
         if anchored:
             tables.append(codes)
 
+    # FENCED BLOCKS ARE NOT TABLES. README carries many ```jsonc / ```bash
+    # examples, and a sample that happened to contain a pipe-delimited row
+    # would otherwise be read as a fourth exit-code table and then failed for
+    # not listing all twelve codes. Nothing in the tree triggers that today;
+    # the point is that a doc author adding an example must not be able to make
+    # this gate red. Arm 10 is the control.
+    in_fence = False
     for line in text.splitlines():
-        cells = _cells(line)
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            flush()
+            block = []
+            continue
+        cells = None if in_fence else _cells(line)
         if cells is None:
             flush()
             block = []
@@ -160,6 +218,46 @@ def run_lint() -> int:
     )
 
     failures: list[str] = []
+
+    # REGISTRY vs ENUM. `exit_codes_match_process_exit_code_contract` in
+    # src/core/agent_docs.rs already asserts this, and it is authoritative --
+    # but it is a #[test], so on this host it is reachable only through a Cargo
+    # dispatch. Mirroring an otherwise-unreachable Rust assertion in Python is
+    # the established pattern here (cf. check-boundary-inventory-coverage.py),
+    # and without it this gate would validate docs against a registry that had
+    # itself drifted from the enum, reporting green on a code nobody documents
+    # because nobody registered it either.
+    if not ENUM_SOURCE.is_file():
+        say(f"CANNOT ANSWER: enum source not found at {ENUM_SOURCE}")
+        return 3
+    enum_codes, bare_variants = parse_enum(ENUM_SOURCE.read_text(encoding="utf-8"))
+    if not enum_codes:
+        say(
+            "CANNOT ANSWER: could not parse `pub enum ProcessExitCode` from "
+            f"{ENUM_SOURCE.relative_to(REPO_ROOT)}; the declaration shape changed"
+        )
+        return 3
+    say(
+        f"enum: {len(enum_codes)} variant(s) with explicit discriminants, "
+        f"{len(bare_variants)} without; registry/enum agree: "
+        f"{set(enum_codes) == set(registry)}"
+    )
+    for name in bare_variants:
+        failures.append(
+            f"ProcessExitCode::{name} declares no explicit discriminant, so its "
+            "numeric value cannot be checked against the registry or the docs"
+        )
+    for code in sorted(set(enum_codes) - set(registry)):
+        failures.append(
+            f"ProcessExitCode::{enum_codes[code]} = {code} is returnable but "
+            "absent from the EXIT_CODES registry, so `ee agent-docs` does not "
+            "publish it"
+        )
+    for code in sorted(set(registry) - set(enum_codes)):
+        failures.append(
+            f"EXIT_CODES publishes code {code} ({registry[code]}) which "
+            "ProcessExitCode does not declare"
+        )
     table_count = 0
 
     for name in DOCUMENTED:
@@ -205,7 +303,10 @@ def run_lint() -> int:
         )
         return 1
 
-    say("OK -- every registry code is documented in every exit-code table")
+    say(
+        "OK -- the enum, the registry and every documented exit-code table "
+        "all name the same set of codes"
+    )
     return 0
 
 
@@ -231,6 +332,27 @@ pub const EXIT_CODES: &[ExitCodeEntry] = &[
         description: "Operation was cancelled",
     },
 ];
+"""
+
+_ENUM_FIXTURE = """
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum ProcessExitCode {
+    Success = 0,
+    /// A doc comment between variants must not break the parse.
+    EvalFailure = 9,
+    Cancelled = 130,
+}
+"""
+
+# A variant with no `= N`. It is still returnable, so the parser must surface
+# it rather than quietly omitting it from the discriminant map.
+_ENUM_BARE_FIXTURE = """
+pub enum ProcessExitCode {
+    Success = 0,
+    Mystery,
+    Cancelled = 130,
+}
 """
 
 _COMPLETE_TABLE = """
@@ -335,17 +457,64 @@ def self_test() -> int:
         [],
     )
 
-    print(f"check-exit-code-docs self-test: {9 - failures}/9 arms passed")
+    # FENCE CONTROL. The same rows that anchor a real table must be ignored
+    # inside a code fence, or a doc example can turn this gate red.
+    fenced = "```text\n" + _COMPLETE_TABLE.strip() + "\n```\n"
+    check(
+        "arm10 FENCE CONTROL: a table inside a code fence is not a table",
+        find_exit_code_tables(fenced),
+        [],
+    )
+    # ...and the same content OUTSIDE a fence still is, so arm 10 cannot pass
+    # by the parser having simply stopped working.
+    check(
+        "arm11 fence control's twin: unfenced, the same rows DO parse",
+        sorted(find_exit_code_tables(_COMPLETE_TABLE)[0]),
+        [0, 9, 130],
+    )
+
+    # --- enum arms: the registry-vs-enum half of the chain ---
+    enum_codes, bare = parse_enum(_ENUM_FIXTURE)
+    check("arm12 enum discriminants parse", sorted(enum_codes), [0, 9, 130])
+    check("arm13 enum variant names parse", enum_codes.get(9), "EvalFailure")
+    check("arm14 a well-formed enum reports no bare variants", bare, [])
+
+    bare_codes, bare_names = parse_enum(_ENUM_BARE_FIXTURE)
+    check(
+        "arm15 HONEST-GAP CONTROL: a variant with no discriminant is surfaced",
+        bare_names,
+        ["Mystery"],
+    )
+    check(
+        "arm16 ...and is absent from the discriminant map, so it cannot pass silently",
+        sorted(bare_codes),
+        [0, 130],
+    )
+
+    check(
+        "arm17 an unparseable enum yields nothing, not a silent pass",
+        parse_enum("pub enum SomethingElse { A = 1, }"),
+        ({}, []),
+    )
+
+    print(f"check-exit-code-docs self-test: {17 - failures}/17 arms passed")
     return 0 if failures == 0 else 2
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) > 1 and argv[1] == "--self-test":
+    # Exact match, not `argv[1] == ...`: a loose check accepts
+    # `--self-test --json` and silently ignores the second argument, which is
+    # how a caller comes to believe it ran a mode this gate does not have.
+    if argv[1:] == ["--self-test"]:
         return self_test()
-    if len(argv) > 1:
-        print(__doc__)
-        print("usage: check-exit-code-docs.py [--self-test]", file=sys.stderr)
-        return 2
+    if argv[1:]:
+        # 3, not 2. Exit 2 is reserved for a FAILED --self-test, and a usage
+        # error is a cannot-answer, which is what 3 means throughout this
+        # family (cf. scripts/check-action-pins.py). Returning 2 here would
+        # make "you typed the flag wrong" indistinguishable from "the
+        # detector's own controls are broken".
+        print(f"usage: {argv[0]} [--self-test]", file=sys.stderr)
+        return 3
     return run_lint()
 
 

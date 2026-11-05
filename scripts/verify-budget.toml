@@ -536,9 +536,26 @@ expected_seconds_p50 = 1
 regression_factor = 1.5
 
 # bd-undocumented-exit-codes-9-and-130-zop31. MEASURED 2026-11-05, not
-# estimated: the lint arm ran in 56ms on this host, so both arms declare the
-# 1s floor this file uses for sub-second checks. +2s against a 608s ceiling
-# that had headroom after bd-2di61 broadened the opt-in exclusion.
+# estimated: the lint arm ran in 73ms and the 17-arm self-test in 321ms on
+# this host, so both rows declare the 1s floor this file uses for sub-second
+# checks.
+#
+# THE SECONDS JUSTIFIED, as verification_drift_guard.rs:1715 asks of whoever
+# adds a stage. Recomputed the way that test does -- sum expected_seconds_p50
+# over every row whose stage is NOT in `opt_in_gated_stage_names`, i.e. not
+# gated behind a `--flag not set` record_gated_off -- the non-benchmark total
+# went **600 -> 602 against the 608 ceiling. Headroom is 6 SECONDS.**
+#
+# Read that number, not the prose above. The paragraphs at the head of this
+# file record 566/608, 592/608 and "~42s of headroom" on three different dates
+# and are left alone because they are dated observations; none of them is the
+# live total. 136 stage blocks, 112 carrying a p50, 24 declaring
+# expected_seconds_p50_unmeasured, 5 opt-in-gated rows excluding 717s.
+#
+# So the next sub-second static gate fits and the one after that may not. If
+# you need room, the honest move is the one the guard's own message names:
+# re-measure and reduce a real stage cost, or move the ceiling and record why
+# -- never retune a p50 to fit, which turns this file into fiction.
 [[stage]]
 name = "Exit Code Docs Contract"
 expected_seconds_p50 = 1
