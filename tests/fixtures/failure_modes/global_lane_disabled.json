@@ -9,8 +9,8 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A retrieval surface ran with the global memory lane excluded \u2014 no global store exists yet, the workspace has participate=false, or [memory] include_global=false. The lane's absence is reported honestly instead of silently returning workspace-only results.",
-    "setup_commands": ["ee init --workspace ."],
+    "description": "A retrieval surface excluded an existing global store because the workspace has participate=false or [memory] include_global=false. The intentional opt-out is reported without opening the disabled store. An absent optional store stays quiet; an explicit --memory-scope global request reports store_absent.",
+    "setup_commands": ["ee init --workspace .", "ee remember --global \"Global fixture rule.\" --workspace .", "ee config set memory.include_global false --workspace ."],
     "invocation": "ee search \"anything\" --workspace . --json"
   },
   "expected_emission": {

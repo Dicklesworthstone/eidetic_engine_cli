@@ -113,6 +113,48 @@ fn stdout_json(output: Output, context: &str) -> Result<serde_json::Value, Strin
         .map_err(|error| format!("{context}: stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
+fn assert_global_lane_exclusion(
+    envelope: &serde_json::Value,
+    expected_reason: Option<&str>,
+) -> TestResult {
+    let degraded = envelope["degraded"]
+        .as_array()
+        .ok_or("degraded array missing")?;
+    let excluded = degraded
+        .iter()
+        .filter(|entry| entry["code"] == "global_lane_disabled")
+        .collect::<Vec<_>>();
+    if let Some(reason) = expected_reason {
+        assert_eq!(excluded.len(), 1, "{envelope}");
+        assert_eq!(excluded[0]["severity"], "info", "{envelope}");
+        assert_eq!(
+            excluded[0]["message"],
+            format!("Global memory lane did not contribute to this search: {reason}."),
+            "{envelope}"
+        );
+        assert!(
+            excluded[0]["repair"]
+                .as_str()
+                .is_some_and(|repair| !repair.is_empty()),
+            "{envelope}"
+        );
+        assert!(
+            degraded.iter().all(|entry| !matches!(
+                entry["code"].as_str(),
+                Some(
+                    "scope_metadata_unavailable"
+                        | "global_index_unavailable"
+                        | "global_lane_migration_required"
+                )
+            )),
+            "a disabled lane must not probe its store: {envelope}"
+        );
+    } else {
+        assert!(excluded.is_empty(), "{envelope}");
+    }
+    Ok(())
+}
+
 #[test]
 fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResult {
     let retained = tempfile::Builder::new()
@@ -215,10 +257,11 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
         "--max-tokens",
         "4000",
     ];
-    let check_local_retrieval = |label: &str| -> TestResult {
+    let check_local_retrieval = |label: &str, exclusion_reason: Option<&str>| -> TestResult {
         let (code, packed) = run(&format!("{label}-pack"), &pack)?;
         assert_eq!(code, 0, "{packed}");
         assert_eq!(packed["success"], true, "{packed}");
+        assert_global_lane_exclusion(&packed, exclusion_reason)?;
         let item = packed
             .pointer("/data/pack/items")
             .and_then(serde_json::Value::as_array)
@@ -258,7 +301,79 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
             .any(|hit| hit["memoryId"] == global_id),
         "{found}"
     );
-    check_local_retrieval("missing-policy")?;
+    assert_global_lane_exclusion(&found, None)?;
+    check_local_retrieval("missing-policy", None)?;
+
+    let check_excluded_search = |label: &str, reason: Option<&str>| -> TestResult {
+        let (code, excluded) = run(label, &search)?;
+        assert_eq!(code, 0, "{excluded}");
+        assert!(
+            excluded["data"]["results"]
+                .as_array()
+                .ok_or("results missing")?
+                .iter()
+                .all(|hit| hit["memoryId"] != global_id),
+            "{excluded}"
+        );
+        assert_global_lane_exclusion(&excluded, reason)
+    };
+    // A real, previously retrievable global row is withheld by this one
+    // opt-out. Ordinary workspace search and pack must explain the exclusion.
+    std::fs::write(
+        &config,
+        "[memory]\ninclude_global = false\nparticipate = true\n",
+    )
+    .map_err(|error| error.to_string())?;
+    check_excluded_search("include-disabled-search", Some("disabled_by_config"))?;
+    check_local_retrieval("include-disabled", Some("disabled_by_config"))?;
+
+    // Store absence is a different state: optional retrieval stays quiet and
+    // must not create a store, while an explicit global request still reports
+    // store_absent. Rename retains the real fixture without deleting files.
+    let paths = GlobalStorePaths::from_data_root(&data.join("ee"));
+    let retained_global = root.join("global-store.retained");
+    std::fs::rename(&paths.root, &retained_global).map_err(|error| error.to_string())?;
+    check_excluded_search("absent-global-search", None)?;
+    check_local_retrieval("absent-global", None)?;
+    let (code, missing_global) = run(
+        "explicit-absent-global-search",
+        &[
+            "search",
+            "Globalpolicysentinel",
+            "--source-mode",
+            "lexical-only",
+            "--memory-scope",
+            "global",
+        ],
+    )?;
+    assert_eq!(code, 0, "{missing_global}");
+    assert_global_lane_exclusion(&missing_global, Some("store_absent"))?;
+    assert!(!paths.root.exists(), "retrieval created an absent store");
+
+    // Presence is enough to explain the opt-out. Invalid database bytes make
+    // accidental content probing fail observably, even when run as root.
+    std::fs::create_dir(&paths.root).map_err(|error| error.to_string())?;
+    let unreadable_database = b"disabled-global-store-is-not-a-database";
+    std::fs::write(&paths.database_path, unreadable_database).map_err(|error| error.to_string())?;
+    check_excluded_search(
+        "unreadable-disabled-global-search",
+        Some("disabled_by_config"),
+    )?;
+    check_local_retrieval("unreadable-disabled-global", Some("disabled_by_config"))?;
+    assert_eq!(
+        std::fs::read(&paths.database_path).map_err(|error| error.to_string())?,
+        unreadable_database
+    );
+    assert_eq!(
+        std::fs::read_dir(&paths.root)
+            .map_err(|error| error.to_string())?
+            .count(),
+        1,
+        "disabled global retrieval created store sidecars"
+    );
+    std::fs::rename(&paths.root, root.join("unreadable-global-store.retained"))
+        .map_err(|error| error.to_string())?;
+    std::fs::rename(&retained_global, &paths.root).map_err(|error| error.to_string())?;
 
     std::fs::write(
         &config,
@@ -273,17 +388,8 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
         "global_lane_unavailable"
     );
     assert_eq!(denied["error"]["details"]["executed"], false);
-    let (code, excluded) = run("disabled-policy-search", &search)?;
-    assert_eq!(code, 0, "{excluded}");
-    assert!(
-        excluded["data"]["results"]
-            .as_array()
-            .ok_or("results missing")?
-            .iter()
-            .all(|hit| hit["memoryId"] != global_id),
-        "{excluded}"
-    );
-    check_local_retrieval("disabled-policy")?;
+    check_excluded_search("disabled-policy-search", Some("not_participating"))?;
+    check_local_retrieval("disabled-policy", Some("not_participating"))?;
     std::fs::rename(&config, root.join("disabled-config.retained.toml"))
         .map_err(|error| error.to_string())?;
 

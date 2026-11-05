@@ -13735,8 +13735,9 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
 
 /// The user-global rows this request may read: resolves the store path,
 /// applies the `[memory]` inclusion policy, and reads the store at the
-/// request's `as_of`. `None` means the lane is withheld (the reason, when a
-/// caller asked for `--memory-scope global`, is pushed to `degraded`).
+/// request's `as_of`. `None` means the lane is withheld. An explicit global
+/// request always receives the reason; an optional lane reports an opt-out
+/// only when a store exists, so ordinary store absence remains quiet.
 fn admitted_global_store_memories(
     options: &SearchOptions,
     memory_config: &crate::config::MemoryConfig,
@@ -13763,26 +13764,14 @@ fn admitted_global_store_memories(
             no_global_flag: false,
         });
     if !inclusion.included {
-        // SCOPE-GATED ON PURPOSE, pending a decision recorded on bd-c4eoq.
-        //
-        // The honest-abstention entry is emitted only when the caller asked
-        // for the global lane explicitly, so a plain `ee search` in a
-        // workspace that opted out reports nothing. Three sources say that is
-        // wrong -- the e2e assertion `participate_false_isolated_and_honest`,
-        // `tests/fixtures/failure_modes/global_lane_disabled.json` (whose
-        // declared invocation is a plain `ee search`), and AGENTS.md's rule
-        // that `degraded[]` is populated when a response was actually
-        // affected.
-        //
-        // It is left alone anyway, because `include_global = false` is ALSO
-        // the mechanism this codebase's own fixtures use to stay off the
-        // host's real global store and keep host-dependent advisories out of
-        // unrelated assertions (see the fixture comment at the
-        // `live_large_gap_search_emits_repair_once...` test). Making the
-        // opt-out itself emit would hand that noise straight back. Choosing
-        // between honesty here and a quiet opt-out is a contract decision, not
-        // a predicate to widen in passing.
-        if matches!(options.memory_scope, MemoryScope::Global) {
+        // Presence is the first inclusion gate. Every other exclusion means
+        // policy withheld an existing lane, which also affects ordinary
+        // workspace retrieval (bd-c4eoq). Report that decision without opening
+        // or checking the disabled store's contents. Explicit global requests
+        // retain their missing-store advisory; optional absent stores are quiet.
+        if matches!(options.memory_scope, MemoryScope::Global)
+            || inclusion.reason != super::global_store::GlobalInclusionReason::StoreAbsent
+        {
             degraded.push(SearchDegradation::global_memory_disabled(inclusion.reason));
         }
         return None;
