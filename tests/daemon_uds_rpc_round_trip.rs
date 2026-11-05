@@ -1353,19 +1353,29 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     let mut handle = start_server_for_workspace(&socket_path, workspace_id)
         .map_err(|error| format!("start_server_for_workspace: {error}"))?;
 
+    // Exact result equality includes recency scores and their referenceTime.
+    // Hold that input fixed across calls instead of relying on three requests
+    // landing within the same wall-clock tick. This uses the public search
+    // contract; no score or provenance field is removed from the comparison.
+    let reference_time = chrono::Utc::now().to_rfc3339();
+    let repeated_search = |request_id: &str| {
+        let mut request = search_request(request_id, &workspace, &database, &index_dir);
+        request.params["asOf"] = serde_json::json!(reference_time);
+        request
+    };
     let first = client_round_trip(
         handle.socket_path(),
-        &search_request("req-search-warm-001", &workspace, &database, &index_dir),
+        &repeated_search("req-search-warm-001"),
     )
     .map_err(|error| format!("first search round-trip: {error}"))?;
     let second = client_round_trip(
         handle.socket_path(),
-        &search_request("req-search-warm-002", &workspace, &database, &index_dir),
+        &repeated_search("req-search-warm-002"),
     )
     .map_err(|error| format!("second search round-trip: {error}"))?;
     let third = client_round_trip(
         handle.socket_path(),
-        &search_request("req-search-warm-003", &workspace, &database, &index_dir),
+        &repeated_search("req-search-warm-003"),
     )
     .map_err(|error| format!("third search round-trip: {error}"))?;
     let mut context_params = context_pack_params(
@@ -2797,6 +2807,9 @@ fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales()
         let mut params = context_pack_params(&workspace, &database, "release provenance");
         params["indexDir"] = serde_json::json!(index.display().to_string());
         params["strictSourceMode"] = serde_json::json!(true);
+        // Compare identical scoring inputs even when a loaded native worker
+        // takes seconds between requests. The fresh index remains exercised.
+        let reference_time = chrono::Utc::now();
         let mut expected_search = None;
         for call in 0..12 {
             let mut request = DaemonRequest::new(
@@ -2826,6 +2839,7 @@ fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales()
             );
             request.params["sourceMode"] = serde_json::json!("lexical_only");
             request.params["strictSourceMode"] = serde_json::json!(true);
+            request.params["asOf"] = serde_json::json!(reference_time.to_rfc3339());
             let result = successful_result(
                 client_round_trip(handle.socket_path(), &request)
                     .map_err(|error| error.to_string())?,
@@ -2849,6 +2863,49 @@ fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales()
             } else {
                 expected_search = Some(results.clone());
             }
+        }
+
+        // A cache that ignores asOf could satisfy all twelve equalities.
+        // Advance only the requested scoring clock, without sleeping or
+        // mutating storage, and require the same memory to decay in the
+        // actual recency and final-score components.
+        let mut aged_request = search_request("lifecycle-search-aged", &workspace, &database, &index);
+        aged_request.params["sourceMode"] = serde_json::json!("lexical_only");
+        aged_request.params["strictSourceMode"] = serde_json::json!(true);
+        aged_request.params["asOf"] =
+            serde_json::json!((reference_time + chrono::Duration::days(1)).to_rfc3339());
+        let aged = successful_result(
+            client_round_trip(handle.socket_path(), &aged_request)
+                .map_err(|error| error.to_string())?,
+            "advanced scoring clock",
+        )?;
+        let baseline_hit = expected_search
+            .as_ref()
+            .and_then(|hits| {
+                hits.iter()
+                    .find(|hit| hit["docId"] == "mem_00000000000000000000005001")
+            })
+            .ok_or_else(|| "baseline omitted planted scoring control".to_owned())?;
+        let aged_hit = aged
+            .pointer("/response/data/results")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|hits| {
+                hits.iter()
+                    .find(|hit| hit["docId"] == "mem_00000000000000000000005001")
+            })
+            .ok_or_else(|| format!("advanced scoring clock lost planted memory: {aged}"))?;
+        for component in ["recency", "finalScore"] {
+            let pointer = format!("/metadata/qualityScoring/components/{component}");
+            let baseline_score = baseline_hit
+                .pointer(&pointer)
+                .and_then(serde_json::Value::as_f64);
+            let aged_score = aged_hit.pointer(&pointer).and_then(serde_json::Value::as_f64);
+            ensure(
+                baseline_score.zip(aged_score).is_some_and(|(before, after)| {
+                    before.is_finite() && after.is_finite() && after > 0.0 && after < before
+                }),
+                format!("asOf must change {component} on the same memory: before={baseline_hit}; after={aged_hit}"),
+            )?;
         }
 
         // A permanent cached answer would pass every equality above. Change
