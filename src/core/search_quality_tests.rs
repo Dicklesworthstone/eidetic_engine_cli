@@ -1648,8 +1648,8 @@ fn handoff_native_rehydration_preserves_calibration_and_exact_pack_selection() {
     search_options.as_of = Some(reference_time);
     search_options.explain = false;
     search_options.strict_source_mode = true;
-    let persistence_before = ["audit_log", "pack_records"]
-        .map(|table| fixture.db.count_table_rows(table).unwrap());
+    let persistence_before =
+        ["audit_log", "pack_records"].map(|table| fixture.db.count_table_rows(table).unwrap());
 
     let calibration_path = search_score_calibration_jsonl_path(&fixture.root);
     std::fs::create_dir_all(calibration_path.parent().unwrap()).unwrap();
@@ -1723,8 +1723,7 @@ fn handoff_native_rehydration_preserves_calibration_and_exact_pack_selection() {
         }
 
         let canonical =
-            crate::core::context::run_context_pack_with_performance(&pack_options, "pack")
-                .unwrap();
+            crate::core::context::run_context_pack_with_performance(&pack_options, "pack").unwrap();
         let calls = AtomicUsize::new(0);
         let provider = |options: &SearchOptions, require_cached_local: bool| {
             assert!(!require_cached_local);

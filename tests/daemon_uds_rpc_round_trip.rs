@@ -2869,7 +2869,8 @@ fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales()
         // Advance only the requested scoring clock, without sleeping or
         // mutating storage, and require the same memory to decay in the
         // actual recency and final-score components.
-        let mut aged_request = search_request("lifecycle-search-aged", &workspace, &database, &index);
+        let mut aged_request =
+            search_request("lifecycle-search-aged", &workspace, &database, &index);
         aged_request.params["sourceMode"] = serde_json::json!("lexical_only");
         aged_request.params["strictSourceMode"] = serde_json::json!(true);
         aged_request.params["asOf"] =
@@ -2899,12 +2900,18 @@ fn daemon_repeated_retrieval_refreshes_after_rebuild_and_restart_at_two_scales()
             let baseline_score = baseline_hit
                 .pointer(&pointer)
                 .and_then(serde_json::Value::as_f64);
-            let aged_score = aged_hit.pointer(&pointer).and_then(serde_json::Value::as_f64);
+            let aged_score = aged_hit
+                .pointer(&pointer)
+                .and_then(serde_json::Value::as_f64);
             ensure(
-                baseline_score.zip(aged_score).is_some_and(|(before, after)| {
-                    before.is_finite() && after.is_finite() && after > 0.0 && after < before
-                }),
-                format!("asOf must change {component} on the same memory: before={baseline_hit}; after={aged_hit}"),
+                baseline_score
+                    .zip(aged_score)
+                    .is_some_and(|(before, after)| {
+                        before.is_finite() && after.is_finite() && after > 0.0 && after < before
+                    }),
+                format!(
+                    "asOf must change {component} on the same memory: before={baseline_hit}; after={aged_hit}"
+                ),
             )?;
         }
 

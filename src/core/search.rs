@@ -1929,7 +1929,9 @@ impl PackSearchHandoff {
                 if metadata.get("scoreCalibration").is_some() {
                     native_calibration_ids.insert(hit.doc_id.clone());
                 }
-                if metadata.get("memory_scope").and_then(serde_json::Value::as_str)
+                if metadata
+                    .get("memory_scope")
+                    .and_then(serde_json::Value::as_str)
                     == Some(options.memory_scope.as_str())
                 {
                     native_scope_ids.insert(hit.doc_id.clone());
@@ -15258,7 +15260,9 @@ fn normalize_local_memory_store_identity(hit: &mut SearchHit, memory: &StoredMem
     else {
         return;
     };
-    if metadata.get("storeLane").and_then(serde_json::Value::as_str)
+    if metadata
+        .get("storeLane")
+        .and_then(serde_json::Value::as_str)
         != Some(super::global_store::GLOBAL_PROVENANCE_LANE)
     {
         return;
@@ -21875,7 +21879,10 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             for (id, content) in [
                 (Self::LOCAL_ID, "different global body for the same ID"),
-                (Self::GLOBAL_ONLY_ID, "independently admitted global-only body"),
+                (
+                    Self::GLOBAL_ONLY_ID,
+                    "independently admitted global-only body",
+                ),
             ] {
                 let mut input = test_memory_input(GLOBAL_WORKSPACE, content);
                 if id == Self::GLOBAL_ONLY_ID {
@@ -21957,7 +21964,10 @@ mod tests {
                     .connection
                     .insert_memory(
                         MemoryPreloadCollisionFixture::MALFORMED_ID,
-                        &test_memory_input(&fixture.local_memory.workspace_id, "malformed neighbor"),
+                        &test_memory_input(
+                            &fixture.local_memory.workspace_id,
+                            "malformed neighbor",
+                        ),
                     )
                     .map_err(|error| error.to_string())?;
                 fixture
@@ -22069,7 +22079,10 @@ mod tests {
                     Vec::new()
                 }
             );
-            assert_eq!(serde_json::json!(degraded), serde_json::json!(local_degraded));
+            assert_eq!(
+                serde_json::json!(degraded),
+                serde_json::json!(local_degraded)
+            );
             assert_eq!(
                 fixture
                     .connection
