@@ -805,7 +805,9 @@ Every `EE_*` variable honored by `ee` is enumerated in `docs/env_vars.md` and re
 | 6 | degraded but command could not satisfy required mode |
 | 7 | policy denied operation |
 | 8 | migration required |
+| 9 | evaluation completed and found regressions |
 | 10 | workspace store missing (storeless `--workspace`/`--database` addressing miss; distinct from storage failures) |
+| 130 | operation was cancelled by the caller, deadline, or runtime budget (the 128 + SIGINT convention) |
 
 Agents should treat exit 8 as the explicit signal to run `ee migrate run --workspace .`.
 
@@ -905,7 +907,9 @@ JSON error shape:
 | 6 | degraded but command could not satisfy required mode |
 | 7 | policy denied operation |
 | 8 | migration required |
+| 9 | evaluation completed and found regressions |
 | 10 | workspace store missing (storeless `--workspace`/`--database` addressing miss; distinct from storage failures) |
+| 130 | operation was cancelled by the caller, deadline, or runtime budget (the 128 + SIGINT convention) |
 
 ### Architectural Decision Records
 
