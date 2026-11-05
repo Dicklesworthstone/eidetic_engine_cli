@@ -2097,6 +2097,14 @@ run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --j
 # check-production-reachability, timed at 1.99s, declares 2s.
 run_stage "Action Pins Contract" "python3 scripts/check-action-pins.py"
 run_stage "Degraded Code Classification Contract" "python3 scripts/check-degraded-code-classified.py"
+# bd-undocumented-exit-codes-9-and-130-zop31. ProcessExitCode declares twelve
+# variants; the three prose tables published ten, so `EvalFailure = 9` and
+# `Cancelled = 130` were returnable and documented nowhere. The equivalent Rust
+# assertion is reachable only through a dispatch, which is how the sibling
+# docs/degraded_codes.md drift stayed invisible, so this one is Python: 56ms,
+# no toolchain. Both arms declare 1s.
+run_stage "Exit Code Docs Contract" "python3 scripts/check-exit-code-docs.py --self-test"
+run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
 # The `implements-surface` convention is discharged by an artifact nobody opens,
 # 111 times out of 113. `closure-lint.sh` requires a golden to EXIST and (since

@@ -6,8 +6,6 @@
 
 **Durable, local-first, explainable memory for coding agents.**
 
-[![CI Static](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci-static.yml?branch=main&label=CI%20Static)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/workflows/ci-static.yml)
-[![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/Dicklesworthstone/eidetic_engine_cli?label=release)](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
@@ -77,7 +75,7 @@ durable learned memory (see [CASS Integration](#cass-integration)).
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Explicit advisory queries surface matching risk, anti-pattern, and failure memories with provenance |
 | **Memory hygiene** | `ee curate doctor` ranks content debt, `ee learn gaps` turns missed demand into capture templates, and steward snapshots show whether hygiene is improving |
-| **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
+| **Graph-aware** | PageRank, HITS, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views. Personalized PageRank is the one exception: it is wired but **not currently available in production** — see [Limitations](#limitations) |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud service or paid LLM API is required. Embeddings run locally through Frankensearch, with one-time pinned model download and offline hash fallback |
@@ -611,6 +609,15 @@ This runs all readiness gates in order, stopping at the first failure:
 The runner reports exit code, elapsed time, and artifact directories. In agent
 sessions, route heavy Cargo stages through RCH rather than using local fallback.
 
+**There is no hosted CI, by policy and in fact.** GitHub Actions is disabled
+repo-wide for this project and is never used for any purpose, including tests,
+builds and releases; releases are cut with `dsr` and the local cross-compile
+flow instead. This README therefore carries no CI badge: a badge querying the
+Actions API would report on a mechanism the project does not run. Verification
+is `./scripts/verify.sh` plus the pinned RCH lane described above, and the
+honest consequence is that a green local run is necessary, not sufficient —
+several gates are reachable only through a remote Cargo dispatch.
+
 ---
 
 ## Command Reference
@@ -788,7 +795,9 @@ Exit code vocabulary:
 | `6` | degraded-required |
 | `7` | policy denied |
 | `8` | migration required |
+| `9` | evaluation completed and found regressions |
 | `10` | workspace store missing (the addressed workspace has no initialized store) |
+| `130` | operation was cancelled by the caller, deadline, or runtime budget (the 128 + SIGINT convention) |
 
 Common red flags:
 
@@ -3382,6 +3391,7 @@ Boundaries to know:
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Releases are cut outside GitHub Actions and ship checksums and a manifest without Sigstore bundles or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
+| Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.15` as an external blocker. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
