@@ -392,6 +392,153 @@ fn stopword_filter_lexical_search_preserves_inflections_and_rejects_unrelated_qu
     )
 }
 
+fn release_advice_survives_inflection_and_pack_admission(with_model: bool) -> TestResult {
+    let root = tempfile::Builder::new()
+        .prefix("ee-release-admission-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let run = |label: &str, args: &[&str]| -> Result<serde_json::Value, String> {
+        let mut command = if with_model {
+            isolated_ee::isolated_ee_command_with_model(&root)?
+        } else {
+            isolated_ee::isolated_ee_command(&root)?
+        };
+        let output = command
+            .env_remove("EE_AGENT_NAME")
+            .args([
+                "--workspace",
+                workspace.to_str().ok_or("workspace is not UTF-8")?,
+                "--json",
+            ])
+            .args(args)
+            .output()
+            .map_err(|error| format!("{label}: {error}"))?;
+        fs::write(root.join(format!("{label}.stdout")), &output.stdout)
+            .map_err(|error| error.to_string())?;
+        fs::write(root.join(format!("{label}.stderr")), &output.stderr)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            output.status.success(),
+            format!(
+                "{label} failed ({}); retained at {}\nstdout: {}\nstderr: {}",
+                output.status,
+                root.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        stdout_json(&output)
+    };
+    run("init", &["init"])?;
+    let fixtures = [
+        (
+            "Always run cargo test before creating a release tag.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "The 2026-04-15 release failed because tests weren't run locally first.",
+            "fact",
+            "episodic",
+        ),
+        (
+            "Never force-push to main branch during release.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Publishing to crates.io requires cargo publish --dry-run first.",
+            "rule",
+            "procedural",
+        ),
+        ("Descale the espresso machine weekly.", "fact", "semantic"),
+    ];
+    let mut memory_ids = Vec::new();
+    for (index, (content, kind, level)) in fixtures.iter().enumerate() {
+        let remembered = run(
+            &format!("remember-{index}"),
+            &["remember", content, "--kind", kind, "--level", level],
+        )?;
+        memory_ids.push(json_str(&remembered, "/data/memory_id", "remember")?.to_owned());
+    }
+
+    let lexical = run(
+        "inflected-lexical-search",
+        &["search", "releasing", "--source-mode", "lexical_only"],
+    )?;
+    let lexical_ids = json_array(&lexical, "/data/results", "inflected lexical search")?
+        .iter()
+        .filter_map(|hit| hit["docId"].as_str())
+        .collect::<BTreeSet<_>>();
+    for id in [&memory_ids[0], &memory_ids[1], &memory_ids[2]] {
+        ensure(
+            lexical_ids.contains(id.as_str()),
+            format!("inflected query must retrieve release memory {id}: {lexical}"),
+        )?;
+    }
+    ensure(
+        !lexical_ids.contains(memory_ids[4].as_str()),
+        format!("espresso must not match the release subject: {lexical}"),
+    )?;
+
+    let query = "what should I know before releasing this project?";
+    let mode = if with_model { "hybrid" } else { "lexical_only" };
+    let search = run("task-search", &["search", query, "--source-mode", mode])?;
+    ensure_equal(
+        &json_str(&search, "/data/embed_backend", "task search")?,
+        &if with_model {
+            "neural_local"
+        } else {
+            "hash_fallback"
+        },
+        "the selected test arm must execute its intended embedding backend",
+    )?;
+    ensure(
+        json_array(&search, "/data/results", "task search")?
+            .iter()
+            .any(|hit| hit["docId"] == memory_ids[2]),
+        format!("task search must retrieve the required warning before packing: {search}"),
+    )?;
+    let packed = run(
+        "task-pack",
+        &["pack", query, "--source-mode", mode, "--max-tokens", "4000"],
+    )?;
+    let items = json_array(&packed, "/data/pack/items", "release pack")?;
+    for index in [0, 2] {
+        ensure(
+            items.iter().any(|item| {
+                item["memoryId"] == memory_ids[index] && item["content"] == fixtures[index].0
+            }),
+            format!(
+                "pack must retain required release advice {}: {packed}",
+                memory_ids[index]
+            ),
+        )?;
+    }
+    ensure(
+        !items.iter().any(|item| item["memoryId"] == memory_ids[4]),
+        format!("unrelated espresso advice must not enter the release pack: {packed}"),
+    )
+}
+
+#[test]
+fn offline_release_advice_survives_inflection_and_pack_admission() -> TestResult {
+    release_advice_survives_inflection_and_pack_admission(false)
+}
+
+#[cfg(feature = "embed-fast")]
+#[test]
+#[ignore = "requires a provisioned EE_EMBED_MODEL_FIXTURE_DIR; run explicitly on the neural verification lane"]
+fn neural_release_advice_survives_inflection_and_pack_admission() -> TestResult {
+    release_advice_survives_inflection_and_pack_admission(true)
+}
+
 #[test]
 fn remember_accepts_sec_identifiers_preserves_pii_refusal_and_loads_user_allow_regex() -> TestResult
 {

@@ -4005,6 +4005,7 @@ async fn run_context_pack_attempt(
         .map(|candidate| candidate.item.evidence_id.clone())
         .collect::<BTreeSet<_>>();
     policy_omissions.extend(filter_context_pack_candidates_by_query_relative_elbow(
+        &request.query,
         &search_report.results,
         &required_relevance_candidates,
         &mut candidates,
@@ -8881,9 +8882,9 @@ fn context_pack_l2_feature_flags_hash(
     // Old cached prose and Pack DNA can retain score noise even when numeric
     // hash inputs already occupy the same fixed-point bin.
     hash_labeled_bytes(&mut hasher, "pack_score_explanation_policy", b"q20_12.v1");
-    // Reassemble older packs that filled the budget with an uncalibrated tail
-    // before query-relative admission reached the complete candidate universe.
-    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v2");
+    // Reassemble older packs whose uncalibrated elbow discarded candidates
+    // with lexical evidence for the task's subject.
+    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v3");
     // Reassemble adjacency-only packs so verified command-tool interludes can
     // supply the opposite native message under the current admission policy.
     hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v2");
@@ -15711,7 +15712,12 @@ fn query_relative_elbow_floor(scores: &[f32]) -> Option<f32> {
 /// Apply the fresh-store fallback after all native and memory fan-in, before
 /// pagination. Each local retrieval source is fitted independently; lexical
 /// pool ratios, cosine, and reranker values are not a shared confidence scale.
+/// A quality-score gap is not evidence against a lexical subject match. Such
+/// matches still shape the fitted population, but the heuristic cannot discard
+/// them; explicit caller floors and the remaining admission policies still can.
+#[allow(clippy::too_many_arguments)]
 fn filter_context_pack_candidates_by_query_relative_elbow(
+    query: &str,
     search_hits: &[SearchHit],
     required_memory_ids: &BTreeSet<MemoryId>,
     candidates: &mut Vec<PackCandidate>,
@@ -15723,6 +15729,16 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
     if relevance_floor.is_some() {
         return Vec::new();
     }
+    let mut query_terms = lexical_terms(query);
+    // These words frame a task or name its workspace; sharing only "before"
+    // must not protect an espresso instruction from a release-task cutoff.
+    // This exclusion applies only to the heuristic exemption, not retrieval.
+    for term in lexical_terms("before after know project repo repository workspace") {
+        query_terms.remove(&term);
+    }
+    let shares_query_subject = |content: &str| {
+        !query_terms.is_empty() && !query_terms.is_disjoint(&lexical_terms(content))
+    };
     let sources = search_hits
         .iter()
         .filter(|hit| {
@@ -15734,9 +15750,18 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                     .and_then(serde_json::Value::as_bool)
                     != Some(true)
         })
-        .map(|hit| (hit.doc_id.as_str(), hit.source.as_str()))
+        .map(|hit| {
+            (
+                hit.doc_id.as_str(),
+                (
+                    hit.source.as_str(),
+                    hit.lexical_score
+                        .is_some_and(|score| score.is_finite() && score > 0.0),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32)>::new();
+    let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32, bool)>::new();
     for candidate in candidates.iter() {
         // Focus, explicit graph seeds, warnings, and independently normalized
         // stores neither set this local cutoff nor lose their reservation to it.
@@ -15746,21 +15771,30 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
         {
             continue;
         }
-        if let Some(source) = sources.get(candidate.memory_id.to_string().as_str()) {
+        if let Some((source, lexical_match)) = sources.get(candidate.memory_id.to_string().as_str())
+        {
             let score = candidate.relevance.into_inner();
+            let subject_match = *lexical_match && shares_query_subject(&candidate.content);
             population
                 .entry(ContextPackEntityKey::Memory(candidate.memory_id))
-                .and_modify(|entry| entry.1 = entry.1.max(score))
-                .or_insert((*source, score));
+                .and_modify(|entry| {
+                    entry.1 = entry.1.max(score);
+                    entry.2 |= subject_match;
+                })
+                .or_insert((*source, score, subject_match));
         }
     }
     for item in rule_candidates.iter() {
         if item.section != PackSection::Failures
-            && let Some(source) = sources.get(item.rule_id.as_str())
+            && let Some((source, lexical_match)) = sources.get(item.rule_id.as_str())
         {
             population.insert(
                 ContextPackEntityKey::Rule(item.rule_id.clone()),
-                (*source, item.relevance.into_inner()),
+                (
+                    *source,
+                    item.relevance.into_inner(),
+                    *lexical_match && shares_query_subject(&item.content),
+                ),
             );
         }
     }
@@ -15768,16 +15802,20 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
         // A derived card can replace several source spans. Its synthesis is
         // not another independent observation of their retrieval distribution.
         if !candidate.incident_card
-            && let Some(source) = sources.get(candidate.item.evidence_id.as_str())
+            && let Some((source, lexical_match)) = sources.get(candidate.item.evidence_id.as_str())
         {
             population.insert(
                 ContextPackEntityKey::Evidence(candidate.item.evidence_id.clone()),
-                (*source, candidate.item.relevance.into_inner()),
+                (
+                    *source,
+                    candidate.item.relevance.into_inner(),
+                    *lexical_match && shares_query_subject(&candidate.item.content),
+                ),
             );
         }
     }
     let mut score_pools = BTreeMap::<&str, Vec<f32>>::new();
-    for (source, score) in population.values() {
+    for (source, score, _) in population.values() {
         score_pools.entry(source).or_default().push(*score);
     }
     let floors = score_pools
@@ -15788,7 +15826,8 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
         .collect::<BTreeMap<_, _>>();
     let rejected = population
         .iter()
-        .filter_map(|(entity, (source, score))| {
+        .filter(|(_, (_, _, subject_match))| !*subject_match)
+        .filter_map(|(entity, (source, score, _))| {
             floors
                 .get(source)
                 .filter(|floor| score < *floor)
@@ -17430,6 +17469,166 @@ mod relevance_floor_tests {
         }
     }
 
+    fn release_admission_candidates() -> (CandidateSet, Vec<SearchHit>) {
+        let mut candidates = elbow_candidate_set(&[0.4, 0.19, 0.11, 0.10]);
+        let contents = [
+            "Always run cargo test before creating a release tag.",
+            "Never force-push to main branch during release.",
+            "Descale the espresso machine before use.",
+            "This project grows garden flowers.",
+        ];
+        for (index, content) in contents.into_iter().enumerate() {
+            candidates.memories[index].content = content.to_owned();
+            candidates.rules[index].content = content.to_owned();
+            candidates.evidence[index].item.content = content.to_owned();
+        }
+        let mut hits = retrieval_hits(&candidates);
+        for hit in &mut hits {
+            hit.source = ScoreSource::Hybrid;
+            hit.score = crate::core::search::RRF_HYBRID_TYPICAL_MAX * 0.5;
+            hit.fast_score = Some(0.3426);
+            // Even an engine match is insufficient when the body only shares
+            // task scaffolding, as the espresso and gardening controls do.
+            hit.lexical_score = Some(2.0);
+        }
+        // Preserve the required warning even when retrieval places it first
+        // but later quality adjustments leave it below the fitted elbow.
+        hits.swap(0, 1);
+        (candidates, hits)
+    }
+
+    #[test]
+    fn query_relative_admission_preserves_lexical_subject_matches_across_entity_kinds() {
+        let (mut candidates, hits) = release_admission_candidates();
+        let required_id = candidates.memories[1].memory_id;
+        assert_eq!(hits[0].doc_id, required_id.to_string());
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            "what should I know before releasing this project?",
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(candidates.memories.len(), 2);
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.memories[1].memory_id, required_id);
+        assert_eq!(candidates.rules[1].rule_id, "rule_1");
+        assert_eq!(candidates.evidence[1].item.evidence_id, "ev_1");
+        for (index, expected) in [0.4_f32, 0.19].into_iter().enumerate() {
+            assert_eq!(candidates.memories[index].relevance.into_inner(), expected);
+            assert_eq!(candidates.rules[index].relevance.into_inner(), expected);
+            assert_eq!(
+                candidates.evidence[index].item.relevance.into_inner(),
+                expected
+            );
+        }
+        assert_eq!(
+            omitted.len(),
+            2,
+            "anchored leaders must still shape the cutoff"
+        );
+        assert!(omitted.iter().all(|omission| {
+            omission.memory_id != required_id
+                && omission.reason == PackOmissionReason::BelowRelevanceFloor
+        }));
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results"
+                && entry
+                    .message
+                    .contains("2 memory, 2 procedural rule, and 2 imported evidence")
+        }));
+    }
+
+    #[test]
+    fn query_relative_subject_exemption_requires_finite_positive_lexical_evidence() {
+        for lexical_score in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+        ] {
+            let (mut candidates, mut hits) = release_admission_candidates();
+            for hit in &mut hits {
+                hit.lexical_score = lexical_score;
+            }
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                "what should I know before releasing this project?",
+                &hits,
+                &BTreeSet::new(),
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                None,
+                &mut degraded,
+            );
+            assert_eq!(omitted.len(), 3, "lexical evidence: {lexical_score:?}");
+            assert_eq!(candidates.memories.len(), 1);
+            assert_eq!(candidates.rules.len(), 1);
+            assert_eq!(candidates.evidence.len(), 1);
+        }
+    }
+
+    #[test]
+    fn query_relative_subject_exemption_rejects_scaffolding_and_substring_only_matches() {
+        for query in ["what should I know before this project?", "lease", "car"] {
+            let (mut candidates, hits) = release_admission_candidates();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                query,
+                &hits,
+                &BTreeSet::new(),
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                None,
+                &mut Vec::new(),
+            );
+            assert_eq!(omitted.len(), 3, "query: {query}");
+            assert_eq!(candidates.memories.len(), 1);
+            assert_eq!(candidates.rules.len(), 1);
+            assert_eq!(candidates.evidence.len(), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_relevance_floor_remains_authoritative_for_lexical_subject_matches() {
+        for floor in [0.0, 0.3] {
+            let (mut candidates, hits) = release_admission_candidates();
+            let mut degraded = Vec::new();
+            let automatic = filter_context_pack_candidates_by_query_relative_elbow(
+                "what should I know before releasing this project?",
+                &hits,
+                &BTreeSet::new(),
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                Some(floor),
+                &mut degraded,
+            );
+            assert!(automatic.is_empty());
+            assert!(degraded.is_empty());
+            let explicit = filter_context_pack_candidates_by_relevance_floor(
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                Some(floor),
+                &mut degraded,
+            )
+            .expect("valid caller floor");
+            let retained = if floor == 0.0 { 4 } else { 1 };
+            assert_eq!(candidates.memories.len(), retained);
+            assert_eq!(candidates.rules.len(), retained);
+            assert_eq!(candidates.evidence.len(), retained);
+            assert_eq!(explicit.len(), 4 - retained);
+        }
+    }
+
     #[test]
     fn default_query_relative_admission_filters_all_native_kinds_before_pagination() {
         let scores = [
@@ -17443,6 +17642,7 @@ mod relevance_floor_tests {
             .collect::<Vec<_>>();
         let mut degraded = Vec::new();
         let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            "release",
             &hits,
             &BTreeSet::new(),
             &mut candidates.memories,
@@ -17506,6 +17706,7 @@ mod relevance_floor_tests {
             let hits = retrieval_hits(&candidates);
             let mut degraded = Vec::new();
             let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                "release",
                 &hits,
                 &BTreeSet::new(),
                 &mut candidates.memories,
@@ -17533,6 +17734,7 @@ mod relevance_floor_tests {
         }
         let mut degraded = Vec::new();
         let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            "release",
             &hits,
             &BTreeSet::new(),
             &mut candidates.memories,
@@ -17583,6 +17785,7 @@ mod relevance_floor_tests {
             }
             let mut degraded = Vec::new();
             let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                "release",
                 &hits,
                 &required,
                 &mut candidates.memories,
@@ -17615,6 +17818,7 @@ mod relevance_floor_tests {
         }
         let mut degraded = Vec::new();
         let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            "release",
             &hits,
             &required,
             &mut candidates.memories,
