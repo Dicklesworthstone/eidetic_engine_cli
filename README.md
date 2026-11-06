@@ -613,10 +613,16 @@ sessions, route heavy Cargo stages through RCH rather than using local fallback.
 repo-wide for this project and is never used for any purpose, including tests,
 builds and releases; releases are cut with `dsr` and the local cross-compile
 flow instead. This README therefore carries no CI badge: a badge querying the
-Actions API would report on a mechanism the project does not run. Verification
-is `./scripts/verify.sh` plus the pinned RCH lane described above, and the
-honest consequence is that a green local run is necessary, not sufficient —
-several gates are reachable only through a remote Cargo dispatch.
+Actions API would report on a mechanism the project does not run.
+
+`./scripts/verify.sh` is the broadest check available, and an ordinary
+`cargo test` works normally — you do not need the RCH lane described above,
+which is how heavy Cargo stages are offloaded on the maintainer's machine
+rather than a prerequisite for building or testing this crate. What a green
+`verify.sh` does *not* mean is that everything the repository defines as a gate
+has run: the workflow files hold checks that `verify.sh` does not reproduce,
+and with Actions disabled nothing runs them. Treat a green local run as
+necessary, not sufficient.
 
 ---
 
