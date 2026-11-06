@@ -6359,12 +6359,14 @@ ee pack "formatting rules" --workspace . --json
 
 **Introduced by:** bd-1bfwa.3 (epic ADR0069)
 
-**Trigger.** A retrieval surface ran with the global memory lane excluded — no global store exists yet, the workspace has participate=false, or [memory] include_global=false. The lane's absence is reported honestly instead of silently returning workspace-only results.
+**Trigger.** A retrieval surface excluded an existing global store because the workspace has participate=false or [memory] include_global=false. The intentional opt-out is reported without opening the disabled store. An absent optional store stays quiet; an explicit --memory-scope global request reports store_absent.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
+ee remember --global "Global fixture rule." --workspace .
+ee config set memory.include_global false --workspace .
 ```
 
 **Invocation.**
