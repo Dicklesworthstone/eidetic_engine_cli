@@ -41,12 +41,29 @@
 # which is exactly what it did during the 2026-11-05 reality check.
 #
 # What actually remains for this entry is wiring, and wiring it cannot be
-# PROVEN here: every scripts/e2e_*.sh goes through `ee_require_current_binary`,
-# and this host has no runnable current `ee` (installed 0.14.2 against a 0.18.0
-# tree; both CARGO_TARGET_DIR binaries are Linux ELF). Wiring a suite nobody can
-# execute is how the gate gets wedged on unknown state — the same reason the
-# original 19 were baselined rather than fixed in one pass. So this waits on
-# bd-no-runnable-current-ee-binary-on-the-mac-wu6ay, not on the harness.
+# PROVEN here without a usable native binary.
+#
+# CORRECTED LATER THE SAME DAY, 2026-11-05, because the first version of this
+# paragraph named the wrong mechanism and would have sent the next reader
+# hunting in the wrong file — the exact failure it was written to fix:
+#
+#   - e2e_field_report_suite.sh does NOT call `ee_require_current_binary`.
+#     Zero occurrences. It sources scripts/e2e_lib.sh (not e2e_harness.sh) and
+#     reads an ALREADY-SET `$EE_BIN` at :54, whose own comment says "EE_BIN is
+#     resolved by the harness ahead of EE_BINARY". So its CALLER must pin
+#     EE_BIN, exactly as verify.sh gate 6.12698a-j does at each of its ten
+#     call sites. The wiring work is "add a stage that pins EE_BIN", not
+#     "satisfy a guard this script does not have".
+#   - "every scripts/e2e_*.sh goes through the guard" was simply false:
+#     36 scripts under scripts/ call `ee_require_current_binary`, 32 of them
+#     e2e scripts, out of 223 scripts/e2e* files.
+#
+# The substance is unchanged — this needs a runnable native current `ee`
+# (installed 0.14.2 against a 0.18.0 tree; both CARGO_TARGET_DIR binaries were
+# Linux ELF x86-64) and so waits on
+# bd-no-runnable-current-ee-binary-on-the-mac-wu6ay. Wiring a suite nobody can
+# execute is still how the gate gets wedged on unknown state, which is the
+# stated reason the original 19 were baselined rather than fixed in one pass.
 #
 # 2026-09-16 mesh decision: the 7 e2e_mesh_* entries were RETIRED, not wired,
 # and moved to tests/fixtures/e2e_invocation/retired.txt. They contain no
