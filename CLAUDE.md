@@ -158,6 +158,41 @@ because no pattern distinguishes them:**
 So the locally-runnable set is **40**, not 31. Run these nine alongside the grep's
 output; all nine were green and none had ever been run on this host.
 
+**AND VERIFY.SH IS NOT THE ONLY PLACE GATES ARE WIRED. FIVE MORE RUN HERE AND
+NOTHING RUNS THEM AT ALL.** Every enumeration above starts from
+`scripts/verify.sh`, so it cannot see a gate wired somewhere else.
+`.github/workflows/ci-static.yml` — the cargo-free hosted gate — invokes 21
+scripts, and **8 of them appear nowhere in `verify.sh`**. Measured 2026-11-05,
+five of those eight need no toolchain, no binary and no lane, and all five were
+**green**, having apparently never been run on this host:
+
+```bash
+./scripts/check-toolchain-pins.sh        # 11.2 s
+./scripts/check-migration-registry.sh    #  0.6 s
+./scripts/bead-obsolescence.sh           # 22.1 s
+./scripts/check-pinned-definitions.sh    #  6.5 s
+python3 scripts/bead-evidence-triage.py  #  0.1 s
+```
+
+So the locally-runnable set is **45**, not 40. They are invisible because
+Actions is disabled repo-wide (bd-actions-disabled-repo-wide-33mfm) *and*
+`verify.sh` does not duplicate them — two correct-looking states that between
+them execute nothing.
+
+**Do NOT "fix" this by adding them to `verify.sh`.** They total ~41 s against
+**6 s** of remaining non-benchmark budget headroom (602/608; see
+`scripts/verify-budget.toml`), so the arithmetic forbids it. Run them by hand
+before a commit that touches toolchain pins, migrations, pinned definitions or
+bead hygiene.
+
+Two of the eight are excluded deliberately: `checkout-franken-stack.sh` is
+setup rather than a gate, and `release_binary_probe.sh` needs a release binary.
+Note that the probe LOOKS like a local-cargo hazard and is not — its
+`LEARN_CMD="cargo test --test quartz_ledger"` is passed as a `--cmd` string
+argument to `ee learn` at `:183` and never executed. That is the same
+classify-by-contents rule the next paragraph states, applied in the acquitting
+direction.
+
 **CLASSIFY BY THE SCRIPT'S CONTENTS, NOT ITS COMMAND LINE, and this is a tripwire
 matter rather than a tidiness one.** `./scripts/mcp_lib_tests.sh` names no cargo
 in `verify.sh`, so a command-line filter calls it local — but `:100` runs
