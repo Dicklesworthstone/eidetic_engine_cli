@@ -44,6 +44,9 @@ pub(crate) const MEMORY_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.memory_index_proj
 pub(crate) const SESSION_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.session_index_projection.v1";
 pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_projection.v1";
 pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
+/// Index and query analysis must advance together. This participates in the
+/// corpus revision so literal-token generations are rebuilt before reuse.
+pub(crate) const LEXICAL_ANALYZER_REVISION: &str = "ee.lexical_analyzer.english_stem.v1";
 /// v4 (bd-reality-core-convergence-1azkt.45): the shared typed projection
 /// excludes reasoning and unprojectable records, handles summaries, and labels
 /// each message with its actual role. Changing the corpus revision prevents
@@ -55,6 +58,99 @@ pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
 pub const MEMORY_ANCHOR_HASHES_METADATA_KEY: &str = "memory_anchor_hashes";
 pub const MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY: &str = "memory_anchor_redacted_values";
 pub const MEMORY_ANCHOR_FRESHNESS_METADATA_KEY: &str = "memory_anchor_freshness";
+
+/// Create an EE lexical index with the same analyzer used by query readers.
+#[cfg(feature = "lexical-bm25")]
+pub fn create_lexical_index(path: &Path) -> frankensearch::SearchResult<TantivyIndex> {
+    configure_lexical_analyzer(TantivyIndex::create(path)?)
+}
+
+/// Open an EE lexical index for incremental writes with matching text analysis.
+#[cfg(feature = "lexical-bm25")]
+pub fn open_lexical_index(path: &Path) -> frankensearch::SearchResult<TantivyIndex> {
+    configure_lexical_analyzer(TantivyIndex::open(path)?)
+}
+
+/// Read an EE lexical generation without acquiring a writer lock or changing
+/// its files. Analyzer registration is confined to this in-memory index handle.
+#[cfg(feature = "lexical-bm25")]
+pub fn open_lexical_index_read_only(path: &Path) -> frankensearch::SearchResult<TantivyIndex> {
+    configure_lexical_analyzer(TantivyIndex::open_read_only(path)?)
+}
+
+/// Build an ephemeral lexical index with the published index's text analysis.
+#[cfg(feature = "lexical-bm25")]
+pub fn in_memory_lexical_index() -> frankensearch::SearchResult<TantivyIndex> {
+    configure_lexical_analyzer(TantivyIndex::in_memory()?)
+}
+
+/// Preserve Frankensearch's tokenizer, offsets, positions, Unicode handling,
+/// and long technical tokens while adding Tantivy's built-in English stemmer.
+/// Using the stock `en_stem` analyzer would silently discard tokens over forty
+/// bytes. Wrapping the existing analyzer avoids that unrelated loss of recall.
+#[cfg(feature = "lexical-bm25")]
+fn configure_lexical_analyzer(index: TantivyIndex) -> frankensearch::SearchResult<TantivyIndex> {
+    use frankensearch::lexical_tantivy::tantivy_crate::schema::FieldType;
+    use frankensearch::lexical_tantivy::tantivy_crate::tokenizer::{
+        BoxTokenStream, Language, Stemmer, TextAnalyzer, Tokenizer,
+    };
+    use std::collections::BTreeSet;
+
+    #[derive(Clone)]
+    struct ExistingAnalyzer(TextAnalyzer);
+
+    impl Tokenizer for ExistingAnalyzer {
+        type TokenStream<'a> = BoxTokenStream<'a>;
+
+        fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+            self.0.token_stream(text)
+        }
+    }
+
+    let handle = index.index_handle();
+    let schema = handle.schema();
+    let mut tokenizer_names = BTreeSet::new();
+    for field_name in ["content", "title"] {
+        let field = schema.get_field(field_name).map_err(|error| {
+            frankensearch::SearchError::InvalidConfig {
+                field: "lexical.analyzer".to_owned(),
+                value: field_name.to_owned(),
+                reason: format!("Frankensearch search field is unavailable: {error}"),
+            }
+        })?;
+        let tokenizer_name = match schema.get_field_entry(field).field_type() {
+            FieldType::Str(options) => options
+                .get_indexing_options()
+                .map(|options| options.tokenizer()),
+            _ => None,
+        }
+        .ok_or_else(|| frankensearch::SearchError::InvalidConfig {
+            field: "lexical.analyzer".to_owned(),
+            value: field_name.to_owned(),
+            reason: "Frankensearch search field has no text analyzer".to_owned(),
+        })?;
+        tokenizer_names.insert(tokenizer_name.to_owned());
+    }
+    // Content and title currently share an analyzer. Configure each distinct
+    // name once, and leave the raw document-ID analyzer untouched.
+    for name in tokenizer_names {
+        let existing = handle.tokenizers().get(&name).ok_or_else(|| {
+            frankensearch::SearchError::InvalidConfig {
+                field: "lexical.analyzer".to_owned(),
+                value: name.clone(),
+                reason: "Frankensearch text analyzer is not registered".to_owned(),
+            }
+        })?;
+        let analyzer = TextAnalyzer::builder(ExistingAnalyzer(existing))
+            .filter(Stemmer::new(Language::English))
+            .build();
+        handle.tokenizers().register(&name, analyzer);
+    }
+    // Construction has not queued any documents. Tantivy creates each segment
+    // analyzer after receiving its first document, so writers and readers both
+    // see this registration before callers can index or query anything.
+    Ok(index)
+}
 
 /// Emit a standard tracing checkpoint for the radix-ULID tie-breaker surface.
 ///
@@ -1952,7 +2048,7 @@ pub(crate) async fn search_catalog(
     cx.checkpoint().map_err(|error| error.to_string())?;
     #[cfg(feature = "lexical-bm25")]
     let lexical = {
-        let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+        let index = in_memory_lexical_index().map_err(|error| error.to_string())?;
         index
             .index_documents(cx, documents)
             .await
@@ -3668,6 +3764,258 @@ mod tests {
         MemoryAnchorSource, RuleScope, StoredMemoryAnchor,
     };
     use serde_json::json;
+
+    #[cfg(feature = "lexical-bm25")]
+    async fn lexical_hit_ids(
+        index: &super::TantivyIndex,
+        cx: &asupersync::Cx,
+        query: &str,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        use super::LexicalRead;
+
+        let hits = index
+            .search(cx, &super::lexical_engine_query(query), 32)
+            .await
+            .map_err(|error| error.to_string())?;
+        for hit in &hits {
+            assert_eq!(hit.source, ScoreSource::Lexical);
+            assert!(hit.score.is_finite() && hit.score > 0.0, "{query}: {hit:?}");
+            assert!(
+                hit.lexical_score
+                    .is_some_and(|score| score.is_finite() && score > 0.0),
+                "inflection recall must come from the lexical engine: {query}: {hit:?}"
+            );
+        }
+        Ok(hits.into_iter().map(|hit| hit.doc_id.to_string()).collect())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn lexical_engine_recalls_inflections_without_semantic_embeddings() -> Result<(), String> {
+        use super::{IndexableDocument, LexicalWrite};
+        use std::collections::BTreeSet;
+
+        crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("test runtime context missing")?;
+            let index = super::in_memory_lexical_index().map_err(|error| error.to_string())?;
+            // The North Star release memories, plus an unrelated negative control.
+            let documents = [
+                IndexableDocument::new(
+                    "release-tests",
+                    "Always run cargo test before creating a release tag.",
+                ),
+                IndexableDocument::new(
+                    "release-incident",
+                    "The 2026-04-15 release failed because tests weren't run locally first.",
+                ),
+                IndexableDocument::new(
+                    "release-rule",
+                    "Never force-push to main branch during release.",
+                ),
+                IndexableDocument::new(
+                    "publish-rule",
+                    "Publishing to crates.io requires cargo publish --dry-run first.",
+                ),
+                IndexableDocument::new("espresso", "Clean the espresso machine before use."),
+            ];
+            index
+                .index_documents(&cx, &documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            index.commit(&cx).await.map_err(|error| error.to_string())?;
+
+            for (queries, expected) in [
+                (
+                    vec!["release", "releases", "releasing", "released"],
+                    vec!["release-tests", "release-incident", "release-rule"],
+                ),
+                (
+                    vec!["test", "tests", "testing", "tested"],
+                    vec!["release-tests", "release-incident"],
+                ),
+                (
+                    vec!["create", "creates", "creating", "created"],
+                    vec!["release-tests"],
+                ),
+                (
+                    vec!["publish", "publishes", "publishing", "published"],
+                    vec!["publish-rule"],
+                ),
+            ] {
+                let expected: BTreeSet<_> = expected.into_iter().map(str::to_owned).collect();
+                for query in queries {
+                    assert_eq!(
+                        lexical_hit_ids(&index, &cx, query).await?,
+                        expected,
+                        "{query}"
+                    );
+                }
+            }
+            assert!(lexical_hit_ids(&index, &cx, "unicorns").await?.is_empty());
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn lexical_stemming_preserves_syntax_long_tokens_and_original_documents() -> Result<(), String>
+    {
+        use super::{IndexableDocument, LexicalWrite};
+        use std::collections::BTreeSet;
+
+        crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("test runtime context missing")?;
+            let index = super::in_memory_lexical_index().map_err(|error| error.to_string())?;
+            let long_token = "0123456789abcdef".repeat(6);
+            let mut documents = vec![
+                IndexableDocument::new(
+                    "release-rule",
+                    "Never force-push to main branch during release.",
+                )
+                .with_title("Deployment policy"),
+                IndexableDocument::new("release-order", "A release during audits needs review."),
+                IndexableDocument::new("legacy-rule", "A legacy release procedure."),
+                IndexableDocument::new("title-only", "A documentation overview.")
+                    .with_title("Release checklist"),
+                IndexableDocument::new("releases", "An opaque source identifier."),
+                IndexableDocument::new(
+                    "technical",
+                    format!("{long_token} std::fs::read POL-358 CAFÉ 資料"),
+                ),
+            ];
+            for document in &mut documents {
+                document
+                    .metadata
+                    .insert("source_text".to_owned(), document.content.clone());
+            }
+            index
+                .index_documents(&cx, &documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            index.commit(&cx).await.map_err(|error| error.to_string())?;
+
+            for (query, expected) in [
+                (
+                    "content:releasing",
+                    vec!["release-rule", "release-order", "legacy-rule"],
+                ),
+                ("title:releasing", vec!["title-only"]),
+                (r#"content:"during releases""#, vec!["release-rule"]),
+                (
+                    "content:releasing -legacy",
+                    vec!["release-rule", "release-order"],
+                ),
+                (
+                    "content:releasing AND NOT legacy",
+                    vec!["release-rule", "release-order"],
+                ),
+                ("id:releases", vec!["releases"]),
+                ("id:releasing", vec![]),
+                (long_token.as_str(), vec!["technical"]),
+                ("std::fs::read", vec!["technical"]),
+                ("POL-358", vec!["technical"]),
+                ("café", vec!["technical"]),
+                ("資料", vec!["technical"]),
+            ] {
+                let expected: BTreeSet<_> = expected.into_iter().map(str::to_owned).collect();
+                assert_eq!(
+                    lexical_hit_ids(&index, &cx, query).await?,
+                    expected,
+                    "{query}"
+                );
+            }
+
+            let stored = index.all_documents().map_err(|error| error.to_string())?;
+            assert_eq!(stored.len(), documents.len());
+            for original in &documents {
+                let actual = stored
+                    .iter()
+                    .find(|document| document.id == original.id)
+                    .ok_or_else(|| format!("stored document missing: {}", original.id))?;
+                assert_eq!(actual.content, original.content);
+                assert_eq!(actual.title, original.title);
+                assert_eq!(actual.metadata, original.metadata);
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn lexical_stemming_survives_read_only_reopen_and_incremental_upserts() -> Result<(), String> {
+        use super::{IndexableDocument, LexicalWrite};
+        use std::collections::BTreeSet;
+
+        crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("test runtime context missing")?;
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let writer =
+                super::create_lexical_index(directory.path()).map_err(|error| error.to_string())?;
+            writer
+                .index_document(
+                    &cx,
+                    &IndexableDocument::new(
+                        "release-rule",
+                        "Never force-push to main branch during release.",
+                    ),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            writer
+                .commit(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            // A reader must still open while the publisher owns the writer lock.
+            let reader = super::open_lexical_index_read_only(directory.path())
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                lexical_hit_ids(&reader, &cx, "releasing").await?,
+                BTreeSet::from(["release-rule".to_owned()])
+            );
+            drop(reader);
+            drop(writer);
+
+            let writer =
+                super::open_lexical_index(directory.path()).map_err(|error| error.to_string())?;
+            writer
+                .index_documents(
+                    &cx,
+                    &[
+                        IndexableDocument::new("release-rule", "Validate the deployment review."),
+                        IndexableDocument::new(
+                            "release-new",
+                            "Create the release notes before publishing.",
+                        ),
+                    ],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            writer
+                .commit(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            drop(writer);
+
+            let reader = super::open_lexical_index_read_only(directory.path())
+                .map_err(|error| error.to_string())?;
+            for query in ["releasing", "creating", "published"] {
+                assert_eq!(
+                    lexical_hit_ids(&reader, &cx, query).await?,
+                    BTreeSet::from(["release-new".to_owned()]),
+                    "{query}"
+                );
+            }
+            assert!(lexical_hit_ids(&reader, &cx, "force").await?.is_empty());
+            assert_eq!(
+                lexical_hit_ids(&reader, &cx, "deployment").await?,
+                BTreeSet::from(["release-rule".to_owned()])
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
 
     #[test]
     fn subsystem_name_is_stable() {

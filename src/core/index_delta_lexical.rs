@@ -14,7 +14,7 @@ use frankensearch::lexical_tantivy::tantivy_crate::{
     Index, IndexWriter, TantivyDocument, Term,
     index::SegmentId,
     indexer::NoMergePolicy,
-    tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer},
+    tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
 };
 
 use super::{
@@ -219,6 +219,7 @@ fn maintenance_writer(index: &Index) -> Result<IndexWriter, IncrementalFallback>
         "frankensearch_default",
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(LowerCaser)
+            .filter(Stemmer::new(Language::English))
             .build(),
     );
     let writer = index

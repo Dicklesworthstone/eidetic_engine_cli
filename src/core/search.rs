@@ -53,8 +53,6 @@ use super::memory_drift::{
 };
 use super::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_visibility};
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
-#[cfg(feature = "lexical-bm25")]
-use crate::search::TantivyIndex;
 use crate::search::lexical_ram_tier::{
     LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HEAP_WARMLOAD_CODE,
     LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV,
@@ -12374,7 +12372,7 @@ async fn stale_index_live_snapshot_retrieval(
         };
         search_checkpoint(cx)?;
         let results = async {
-            let index = TantivyIndex::in_memory()?;
+            let index = crate::search::in_memory_lexical_index()?;
             for chunk in documents.chunks(32) {
                 index.index_documents(cx, chunk).await?;
             }
@@ -14018,7 +14016,7 @@ async fn global_store_live_snapshot_hits(
             }
             documents.push(document);
         }
-        let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+        let index = crate::search::in_memory_lexical_index().map_err(|error| error.to_string())?;
         for chunk in documents.chunks(32) {
             search_checkpoint(cx).map_err(|error| error.to_string())?;
             index
@@ -16336,7 +16334,7 @@ fn open_lexical_searcher_uncached(lexical_dir: &Path) -> Result<Arc<dyn LexicalR
     // failed this open, lost the lexical arm, and silently fell back to
     // semantic-only ranking (`source_mode_fallback`). The read-only open holds
     // no writer, no writer lock, and no indexing thread pool.
-    TantivyIndex::open_read_only(lexical_dir)
+    crate::search::open_lexical_index_read_only(lexical_dir)
         .map(|lexical| Arc::new(lexical) as Arc<dyn LexicalRead>)
         .map_err(|error| {
             format!(
@@ -18874,7 +18872,7 @@ mod tests {
         crate::core::run_cli_future(async {
             use crate::search::LexicalWrite;
             let cx = asupersync::Cx::current().ok_or("fixture runtime context missing")?;
-            let lexical = crate::search::TantivyIndex::create(&index_dir.join("lexical"))
+            let lexical = crate::search::create_lexical_index(&index_dir.join("lexical"))
                 .map_err(|error| error.to_string())?;
             lexical.commit(&cx).await.map_err(|error| error.to_string())
         })

@@ -9,7 +9,7 @@ use frankensearch::core::generation::EmbeddingIdentityBundleV1;
 use frankensearch::core::traits::{ModelCategory, SearchFuture};
 use frankensearch::lexical_tantivy::tantivy_crate::{
     Term,
-    tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer},
+    tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
 };
 
 use super::super::{DocDigests, MAX_LEXICAL_SEGMENTS, apply, copy_generation, plan};
@@ -54,7 +54,7 @@ fn fragment(root: &Path, documents: &[IndexableDocument]) -> TestResult<Index> {
     let directory = root.join(LEXICAL_INDEX_SUBDIR);
     if !directory.join("meta.json").exists() {
         std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        drop(crate::search::TantivyIndex::create(&directory).map_err(|error| error.to_string())?);
+        drop(crate::search::create_lexical_index(&directory).map_err(|error| error.to_string())?);
     }
     let index = Index::open_in_dir(&directory).map_err(|error| error.to_string())?;
     // The pinned adapter documents equivalence to this native analyzer. The
@@ -63,6 +63,7 @@ fn fragment(root: &Path, documents: &[IndexableDocument]) -> TestResult<Index> {
         "frankensearch_default",
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(LowerCaser)
+            .filter(Stemmer::new(Language::English))
             .build(),
     );
     let schema = index.schema();
@@ -379,7 +380,7 @@ fn native_delta_case(change_body: bool) -> TestResult {
         ] {
             let mut results = Vec::new();
             for directory in [&staged, &rebuilt] {
-                let reader = crate::search::TantivyIndex::open_read_only(
+                let reader = crate::search::open_lexical_index_read_only(
                     &directory.join(LEXICAL_INDEX_SUBDIR),
                 )
                 .map_err(|error| error.to_string())?;
@@ -444,7 +445,7 @@ fn empty_removal_batch_checks_cancellation_without_opening_a_tier() -> TestResul
 }
 
 async fn lexical_ids(cx: &asupersync::Cx, root: &Path, query: &str) -> TestResult<Vec<String>> {
-    let reader = crate::search::TantivyIndex::open_read_only(&root.join(LEXICAL_INDEX_SUBDIR))
+    let reader = crate::search::open_lexical_index_read_only(&root.join(LEXICAL_INDEX_SUBDIR))
         .map_err(|error| error.to_string())?;
     let mut ids = reader
         .search(cx, query, 256)
@@ -471,7 +472,7 @@ fn batched_removals_match_individual_deletes_with_less_native_commit_work() -> T
         let staged = root.join("staged");
         let individual = root.join("individual");
         let _ = fragment(&live, &documents(24))?;
-        let pinned = crate::search::TantivyIndex::open_read_only(&live.join(LEXICAL_INDEX_SUBDIR))
+        let pinned = crate::search::open_lexical_index_read_only(&live.join(LEXICAL_INDEX_SUBDIR))
             .map_err(|error| error.to_string())?;
         let before = files(&live)?;
         for copy in [&staged, &individual] {
@@ -501,7 +502,7 @@ fn batched_removals_match_individual_deletes_with_less_native_commit_work() -> T
             .load_metas()
             .map_err(|error| error.to_string())?
             .opstamp;
-        let old = crate::search::TantivyIndex::open(&individual.join(LEXICAL_INDEX_SUBDIR))
+        let old = crate::search::open_lexical_index(&individual.join(LEXICAL_INDEX_SUBDIR))
             .map_err(|error| error.to_string())?;
         for id in &removals {
             old.delete_document(&cx, id)
@@ -716,7 +717,7 @@ fn bulk_withdrawal_keeps_vector_reuse_and_matches_a_fresh_rebuild() -> TestResul
                 }
             }
             let reader =
-                crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+                crate::search::open_lexical_index_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
                     .map_err(|error| error.to_string())?;
             assert_eq!(
                 reader.doc_count().map_err(|error| error.to_string())?,
@@ -986,7 +987,7 @@ fn native_bulk_upsert_case(mixed: bool) -> TestResult {
         ] {
             let mut results = Vec::new();
             for directory in [&staged, &rebuilt] {
-                let reader = crate::search::TantivyIndex::open_read_only(
+                let reader = crate::search::open_lexical_index_read_only(
                     &directory.join(LEXICAL_INDEX_SUBDIR),
                 )
                 .map_err(|error| error.to_string())?;

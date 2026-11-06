@@ -4858,7 +4858,7 @@ mod tests {
                 use crate::search::LexicalWrite;
                 let cx = asupersync::Cx::current()
                     .ok_or_else(|| "fixture runtime context missing".to_owned())?;
-                let lexical = crate::search::TantivyIndex::create(&lexical_path)
+                let lexical = crate::search::create_lexical_index(&lexical_path)
                     .map_err(|error| format!("create empty lexical fixture tier: {error}"))?;
                 lexical
                     .commit(&cx)

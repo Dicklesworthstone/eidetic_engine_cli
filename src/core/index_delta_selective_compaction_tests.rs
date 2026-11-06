@@ -174,7 +174,7 @@ fn file_inventory(root: &Path) -> TestResult<BTreeMap<std::path::PathBuf, Vec<u8
 fn unequal_segments(root: &Path) -> TestResult<Index> {
     let directory = root.join(LEXICAL_INDEX_SUBDIR);
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    drop(crate::search::TantivyIndex::create(&directory).map_err(|error| error.to_string())?);
+    drop(crate::search::create_lexical_index(&directory).map_err(|error| error.to_string())?);
     let index = Index::open_in_dir(&directory).map_err(|error| error.to_string())?;
     let schema = index.schema();
     let id = schema.get_field("id").map_err(|error| error.to_string())?;
@@ -265,7 +265,7 @@ fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generat
         std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
         super::super::copy_generation(&live, &staged).map_err(|error| error.to_string())?;
         let pinned =
-            crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+            crate::search::open_lexical_index_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
                 .map_err(|error| error.to_string())?;
         let expected = ids(&cx, &pinned).await?;
         assert_eq!(expected.len(), 100);
@@ -299,7 +299,7 @@ fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generat
             original,
             "the live generation must not change"
         );
-        let fresh = crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+        let fresh = crate::search::open_lexical_index_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
             .map_err(|error| error.to_string())?;
         assert_eq!(ids(&cx, &fresh).await?, expected);
         assert_eq!(

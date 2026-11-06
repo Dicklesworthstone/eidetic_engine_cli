@@ -9652,7 +9652,7 @@ mod tests {
         assert_eq!(stored.status, "completed");
         assert!(stored.started_at.is_some() && stored.completed_at.is_some());
         assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
-        let lexical = crate::search::TantivyIndex::open_read_only(
+        let lexical = crate::search::open_lexical_index_read_only(
             &fixture.workspace.join(".ee/index/lexical"),
         )
         .map_err(|e| e.to_string())?;

@@ -214,7 +214,7 @@ impl Fixture {
         {
             use crate::search::LexicalRead;
             let lexical =
-                crate::search::TantivyIndex::open_read_only(&self.index_dir.join("lexical"))
+                crate::search::open_lexical_index_read_only(&self.index_dir.join("lexical"))
                     .unwrap();
             let hits = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
                 lexical.search(&cx, "migration", 128).await

@@ -768,7 +768,7 @@ mod tests {
     ) -> TestResult {
         use crate::search::LexicalRead;
 
-        let lexical = crate::search::TantivyIndex::open_read_only(&directory.join("lexical"))
+        let lexical = crate::search::open_lexical_index_read_only(&directory.join("lexical"))
             .map_err(|error| error.to_string())?;
         assert_eq!(
             lexical.doc_count().map_err(|error| error.to_string())?,
@@ -935,7 +935,7 @@ mod tests {
     ) -> TestResult {
         use crate::search::LexicalRead;
 
-        let lexical = crate::search::TantivyIndex::open_read_only(&directory.join("lexical"))
+        let lexical = crate::search::open_lexical_index_read_only(&directory.join("lexical"))
             .map_err(|error| error.to_string())?;
         assert_eq!(
             lexical.doc_count().map_err(|error| error.to_string())?,

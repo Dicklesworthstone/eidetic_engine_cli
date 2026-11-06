@@ -1018,8 +1018,8 @@ fn hash_index_corpus_component(hasher: &mut blake3::Hasher, name: &str, value: &
 ///
 /// This deliberately excludes row counts, timestamps, generations, and
 /// embedder configuration. It changes only when document shape, admitted
-/// source classes, or source-specific projection/eligibility/redaction
-/// semantics change.
+/// source classes, lexical analysis, or source-specific
+/// projection/eligibility/redaction semantics change.
 pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
     INDEX_CORPUS_REVISION.get_or_init(|| {
         let mut hasher = blake3::Hasher::new();
@@ -1028,6 +1028,11 @@ pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
             &mut hasher,
             "canonical_document_schema",
             crate::search::CANONICAL_DOCUMENT_SCHEMA,
+        );
+        hash_index_corpus_component(
+            &mut hasher,
+            "lexical_analyzer",
+            crate::search::LEXICAL_ANALYZER_REVISION,
         );
         for source in ["memory", "session", "artifact", "rule", "import"] {
             hash_index_corpus_component(&mut hasher, "admitted_source", source);
@@ -4419,7 +4424,7 @@ fn open_lexical_index(index_dir: &Path) -> Result<TantivyIndex, IncrementalFallb
             format!("lexical tier is absent: {}", lexical_path.display()),
         ));
     }
-    TantivyIndex::open(&lexical_path).map_err(|error| {
+    crate::search::open_lexical_index(&lexical_path).map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::TierUnavailable,
             format!(
@@ -7114,7 +7119,7 @@ async fn build_empty_index(
     #[cfg(feature = "lexical-bm25")]
     {
         let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
-        let lexical = TantivyIndex::create(&lexical_path).map_err(|error| {
+        let lexical = crate::search::create_lexical_index(&lexical_path).map_err(|error| {
             IndexRebuildError::Index(format!("failed to create empty lexical tier: {error}"))
         })?;
         lexical.commit(cx).await.map_err(|error| {
@@ -7156,7 +7161,7 @@ pub(crate) async fn build_lexical_tier(
         return Ok(());
     }
     let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
-    let lexical = TantivyIndex::create(&lexical_path).map_err(|error| {
+    let lexical = crate::search::create_lexical_index(&lexical_path).map_err(|error| {
         IndexRebuildError::Index(format!("failed to create lexical tier: {error}"))
     })?;
     for document in documents {

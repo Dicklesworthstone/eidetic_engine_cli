@@ -965,12 +965,14 @@ mod tests {
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn lexical_command_queries_retrieve_the_expected_backend_documents() -> Result<(), String> {
-        use crate::search::{IndexableDocument, LexicalRead, LexicalWrite, TantivyIndex};
+        use crate::search::{
+            IndexableDocument, LexicalRead, LexicalWrite, in_memory_lexical_index,
+        };
         use std::collections::BTreeSet;
 
         crate::core::run_cli_future(async {
             let cx = asupersync::Cx::current().ok_or("test runtime context missing")?;
-            let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+            let index = in_memory_lexical_index().map_err(|error| error.to_string())?;
             let mut documents = vec![
                 IndexableDocument::new("evidence-command", "Run cargo fmt --check before release."),
                 IndexableDocument::new(

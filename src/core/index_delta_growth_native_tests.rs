@@ -179,7 +179,7 @@ async fn assert_lexical(
 
     use crate::search::LexicalRead;
 
-    let reader = crate::search::TantivyIndex::open_read_only(&directory.join("lexical"))
+    let reader = crate::search::open_lexical_index_read_only(&directory.join("lexical"))
         .map_err(|error| error.to_string())?;
     assert_eq!(
         reader.doc_count().map_err(|error| error.to_string())?,
