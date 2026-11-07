@@ -9,7 +9,9 @@
 //! and is honestly omitted (`primer_graph_unavailable`) when they are
 //! missing — never recomputed inline (latency contract). Output is
 //! byte-identical for identical `(workspace_id, db_generation, config_hash,
-//! budget, format)` keys, which is also the `primer_cache` cache key.
+//! budget, format)` keys, which is also the `primer_cache` cache key. The
+//! internal config key also binds the observed graph, global-lane and seal
+//! state: changes to those sources need not advance the workspace generation.
 //! Nothing here reads the wall clock: ordering uses stored timestamps and
 //! ids only, so a cache hit and a cold assembly produce identical bytes.
 
@@ -662,9 +664,10 @@ fn render_markdown(sections: &[PrimerSection]) -> String {
 
 /// Fetch candidates + persisted centrality, assemble (or serve from the
 /// `primer_cache` derived table), and persist the cold result. The cache key
-/// is `(workspace_id, db_generation, config_hash, budget, format)`; any DB
-/// generation advance invalidates. `refresh` forces re-assembly (still
-/// deterministic ⇒ still byte-identical to a cold assembly).
+/// is `(workspace_id, db_generation, config_hash, budget, format)`; the internal
+/// config hash also binds observed graph, global-lane and seal state. A DB
+/// generation advance or a change to those inputs invalidates. `refresh`
+/// forces re-assembly (still deterministic ⇒ byte-identical to a cold assembly).
 pub fn run_primer(
     connection: &DbConnection,
     workspace_id: &str,
@@ -724,6 +727,13 @@ pub fn run_primer_with_global_lane(
     .unwrap_or(i64::MAX);
 
     let (closed_seals, seal_authority_hash) = primer_seal_admission(connection, workspace_id)?;
+    // Graph refresh/status writes do not advance the workspace generation.
+    // Read the selected snapshot once, before a cache lookup, so the identity
+    // and the scores used below describe the same observation. In particular,
+    // a cached unavailable graph must not hide a completed repair, and an
+    // invalidated graph must not keep influencing cached rule order.
+    let (centrality_rows, centrality_state_hash) =
+        load_persisted_centrality(connection, workspace_id)?;
 
     // The global store changes without bumping the workspace generation, so
     // the lane's content fingerprint must be part of the cache key or a
@@ -736,13 +746,14 @@ pub fn run_primer_with_global_lane(
         format!(
             "{}+global:{}",
             settings.config_hash,
-            global_store_lane_hash(&global_rows)
+            global_store_lane_hash(&global_rows, global_lane_degraded.as_ref())
         )
     };
     // Seal-only writes do not advance workspace generations. Bind admission
     // before any cache lookup, and version the key so pre-admission cached
     // responses cannot reappear when all seals have subsequently been revealed.
-    let cache_config_hash = format!("{cache_config_hash}+seals:{seal_authority_hash}");
+    let cache_config_hash =
+        format!("{cache_config_hash}+seals:{seal_authority_hash}+graph:{centrality_state_hash}");
 
     if !refresh
         && let Some(cached) = connection.get_primer_cache(
@@ -793,8 +804,6 @@ pub fn run_primer_with_global_lane(
         });
     }
     merge_global_candidates(&mut candidates, &global_rows);
-
-    let centrality_rows = load_persisted_centrality(connection, workspace_id)?;
 
     let mut report = assemble_primer(
         &candidates,
@@ -866,10 +875,6 @@ fn primer_seal_admission(
 #[path = "primer_seal_admission_tests.rs"]
 mod seal_tests;
 
-/// Read persisted centrality rows from the latest VALID memory-links graph
-/// snapshot. Returns `None` (and the caller degrades) when the snapshot is
-/// missing or non-valid. Deliberately ignores time-based expiry on this
-/// path: assembly must be wall-clock-free so cache hits stay byte-identical.
 /// Read the global-store rows for the primer lane (bd-1bfwa.3).
 ///
 /// `None` paths or an absent store database mean lane-off (opt-in by
@@ -913,7 +918,10 @@ fn load_global_lane_rows(
 
 /// Deterministic fingerprint of the global lane's content for the primer
 /// cache key: the lane changes without bumping the workspace generation.
-fn global_store_lane_hash(rows: &[crate::db::StoredMemory]) -> String {
+fn global_store_lane_hash(
+    rows: &[crate::db::StoredMemory],
+    degraded: Option<&PrimerDegradation>,
+) -> String {
     let mut keyed: Vec<(&str, &str, bool)> = rows
         .iter()
         .map(|row| {
@@ -933,6 +941,24 @@ fn global_store_lane_hash(rows: &[crate::db::StoredMemory]) -> String {
         hasher.update(b"\0");
         hasher.update(if tombstoned { b"t" } else { b"-" });
         hasher.update(b"\0");
+    }
+    // Unavailable global stores all have an empty row set, but their repair
+    // diagnostics can differ (for example pending migration versus unreadable
+    // storage). The cached response must preserve the observation just made.
+    hasher.update(b"\0global_lane_degraded\0");
+    if let Some(degraded) = degraded {
+        hasher.update(b"present\0");
+        for value in [&degraded.code, &degraded.severity, &degraded.message] {
+            hash_primer_cache_field(&mut hasher, value.as_bytes());
+        }
+        if let Some(repair) = &degraded.repair {
+            hasher.update(b"repair\0");
+            hash_primer_cache_field(&mut hasher, repair.as_bytes());
+        } else {
+            hasher.update(b"no_repair\0");
+        }
+    } else {
+        hasher.update(b"absent\0");
     }
     hasher
         .finalize()
@@ -985,49 +1011,121 @@ fn merge_global_candidates(
     candidates.extend(merged);
 }
 
+/// Load persisted scores and the identity of the exact selected snapshot.
+/// Missing, non-valid or malformed snapshots degrade without substituting
+/// unmeasured scores with zero. A valid empty snapshot stays distinct from
+/// missing data. Time-based expiry is deliberately not evaluated here: primer
+/// assembly and cache reuse are wall-clock-free.
 fn load_persisted_centrality(
     connection: &DbConnection,
     workspace_id: &str,
-) -> crate::db::Result<Option<Vec<PrimerCentralityRow>>> {
-    let Some(snapshot) =
-        connection.get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)?
-    else {
-        return Ok(None);
-    };
-    if snapshot.status != GraphSnapshotStatus::Valid {
-        return Ok(None);
+) -> crate::db::Result<(Option<Vec<PrimerCentralityRow>>, String)> {
+    let snapshot =
+        connection.get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.primer.centrality_state.v1\0");
+    if let Some(snapshot) = &snapshot {
+        hasher.update(b"present\0");
+        for value in [
+            snapshot.id.as_str(),
+            snapshot.workspace_id.as_str(),
+            snapshot.graph_type.as_str(),
+            snapshot.schema_version.as_str(),
+            snapshot.status.as_str(),
+            snapshot.content_hash.as_str(),
+            snapshot.metrics_json.as_str(),
+        ] {
+            hash_primer_cache_field(&mut hasher, value.as_bytes());
+        }
+        for value in [
+            snapshot.snapshot_version,
+            snapshot.source_generation,
+            snapshot.node_count,
+            snapshot.edge_count,
+        ] {
+            hasher.update(&value.to_le_bytes());
+        }
+    } else {
+        hasher.update(b"absent\0");
     }
-    let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json) else {
-        return Ok(None);
-    };
-    let nodes = metrics
-        .pointer("/graph/nodes")
-        .or_else(|| metrics.pointer("/nodes"))
-        .and_then(serde_json::Value::as_array);
-    let Some(nodes) = nodes else {
-        return Ok(None);
-    };
+    Ok((
+        snapshot.as_ref().and_then(persisted_centrality_rows),
+        hasher.finalize().to_hex().to_string(),
+    ))
+}
+
+fn hash_primer_cache_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value);
+}
+
+fn persisted_centrality_rows(
+    snapshot: &crate::db::StoredGraphSnapshot,
+) -> Option<Vec<PrimerCentralityRow>> {
+    if snapshot.status != GraphSnapshotStatus::Valid {
+        return None;
+    }
+    let metrics = serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json).ok()?;
+    let nested_nodes = metrics.pointer("/graph/nodes");
+    let top_nodes = metrics.get("nodes");
+    if nested_nodes
+        .zip(top_nodes)
+        .is_some_and(|(nested, top)| nested != top)
+    {
+        return None;
+    }
+    let nodes = nested_nodes.or(top_nodes)?.as_array()?;
+    if nodes.len() != usize::try_from(snapshot.node_count).ok()? {
+        return None;
+    }
+    if nodes.is_empty() {
+        // source_generation is the filtered link count, NOT the workspace
+        // generation. Comparing those different domains would reject healthy
+        // snapshots after unrelated memory writes.
+        return (snapshot.edge_count == 0 && snapshot.source_generation == 0).then(Vec::new);
+    }
+    for path in [
+        "/centrality/algorithmStatus/hits",
+        "/centrality/algorithmStatus/betweenness",
+    ] {
+        if metrics
+            .pointer(path)
+            .is_some_and(|status| status.as_str() != Some("computed"))
+        {
+            return None;
+        }
+    }
+    let mut memory_ids = BTreeSet::new();
     let mut rows = Vec::with_capacity(nodes.len());
     for node in nodes {
-        let Some(memory_id) = node
-            .pointer("/memoryId")
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
+        let memory_id = node.get("memoryId")?.as_str()?;
+        if memory_id.trim().is_empty() || !memory_ids.insert(memory_id) {
+            return None;
+        }
+        for path in ["/metricStatus/authority", "/metricStatus/betweenness"] {
+            if node
+                .pointer(path)
+                .is_some_and(|status| status.as_str() != Some("computed"))
+            {
+                return None;
+            }
+        }
+        let authority = node.get("authority")?.as_f64()?;
+        let betweenness = node.get("betweenness")?.as_f64()?;
+        if !authority.is_finite()
+            || authority < 0.0
+            || !betweenness.is_finite()
+            || betweenness < 0.0
+        {
+            return None;
+        }
         rows.push(PrimerCentralityRow {
             memory_id: memory_id.to_owned(),
-            authority: node
-                .pointer("/authority")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0),
-            betweenness: node
-                .pointer("/betweenness")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0),
+            authority,
+            betweenness,
         });
     }
-    Ok(Some(rows))
+    Some(rows)
 }
 
 #[cfg(test)]
@@ -1484,6 +1582,279 @@ mod tests {
         );
     }
 
+    fn insert_centrality_snapshot(
+        connection: &crate::db::DbConnection,
+        workspace_id: &str,
+        version: u32,
+        nodes: serde_json::Value,
+    ) -> String {
+        let node_count = u32::try_from(nodes.as_array().expect("nodes array").len())
+            .expect("fixture node count");
+        let metrics_json = serde_json::json!({ "graph": { "nodes": nodes } }).to_string();
+        let mut content_hash = blake3::Hasher::new();
+        content_hash.update(b"memory_links\0");
+        content_hash.update(metrics_json.as_bytes());
+        let snapshot_id = format!("gsnap_{version:026}");
+        connection
+            .insert_graph_snapshot(
+                &snapshot_id,
+                &crate::db::CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: version,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count,
+                    edge_count: 0,
+                    metrics_json,
+                    content_hash: format!("blake3:{}", content_hash.finalize().to_hex()),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .expect("insert centrality snapshot");
+        snapshot_id
+    }
+
+    fn centrality_nodes(first_authority: f64, second_authority: f64) -> serde_json::Value {
+        serde_json::json!([
+            { "memoryId": format!("mem_{:026}", 1), "authority": first_authority, "betweenness": 0.1 },
+            { "memoryId": format!("mem_{:026}", 2), "authority": second_authority, "betweenness": 0.2 }
+        ])
+    }
+
+    #[test]
+    fn graph_refresh_and_replacement_invalidate_cache_without_memory_writes() {
+        let (connection, workspace_id) = wrapper_test_db();
+        insert_rule(&connection, &workspace_id, 1);
+        insert_rule(&connection, &workspace_id, 2);
+        let settings = settings(600);
+        let run = || {
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("primer run")
+        };
+        let missing = run();
+        assert!(!missing.cache_hit);
+        assert!(
+            missing
+                .degraded
+                .iter()
+                .any(|entry| entry.code == PRIMER_GRAPH_UNAVAILABLE_CODE)
+        );
+        assert_eq!(
+            missing.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 1)
+        );
+        assert!(run().cache_hit);
+
+        insert_centrality_snapshot(&connection, &workspace_id, 1, centrality_nodes(0.1, 0.9));
+        let repaired = run();
+        assert_eq!(repaired.db_generation, missing.db_generation);
+        assert!(
+            !repaired.cache_hit,
+            "a completed graph repair must invalidate the unavailable cache"
+        );
+        assert!(
+            !repaired
+                .degraded
+                .iter()
+                .any(|entry| entry.code == PRIMER_GRAPH_UNAVAILABLE_CODE)
+        );
+        assert_eq!(
+            repaired.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 2)
+        );
+        let mut warm = run();
+        assert!(warm.cache_hit);
+        warm.cache_hit = false;
+        assert_eq!(
+            warm, repaired,
+            "the same observed graph still reuses identical cached bytes"
+        );
+
+        insert_centrality_snapshot(&connection, &workspace_id, 2, centrality_nodes(0.9, 0.1));
+        let replaced = run();
+        assert_eq!(replaced.db_generation, missing.db_generation);
+        assert!(
+            !replaced.cache_hit,
+            "a new graph at the same source count must replace cached rankings"
+        );
+        assert_eq!(
+            replaced.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 1)
+        );
+        assert!(run().cache_hit);
+    }
+
+    #[test]
+    fn invalidated_latest_graph_withholds_cached_scores_and_load_bearing_items() {
+        let (connection, workspace_id) = wrapper_test_db();
+        for id in 1..=3 {
+            insert_rule(&connection, &workspace_id, id);
+        }
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET level = 'semantic', kind = 'fact' WHERE id = 'mem_{:026}'",
+                3
+            ))
+            .expect("make a load-bearing fact");
+        let settings = settings(600);
+        let run = || {
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("primer run")
+        };
+        insert_centrality_snapshot(&connection, &workspace_id, 1, centrality_nodes(0.8, 0.1));
+        let mut nodes = centrality_nodes(0.1, 0.9);
+        nodes
+            .as_array_mut()
+            .expect("nodes array")
+            .push(serde_json::json!({
+                "memoryId": format!("mem_{:026}", 3), "authority": 0.8, "betweenness": 0.5
+            }));
+        let snapshot_id = insert_centrality_snapshot(&connection, &workspace_id, 2, nodes);
+        let ready = run();
+        assert_eq!(
+            ready.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 2)
+        );
+        assert_eq!(ready.sections[3].items.len(), 1);
+        assert_eq!(
+            ready.sections[3].items[0].memory_id,
+            format!("mem_{:026}", 3)
+        );
+        assert!(run().cache_hit);
+
+        for status in [
+            GraphSnapshotStatus::Stale,
+            GraphSnapshotStatus::Invalid,
+            GraphSnapshotStatus::Archived,
+        ] {
+            assert!(
+                connection
+                    .update_graph_snapshot_status(&snapshot_id, status)
+                    .expect("invalidate graph")
+            );
+            let unavailable = run();
+            assert_eq!(unavailable.db_generation, ready.db_generation);
+            assert!(
+                !unavailable.cache_hit,
+                "graph status {status} must invalidate the cache"
+            );
+            assert!(
+                unavailable
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == PRIMER_GRAPH_UNAVAILABLE_CODE)
+            );
+            assert_eq!(
+                unavailable.sections[0].items[0].memory_id,
+                format!("mem_{:026}", 1)
+            );
+            assert!(
+                unavailable.sections[3].items.is_empty(),
+                "invalidating the latest snapshot must not resurrect an older valid graph"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_graph_bytes_cannot_reuse_a_cached_valid_snapshot() {
+        let (connection, workspace_id) = wrapper_test_db();
+        insert_rule(&connection, &workspace_id, 1);
+        insert_rule(&connection, &workspace_id, 2);
+        let snapshot_id =
+            insert_centrality_snapshot(&connection, &workspace_id, 1, centrality_nodes(0.1, 0.9));
+        let settings = settings(600);
+        let run = || {
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("primer run")
+        };
+        let ready = run();
+        assert_eq!(
+            ready.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 2)
+        );
+        assert!(run().cache_hit);
+        // Keep identity, status, count and declared content hash unchanged.
+        // The cache must observe the actual bytes, including corruption.
+        connection
+            .execute_raw(&format!(
+                "UPDATE graph_snapshots SET metrics_json = '{{' WHERE id = '{snapshot_id}'"
+            ))
+            .expect("corrupt snapshot payload");
+        let unavailable = run();
+        assert_eq!(unavailable.db_generation, ready.db_generation);
+        assert!(!unavailable.cache_hit);
+        assert!(
+            unavailable
+                .degraded
+                .iter()
+                .any(|entry| entry.code == PRIMER_GRAPH_UNAVAILABLE_CODE)
+        );
+        assert_eq!(
+            unavailable.sections[0].items[0].memory_id,
+            format!("mem_{:026}", 1)
+        );
+    }
+
+    #[test]
+    fn persisted_centrality_distinguishes_measured_zero_empty_and_unavailable() {
+        let (connection, workspace_id) = wrapper_test_db();
+        let (missing, missing_hash) =
+            load_persisted_centrality(&connection, &workspace_id).expect("missing snapshot");
+        assert!(missing.is_none());
+        insert_centrality_snapshot(&connection, &workspace_id, 1, serde_json::json!([]));
+        let (empty, empty_hash) =
+            load_persisted_centrality(&connection, &workspace_id).expect("empty snapshot");
+        assert_eq!(empty, Some(Vec::new()));
+        assert_ne!(empty_hash, missing_hash);
+
+        let snapshot_id =
+            insert_centrality_snapshot(&connection, &workspace_id, 2, centrality_nodes(0.0, 0.0));
+        let snapshot = connection
+            .get_graph_snapshot(&snapshot_id)
+            .expect("read graph")
+            .expect("snapshot exists");
+        let measured = persisted_centrality_rows(&snapshot).expect("zero is a measured score");
+        assert_eq!(measured.len(), 2);
+        assert_eq!(measured[0].authority, 0.0);
+        let original: serde_json::Value =
+            serde_json::from_str(&snapshot.metrics_json).expect("metrics JSON");
+        for (path, value) in [
+            ("/graph/nodes/0/authority", serde_json::Value::Null),
+            ("/graph/nodes/0/betweenness", serde_json::json!("not a number")),
+            ("/graph/nodes/0/authority", serde_json::json!(-0.1)),
+            ("/graph/nodes/0/memoryId", serde_json::json!("")),
+            (
+                "/graph/nodes/1/memoryId",
+                original["graph"]["nodes"][0]["memoryId"].clone(),
+            ),
+        ] {
+            let mut metrics = original.clone();
+            *metrics.pointer_mut(path).expect("fixture field") = value;
+            let mut corrupt = snapshot.clone();
+            corrupt.metrics_json = metrics.to_string();
+            assert!(
+                persisted_centrality_rows(&corrupt).is_none(),
+                "invalid consumed graph field {path} must not become a measured zero"
+            );
+        }
+        let mut partial = original.clone();
+        partial["centrality"] = serde_json::json!({
+            "algorithmStatus": { "hits": "timed_out", "betweenness": "computed" }
+        });
+        let mut corrupt = snapshot.clone();
+        corrupt.metrics_json = partial.to_string();
+        assert!(persisted_centrality_rows(&corrupt).is_none());
+        corrupt = snapshot.clone();
+        corrupt.node_count += 1;
+        assert!(persisted_centrality_rows(&corrupt).is_none());
+        let mut contradictory = original.clone();
+        contradictory["nodes"] = serde_json::json!([]);
+        corrupt.metrics_json = contradictory.to_string();
+        corrupt.node_count = snapshot.node_count;
+        assert!(persisted_centrality_rows(&corrupt).is_none());
+    }
+
     // ===== global-lane tests (bd-1bfwa.3 slice B) =====
 
     #[test]
@@ -1624,14 +1995,31 @@ mod tests {
     fn global_store_lane_hash_is_order_independent_and_content_bound() {
         let row_a = global_row(1, "a", None);
         let row_b = global_row(2, "b", None);
-        let forward = global_store_lane_hash(&[row_a.clone(), row_b.clone()]);
-        let reversed = global_store_lane_hash(&[row_b.clone(), row_a.clone()]);
+        let forward = global_store_lane_hash(&[row_a.clone(), row_b.clone()], None);
+        let reversed = global_store_lane_hash(&[row_b.clone(), row_a.clone()], None);
         assert_eq!(forward, reversed, "hash must not depend on row order");
 
         let mut touched = row_b;
         touched.updated_at = "2026-06-09T00:00:00Z".to_owned();
-        let shifted = global_store_lane_hash(&[row_a, touched]);
+        let shifted = global_store_lane_hash(&[row_a, touched], None);
         assert_ne!(forward, shifted, "updated_at changes must change the hash");
+    }
+
+    #[test]
+    fn global_store_lane_hash_binds_unavailable_diagnostics() {
+        let mut degraded = PrimerDegradation {
+            code: "scope_metadata_unavailable".to_owned(),
+            severity: "low".to_owned(),
+            message: "global store needs migration".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        };
+        let migration = global_store_lane_hash(&[], Some(&degraded));
+        assert_ne!(migration, global_store_lane_hash(&[], None));
+        degraded.message = "global store could not be read".to_owned();
+        assert_ne!(migration, global_store_lane_hash(&[], Some(&degraded)));
+        let unreadable = global_store_lane_hash(&[], Some(&degraded));
+        degraded.repair = None;
+        assert_ne!(unreadable, global_store_lane_hash(&[], Some(&degraded)));
     }
 
     #[test]
