@@ -323,6 +323,7 @@ mod tests {
             final_hits: final_ids.iter().map(|id| hit(id)).collect(),
             final_elapsed_ms: 0.0,
             errors: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 

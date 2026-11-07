@@ -420,6 +420,7 @@ mod tests {
                         SearchRerankRuntime::disabled(),
                         SearchFusionWeights::default(),
                         Some(embedder.clone()),
+                        None,
                         &mut trace,
                     )
                     .await;

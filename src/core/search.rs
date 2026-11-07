@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -9518,6 +9519,289 @@ struct SearchRerankRuntime {
     top_k: usize,
 }
 
+/// Exclusion clauses are query semantics, independent of optional reranking.
+/// Borrow the caller's pinned source view: opening a connection per candidate
+/// could filter one generation using the bodies of another. Only candidate IDs
+/// are hydrated, and lexical/vector appearances share the request-local cache.
+struct SearchExclusionTextProvider<'a> {
+    options: &'a SearchOptions,
+    connection: &'a DbConnection,
+    workspace_id: String,
+    scope_context: MemoryScopeContext,
+    reference_time: DateTime<Utc>,
+    scope_rejections: AtomicUsize,
+    cache: Mutex<HashMap<String, Option<String>>>,
+    storage_failure: OnceLock<()>,
+}
+
+fn canonical_search_query(query: &str) -> String {
+    use frankensearch::core::canonicalize::{Canonicalizer, DefaultCanonicalizer};
+    DefaultCanonicalizer::default().canonicalize_query(query)
+}
+
+fn search_query_has_exclusions(query: &str) -> bool {
+    frankensearch::core::ParsedQuery::parse(&canonical_search_query(query)).has_negations()
+}
+
+fn search_exclusion_source_error() -> SearchError {
+    SearchError::Index(
+        "Query exclusions could not be verified against the source snapshot; results withheld"
+            .to_owned(),
+    )
+}
+
+impl<'a> SearchExclusionTextProvider<'a> {
+    fn for_query(
+        query: &str,
+        source: Option<(&'a SearchOptions, &'a DbConnection)>,
+    ) -> Result<Option<Self>, SearchError> {
+        if !search_query_has_exclusions(query) {
+            return Ok(None);
+        }
+        let (options, connection) = source.ok_or_else(search_exclusion_source_error)?;
+        let workspace = crate::core::workspace::addressed_workspace_row(
+            connection,
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        )
+        .map_err(|_| search_exclusion_source_error())?
+        .ok_or_else(search_exclusion_source_error)?;
+        let scope_context = MemoryScopeContext::for_workspace_with_connection(
+            &options.workspace_path,
+            options.memory_scope,
+            options.strict_scope,
+            Some(connection),
+        );
+        if scope_context.team_roster_read_error().is_some() {
+            return Err(search_exclusion_source_error());
+        }
+        Ok(Some(Self {
+            options,
+            connection,
+            workspace_id: workspace.id,
+            scope_context,
+            reference_time: options.as_of.unwrap_or_else(Utc::now),
+            scope_rejections: AtomicUsize::new(0),
+            cache: Mutex::new(HashMap::new()),
+            storage_failure: OnceLock::new(),
+        }))
+    }
+
+    fn text_for_doc(&self, doc_id: &str) -> Option<String> {
+        let Ok(mut cache) = self.cache.lock() else {
+            self.storage_failure.get_or_init(|| ());
+            return None;
+        };
+        if let Some(text) = cache.get(doc_id) {
+            return text.clone();
+        }
+        if self.storage_failure.get().is_some() {
+            return None;
+        }
+        let text = match self.load_text(doc_id) {
+            Ok(text) => text,
+            // A malformed candidate cannot supply authority, but it must not
+            // deny unrelated admitted candidates from the same snapshot.
+            Err(DbError::MalformedRow { .. }) => None,
+            Err(_) => {
+                self.storage_failure.get_or_init(|| ());
+                None
+            }
+        };
+        cache.insert(doc_id.to_owned(), text.clone());
+        text
+    }
+
+    fn load_text(&self, doc_id: &str) -> crate::db::Result<Option<String>> {
+        let connection = self.connection;
+        if doc_id.starts_with("mem_") {
+            if MemoryId::from_str(doc_id)
+                .ok()
+                .is_none_or(|id| id.to_string() != doc_id)
+            {
+                return Ok(None);
+            }
+            let Some(memory) = connection.get_memory(doc_id)? else {
+                return Ok(None);
+            };
+            let tags = connection.get_memory_tags(doc_id)?;
+            // Global/house-rule memories may be indexed into another workspace.
+            // Indexed IDs alone cannot authorize arbitrary cross-workspace rows.
+            if (memory.workspace_id != self.workspace_id
+                && !crate::models::memory_tags_include_global_scope(&tags))
+                || !self.scope_context.memory_in_scope_with_tags(&memory, &tags)
+            {
+                self.scope_rejections.fetch_add(1, Ordering::Relaxed);
+                return Ok(None);
+            }
+            if (!self.options.include_tombstoned && memory.tombstoned_at.is_some())
+                || memory_validity_visibility(
+                    memory.valid_from.as_deref(),
+                    memory.valid_to.as_deref(),
+                    self.reference_time,
+                    self.options.include_expired,
+                    self.options.include_future,
+                ) != MemoryValidityVisibility::Visible
+                || !rule_admission::memory_revisions::seed_is_visible(
+                    connection,
+                    doc_id,
+                    self.reference_time,
+                )?
+            {
+                return Ok(None);
+            }
+            // Memory metadata and anchors do not change its canonical body.
+            return Ok(Some(memory.content));
+        }
+        let passthrough_scope = matches!(
+            self.options.memory_scope,
+            MemoryScope::Workspace | MemoryScope::Swarm
+        );
+        if !passthrough_scope
+            && (doc_id.starts_with("ev_")
+                || doc_id.starts_with("sess_")
+                || doc_id.starts_with("art_"))
+        {
+            self.scope_rejections.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if doc_id.starts_with("ev_") {
+            if EvidenceId::from_str(doc_id)
+                .ok()
+                .is_none_or(|id| id.to_string() != doc_id)
+            {
+                return Ok(None);
+            }
+            return connection
+                .get_search_admitted_evidence_span(doc_id, &self.workspace_id)
+                .map(|span| {
+                    span.map(|span| {
+                        // Exclusions inspect the same screened reader text as
+                        // indexing, never raw JSONL envelopes or private metadata.
+                        crate::search::evidence_span_to_document(&span)
+                            .content()
+                            .to_owned()
+                    })
+                });
+        }
+        if doc_id.starts_with("rule_") {
+            let Some(rule) = connection.get_procedural_rule(doc_id)? else {
+                return Ok(None);
+            };
+            let candidates = [SearchHit {
+                doc_id: doc_id.to_owned(),
+                score: 0.0,
+                source: ScoreSource::SemanticFast,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            }];
+            // Native rule admission includes canonical identity, lineage,
+            // lifecycle and review holds, in addition to the requested scope.
+            let mut native_scope = self.scope_context.clone();
+            native_scope.scope = MemoryScope::Workspace;
+            if !rule_admission::scoped_metadata(
+                self.options,
+                &candidates,
+                &native_scope,
+                connection,
+            )?
+            .contains_key(doc_id)
+            {
+                return Ok(None);
+            }
+            if !passthrough_scope
+                && !rule_admission::scoped_metadata(
+                    self.options,
+                    &candidates,
+                    &self.scope_context,
+                    connection,
+                )?
+                .contains_key(doc_id)
+            {
+                self.scope_rejections.fetch_add(1, Ordering::Relaxed);
+                return Ok(None);
+            }
+            return Ok(Some(rule.content));
+        }
+        if doc_id.starts_with("sess_") {
+            if crate::models::SessionId::from_str(doc_id)
+                .ok()
+                .is_none_or(|id| id.to_string() != doc_id)
+            {
+                return Ok(None);
+            }
+            return connection.get_session(doc_id).map(|session| {
+                session
+                    .filter(|session| session.workspace_id == self.workspace_id)
+                    .map(|session| {
+                        crate::search::session_to_document(&session)
+                            .content()
+                            .to_owned()
+                    })
+            });
+        }
+        if doc_id.starts_with("art_") {
+            return connection.get_artifact(doc_id).map(|artifact| {
+                artifact
+                    .filter(|artifact| artifact.workspace_id == self.workspace_id)
+                    .map(|artifact| {
+                        crate::search::artifact_to_document(&artifact)
+                            .content()
+                            .to_owned()
+                    })
+            });
+        }
+        // Unknown index-only identities cannot prove an exclusion did not match.
+        Ok(None)
+    }
+
+    fn check_storage(&self) -> Result<(), SearchError> {
+        if self.storage_failure.get().is_some() {
+            Err(search_exclusion_source_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn retain_verified(&self, candidates: &mut Vec<crate::search::ScoredResult>) {
+        // Upstream's Option callback treats missing text as "no exclusion".
+        // Explicitly withhold missing/non-admitted rows here; do not invent a
+        // document body to force the upstream matcher to discard them. Existing
+        // live-admission gates similarly run after candidate collection.
+        candidates.retain(|candidate| self.text_for_doc(&candidate.doc_id).is_some());
+    }
+
+    fn apply_scope_decision(
+        &self,
+        hits: &mut Vec<SearchHit>,
+        degraded: &mut Vec<SearchDegradation>,
+    ) {
+        let excluded = self.scope_rejections.load(Ordering::Relaxed);
+        if excluded == 0 {
+            return;
+        }
+        // Hydration must reject private rows before upstream sees their bodies.
+        // Preserve strict scope's all-results-withheld contract even when the
+        // rejected candidate would otherwise disappear before the final gate.
+        if self.options.strict_scope {
+            hits.clear();
+            degraded.push(SearchDegradation::scope_strict_excluded_evidence(
+                self.options.memory_scope,
+                excluded,
+            ));
+        } else {
+            degraded.push(SearchDegradation::scope_excluded_evidence(
+                self.options.memory_scope,
+                excluded,
+            ));
+        }
+    }
+}
+
 const SEARCH_RERANK_MIN_CANDIDATES: usize = 5;
 const SEARCH_RERANK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -10580,6 +10864,7 @@ async fn run_search_inner_with_performance(
             rerank_runtime,
             fusion_weights,
             fast_embedder_override,
+            read_connection.map(|connection| (options, connection)),
             &mut trace,
         )
         .await
@@ -11412,11 +11697,13 @@ async fn run_diag_search_in_snapshot(
             source_mode.applied,
             fusion_weights,
             fast_embedder_override,
+            read_connection.map(|connection| (options, connection)),
         )
         .await?
     };
     #[cfg(unix)]
     drop(generation_lease);
+    degraded.append(&mut diag_result.degraded);
     apply_live_evidence_visibility_to_diag(
         options,
         &mut diag_result,
@@ -12792,6 +13079,7 @@ struct DiagSearchSyncResult {
     final_hits: Vec<SearchHit>,
     final_elapsed_ms: f64,
     errors: Vec<String>,
+    degraded: Vec<SearchDegradation>,
 }
 
 fn empty_diag_search_result(
@@ -12832,6 +13120,7 @@ fn empty_diag_search_result(
         final_hits: Vec::new(),
         final_elapsed_ms: 0.0,
         errors: Vec::new(),
+        degraded: Vec::new(),
     }
 }
 
@@ -12846,12 +13135,25 @@ async fn diag_search_sync(
     source_mode: SearchSourceMode,
     fusion_weights: SearchFusionWeights,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    exclusion_source: Option<(&SearchOptions, &DbConnection)>,
 ) -> Result<DiagSearchSyncResult, SearchError> {
     search_checkpoint(cx)?;
     #[cfg(unix)]
     let _generation_lease = pin_search_generation(cx, index_dir).await?;
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = crate::search::lexical_engine_query(query).into_owned();
+    let exclusion_text = if source_mode.uses_embeddings() {
+        SearchExclusionTextProvider::for_query(&query_owned, exclusion_source)?
+    } else {
+        None
+    };
+    let canonical_query = canonical_search_query(&query_owned);
+    let parsed_query = frankensearch::core::ParsedQuery::parse(&canonical_query);
+    let semantic_query = if parsed_query.is_positive_empty() {
+        canonical_query
+    } else {
+        parsed_query.positive
+    };
     #[allow(clippy::type_complexity)]
     let result_holder: Arc<Mutex<Option<Result<DiagSearchSyncResult, SearchError>>>> =
         Arc::new(Mutex::new(None));
@@ -12903,7 +13205,7 @@ async fn diag_search_sync(
 
         let mut candidate_metadata = BTreeMap::new();
         let lexical_start = Instant::now();
-        let lexical_result = match lexical.as_ref() {
+        let mut lexical_result = match lexical.as_ref() {
             Some(lexical) => match lexical.search(&cx, &query_owned, candidate_limit).await {
                 Ok(results) => {
                     for result in &results {
@@ -12954,8 +13256,8 @@ async fn diag_search_sync(
         }
 
         let semantic_start = Instant::now();
-        let semantic_result = match fast_embedder.as_ref() {
-            Some(fast_embedder) => match fast_embedder.embed(&cx, &query_owned).await {
+        let mut semantic_result = match fast_embedder.as_ref() {
+            Some(fast_embedder) => match fast_embedder.embed(&cx, &semantic_query).await {
                 Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
                     Ok(results) => SearchArmDiagnostics {
                         available: true,
@@ -13018,6 +13320,24 @@ async fn diag_search_sync(
             return;
         }
 
+        if let Some(provider) = exclusion_text.as_ref() {
+            // These arms describe the raw pre-fusion pools. Even diagnostic
+            // IDs require source authority; never expose an unhydrated row.
+            lexical_result
+                .results
+                .retain(|hit| provider.text_for_doc(&hit.doc_id).is_some());
+            semantic_result
+                .results
+                .retain(|hit| provider.text_for_doc(&hit.doc_id).is_some());
+            candidate_metadata.retain(|id, _| provider.text_for_doc(id).is_some());
+            if let Err(error) = search_checkpoint(&cx).and_then(|()| provider.check_storage()) {
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(error));
+                }
+                return;
+            }
+        }
+
         let fusion_start = Instant::now();
         let fusion = build_fusion_diagnostics(
             &lexical_result.results,
@@ -13070,10 +13390,20 @@ async fn diag_search_sync(
                     } else {
                         searcher
                     };
-                    searcher
-                        .search_collect(&cx, &query_owned, limit)
-                        .await
-                        .map(|(results, metrics)| {
+                    let results = if let Some(provider) = exclusion_text.as_ref() {
+                        searcher
+                            .search_collect_with_text(&cx, &query_owned, limit, |id| {
+                                provider.text_for_doc(id)
+                            })
+                            .await
+                    } else {
+                        searcher.search_collect(&cx, &query_owned, limit).await
+                    };
+                    results
+                        .map(|(mut results, metrics)| {
+                            if let Some(provider) = exclusion_text.as_ref() {
+                                provider.retain_verified(&mut results);
+                            }
                             let final_score_scale =
                                 two_tier_final_score_scale(source_mode, &results, &metrics);
                             search_hits_from_scored_results(results, explain, final_score_scale)
@@ -13087,6 +13417,14 @@ async fn diag_search_sync(
                 )),
             }
         };
+        if let Some(provider) = exclusion_text.as_ref()
+            && let Err(error) = search_checkpoint(&cx).and_then(|()| provider.check_storage())
+        {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
+        }
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(Err(error));
@@ -13098,6 +13436,10 @@ async fn diag_search_sync(
                 let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
+                let mut degraded = Vec::new();
+                if let Some(provider) = exclusion_text.as_ref() {
+                    provider.apply_scope_decision(&mut hits, &mut degraded);
+                }
                 Ok(DiagSearchSyncResult {
                     candidate_metadata,
                     pre_fusion: PreFusionDiagnostics {
@@ -13108,6 +13450,7 @@ async fn diag_search_sync(
                     final_hits: hits,
                     final_elapsed_ms: final_start.elapsed().as_secs_f64() * 1000.0,
                     errors: Vec::new(),
+                    degraded,
                 })
             }
             Err(error) => Err(error),
@@ -14004,6 +14347,7 @@ async fn global_store_frankensearch_hits(
         SearchRerankRuntime::disabled(),
         SearchFusionWeights::default(),
         None,
+        None,
         &mut global_trace,
     )
     .await;
@@ -14678,6 +15022,7 @@ fn search_sync(
             SearchRerankRuntime::disabled(),
             SearchFusionWeights::default(),
             fast_embedder_override,
+            None,
             &mut trace,
         )
         .await
@@ -14700,6 +15045,7 @@ async fn search_sync_with_performance(
     rerank_runtime: SearchRerankRuntime,
     fusion_weights: SearchFusionWeights,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    exclusion_source: Option<(&SearchOptions, &DbConnection)>,
     trace: &mut SearchPerformanceTrace,
 ) -> Result<runtime_fallback::Retrieval, SearchError> {
     search_checkpoint(cx)?;
@@ -14724,6 +15070,11 @@ async fn search_sync_with_performance(
 
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = plan_lookup.plan.parsed_query.q.clone();
+    let exclusion_text = if source_mode.uses_embeddings() {
+        SearchExclusionTextProvider::for_query(&query_owned, exclusion_source)?
+    } else {
+        None
+    };
     let rerank_runtime_owned = rerank_runtime.clone();
     tracing::debug!(
         target: "ee::search::determinism",
@@ -14900,11 +15251,10 @@ async fn search_sync_with_performance(
         let collect_start = Instant::now();
         let collect_limit = rerank_runtime_owned.collect_limit(limit);
         run_before_search_collect_hook(&cx);
-        let search_result = if let Some(text_provider) = rerank_runtime_owned.text_provider.clone()
-        {
+        let search_result = if let Some(provider) = exclusion_text.as_ref() {
             searcher
-                .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
-                    text_provider.text_for_doc(doc_id)
+                .search_collect_with_text(&cx, &query_owned, collect_limit, |doc_id| {
+                    provider.text_for_doc(doc_id)
                 })
                 .await
         } else {
@@ -14912,7 +15262,19 @@ async fn search_sync_with_performance(
                 .search_collect(&cx, &query_owned, collect_limit)
                 .await
         };
-        let search_result = observed.admit_result(search_result);
+        let mut search_result = observed.admit_result(search_result);
+        if let Some(provider) = exclusion_text.as_ref() {
+            if let Ok((results, _)) = &mut search_result {
+                provider.retain_verified(results);
+            }
+            if let Err(error) = search_checkpoint(&cx).and_then(|()| provider.check_storage()) {
+                run_after_search_collect_hook(&cx, false);
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(error));
+                }
+                return;
+            }
+        }
         run_after_search_collect_hook(&cx, search_result.is_ok());
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
@@ -14921,7 +15283,7 @@ async fn search_sync_with_performance(
             return;
         }
         if observed.needs_recovery(&search_result) {
-            let recovered = runtime_fallback::recover_lexical(
+            let mut recovered = runtime_fallback::recover_lexical(
                 &cx,
                 &index_dir_owned,
                 &query_owned,
@@ -14931,6 +15293,17 @@ async fn search_sync_with_performance(
                 rerank_seed,
             )
             .await;
+            if let Some(provider) = exclusion_text.as_ref() {
+                if let Ok(retrieval) = &mut recovered {
+                    retrieval
+                        .hits
+                        .retain(|hit| provider.text_for_doc(&hit.doc_id).is_some());
+                    provider.apply_scope_decision(&mut retrieval.hits, &mut retrieval.degraded);
+                }
+                if let Err(error) = search_checkpoint(&cx).and_then(|()| provider.check_storage()) {
+                    recovered = Err(error);
+                }
+            }
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::runtimeLexicalRecovery",
@@ -14989,7 +15362,7 @@ async fn search_sync_with_performance(
 
         let convert_start = Instant::now();
         let converted = match search_result {
-            Ok((results, metrics, degraded)) => {
+            Ok((results, metrics, mut degraded)) => {
                 let final_score_scale = two_tier_final_score_scale(source_mode, &results, &metrics);
                 let reranked_count = results
                     .iter()
@@ -15011,6 +15384,9 @@ async fn search_sync_with_performance(
                 let mut hits = search_hits_from_scored_results(results, explain, final_score_scale);
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
+                if let Some(provider) = exclusion_text.as_ref() {
+                    provider.apply_scope_decision(&mut hits, &mut degraded);
+                }
                 Ok(runtime_fallback::Retrieval {
                     hits,
                     degraded,
@@ -15776,6 +16152,16 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
         degraded.push(SearchDegradation::scope_metadata_unavailable(error));
     }
     let mut stats = scope_context.stats();
+    if options.strict_scope
+        && degraded
+            .iter()
+            .any(|entry| entry.code == "scope_strict_excluded_evidence")
+    {
+        // Candidate hydration can observe a private row before fusion. That
+        // strict decision applies to the entire request, including global-store
+        // hits merged after local retrieval and candidates below the floor.
+        return (Vec::new(), stats);
+    }
     if hits.is_empty() {
         return (hits, stats);
     }
@@ -18017,6 +18403,7 @@ mod tests {
                         SearchRerankRuntime::disabled(),
                         SearchFusionWeights::default(),
                         Some(Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>),
+                        None,
                         &mut trace,
                     )
                     .await
@@ -18290,6 +18677,471 @@ mod tests {
             tags: Vec::new(),
             valid_from: None,
             valid_to: None,
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    mod exclusion_queries {
+        #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+        use super::*;
+        use frankensearch::core::generation::EmbeddingIdentityBundleV1;
+
+        const MEMORY: &str = "mem_00000000000000000000000891";
+        const BLOCKED_MEMORY: &str = "mem_00000000000000000000000892";
+        const RULE: &str = "rule_00000000000000000000000891";
+        const BLOCKED_RULE: &str = "rule_00000000000000000000000892";
+        const EVIDENCE: &str = "ev_00000000000000000000000891";
+        const BLOCKED_EVIDENCE: &str = "ev_00000000000000000000000892";
+        const SESSION: &str = "sess_00000000000000000000000891";
+
+        // Use deterministic vectors while exercising the production semantic
+        // dispatch. These tests measure exclusion/admission, not model quality.
+        struct SemanticFixture(HashEmbedder);
+
+        impl Embedder for SemanticFixture {
+            fn embed<'a>(
+                &'a self,
+                cx: &'a asupersync::Cx,
+                text: &'a str,
+            ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+                self.0.embed(cx, text)
+            }
+
+            fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+                self.0.identity()
+            }
+
+            fn id(&self) -> &str {
+                self.0.id()
+            }
+
+            fn model_name(&self) -> &str {
+                self.0.model_name()
+            }
+
+            fn dimension(&self) -> usize {
+                self.0.dimension()
+            }
+
+            fn is_semantic(&self) -> bool {
+                true
+            }
+
+            fn category(&self) -> frankensearch::core::traits::ModelCategory {
+                self.0.category()
+            }
+        }
+
+        struct Fixture {
+            _root: tempfile::TempDir,
+            _embedder: crate::core::index::TestWorkspaceEmbedderStackGuard,
+            options: SearchOptions,
+            workspace_id: String,
+            db: DbConnection,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let root = tempfile::tempdir().expect("fixture directory");
+                let workspace = root.path().canonicalize().expect("canonical workspace");
+                std::fs::create_dir(workspace.join(".ee")).expect("store directory");
+                std::fs::write(
+                    workspace.join(".ee/config.toml"),
+                    "[memory]\ninclude_global = false\n[search]\nrerank = \"off\"\n",
+                )
+                .expect("reranking disabled in actual search configuration");
+                let database = workspace.join(".ee/ee.db");
+                let db = DbConnection::open_file(&database).expect("fixture source");
+                db.migrate().expect("migrate source");
+                let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+                db.insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.display().to_string(),
+                        name: None,
+                    },
+                )
+                .expect("fixture workspace");
+                let _embedder = crate::core::index::install_test_workspace_embedder(
+                    &workspace_id,
+                    EmbedderStack::from_parts(
+                        Arc::new(SemanticFixture(HashEmbedder::default_256())),
+                        None,
+                    ),
+                );
+                db.insert_session(
+                    SESSION,
+                    &CreateSessionInput {
+                        workspace_id: workspace_id.clone(),
+                        cass_session_id: "exclusion-private-source".to_owned(),
+                        source_path: Some("/private/exclusion-source.jsonl".to_owned()),
+                        agent_name: Some("codex".to_owned()),
+                        model: None,
+                        started_at: None,
+                        ended_at: None,
+                        message_count: 3,
+                        token_count: None,
+                        content_hash: format!("blake3:{}", blake3::hash(b"exclusion-session")),
+                        metadata_json: None,
+                    },
+                )
+                .expect("source session");
+                let blocked = format!(
+                    "copper kestrel release {}legacy unsafe shortcut",
+                    "documented procedure ".repeat(30)
+                );
+                for (memory, rule, evidence, content, line) in [
+                    (
+                        MEMORY,
+                        RULE,
+                        EVIDENCE,
+                        "copper kestrel release verified procedure",
+                        1,
+                    ),
+                    (
+                        BLOCKED_MEMORY,
+                        BLOCKED_RULE,
+                        BLOCKED_EVIDENCE,
+                        blocked.as_str(),
+                        2,
+                    ),
+                ] {
+                    db.insert_memory(memory, &test_memory_input(&workspace_id, content))
+                        .expect("source memory");
+                    db.insert_procedural_rule(
+                        rule,
+                        &crate::db::CreateProceduralRuleInput {
+                            workspace_id: workspace_id.clone(),
+                            content: content.to_owned(),
+                            confidence: 0.9,
+                            utility: 0.8,
+                            importance: 0.8,
+                            trust_class: "human_explicit".to_owned(),
+                            scope: "workspace".to_owned(),
+                            scope_pattern: None,
+                            maturity: "validated".to_owned(),
+                            protected: true,
+                            source_memory_ids: vec![memory.to_owned()],
+                            tags: Vec::new(),
+                        },
+                    )
+                    .expect("source native rule");
+                    db.insert_evidence_span(
+                        evidence,
+                        &Self::evidence_input(&workspace_id, line, content, Vec::new()),
+                    )
+                    .expect("source native evidence");
+                }
+                let options = SearchOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database),
+                    index_dir: Some(workspace.join(".ee/index")),
+                    query: "copper kestrel release -legacy".to_owned(),
+                    limit: 20,
+                    memory_scope: MemoryScope::Workspace,
+                    relevance_floor: Some(0.0),
+                    ..source_mode_test_options(SearchSourceMode::Hybrid, false)
+                };
+                Self {
+                    _root: root,
+                    _embedder,
+                    options,
+                    workspace_id,
+                    db,
+                }
+            }
+
+            fn evidence_input(
+                workspace: &str,
+                line: u32,
+                content: &str,
+                inherited_redaction_classes: Vec<String>,
+            ) -> CreateEvidenceSpanInput {
+                CreateEvidenceSpanInput {
+                    workspace_id: workspace.to_owned(),
+                    session_id: SESSION.to_owned(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("exclusion-span-{line}"),
+                    span_kind: "message".to_owned(),
+                    start_line: line,
+                    end_line: line,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: content.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(content.as_bytes())),
+                    metadata_json: None,
+                    inherited_redaction_classes,
+                }
+            }
+
+            fn rebuild(&self) {
+                let report =
+                    crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                        workspace_path: self.options.workspace_path.clone(),
+                        database_path: self.options.database_path.clone(),
+                        index_dir: self.options.index_dir.clone(),
+                        dry_run: false,
+                    })
+                    .expect("publish native fixture corpus");
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+            }
+        }
+
+        fn assert_exclusions(report: &SearchReport, mode: SearchSourceMode) {
+            assert_eq!(report.status, SearchStatus::Success, "{:?}", report.errors);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert_eq!(report.source_mode_applied, mode);
+            assert_eq!(
+                report.rerank_configured_mode,
+                crate::config::SearchRerankMode::Off
+            );
+            assert!(!report.rerank_runtime_available);
+            for id in [MEMORY, RULE, EVIDENCE] {
+                assert!(
+                    report.results.iter().any(|hit| hit.doc_id == id),
+                    "missing {id}"
+                );
+            }
+            for id in [BLOCKED_MEMORY, BLOCKED_RULE, BLOCKED_EVIDENCE] {
+                assert!(
+                    !report.results.iter().any(|hit| hit.doc_id == id),
+                    "leaked {id}"
+                );
+            }
+        }
+
+        #[test]
+        fn rerank_off_exclusions_work_in_default_search_and_diagnostics() {
+            let mut fixture = Fixture::new();
+            fixture.rebuild();
+            for mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+                fixture.options.source_mode = mode;
+                for query in [
+                    "copper kestrel release -legacy",
+                    "copper kestrel release NOT \"unsafe shortcut\"",
+                ] {
+                    fixture.options.query = query.to_owned();
+                    let report = run_search(&fixture.options).expect("ordinary exclusion search");
+                    assert_exclusions(&report, mode);
+                    let diag =
+                        run_diag_search(&fixture.options).expect("diagnostic exclusion search");
+                    assert_exclusions(&diag.final_report, mode);
+                    // Raw vector diagnostics intentionally expose pre-fusion
+                    // candidates, while the final result obeys query negation.
+                    assert!(
+                        diag.pre_fusion
+                            .semantic_fast
+                            .results
+                            .iter()
+                            .any(|hit| hit.doc_id == BLOCKED_MEMORY)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn exclusion_source_withholds_absent_private_sealed_and_quarantined_rows() {
+            let fixture = Fixture::new();
+            const PRIVATE: &str = "mem_00000000000000000000000893";
+            const SEALED: &str = "mem_00000000000000000000000894";
+            const QUARANTINED: &str = "ev_00000000000000000000000893";
+            fixture
+                .db
+                .insert_workspace(
+                    "wsp_00000000000000000000000893",
+                    &CreateWorkspaceInput {
+                        path: fixture
+                            .options
+                            .workspace_path
+                            .join("foreign")
+                            .display()
+                            .to_string(),
+                        name: None,
+                    },
+                )
+                .expect("foreign workspace");
+            fixture
+                .db
+                .insert_memory(
+                    PRIVATE,
+                    &test_memory_input("wsp_00000000000000000000000893", "private source body"),
+                )
+                .expect("foreign memory");
+            fixture
+                .db
+                .insert_memory(
+                    SEALED,
+                    &test_memory_input(
+                        &fixture.workspace_id,
+                        crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                    ),
+                )
+                .expect("sealed memory");
+            fixture
+                .db
+                .insert_memory_seal(
+                    SEALED,
+                    &crate::models::memory_seal_commitment(b"private protocol"),
+                    "2026-01-01T00:00:00Z",
+                )
+                .expect("closed seal");
+            fixture
+                .db
+                .insert_evidence_span(
+                    QUARANTINED,
+                    &Fixture::evidence_input(
+                        &fixture.workspace_id,
+                        3,
+                        "[REDACTED:history] private archived body",
+                        vec!["history".to_owned()],
+                    ),
+                )
+                .expect("quarantined source");
+            let snapshot =
+                rule_admission::memory_revisions::RevisionReadSnapshot::begin(&fixture.db)
+                    .expect("source snapshot");
+            let provider = SearchExclusionTextProvider::for_query(
+                &fixture.options.query,
+                Some((&fixture.options, &fixture.db)),
+            )
+            .expect("source provider")
+            .expect("negative query");
+            let unavailable = [
+                PRIVATE,
+                SEALED,
+                QUARANTINED,
+                "mem_00000000000000000000000999",
+                "mem_bad",
+                "foreign_index_row",
+            ];
+            for id in unavailable {
+                assert!(provider.text_for_doc(id).is_none(), "admitted {id}");
+            }
+            // Upstream keeps candidates whose callback returns None. The
+            // explicit retention gate must remove those IDs while preserving
+            // unrelated positively admitted results.
+            let mut candidates = unavailable
+                .into_iter()
+                .chain([MEMORY])
+                .map(|id| crate::search::ScoredResult {
+                    doc_id: id.into(),
+                    score: 1.0,
+                    source: frankensearch::ScoreSource::SemanticFast,
+                    index: None,
+                    fast_score: Some(1.0),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                })
+                .collect();
+            provider.retain_verified(&mut candidates);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].doc_id.as_str(), MEMORY);
+            assert!(
+                provider
+                    .text_for_doc(BLOCKED_RULE)
+                    .unwrap()
+                    .contains("unsafe shortcut")
+            );
+            assert!(provider.text_for_doc(SESSION).unwrap().contains("codex"));
+            assert!(
+                !provider
+                    .text_for_doc(SESSION)
+                    .unwrap()
+                    .contains("/private/")
+            );
+            assert!(
+                provider.check_storage().is_ok(),
+                "one missing source must not abort the query"
+            );
+            drop(provider);
+            snapshot.finish().expect("release source snapshot");
+            assert!(SearchExclusionTextProvider::for_query("release -legacy", None).is_err());
+            assert!(
+                SearchExclusionTextProvider::for_query("release", None)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn exclusion_hydration_borrows_snapshot_and_strict_scope_survives_later_merges() {
+            let mut fixture = Fixture::new();
+            let reader =
+                DbConnection::open_file_read_only(&fixture.options.resolve_database_path())
+                    .expect("read-only source");
+            let snapshot = rule_admission::memory_revisions::RevisionReadSnapshot::begin(&reader)
+                .expect("pin source generation");
+            let provider = SearchExclusionTextProvider::for_query(
+                &fixture.options.query,
+                Some((&fixture.options, &reader)),
+            )
+            .expect("snapshot provider")
+            .unwrap();
+            fixture
+                .db
+                .tombstone_memory(BLOCKED_MEMORY)
+                .expect("concurrent source change");
+            // This candidate was not previously cached. Its body and authority
+            // must still come from the source generation pinned by the caller.
+            assert!(
+                provider
+                    .text_for_doc(BLOCKED_MEMORY)
+                    .unwrap()
+                    .contains("legacy")
+            );
+            drop(provider);
+            snapshot.finish().expect("release pinned generation");
+            let current = SearchExclusionTextProvider::for_query(
+                &fixture.options.query,
+                Some((&fixture.options, &reader)),
+            )
+            .expect("current provider")
+            .unwrap();
+            assert!(current.text_for_doc(BLOCKED_MEMORY).is_none());
+            drop(current);
+
+            fixture.options.memory_scope = MemoryScope::Global;
+            fixture.options.strict_scope = true;
+            let provider = SearchExclusionTextProvider::for_query(
+                &fixture.options.query,
+                Some((&fixture.options, &reader)),
+            )
+            .expect("strict provider")
+            .unwrap();
+            assert!(provider.text_for_doc(MEMORY).is_none());
+            let mut hits = Vec::new();
+            let mut degraded = Vec::new();
+            provider.apply_scope_decision(&mut hits, &mut degraded);
+            assert_eq!(degraded[0].code, "scope_strict_excluded_evidence");
+            // Simulate a positively admitted global-store result merged after
+            // local retrieval: it cannot repopulate a strictly rejected request.
+            hits.push(SearchHit {
+                doc_id: MEMORY.to_owned(),
+                score: 1.0,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(1.0),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            });
+            let (hits, _) =
+                apply_memory_scope_visibility(&fixture.options, hits, &mut degraded, Some(&reader));
+            assert!(hits.is_empty());
+            assert_eq!(
+                degraded
+                    .iter()
+                    .filter(|entry| entry.code == "scope_strict_excluded_evidence")
+                    .count(),
+                1
+            );
         }
     }
 
