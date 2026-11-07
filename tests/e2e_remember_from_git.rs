@@ -441,6 +441,221 @@ fn assert_persisted_anchors(workspace: &Path, log_path: &Path, memory_id: &str) 
     )
 }
 
+#[cfg(feature = "lexical-bm25")]
+fn run_deferred_ee_json(workspace: &Path, log_path: &Path, args: &[&str]) -> Result<Value, String> {
+    let mut start = TestEvent::new(TEST_ID, EventKind::CommandStart);
+    start.command = Some(env!("CARGO_BIN_EXE_ee").to_owned());
+    start.args = args.iter().map(|arg| (*arg).to_owned()).collect();
+    emit_event(log_path, start)?;
+    let started = Instant::now();
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join("deferred-env"))?
+        // A host opt-out must not mask the tagged-proposal regression.
+        .env_remove("EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS")
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run isolated deferred-index fixture: {error}"))?;
+    let mut end = TestEvent::new(TEST_ID, EventKind::CommandEnd);
+    end.command = Some(env!("CARGO_BIN_EXE_ee").to_owned());
+    end.args = args.iter().map(|arg| (*arg).to_owned()).collect();
+    end.exit_code = output.status.code();
+    end.elapsed_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    end.stdout_hash = Some(hash_bytes(&output.stdout));
+    end.stderr_excerpt = Some(excerpt_stderr(&output.stderr, 4096));
+    emit_event(log_path, end)?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("deferred-index fixture response must be JSON: {error}"))?;
+    assert_logged(
+        log_path,
+        "deferred_index_command_success",
+        output.status.success() && parsed["success"] == Value::Bool(true),
+        json!({
+            "args": args,
+            "exit": output.status.code(),
+            "schema": parsed["schema"],
+            "stderr": excerpt_stderr(&output.stderr, 4096),
+        }),
+    )?;
+    Ok(parsed)
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn remember_defer_index_persists_plain_and_git_captures_before_publication() -> TestResult {
+    let workspace = unique_workspace("deferred-index")?;
+    let log_path = workspace.join("deferred_index_events.jsonl");
+    seed_git_repo(&workspace, &log_path)?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_owned())?;
+    run_deferred_ee_json(
+        &workspace,
+        &log_path,
+        &["--workspace", workspace_arg, "--json", "init"],
+    )?;
+    let seed = run_deferred_ee_json(
+        &workspace,
+        &log_path,
+        &[
+            "--workspace",
+            workspace_arg,
+            "--json",
+            "remember",
+            "A published baseline records database generation ownership.",
+        ],
+    )?;
+    assert_logged(
+        &log_path,
+        "default_remember_publishes_index",
+        seed["data"]["index_status"].as_str() == Some("indexed"),
+        json!({"indexStatus": seed["data"]["index_status"]}),
+    )?;
+    let before = run_deferred_ee_json(
+        &workspace,
+        &log_path,
+        &["--workspace", workspace_arg, "--json", "index", "status"],
+    )?;
+    let initial_generation = before["data"]["indexGeneration"]
+        .as_u64()
+        .ok_or_else(|| "seed must publish a generation before testing deferral".to_owned())?;
+    let mut expected_hits = Vec::new();
+    for (mode, capture_args, query) in [
+        (
+            "plain",
+            vec![
+                "Deferredcapturefixture retains release verification evidence.",
+                "--tags",
+                "deferred-release",
+                "--idempotency-key",
+                "deferred-plain",
+                "--defer-index",
+            ],
+            "Deferredcapturefixture",
+        ),
+        (
+            "git",
+            vec!["--from-commit", "HEAD", "--apply", "--defer-index"],
+            "repaired_capture_path",
+        ),
+    ] {
+        let mut args = vec!["--workspace", workspace_arg, "--json", "remember"];
+        args.extend(capture_args);
+        let parsed = run_deferred_ee_json(&workspace, &log_path, &args)?;
+        assert_remember_envelope(&log_path, &parsed, "deferred_remember_envelope")?;
+        assert_logged(
+            &log_path,
+            "deferred_remember_is_durable_and_queued",
+            parsed["data"]["persisted"] == Value::Bool(true)
+                && parsed["data"]["index_status"].as_str() == Some("queued")
+                && parsed["data"]["curation_candidate_status"].as_str()
+                    == Some("skipped_too_few_neighbors"),
+            json!({
+                "mode": mode,
+                "persisted": parsed["data"]["persisted"],
+                "indexStatus": parsed["data"]["index_status"],
+                "curationStatus": parsed["data"]["curation_candidate_status"],
+            }),
+        )?;
+        let id = memory_id(&parsed)?.to_owned();
+        let job_id = parsed["data"]["index_job_id"]
+            .as_str()
+            .ok_or_else(|| "deferred response must identify its durable job".to_owned())?;
+        let audit_id = parsed["data"]["audit_id"]
+            .as_str()
+            .ok_or_else(|| "deferred response must identify its source audit".to_owned())?;
+        let connection = DbConnection::open_file_read_only(&workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory(&id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "deferred memory must already exist in source storage".to_owned())?;
+        let job = connection
+            .get_search_index_job(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "deferred job must already exist in source storage".to_owned())?;
+        let audits = connection
+            .list_audit_by_target("memory", &id, None)
+            .map_err(|error| error.to_string())?;
+        assert_logged(
+            &log_path,
+            "deferred_source_job_and_audit_are_committed",
+            stored.content == content(&parsed)?
+                && job.status == "pending"
+                && job.document_id.as_deref() == Some(id.as_str())
+                && audits.iter().any(|audit| audit.id == audit_id),
+            json!({"mode": mode, "memoryId": id, "jobId": job_id, "jobStatus": job.status}),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        if mode == "git" {
+            assert_commit_capture_response(&log_path, &parsed, true)?;
+            assert_persisted_anchors(&workspace, &log_path, &id)?;
+        }
+        let status = run_deferred_ee_json(
+            &workspace,
+            &log_path,
+            &["--workspace", workspace_arg, "--json", "index", "status"],
+        )?;
+        assert_logged(
+            &log_path,
+            "deferred_capture_does_not_publish_during_proposal",
+            status["data"]["indexGeneration"].as_u64() == Some(initial_generation)
+                && status["data"]["dbGeneration"].as_u64() != Some(initial_generation),
+            json!({"mode": mode, "before": initial_generation, "after": status["data"]}),
+        )?;
+        expected_hits.push((id, query));
+    }
+    run_deferred_ee_json(
+        &workspace,
+        &log_path,
+        &["--workspace", workspace_arg, "--json", "index", "rebuild"],
+    )?;
+    let published = run_deferred_ee_json(
+        &workspace,
+        &log_path,
+        &["--workspace", workspace_arg, "--json", "index", "status"],
+    )?;
+    assert_logged(
+        &log_path,
+        "explicit_rebuild_publishes_deferred_source_generation",
+        published["data"]["health"].as_str() == Some("ready")
+            && published["data"]["dbGeneration"] == published["data"]["indexGeneration"],
+        json!({"status": published["data"]}),
+    )?;
+    for (id, query) in expected_hits {
+        let search = run_deferred_ee_json(
+            &workspace,
+            &log_path,
+            &[
+                "--workspace",
+                workspace_arg,
+                "--json",
+                "search",
+                query,
+                "--source-mode",
+                "lexical_only",
+                "--strict-source-mode",
+                "--speed",
+                "instant",
+                "--memory-scope",
+                "workspace",
+                "--relevance-floor",
+                "0",
+                "--limit",
+                "20",
+            ],
+        )?;
+        let found = search["data"]["results"]
+            .as_array()
+            .is_some_and(|hits| hits.iter().any(|hit| hit["docId"].as_str() == Some(id.as_str())));
+        assert_logged(
+            &log_path,
+            "published_deferred_memory_is_retrievable_by_exact_identity",
+            found,
+            json!({"memoryId": id, "query": query}),
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn remember_from_git_real_binary_captures_dry_run_apply_and_anchors() -> TestResult {
     let workspace = unique_workspace("capture")?;

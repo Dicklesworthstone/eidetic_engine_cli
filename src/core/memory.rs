@@ -683,9 +683,9 @@ pub fn remember_memory(
     remember_memory_inner(options, &mut id_source, None, false, &[], None)
 }
 
-/// [`remember_memory`] with the search-index publish optionally deferred
-/// (bd-2efx1): the index job is enqueued transactionally but left
-/// pending for a later coalesced drain. Batch-lane internal.
+/// [`remember_memory`] with search-index publication optionally deferred.
+/// The source transaction enqueues the job; a batch drain, daemon, or explicit
+/// rebuild publishes the source later.
 fn remember_memory_with_index_mode(
     options: &RememberMemoryOptions<'_>,
     defer_index_processing: bool,
@@ -1794,15 +1794,15 @@ fn remember_memory_outcome_inner_with_store(
 
     let index_dir = prepared.index_dir.clone();
     let index_report = if defer_index_processing {
-        // bd-2efx1: leave the job pending; the batch lane drains every
-        // pending job with one coalesced rebuild after its last line.
+        // The source transaction already enqueued this job. The caller or
+        // a later index worker owns publication for a deferred write.
         IndexProcessingJobReport {
             job_id: index_job_id.clone(),
             job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
             document_source: Some("memory".to_owned()),
             document_id: None,
             outcome: "skipped".to_owned(),
-            processing_mode: "deferred_to_coalesced_batch_rebuild".to_owned(),
+            processing_mode: "deferred_to_index_queue".to_owned(),
             documents_total: 1,
             documents_indexed: 0,
             error: None,
@@ -5157,7 +5157,7 @@ fn finish_remember_memory_after_primary_commit(
             document_source: Some("memory".to_owned()),
             document_id: None,
             outcome: "skipped".to_owned(),
-            processing_mode: "deferred_to_coalesced_batch_rebuild".to_owned(),
+            processing_mode: "deferred_to_index_queue".to_owned(),
             documents_total: 1,
             documents_indexed: 0,
             error: None,
@@ -7220,10 +7220,12 @@ pub struct RememberWriteControls<'a> {
     pub reinforce: bool,
     /// Optional idempotency key for replay-safe writes.
     pub idempotency_key: Option<&'a str>,
-    /// bd-2efx1: leave this write's search-index job pending instead of
-    /// publishing it synchronously. The batch lane sets this and drains
-    /// every pending job with ONE coalesced rebuild after the last line —
-    /// without it each line pays a full index rebuild (O(n²) ingest).
+    /// Leave this write's search-index job pending instead of publishing it
+    /// synchronously. Single writes can opt in for later daemon processing
+    /// or explicit source publication with an index rebuild; batches drain
+    /// their jobs together after the last line. Remember-time proposal uses
+    /// tag-overlap neighbors so its search lookup cannot publish the index
+    /// as a side effect.
     pub defer_index_processing: bool,
 }
 

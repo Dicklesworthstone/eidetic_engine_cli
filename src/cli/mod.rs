@@ -10294,6 +10294,18 @@ pub struct RememberArgs {
     #[arg(long = "no-propose-candidates", action = ArgAction::SetTrue)]
     pub no_propose_candidates: bool,
 
+    /// Leave this memory's search-index job queued for a daemon or explicit rebuild.
+    ///
+    /// The memory is durably stored before returning. Search visibility may lag;
+    /// reads only repair small bounded backlogs automatically. Remember-time
+    /// curation uses tag-overlap neighbors without triggering index publication.
+    #[arg(
+        long = "defer-index",
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["batch", "stdin", "reinforce", "global"]
+    )]
+    pub defer_index: bool,
+
     /// Confidence score (0.0 to 1.0).
     #[arg(long, default_value = "0.8")]
     pub confidence: f32,
@@ -59220,6 +59232,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         workflow: args.workflow.clone(),
         no_auto_link: args.no_auto_link,
         no_propose_candidates: args.no_propose_candidates,
+        defer_index: false,
         confidence: args.confidence,
         source: args.source.clone(),
         global: false,
@@ -59736,10 +59749,22 @@ fn remember_attempt_family_from_args(
         }))
 }
 
+fn validate_remember_index_deferral(args: &RememberArgs) -> Result<(), DomainError> {
+    if args.defer_index && (args.batch || args.stdin || args.reinforce || args.global) {
+        return Err(DomainError::Usage {
+            message: "--defer-index cannot be combined with --batch, --stdin, --reinforce, or --global"
+                .to_owned(),
+            repair: Some("ee remember \"<content>\" --defer-index --json".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn handle_remember(
     cli: &Cli,
     args: &RememberArgs,
 ) -> Result<(RememberOutcome, Option<serde_json::Value>), DomainError> {
+    validate_remember_index_deferral(args)?;
     let workspace_path = cli.resolve_workspace();
     validate_remember_sentinels(args)?;
     if args.seal {
@@ -59838,7 +59863,7 @@ fn handle_remember(
         let controls = RememberWriteControls {
             reinforce: false,
             idempotency_key: args.idempotency_key.as_deref(),
-            defer_index_processing: false,
+            defer_index_processing: args.defer_index,
         };
         let creation_companions = remember_creation_companions_from_args(args, None);
         let outcome = if args.global {
@@ -59915,7 +59940,7 @@ fn handle_remember(
     let controls = RememberWriteControls {
         reinforce: args.reinforce,
         idempotency_key: args.idempotency_key.as_deref(),
-        defer_index_processing: false,
+        defer_index_processing: args.defer_index,
     };
     let outcome = if args.global {
         remember_global_memory_with_creation_companions(
@@ -60100,6 +60125,9 @@ where
     W: Write,
     E: Write,
 {
+    if let Err(error) = validate_remember_index_deferral(args) {
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+    }
     let usage = |message: &str| DomainError::Usage {
         message: message.to_owned(),
         repair: Some("ee remember --help".to_owned()),
@@ -94131,6 +94159,11 @@ mod tests {
             Some(Command::Note(ref args)) => {
                 let remember_args = super::note_to_remember_args(args);
                 ensure_equal(
+                    &remember_args.defer_index,
+                    &false,
+                    "note keeps inline publication",
+                )?;
+                ensure_equal(
                     &remember_args.level,
                     &"procedural".to_string(),
                     "inferred level",
@@ -99370,6 +99403,121 @@ demos:
             ),
             _ => Err("expected Remember command".to_string()),
         }
+    }
+
+    #[test]
+    fn remember_defer_index_is_explicit_and_accepts_capture_modes() -> TestResult {
+        let ordinary = Cli::try_parse_from(["ee", "remember", "Keep default publication."])
+            .map_err(|error| error.to_string())?;
+        let Some(Command::Remember(args)) = ordinary.command else {
+            return Err("expected Remember command".to_owned());
+        };
+        ensure(
+            !args.defer_index,
+            "remember publication remains synchronous by default",
+        )?;
+        for argv in [
+            vec!["ee", "remember", "Queue an explicit memory.", "--defer-index"],
+            vec![
+                "ee",
+                "remember",
+                "Queue a custom-store memory.",
+                "--database",
+                "selected.db",
+                "--defer-index",
+            ],
+            vec![
+                "ee",
+                "remember",
+                "--from-commit",
+                "HEAD",
+                "--apply",
+                "--defer-index",
+            ],
+            vec!["ee", "remember", "--from-diff", "HEAD~1", "--defer-index"],
+            vec!["ee", "remember", "--from-worktree", "--defer-index"],
+        ] {
+            let parsed = Cli::try_parse_from(argv).map_err(|error| error.to_string())?;
+            let Some(Command::Remember(args)) = parsed.command else {
+                return Err("expected deferred Remember command".to_owned());
+            };
+            ensure(
+                args.defer_index,
+                "explicit defer flag is retained for every capture mode",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_defer_index_rejects_unsupported_combinations_before_storage() -> TestResult {
+        for flag in ["--batch", "--stdin", "--reinforce", "--global"] {
+            let error = Cli::try_parse_from([
+                "ee",
+                "remember",
+                "Invalid deferred combination.",
+                "--defer-index",
+                flag,
+            ])
+            .expect_err("unsupported defer combination must fail parsing");
+            ensure_equal(
+                &error.kind(),
+                &clap::error::ErrorKind::ArgumentConflict,
+                "defer-index conflict",
+            )?;
+        }
+
+        // Programmatic callers can construct args without Clap. Guard the
+        // handlers as well, before touching storage or consuming batch stdin.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().to_string_lossy().into_owned();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "remember",
+            "Reject direct invalid deferral.",
+            "--defer-index",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(Command::Remember(ref base)) = parsed.command else {
+            return Err("expected Remember command".to_owned());
+        };
+        for flag in ["batch", "stdin", "reinforce", "global"] {
+            let mut args = base.clone();
+            match flag {
+                "batch" => args.batch = true,
+                "stdin" => args.stdin = true,
+                "reinforce" => args.reinforce = true,
+                "global" => args.global = true,
+                _ => return Err("unexpected test flag".to_owned()),
+            }
+            match super::handle_remember(&parsed, &args) {
+                Err(DomainError::Usage { message, .. }) => {
+                    ensure(
+                        message.contains("--defer-index"),
+                        "direct handler names the conflict",
+                    )?;
+                }
+                other => {
+                    return Err(format!(
+                        "expected direct deferred usage error, got {other:?}"
+                    ));
+                }
+            }
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::handle_remember_batch(&parsed, &args, &mut stdout, &mut stderr);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                "direct batch handler rejects deferral",
+            )?;
+        }
+        ensure(
+            !temp.path().join(".ee").exists(),
+            "invalid deferral never initializes a store",
+        )
     }
 
     #[test]

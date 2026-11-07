@@ -673,6 +673,7 @@ Current top-level groups:
 | `ee journal distill [--dry-run\|--apply] --json` | Turn repeated or surprising journal entries into reviewable curation candidates; dry-run is the safe default |
 | `ee journal list` / `ee journal show <entry-id>` | Inspect append-only journal entries, truncation/redaction state, and distillation bookkeeping |
 | `ee remember --batch --stdin --json` | Record a JSONL batch of curated memories with independent per-line results and quarantine reporting |
+| `ee remember "<text>" --defer-index --json` | Store a workspace memory and leave its index job queued for a daemon or explicit rebuild; also works with git capture and explicit database paths |
 | `ee remember "<text>" --reinforce --json` | Corroborate an existing near-duplicate memory through bounded reinforcement instead of creating a redundant row |
 | `ee decide record "<topic>" --chosen <x> --alternative <y> --rationale "<why>" [--revisit-by <RFC3339\|+ND>]` | Record a decision-kind memory with typed fields and fork protection |
 | `ee decide list [--about <text>] [--include-superseded] --json` | Review current decision heads or full supersede history before proposing architecture changes |
@@ -690,6 +691,35 @@ Current top-level groups:
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
 | `ee preflight check --cmd "<shell command>" --json` | Retrieve advisory risk, failure, and anti-pattern memory for a command; never block execution |
 | `ee verify proofs --json` | Check committed Lean4 and TLA+ proof artifacts |
+
+### Deferred index publication for individual memories
+
+Use `--defer-index` when a capture should commit its source memory and durable
+index job without publishing the search index during that write:
+
+```bash
+ee remember "Release verification needs the retained evidence bundle." \
+  --workspace . --tags release --defer-index --json
+ee remember --from-commit HEAD --apply --workspace . --defer-index --json
+ee index rebuild --workspace .
+```
+
+The response's `data.index_status` reflects the durable index state. `queued`
+means the memory is stored and its index work is still pending; a concurrent
+worker may finish it before the response is rendered. A running daemon can
+drain the queue, or `ee index rebuild` can publish it explicitly. Include the
+same `--database <path>` on the rebuild when capturing into a selected database.
+Search visibility can lag until publication: automatic read repair only handles
+small bounded backlogs and does not guarantee that the next query publishes
+all queued work.
+
+Remember-time curation remains enabled and uses deterministic tag-overlap
+neighbors while publication is deferred. It skips the search-neighbor probe
+because that probe can otherwise publish the index as a side effect. Without
+`--defer-index`, individual captures keep their existing publication behavior.
+Dry runs still write nothing, and git capture still requires `--apply` to persist.
+The flag conflicts with `--global`, `--reinforce`, `--batch`, and `--stdin`;
+JSONL batches already defer individual jobs and publish once at the end.
 
 ### Optional explanation budgets
 
