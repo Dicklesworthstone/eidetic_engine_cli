@@ -2109,6 +2109,22 @@ run_stage "Degraded Code Classification Contract" "python3 scripts/check-degrade
 # docs <-> registry <-> enum chain is checkable here.
 run_stage "Exit Code Docs Contract" "python3 scripts/check-exit-code-docs.py --self-test"
 run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
+# bd-b5j51. Index reuse is gated by expected_index_corpus_revision(), and
+# LEXICAL_ANALYZER_REVISION participates in that hash so a generation built
+# under different text analysis is rebuilt rather than reused. That constant had
+# exactly two occurrences -- its definition and the one hashing site -- while
+# the analyzer is DEFINED elsewhere, so an analyzer edit that forgot the bump
+# would leave every existing index reused under the old analysis while queries
+# used the new one: silent recall loss, no error, no degraded code. Same failure
+# shape as the North Star inflection miss that 8ec0a2715 just repaired.
+# The three engine regressions added with that fix each build a FRESH index in a
+# tempdir, so none of them can observe a reuse bug -- they assert the analyzer is
+# correct today, not that changed analysis forces a rebuild. Python because
+# cargo does not run on the Mac dev host at all, which is where that blind spot
+# is total. MEASURED 2026-11-07: lint 130ms, self-test 60ms (19 arms). Both rows
+# declare the manifest's 1s floor for sub-second checks.
+run_stage "Lexical Analyzer Revision Contract" "python3 scripts/check-lexical-analyzer-revision.py --self-test"
+run_stage "Lexical Analyzer Revision Lint" "python3 scripts/check-lexical-analyzer-revision.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
 # The `implements-surface` convention is discharged by an artifact nobody opens,
 # 111 times out of 113. `closure-lint.sh` requires a golden to EXIST and (since

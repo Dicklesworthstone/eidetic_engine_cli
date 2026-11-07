@@ -46,7 +46,18 @@ pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_
 pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
 /// Index and query analysis must advance together. This participates in the
 /// corpus revision so literal-token generations are rebuilt before reuse.
-pub(crate) const LEXICAL_ANALYZER_REVISION: &str = "ee.lexical_analyzer.english_stem.v1";
+///
+/// The `+fp` segment is a fingerprint of the analyzer source itself, covering
+/// `configure_lexical_analyzer` below and the registration in
+/// `core::index_delta_lexical::maintenance_writer`. It is enforced by
+/// `scripts/check-lexical-analyzer-revision.py`, which recomputes it and fails
+/// when analysis has changed without this constant moving -- the state in which
+/// every existing index is reused under the old analysis while queries use the
+/// new one (bd-b5j51). Run that script to obtain the value; do not hand-edit the
+/// hex. Bump the `v1` segment as well when consumers should see a named change,
+/// and bump it alone when analysis changes upstream with no diff here.
+pub(crate) const LEXICAL_ANALYZER_REVISION: &str =
+    "ee.lexical_analyzer.english_stem.v1+fp06a7c85ae6";
 /// v4 (bd-reality-core-convergence-1azkt.45): the shared typed projection
 /// excludes reasoning and unprojectable records, handles summaries, and labels
 /// each message with its actual role. Changing the corpus revision prevents
