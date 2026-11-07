@@ -4516,17 +4516,7 @@ fn collect_workspace_index_source_snapshot_with_limit(
             .chain(evidence_docs)
             .map(CanonicalSearchDocument::into_indexable)
             .collect();
-        let open_job_ids = db
-            .list_search_index_jobs(workspace_id, None)?
-            .into_iter()
-            .filter(|job| {
-                matches!(
-                    job.status_enum(),
-                    Some(SearchIndexJobStatus::Pending | SearchIndexJobStatus::Running)
-                )
-            })
-            .map(|job| job.id)
-            .collect();
+        let open_job_ids = db.open_search_index_job_ids_in_current_snapshot(workspace_id)?;
         Ok(Some(WorkspaceIndexSourceSnapshot {
             generation: captured_generation.unwrap_or_else(|| u64::from(documents_total)),
             memories_indexed,

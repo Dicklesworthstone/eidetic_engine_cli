@@ -15,8 +15,8 @@ use super::{
     BTreeSet, CanonicalSearchDocument, DbConnection, DbError, DbOperation, DeltaStageError,
     EvidenceAdmissionReport, IncrementalFallback, IndexDocumentCounts, IndexEmbedderFingerprint,
     IndexModelSelection, IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path,
-    RuleIndexProjection, RunningIndexJobFinalizer, SearchIndexJobStatus, SearchIndexJobType,
-    StoredSearchIndexJob, UnpublishedIndexStage, append_failed_index_job_transition,
+    RuleIndexProjection, RunningIndexJobFinalizer, SearchIndexJobType, StoredSearchIndexJob,
+    UnpublishedIndexStage, append_failed_index_job_transition,
     artifact_to_document, checked_document_counts, complete_running_index_job_in_txn, delta,
     embedder_fingerprint_for_index_metadata, embedder_reports_pending_model2vec_download,
     evidence_span_to_document, finalize_coalesced_claimed_jobs, index_operation_checkpoint,
@@ -264,17 +264,7 @@ fn capture_with_control(
         index_operation_checkpoint(cx, control)?;
         let document_counts =
             checked_document_counts(counts[0], counts[1], counts[2], counts[3], counts[4])?;
-        let open_job_ids = db
-            .list_search_index_jobs(workspace_id, None)?
-            .into_iter()
-            .filter(|job| {
-                matches!(
-                    job.status_enum(),
-                    Some(SearchIndexJobStatus::Pending | SearchIndexJobStatus::Running)
-                )
-            })
-            .map(|job| job.id)
-            .collect();
+        let open_job_ids = db.open_search_index_job_ids_in_current_snapshot(workspace_id)?;
         let mut reconciliation = match reconciler.finish() {
             Ok(reconciliation) => reconciliation,
             Err(refusal) => {

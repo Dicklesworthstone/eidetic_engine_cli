@@ -15299,13 +15299,19 @@ const RECORDED_ADMISSION_VERDICT_SQL: &str = "SELECT evidence_span_id, verdict_b
 const EVIDENCE_SEARCH_CANDIDATE_PRODUCER: &str = "cass_import";
 const EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY: &str = "admitted";
 
-/// Columns of an index-order evidence page: the evidence row in
-/// `evidence_spans_from_rows` order, then its rowid.
-const INDEX_EVIDENCE_PAGE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at, e.rowid";
+/// Body-free membership columns of an index-order evidence page.
+const INDEX_EVIDENCE_PAGE_COLUMNS: &str =
+    "e.id, e.workspace_id, e.producer_kind, e.search_eligibility, e.rowid";
 const INDEX_EVIDENCE_WORKSPACE_COLUMN: usize = 1;
-const INDEX_EVIDENCE_PRODUCER_COLUMN: usize = 14;
-const INDEX_EVIDENCE_ELIGIBILITY_COLUMN: usize = 19;
-const INDEX_EVIDENCE_ROWID_COLUMN: usize = 27;
+const INDEX_EVIDENCE_PRODUCER_COLUMN: usize = 2;
+const INDEX_EVIDENCE_ELIGIBILITY_COLUMN: usize = 3;
+const INDEX_EVIDENCE_ROWID_COLUMN: usize = 4;
+
+/// Hydrate a contiguous candidate run using only its rowid bounds. Neither a
+/// workspace predicate nor an IN lookup may redirect the planner to the
+/// secondary-index sort or whole-table scans that made paging quadratic.
+const INDEX_EVIDENCE_HYDRATION_SQL: &str = "SELECT e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at, e.rowid FROM evidence_spans e WHERE e.rowid >= ?1 AND e.rowid <= ?2 ORDER BY e.rowid ASC LIMIT ?3";
+const INDEX_EVIDENCE_HYDRATED_ROWID_COLUMN: usize = 27;
 
 /// One index-order page read by `read_index_evidence_page`.
 struct IndexEvidencePage {
@@ -18366,6 +18372,8 @@ impl DbConnection {
         cursor: Option<i64>,
         session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
     ) -> Result<IndexEvidencePage> {
+        let cx = asupersync::Cx::current();
+        checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
         let (sql, params) = index_evidence_page_query(cursor);
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         let table_rows = rows.len();
@@ -18380,10 +18388,61 @@ impl DbConnection {
                 )
             })
             .transpose()?;
-        let candidates = rows
-            .into_iter()
-            .filter(|row| index_evidence_row_is_candidate(row, workspace_id))
-            .collect::<Vec<_>>();
+        let mut candidates = Vec::new();
+        for run in rows.split(|row| !index_evidence_row_is_candidate(row, workspace_id)) {
+            let (Some(first), Some(last)) = (run.first(), run.last()) else {
+                continue;
+            };
+            checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+            let first_rowid = required_i64(
+                first,
+                INDEX_EVIDENCE_ROWID_COLUMN,
+                DbOperation::Query,
+                "rowid",
+            )?;
+            let last_rowid = required_i64(
+                last,
+                INDEX_EVIDENCE_ROWID_COLUMN,
+                DbOperation::Query,
+                "rowid",
+            )?;
+            let limit = i64::try_from(run.len()).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "Index evidence candidate run exceeds its page bound".to_owned(),
+            })? + 1;
+            let hydrated = self.query_for(
+                DbOperation::Query,
+                INDEX_EVIDENCE_HYDRATION_SQL,
+                &[
+                    Value::BigInt(first_rowid),
+                    Value::BigInt(last_rowid),
+                    Value::BigInt(limit),
+                ],
+            )?;
+            if hydrated.len() != run.len() {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Index evidence hydration changed source membership".to_owned(),
+                });
+            }
+            for (discovered, full) in run.iter().zip(&hydrated) {
+                checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+                let id = required_text(discovered, 0, DbOperation::Query, "id")?;
+                if required_text(full, 0, DbOperation::Query, "id")? != id
+                    || full.get(INDEX_EVIDENCE_HYDRATED_ROWID_COLUMN)
+                        != discovered.get(INDEX_EVIDENCE_ROWID_COLUMN)
+                    || full.get(1) != discovered.get(INDEX_EVIDENCE_WORKSPACE_COLUMN)
+                    || full.get(14) != discovered.get(INDEX_EVIDENCE_PRODUCER_COLUMN)
+                    || full.get(19) != discovered.get(INDEX_EVIDENCE_ELIGIBILITY_COLUMN)
+                {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "Index evidence hydration disagrees with discovery".to_owned(),
+                    });
+                }
+            }
+            candidates.extend(hydrated);
+        }
         Ok(IndexEvidencePage {
             rows: self.evidence_search_rows(&candidates, session_cache)?,
             last_rowid,
@@ -34426,6 +34485,28 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_search_index_job_from_row).collect()
+    }
+
+    /// Read only outstanding job identities inside the caller's source snapshot.
+    ///
+    /// Completed history can contain large diagnostics and needs neither decoding
+    /// nor sorting when a publisher only needs the pending/running membership.
+    pub(crate) fn open_search_index_job_ids_in_current_snapshot(
+        &self,
+        workspace_id: &str,
+    ) -> Result<BTreeSet<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND (status = ?2 OR status = ?3)",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_owned()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_owned()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(str::to_owned))
+            .collect()
     }
 
     /// List pending search index jobs for processing in stable FIFO order.
@@ -57881,6 +57962,134 @@ UPDATE memories
     }
 
     #[test]
+    fn index_order_discovery_hydrates_only_selected_candidate_runs() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012397";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012397', '/tmp/hydration-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let session_a =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x782_a00)).to_string();
+        let session_b =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x782_b00)).to_string();
+        connection.insert_session(&session_a, &session_input("hydration-session-a"))?;
+        let mut input_b = session_input("hydration-session-b");
+        input_b.workspace_id = workspace_b.to_owned();
+        connection.insert_session(&session_b, &input_b)?;
+
+        let kinds = [
+            "admitted",
+            "foreign",
+            "quarantined",
+            "admitted",
+            "admitted",
+            "foreign",
+            "non_cass",
+            "admitted",
+            "foreign",
+        ];
+        let mut expected = Vec::new();
+        let mut excluded = Vec::new();
+        for (index, kind) in kinds.into_iter().enumerate() {
+            // IDs run opposite to insertion order: the visitor must keep rowid order.
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x782_c100 - index as u128,
+            ))
+            .to_string();
+            let mut input = evidence_span_input(
+                if kind == "foreign" { &session_b } else { &session_a },
+                &format!("hydration-span-{index}"),
+                index as u32 * 10 + 1,
+            );
+            if kind == "foreign" {
+                input.workspace_id = workspace_b.to_owned();
+            }
+            if kind == "quarantined" {
+                input.role = Some("system".to_owned());
+            }
+            if kind == "non_cass" {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            if kind != "admitted" {
+                input.excerpt = "Stable release evidence for the cache. ".repeat(768);
+                input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+            }
+            connection.insert_evidence_span(&id, &input)?;
+            if kind == "admitted" {
+                expected.push(id);
+            } else {
+                excluded.push(id);
+            }
+        }
+
+        // Invalid body columns on excluded rows must not get decoded. The SQL
+        // storage constraint permits this value, but StoredEvidenceSpan does not.
+        for id in &excluded {
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE evidence_spans SET screening_version = ?1 WHERE id = ?2",
+                &[
+                    Value::BigInt(i64::from(u32::MAX) + 1),
+                    Value::Text(id.clone()),
+                ],
+            )?;
+        }
+        let mut visited = Vec::new();
+        let (scan, statements) = super::capture_query_sql_for_test(|| {
+            connection.visit_index_evidence_for_workspace(workspace_a, |span| {
+                visited.push(span.id);
+                Ok(())
+            })
+        });
+        let scan = scan?;
+        ensure_equal(&visited, &expected, "only selected bodies are hydrated in physical order")?;
+        ensure_equal(&scan.pages_read, &1, "one membership page is scanned")?;
+        ensure_equal(
+            &statements
+                .iter()
+                .filter(|sql| sql.as_str() == super::INDEX_EVIDENCE_HYDRATION_SQL)
+                .count(),
+            &3,
+            "adjacent candidates share one bounded hydration query",
+        )?;
+
+        let (sql, params) = super::index_evidence_page_query(None);
+        ensure(
+            !sql.contains("excerpt") && !sql.contains("metadata"),
+            "membership discovery never selects source bodies",
+        )?;
+        let rows = connection.query_for(DbOperation::Query, &sql, &params)?;
+        ensure_equal(&rows.len(), &9, "discovery still visits every table row")?;
+        ensure(
+            rows.iter().all(|row| row.get(5).is_none()),
+            "discovery carries only five membership columns",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET screening_version = ?1 WHERE id = ?2",
+            &[
+                Value::BigInt(i64::from(u32::MAX) + 1),
+                Value::Text(expected[0].clone()),
+            ],
+        )?;
+        ensure(
+            matches!(
+                connection.visit_index_evidence_for_workspace(workspace_a, |_| Ok(())),
+                Err(DbError::MalformedRow { .. })
+            ),
+            "a malformed selected body still fails the scan",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn index_order_admission_scan_issues_no_whole_table_read_per_page() -> TestResult {
         // GH#78: a full admission scan (index rebuild, its dry run, index
         // status) cost O(N^2). Every 128 rows fetched their recorded verdicts
@@ -57965,7 +58174,11 @@ UPDATE memories
 
         let page_reads = statements
             .iter()
-            .filter(|sql| sql.contains("FROM evidence_spans e") && sql.contains("ORDER BY e.rowid"))
+            .filter(|sql| {
+                sql.contains("FROM evidence_spans e")
+                    && sql.contains("ORDER BY e.rowid")
+                    && sql.as_str() != super::INDEX_EVIDENCE_HYDRATION_SQL
+            })
             .collect::<Vec<_>>();
         ensure_equal(
             &page_reads.len(),
@@ -57982,7 +58195,25 @@ UPDATE memories
                     && !predicate.contains("search_eligibility"),
                 format!("an index-order page must be a bare rowid seek: {sql}"),
             )?;
+            ensure(
+                !sql.contains("e.excerpt") && !sql.contains("e.metadata_json"),
+                "membership pages do not select full evidence bodies",
+            )?;
         }
+        let hydration_reads = statements
+            .iter()
+            .filter(|sql| sql.as_str() == super::INDEX_EVIDENCE_HYDRATION_SQL)
+            .count();
+        ensure_equal(
+            &hydration_reads,
+            &2,
+            "dense membership pages hydrate one candidate run each",
+        )?;
+        let plan = query_plan(&connection, super::INDEX_EVIDENCE_HYDRATION_SQL)?;
+        ensure(
+            plan.contains("SEARCH ") && !plan.contains("SCAN ") && !plan.contains("TEMP B-TREE"),
+            format!("candidate hydration must seek its bounded rowid range: {plan}"),
+        )?;
         connection.close()?;
         Ok(())
     }
@@ -65215,6 +65446,100 @@ UPDATE memories
         )?;
         ensure_equal(&running_jobs.len(), &1, "one running job")?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn open_index_job_snapshot_excludes_terminal_history_and_other_workspaces() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012396";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012396', '/tmp/open-jobs-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let states = [
+            (workspace_a, super::SearchIndexJobStatus::Pending),
+            (workspace_a, super::SearchIndexJobStatus::Running),
+            (workspace_a, super::SearchIndexJobStatus::Completed),
+            (workspace_a, super::SearchIndexJobStatus::Failed),
+            (workspace_a, super::SearchIndexJobStatus::Cancelled),
+            (workspace_b, super::SearchIndexJobStatus::Pending),
+            (workspace_b, super::SearchIndexJobStatus::Running),
+        ];
+        let mut expected = BTreeSet::new();
+        for (ordinal, (workspace, status)) in states.into_iter().enumerate() {
+            let id = format!("sidx_{ordinal:026}");
+            let input = super::CreateSearchIndexJobInput {
+                workspace_id: workspace.to_owned(),
+                job_type: super::SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some("mem_01234567890123456789012345".to_owned()),
+                documents_total: 1,
+            };
+            connection.insert_search_index_job(&id, &input)?;
+            if matches!(
+                status,
+                super::SearchIndexJobStatus::Running
+                    | super::SearchIndexJobStatus::Completed
+                    | super::SearchIndexJobStatus::Failed
+            ) {
+                ensure(connection.start_search_index_job(&id)?, "job starts")?;
+            }
+            match status {
+                super::SearchIndexJobStatus::Completed => {
+                    ensure(connection.complete_search_index_job(&id, 1)?, "job completes")?;
+                }
+                super::SearchIndexJobStatus::Failed => {
+                    ensure(
+                        connection.fail_search_index_job(&id, &"Historical diagnostic. ".repeat(512))?,
+                        "job fails with a stored diagnostic",
+                    )?;
+                }
+                super::SearchIndexJobStatus::Cancelled => {
+                    ensure(connection.cancel_search_index_job(&id)?, "job cancels")?;
+                }
+                _ => {}
+            }
+            if workspace == workspace_a
+                && matches!(
+                    status,
+                    super::SearchIndexJobStatus::Pending | super::SearchIndexJobStatus::Running
+                )
+            {
+                expected.insert(id);
+            }
+        }
+
+        let (open_ids, statements) = super::capture_query_sql_for_test(|| {
+            connection.with_transaction(|| {
+                connection.open_search_index_job_ids_in_current_snapshot(workspace_a)
+            })
+        });
+        ensure_equal(
+            &open_ids?,
+            &expected,
+            "only this workspace's pending and running jobs belong to the snapshot",
+        )?;
+        let reads = statements
+            .iter()
+            .filter(|sql| sql.contains("FROM search_index_jobs"))
+            .collect::<Vec<_>>();
+        ensure_equal(&reads.len(), &1, "open job membership uses one query")?;
+        ensure(
+            reads[0].starts_with("SELECT id FROM ")
+                && !reads[0].contains("ORDER BY")
+                && !reads[0].contains("error_message"),
+            "job membership neither hydrates historical diagnostics nor sorts history",
+        )?;
+        ensure(
+            connection
+                .open_search_index_job_ids_in_current_snapshot("wsp_missing")?
+                .is_empty(),
+            "an absent workspace has no outstanding job identities",
+        )?;
         connection.close()?;
         Ok(())
     }
