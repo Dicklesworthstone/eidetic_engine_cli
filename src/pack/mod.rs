@@ -9060,12 +9060,23 @@ fn pack_lod_candidate_plan(
     section_usage: &SectionTokenUsage,
     lod_usage: &PackLodBudgetState,
 ) -> Option<PackLodCandidatePlan> {
+    let available_tokens = budget
+        .max_tokens()
+        .saturating_sub(used_tokens)
+        .min(quotas.remaining(
+            candidate.section,
+            section_usage.tokens_for(candidate.section),
+        ));
     for tier in [
         PackLodTier::Full,
         PackLodTier::TruncatedPreview,
         PackLodTier::LinkOnly,
     ] {
-        let remaining = lod_usage.remaining(tier);
+        // Size compressed content to every binding limit before rendering it.
+        // A preview sized to the tier alone can exceed the remaining section
+        // quota and incorrectly fall through to a bare link or an omission,
+        // even though a shorter extractive preview would fit.
+        let remaining = lod_usage.remaining(tier).min(available_tokens);
         if remaining == 0 {
             continue;
         }
@@ -14512,6 +14523,285 @@ mod tests {
             !link_plan.candidate.content.contains("file://AGENTS.md"),
             "link-only tier should not duplicate provenance URI into content",
         )
+    }
+
+    #[test]
+    fn lod_candidate_plan_sizes_previews_to_each_remaining_limit() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let source = repeated_lod_content("preview", 400);
+        let source_tokens = estimate_tokens_default(&source);
+        ensure(source_tokens > 700, "fixture exceeds the full tier")?;
+        let candidate = candidate_with_content(1, 1.0, 0.8, source_tokens, source.clone())?;
+
+        for (label, quota, section_used, used_tokens, preview_used, limit) in [
+            ("section", SectionQuota::capped(100), 40, 40, 0, 60),
+            ("global", SectionQuota::unlimited(), 0, 950, 0, 50),
+            ("tier", SectionQuota::unlimited(), 0, 180, 180, 20),
+        ] {
+            let quotas = SectionQuotas::new(
+                quota,
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+            );
+            let mut section_usage = super::SectionTokenUsage::default();
+            section_usage.used[PackSection::ProceduralRules as usize] = section_used;
+            let mut lod_usage =
+                super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget);
+            lod_usage.add(super::PackLodTier::TruncatedPreview, preview_used);
+            let plan = super::pack_lod_candidate_plan(
+                &candidate,
+                used_tokens,
+                budget,
+                &quotas,
+                &section_usage,
+                &lod_usage,
+            )
+            .ok_or_else(|| format!("expected a preview within the {label} limit"))?;
+
+            ensure_equal(
+                &plan.tier,
+                &super::PackLodTier::TruncatedPreview,
+                &format!("{label} capacity admits useful content before a link"),
+            )?;
+            ensure(
+                plan.candidate.estimated_tokens <= limit,
+                format!("preview respects the remaining {label} capacity"),
+            )?;
+            ensure_equal(
+                &plan.candidate.estimated_tokens,
+                &estimate_tokens_default(&plan.candidate.content),
+                "compressed token cost describes the actual preview",
+            )?;
+            let prefix = plan
+                .candidate
+                .content
+                .strip_suffix(" ...")
+                .ok_or_else(|| "preview must disclose truncation".to_owned())?;
+            ensure(source.starts_with(prefix), "preview remains extractive")?;
+            let next_word_count = prefix.split_whitespace().count() + 1;
+            let longer_preview = format!(
+                "{} ...",
+                source
+                    .split_whitespace()
+                    .take(next_word_count)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            ensure(
+                estimate_tokens_default(&longer_preview) > limit,
+                format!("preview uses all available whole words under the {label} limit"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lod_candidate_plan_preserves_full_text_and_minimum_preview_boundaries() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let source = "alpha beta gamma delta epsilon";
+        let full_tokens = estimate_tokens_default(source);
+        let minimum_preview_tokens = estimate_tokens_default("alpha ...");
+        ensure(
+            minimum_preview_tokens > 1 && full_tokens > minimum_preview_tokens,
+            "fixture distinguishes full content, a minimal preview, and no space",
+        )?;
+        let candidate = candidate_with_content(1, 1.0, 0.8, full_tokens, source)?;
+        let section_usage = super::SectionTokenUsage::default();
+        let lod_usage =
+            super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget);
+
+        for (quota, expected_tier, expected_content) in [
+            (
+                SectionQuota::capped(full_tokens),
+                Some(super::PackLodTier::Full),
+                source,
+            ),
+            (
+                SectionQuota::capped(minimum_preview_tokens),
+                Some(super::PackLodTier::TruncatedPreview),
+                "alpha ...",
+            ),
+            (SectionQuota::capped(minimum_preview_tokens - 1), None, ""),
+            (SectionQuota::disabled(), None, ""),
+        ] {
+            let quotas = SectionQuotas::new(
+                quota,
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+                SectionQuota::unlimited(),
+            );
+            let plan = super::pack_lod_candidate_plan(
+                &candidate,
+                0,
+                budget,
+                &quotas,
+                &section_usage,
+                &lod_usage,
+            );
+            ensure_equal(
+                &plan.as_ref().map(|plan| plan.tier),
+                &expected_tier,
+                "exact section capacity selects the highest feasible detail tier",
+            )?;
+            if let Some(plan) = plan {
+                ensure_equal(
+                    &plan.candidate.content.as_str(),
+                    &expected_content,
+                    "full content stays intact and the minimum preview stays meaningful",
+                )?;
+            }
+        }
+        ensure(
+            super::pack_lod_candidate_plan(
+                &candidate,
+                budget.max_tokens(),
+                budget,
+                &SectionQuotas::unlimited(),
+                &section_usage,
+                &lod_usage,
+            )
+            .is_none(),
+            "compressed tiers cannot bypass an exhausted overall budget",
+        )
+    }
+
+    #[test]
+    fn lod_candidate_plan_uses_bare_link_at_exact_remaining_capacity() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidate = candidate_with_content(7, 0.9, 0.8, 900, "singleword".repeat(200))?;
+        let bare_link = candidate.memory_id.to_string();
+        let bare_link_tokens = estimate_tokens_default(&bare_link);
+        ensure(
+            estimate_tokens_default(&format!("Memory {bare_link}")) > bare_link_tokens,
+            "fixture distinguishes the labeled and bare link costs",
+        )?;
+        let quotas = SectionQuotas::new(
+            SectionQuota::capped(bare_link_tokens),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+        );
+        let plan = super::pack_lod_candidate_plan(
+            &candidate,
+            0,
+            budget,
+            &quotas,
+            &super::SectionTokenUsage::default(),
+            &super::PackLodBudgetState::from_options(PackAssemblyOptions::default(), budget),
+        )
+        .ok_or_else(|| "the bare link exactly fits the section quota".to_owned())?;
+        ensure_equal(
+            &plan.tier,
+            &super::PackLodTier::LinkOnly,
+            "a single-word source cannot produce an extractive preview",
+        )?;
+        ensure_equal(
+            &plan.candidate.content,
+            &bare_link,
+            "retain the usable source pointer",
+        )?;
+        ensure_equal(
+            &plan.candidate.estimated_tokens,
+            &bare_link_tokens,
+            "the link consumes exactly its available capacity",
+        )
+    }
+
+    #[test]
+    fn lod_previews_fill_remaining_sections_in_both_selectors_and_reused_arenas() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let source = repeated_lod_content("artifact", 400);
+        let source_tokens = estimate_tokens_default(&source);
+        ensure(source_tokens > 700, "fixture exceeds the full tier")?;
+        let anchor = candidate_in_section(
+            1,
+            PackSection::Artifacts,
+            1.0,
+            1.0,
+            40,
+            "The project manifest names the build inputs.",
+        )?;
+        let preview =
+            candidate_in_section(2, PackSection::Artifacts, 0.5, 0.5, source_tokens, source)?;
+        let determinism = Deterministic::from_seed(71);
+        let mut workspace = arena_workspace();
+
+        for profile in [ContextPackProfile::Balanced, ContextPackProfile::Submodular] {
+            let baseline = assemble_draft_with_profile_and_options_seeded(
+                profile,
+                "inspect repository artifacts",
+                budget,
+                vec![preview.clone(), anchor.clone()],
+                PackAssemblyOptions::default(),
+                &determinism,
+            )
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+            ensure_equal(
+                &baseline.items.len(),
+                &2,
+                "both useful artifacts are selected",
+            )?;
+            ensure_equal(
+                &baseline.items.first().map(|item| item.memory_id),
+                &Some(anchor.memory_id),
+                "the higher-value full item consumes section capacity first",
+            )?;
+            let selected = selected_item_for_memory(&baseline, preview.memory_id)?;
+            ensure(
+                selected.content.starts_with("artifact0 ") && selected.content.ends_with(" ..."),
+                "the second artifact retains source content instead of a link-only stub",
+            )?;
+            ensure_equal(
+                &selected_item_for_memory(&baseline, anchor.memory_id)?.content,
+                &anchor.content,
+                "the full item remains unchanged",
+            )?;
+            let quota = SectionQuotas::for_profile(profile, budget.max_tokens());
+            ensure(
+                selected.estimated_tokens <= quota.remaining(PackSection::Artifacts, 40),
+                "the preview respects the partially consumed section quota",
+            )?;
+            ensure_equal(
+                &baseline.used_tokens,
+                &(40 + selected.estimated_tokens),
+                "pack accounting includes the actual compressed cost",
+            )?;
+            ensure_equal(
+                &baseline.selection_audit.budget_used,
+                &baseline.used_tokens,
+                "selection audit agrees with pack accounting",
+            )?;
+
+            for _ in 0..2 {
+                let reused = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                    profile,
+                    "inspect repository artifacts",
+                    budget,
+                    vec![anchor.clone(), preview.clone()],
+                    PackAssemblyOptions {
+                        arena_mode: super::ArenaMode::WorkspaceReuse,
+                        ..PackAssemblyOptions::default()
+                    },
+                    &determinism,
+                    &mut workspace,
+                )
+                .map_err(|error| format!("reused draft rejected: {error:?}"))?;
+                assert_packs_equal_across_arena_mode(
+                    &baseline,
+                    &reused,
+                    "section-limited previews with reversed candidate input",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
