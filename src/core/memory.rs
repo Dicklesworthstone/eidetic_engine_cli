@@ -1825,6 +1825,7 @@ fn remember_memory_outcome_inner_with_store(
             &memory_id,
             &memory_input,
             options.propose_candidates,
+            !defer_index_processing,
         ) {
             Ok(report) => (
                 report.candidate,
@@ -5179,6 +5180,7 @@ fn finish_remember_memory_after_primary_commit(
             &memory_id,
             &memory_input,
             propose_candidates,
+            !defer_index_processing,
         ) {
             Ok(report) => (
                 report.candidate,
@@ -6003,6 +6005,7 @@ fn propose_curation_candidate_for_remember(
     memory_id: &str,
     memory_input: &CreateMemoryInput,
     enabled: bool,
+    allow_search_neighbors: bool,
 ) -> Result<RememberCurationProposalReport, DomainError> {
     if !enabled {
         return Ok(RememberCurationProposalReport {
@@ -6029,7 +6032,16 @@ fn propose_curation_candidate_for_remember(
 
     let started = Instant::now();
     let mut degradations = Vec::new();
-    let mut member_ids = match remember_search_neighbor_ids(prepared, memory_input) {
+    // Search neighbor lookup can repair a stale index as a side effect. A
+    // deferred write must leave publication to its caller or a later worker,
+    // including when tagged memories opt into the default proposal path.
+    // Deterministic tag-overlap clustering below remains available.
+    let search_neighbors = if allow_search_neighbors {
+        remember_search_neighbor_ids(prepared, memory_input)
+    } else {
+        Ok(Vec::new())
+    };
+    let mut member_ids = match search_neighbors {
         Ok(ids) => ids,
         Err(error) => {
             degradations.push(RememberSuggestedLinkDegradation {
@@ -21517,6 +21529,138 @@ mod tests {
             RememberOutcome::Reinforced(report) => Ok(report),
             other => Err(format!("{ctx}: expected Reinforced outcome, got {other:?}")),
         }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn remember_tagged_batch_keeps_jobs_pending_until_final_drain() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let seed = remember_memory(&upgrade_remember_options(
+            &canonical,
+            "Seed published fixture about database generation tracking.",
+            0.8,
+            None,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        ensure(
+            seed.index_status,
+            "indexed".to_owned(),
+            "seed index published",
+        )?;
+        let status_options = IndexStatusOptions {
+            workspace_path: canonical.clone(),
+            database_path: None,
+            index_dir: None,
+        };
+        let before = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            before.index_generation.is_some(),
+            true,
+            "published generation is required to exercise read repair",
+        )?;
+        let options = RememberBatchOptions {
+            propose_candidates: true,
+            ..upgrade_batch_options(&canonical, false)
+        };
+        let input = concat!(
+            "{\"content\":\"Queued tagged fixture about release readiness.\",\"tags\":[\"release\"]}\n",
+            "{\"content\":\"Queued tagged fixture about clippy waivers.\",\"tags\":[\"clippy\"],\"idempotencyKey\":\"tagged-defer\"}\n",
+        );
+        let report = remember_memory_batch_stdin_with_reconcile_hook(
+            &options,
+            input,
+            |connection, workspace_id| {
+                let pending = connection
+                    .list_pending_search_index_jobs(workspace_id, None)
+                    .map_err(|error| DomainError::Storage {
+                        message: error.to_string(),
+                        repair: None,
+                    })?;
+                if pending.len() != 2 {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "tagged proposal drained deferred jobs before batch completion: {} pending",
+                            pending.len()
+                        ),
+                        repair: None,
+                    });
+                }
+                let current = get_index_status_with_connection(&status_options, Some(connection))
+                    .map_err(|error| DomainError::Storage {
+                        message: error.to_string(),
+                        repair: None,
+                    })?;
+                if current.index_generation != before.index_generation
+                    || current.db_generation == current.index_generation
+                {
+                    return Err(DomainError::Storage {
+                        message: "tagged proposal published the index during deferred ingestion"
+                            .to_owned(),
+                        repair: None,
+                    });
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| error.message())?;
+        ensure(report.stored_count, 2, "tagged records stored")?;
+        ensure(
+            report.index_status,
+            "indexed".to_owned(),
+            "tagged batch publishes at its final drain",
+        )?;
+        let expected_ids = report
+            .results
+            .iter()
+            .filter_map(|result| result.memory_id.clone())
+            .collect::<BTreeSet<_>>();
+        ensure(expected_ids.len(), 2, "tagged response memory identities")?;
+        let connection = open_upgrade_test_db(&canonical)?;
+        let pending = connection
+            .list_pending_search_index_jobs(&stable_workspace_id(&canonical), None)
+            .map_err(|error| error.to_string())?;
+        ensure(pending.len(), 0, "final batch drain completes deferred jobs")?;
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical,
+                database_path: None,
+                index_dir: None,
+                query: "Queued tagged fixture".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("tagged batch search failed: {error:?}"))?;
+        let actual_ids = search
+            .results
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<BTreeSet<_>>();
+        ensure(
+            expected_ids.is_subset(&actual_ids),
+            true,
+            "both deferred tagged memories become searchable after the final drain",
+        )
     }
 
     /// bd-2efx1: the batch lane defers per-line index publishing and
