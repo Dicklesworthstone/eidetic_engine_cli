@@ -113,15 +113,40 @@ case "$DEPENDENCY_CYCLE_TIMEOUT_SECONDS" in
     ''|*[!0-9]*|0) DEPENDENCY_CYCLE_TIMEOUT_SECONDS=8 ;;
 esac
 
+# A TERM-only bound does not bind, and this script hung forever on exactly that.
+#
+# Measured 2026-11-07: `br dep cycles --json --no-db` writes its COMPLETE, valid
+# JSON and then does not exit. SIGTERM does not reap it. Two consequences
+# compound:
+#
+#   1. `timeout N cmd` sends SIGTERM at N and then WAITS for a child that is
+#      never going to die, so the bound itself never returns;
+#   2. every call here is a `$(...)` command substitution, which waits for EOF
+#      on the pipe. The surviving process holds the write end open, so even a
+#      timeout that did return would leave the substitution blocked.
+#
+# So `scripts/closeout_audit.sh --bead <id> --json` produced ZERO bytes and
+# never terminated -- on every bead, for as long as this wrapper has looked like
+# a bound. AGENTS.md recommends this script as the pre-close evidence check
+# ("will pre-check the evidence for you"), so the advice led straight into a
+# hang, and an agent that follows it either waits forever or kills the script and
+# skips the check it was told to run.
+#
+# `-k` escalates to SIGKILL after the grace period. Without `--foreground`,
+# timeout signals the whole process group, which is what reaps a nested shell's
+# surviving grandchild and finally closes the pipe. The shell fallback escalates
+# the same way; it previously sent SIGTERM alone and inherited the identical bug.
+TERM_TO_KILL_GRACE_SECONDS="${TERM_TO_KILL_GRACE_SECONDS:-2}"
+
 run_bounded_command() {
     local seconds="${1:?seconds required}"
     shift
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${seconds}s" bash -c '"$@"' closeout-audit "$@"
+        timeout -k "${TERM_TO_KILL_GRACE_SECONDS}s" "${seconds}s" bash -c '"$@"' closeout-audit "$@"
         return $?
     fi
     if command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "${seconds}s" bash -c '"$@"' closeout-audit "$@"
+        gtimeout -k "${TERM_TO_KILL_GRACE_SECONDS}s" "${seconds}s" bash -c '"$@"' closeout-audit "$@"
         return $?
     fi
     "$@" &
@@ -129,6 +154,8 @@ run_bounded_command() {
     (
         sleep "$seconds"
         kill "$command_pid" 2>/dev/null || true
+        sleep "$TERM_TO_KILL_GRACE_SECONDS"
+        kill -KILL "$command_pid" 2>/dev/null || true
     ) &
     local watchdog_pid=$!
     local status=0
