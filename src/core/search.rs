@@ -821,9 +821,7 @@ fn drop_stopword_only_lexical_hits(
     // response metadata. A failed read remains unknown rather than a rejection.
     let truncated_hits = hits
         .iter()
-        .filter(|hit| {
-            lexical_only(hit) && hit.metadata.as_ref().is_some_and(preview_truncated)
-        })
+        .filter(|hit| lexical_only(hit) && hit.metadata.as_ref().is_some_and(preview_truncated))
         .collect::<Vec<_>>();
     let truncated_evidence = truncated_hits
         .iter()
@@ -31090,8 +31088,8 @@ mod tests {
     }
 
     #[test]
-    fn stopword_filter_never_substitutes_local_bodies_for_global_or_unknown_sources()
-    -> TestResult {
+    fn stopword_filter_never_substitutes_local_bodies_for_global_or_unknown_sources() -> TestResult
+    {
         const WORKSPACE: &str = "wsp_00000000000000000000000933";
         const COLLISION: &str = "mem_00000000000000000000000933";
         let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
@@ -31107,8 +31105,7 @@ mod tests {
         let body = "How do I descale the espresso machine? ".repeat(12);
         db.insert_memory(COLLISION, &test_memory_input(WORKSPACE, &body))
             .map_err(|error| error.to_string())?;
-        let mut global =
-            stopword_probe_hit(COLLISION, ScoreSource::Lexical, "How do I ...", true);
+        let mut global = stopword_probe_hit(COLLISION, ScoreSource::Lexical, "How do I ...", true);
         global.metadata.as_mut().ok_or("missing metadata")?["storeLane"] =
             serde_json::json!(super::super::global_store::GLOBAL_PROVENANCE_LANE);
         let original = vec![

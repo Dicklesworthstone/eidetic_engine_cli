@@ -58000,7 +58000,11 @@ UPDATE memories
             ))
             .to_string();
             let mut input = evidence_span_input(
-                if kind == "foreign" { &session_b } else { &session_a },
+                if kind == "foreign" {
+                    &session_b
+                } else {
+                    &session_a
+                },
                 &format!("hydration-span-{index}"),
                 index as u32 * 10 + 1,
             );
@@ -58047,7 +58051,11 @@ UPDATE memories
             })
         });
         let scan = scan?;
-        ensure_equal(&visited, &expected, "only selected bodies are hydrated in physical order")?;
+        ensure_equal(
+            &visited,
+            &expected,
+            "only selected bodies are hydrated in physical order",
+        )?;
         ensure_equal(&scan.pages_read, &1, "one membership page is scanned")?;
         ensure_equal(
             &statements
@@ -65490,11 +65498,15 @@ UPDATE memories
             }
             match status {
                 super::SearchIndexJobStatus::Completed => {
-                    ensure(connection.complete_search_index_job(&id, 1)?, "job completes")?;
+                    ensure(
+                        connection.complete_search_index_job(&id, 1)?,
+                        "job completes",
+                    )?;
                 }
                 super::SearchIndexJobStatus::Failed => {
                     ensure(
-                        connection.fail_search_index_job(&id, &"Historical diagnostic. ".repeat(512))?,
+                        connection
+                            .fail_search_index_job(&id, &"Historical diagnostic. ".repeat(512))?,
                         "job fails with a stored diagnostic",
                     )?;
                 }
