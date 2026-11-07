@@ -10,9 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::memory_revisions::RevisionReadSnapshot;
 use super::{DbConnection, SearchDegradation, SearchHit, SearchOptions};
 use crate::core::incident_card::proof::{CardChecks, requires_proof};
-use crate::core::search::{
-    MeshQueryVisibility, canonical_evidence_search_metadata, mesh_query_visibility,
-};
+use crate::core::search::{canonical_evidence_search_metadata, evidence_metadata_matches_source};
 use crate::db::{DbError, DbOperation};
 use crate::models::EvidenceId;
 
@@ -175,20 +173,11 @@ pub(super) fn admit_hits(
             }
             let projection = projections.evidence.get(&hit.doc_id);
             let valid = projection.is_some_and(|projection| {
-                // Semantic winners may have no metadata. A supplied source revision
-                // must agree, and metadata from another authority is not a local row.
-                let field_matches = |name: &str, expected: &str| {
-                    hit.metadata
-                        .as_ref()
-                        .and_then(|value| value.get(name))
-                        .is_none_or(|value| value.as_str() == Some(expected))
-                };
-                field_matches("entity_revision", &projection.revision)
-                    && field_matches("content_hash", &projection.content_hash)
-                    && matches!(
-                        mesh_query_visibility(hit.metadata.as_ref()),
-                        MeshQueryVisibility::Local
-                    )
+                evidence_metadata_matches_source(
+                    hit.metadata.as_ref(),
+                    &projection.revision,
+                    &projection.content_hash,
+                )
             });
             if !valid {
                 filtered += 1;
@@ -363,6 +352,263 @@ mod tests {
             admit_hits(&options, vec![current], &mut Vec::new(), Some(&source.db)).len(),
             1
         );
+        Ok(())
+    }
+
+    fn invalid_retrieval_witnesses() -> Vec<serde_json::Value> {
+        vec![
+            json!({"entity_revision":"obsolete"}),
+            json!({"entity_revision":false}),
+            json!({"content_hash":"obsolete"}),
+            json!({"content_hash":null}),
+            json!(["not an evidence metadata object"]),
+            json!({"mesh":{"workspaceScopeDecision":"deny"}}),
+            // An allowed foreign document is still not authority for a local
+            // evidence ID, even if that ID happens to exist in this workspace.
+            json!({"mesh":{
+                "workspaceScopeDecision":"allow",
+                "cachedMaterialId":"mesh_mat_source_witness",
+                "originWorkspaceId":"wsp_remote",
+                "producerPeerId":"peer_source",
+                "materialLane":"metadata",
+                "importDecisionId":"mesh_dec_source_witness",
+                "trustLane":"mesh_metadata",
+                "redactionPosture":"standard"
+            }}),
+        ]
+    }
+
+    #[test]
+    fn source_hydration_cannot_launder_an_invalid_retrieval_witness_before_ranking() -> TestResult {
+        let (_root, source, options) = fixture(true)?;
+        let card = source.current_card()?;
+        for id in [&card.id, &source.failure] {
+            let before = source
+                .db
+                .get_search_admitted_evidence_span(id, WS)?
+                .ok_or("positive live source authority")?;
+            for metadata in invalid_retrieval_witnesses() {
+                let mut candidate = hit(id);
+                candidate.score = 99.0;
+                candidate.metadata = Some(metadata);
+                let mut degraded = Vec::new();
+                // This is the production composition. Testing the downstream
+                // proof gate alone missed hydration overwriting the witness.
+                let visible = crate::core::search::apply_live_evidence_visibility(
+                    &options,
+                    vec![candidate, hit(&source.repair)],
+                    &mut degraded,
+                    Some(&source.db),
+                );
+                let admitted =
+                    super::super::admit_hits(&options, visible, &mut degraded, Some(&source.db));
+                assert_eq!(admitted.len(), 1);
+                assert_eq!(admitted[0].doc_id, source.repair);
+                assert_eq!(admitted[0].score.to_bits(), 0.73_f32.to_bits());
+                assert!(
+                    degraded
+                        .iter()
+                        .any(|entry| entry.code == "evidence_live_admission_filtered")
+                );
+            }
+            let after = source.db.get_evidence_span(id)?.ok_or("retained source")?;
+            assert_eq!(after.excerpt, before.excerpt);
+            assert_eq!(after.metadata_json, before.metadata_json);
+            assert_eq!(after.pack_entity_revision(), before.pack_entity_revision());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_hydration_keeps_matching_and_metadata_free_evidence_scores() -> TestResult {
+        let (_root, source, options) = fixture(true)?;
+        let card = source.current_card()?;
+        for id in [&card.id, &source.repair] {
+            let span = source
+                .db
+                .get_search_admitted_evidence_span(id, WS)?
+                .ok_or("admitted source")?;
+            let expected = canonical_evidence_search_metadata(&span);
+            for metadata in [
+                None,
+                Some(json!({})),
+                Some(json!({
+                    "entity_revision":span.pack_entity_revision(),
+                    "content_hash":span.content_hash,
+                    "content":"discard this indexed preview"
+                })),
+            ] {
+                let mut candidate = hit(id);
+                candidate.metadata = metadata;
+                let mut degraded = Vec::new();
+                let visible = crate::core::search::apply_live_evidence_visibility(
+                    &options,
+                    vec![candidate],
+                    &mut degraded,
+                    Some(&source.db),
+                );
+                let admitted =
+                    super::super::admit_hits(&options, visible, &mut degraded, Some(&source.db));
+                assert_eq!(admitted.len(), 1);
+                assert_eq!(admitted[0].metadata.as_ref(), Some(&expected));
+                assert_eq!(admitted[0].score.to_bits(), 0.73_f32.to_bits());
+                assert_eq!(admitted[0].fast_score, Some(0.73));
+                assert!(degraded.is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_hydration_checks_raw_only_and_final_evidence_witnesses() -> TestResult {
+        use crate::core::search::{
+            FusionContribution, SearchArmHit, SearchFusionWeights,
+            apply_live_evidence_visibility_to_diag, empty_diag_search_result,
+        };
+
+        let (_root, source, options) = fixture(true)?;
+        let card = source.current_card()?;
+        for metadata in invalid_retrieval_witnesses() {
+            let mut diag = empty_diag_search_result(
+                SearchSourceMode::LexicalOnly,
+                false,
+                60.0,
+                10,
+                SearchFusionWeights::default(),
+            );
+            // The failure exists only in the raw arms. The card's witness is
+            // carried only by its final hit. Both must be rejected, while the
+            // metadata-free semantic repair survives on every surface.
+            diag.candidate_metadata
+                .insert(source.failure.clone(), metadata.clone());
+            let mut final_card = hit(&card.id);
+            final_card.metadata = Some(metadata);
+            diag.final_hits = vec![final_card, hit(&source.repair)];
+            for (index, id) in [&source.failure, &card.id, &source.repair]
+                .into_iter()
+                .enumerate()
+            {
+                let arm = SearchArmHit {
+                    doc_id: id.clone(),
+                    raw_score: 0.73,
+                    rank: index + 1,
+                };
+                diag.pre_fusion.lexical.results.push(arm.clone());
+                diag.pre_fusion.semantic_fast.results.push(arm);
+                diag.fusion.per_doc_contribution.push(FusionContribution {
+                    doc_id: id.clone(),
+                    lexical_rank: Some(index + 1),
+                    lexical_contribution: Some(0.01),
+                    semantic_rank: Some(index + 1),
+                    semantic_contribution: Some(0.01),
+                    fused_score: 0.02,
+                });
+            }
+            let mut degraded = Vec::new();
+            apply_live_evidence_visibility_to_diag(
+                &options,
+                &mut diag,
+                &mut degraded,
+                Some(&source.db),
+            );
+            for arm in [&diag.pre_fusion.lexical, &diag.pre_fusion.semantic_fast] {
+                assert_eq!(arm.results.len(), 1);
+                assert_eq!(arm.results[0].doc_id, source.repair);
+                assert_eq!(arm.results[0].rank, 3);
+            }
+            assert_eq!(diag.fusion.per_doc_contribution.len(), 1);
+            assert_eq!(diag.fusion.per_doc_contribution[0].doc_id, source.repair);
+            assert_eq!(diag.final_hits.len(), 1);
+            assert_eq!(diag.final_hits[0].doc_id, source.repair);
+            assert!(!diag.candidate_metadata.contains_key(&source.failure));
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "evidence_live_admission_filtered");
+            assert!(degraded[0].message.contains("Filtered 2 indexed evidence"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_handoff_revalidation_rejects_stale_evidence_before_hydration() -> TestResult {
+        use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
+        use crate::core::search::{
+            PackSearchHandoff, PackSearchSnapshot, SearchFusionWeights, SearchReport, SearchStatus,
+        };
+        use crate::models::{MemoryScopeStats, model_registry::EmbedBackend};
+        use crate::search::scoring::SearchScoringConfig;
+
+        let (_root, source, options) = fixture(true)?;
+        let card = source.current_card()?;
+        let reference = chrono::Utc::now();
+        for metadata in [None]
+            .into_iter()
+            .chain(invalid_retrieval_witnesses().into_iter().map(Some))
+        {
+            let invalid = metadata.is_some();
+            let mut candidate = hit(&card.id);
+            candidate.metadata = metadata;
+            let handoff = PackSearchHandoff {
+                report: SearchReport {
+                    status: SearchStatus::Success,
+                    embed_backend: EmbedBackend::HashFallback,
+                    query: options.query.clone(),
+                    requested_limit: options.limit,
+                    results: vec![candidate],
+                    elapsed_ms: 0.0,
+                    errors: Vec::new(),
+                    degraded: Vec::new(),
+                    runtime_profile: RuntimeProfileReport::for_profile(
+                        OperatingProfile::Workstation,
+                        "test_fixture",
+                    ),
+                    rerank_configured_mode: crate::config::SearchRerankMode::Off,
+                    rerank_configured_top_k: 50,
+                    rerank_runtime_available: false,
+                    relevance_floor_applied: options.relevance_floor,
+                    candidates_below_floor: 0,
+                    query_assist: None,
+                    source_mode_requested: options.source_mode,
+                    source_mode_applied: options.source_mode,
+                    source_mode_fallback: false,
+                    strict_source_mode: options.strict_source_mode,
+                    memory_scope: options.memory_scope,
+                    strict_scope: options.strict_scope,
+                    scope_stats: MemoryScopeStats::new(options.memory_scope, false, None, 0),
+                    index_freshness: None,
+                },
+                quality_scoring_policy: SearchScoringConfig::default().policy_hash(),
+                fusion_weights: SearchFusionWeights::default(),
+                quality_reference_time: options.as_of,
+                audit_facts: None,
+                cached_local_embedder: None,
+                snapshot: PackSearchSnapshot {
+                    workspace_id: WS.to_owned(),
+                    generation: source
+                        .db
+                        .get_workspace_generation(WS)?
+                        .ok_or("generation")?,
+                    calibration_input_identity: None,
+                    scoring_reference_time: reference,
+                },
+            };
+            let mut received = PackSearchHandoff::from_value(serde_json::to_value(handoff)?)?;
+            received.revalidate(&options, &source.db);
+            if invalid {
+                assert!(received.report.results.is_empty());
+                assert_eq!(received.report.status, SearchStatus::NoResults);
+                assert!(
+                    received
+                        .report
+                        .degraded
+                        .iter()
+                        .any(|entry| { entry.code == "evidence_live_admission_filtered" })
+                );
+            } else {
+                assert_eq!(received.report.results.len(), 1);
+                assert_eq!(received.report.results[0].doc_id, card.id);
+                assert_eq!(received.report.results[0].fast_score, Some(0.73));
+            }
+        }
         Ok(())
     }
 

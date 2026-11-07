@@ -15090,6 +15090,17 @@ fn apply_live_evidence_visibility(
                 filtered = filtered.saturating_add(1);
                 return None;
             };
+            // Check the retrieved identity before replacing its metadata. A
+            // current local row cannot certify scores from an obsolete source
+            // revision or turn a mesh-origin candidate into local evidence.
+            if !evidence_metadata_matches_source(
+                hit.metadata.as_ref(),
+                &span.pack_entity_revision(),
+                &span.content_hash,
+            ) {
+                filtered = filtered.saturating_add(1);
+                return None;
+            }
             // Frankensearch's semantic result contract intentionally carries
             // identifiers and scores, not stored document bodies. Hydrate the
             // admitted evidence hit from the live FrankenSQLite source of
@@ -15119,6 +15130,28 @@ pub(crate) fn canonical_evidence_search_metadata(
             .map(|(key, value)| (key, serde_json::Value::String(value)))
             .collect(),
     )
+}
+
+/// Validate source witnesses while they still describe the retrieved hit.
+/// Hydration must not overwrite an invalid witness with the value it is meant
+/// to verify. Metadata-free semantic candidates still use live admission;
+/// supplied revision/hash fields must match in both type and value.
+fn evidence_metadata_matches_source(
+    metadata: Option<&serde_json::Value>,
+    entity_revision: &str,
+    content_hash: &str,
+) -> bool {
+    if metadata.is_some_and(|value| !value.is_object()) {
+        return false;
+    }
+    let field_matches = |name: &str, expected: &str| {
+        metadata
+            .and_then(|value| value.get(name))
+            .is_none_or(|value| value.as_str() == Some(expected))
+    };
+    field_matches("entity_revision", entity_revision)
+        && field_matches("content_hash", content_hash)
+        && matches!(mesh_query_visibility(metadata), MeshQueryVisibility::Local)
 }
 
 fn live_admitted_evidence_spans(
@@ -15220,8 +15253,34 @@ fn apply_live_evidence_visibility_to_diag(
         return;
     }
 
-    let admitted = live_admitted_evidence_spans(options, &evidence_ids, read_connection);
+    let mut admitted = live_admitted_evidence_spans(options, &evidence_ids, read_connection);
+    // Raw diagnostic arms keep only IDs and scores. Check their private
+    // retrieval metadata too, including candidates absent from the final
+    // pool, before any current-source projection can erase that witness.
+    for (id, metadata) in &diag.candidate_metadata {
+        if let Some(span) = admitted.get(id)
+            && !evidence_metadata_matches_source(
+                Some(metadata),
+                &span.pack_entity_revision(),
+                &span.content_hash,
+            )
+        {
+            admitted.remove(id);
+        }
+    }
+    for hit in &diag.final_hits {
+        if let Some(span) = admitted.get(&hit.doc_id)
+            && !evidence_metadata_matches_source(
+                hit.metadata.as_ref(),
+                &span.pack_entity_revision(),
+                &span.content_hash,
+            )
+        {
+            admitted.remove(&hit.doc_id);
+        }
+    }
     let is_visible = |doc_id: &str| !doc_id.starts_with("ev_") || admitted.contains_key(doc_id);
+    diag.candidate_metadata.retain(|id, _| is_visible(id));
     diag.pre_fusion
         .lexical
         .results
