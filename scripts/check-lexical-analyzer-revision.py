@@ -182,23 +182,34 @@ def extract_fn(source: str, name: str, path_label: str) -> str:
     Fails closed. A renamed or deleted function is "cannot answer", not "no
     analysis found, therefore nothing changed" -- the second reading is how a
     gate reports green for a tree it never inspected.
+
+    EVERY step runs on comment-stripped text, and that is load-bearing rather
+    than tidy. Searching the raw source for the body's opening brace found a
+    `{` inside a comment in the SIGNATURE -- measured with
+    `// registers {content,title}`, a comment a maintainer of this very function
+    would plausibly write -- and then balanced from there, returning a "body"
+    that was a fragment of the signature and contained no analysis at all. The
+    gate reported a mismatch, and the moment anyone pasted that fingerprint in
+    to clear it, every later change to the real body became invisible. A silent
+    false pass, reached by fixing the red it printed.
     """
-    match = _fn_decl(name).search(source)
+    cleaned = strip_rust_comments(source)
+    match = _fn_decl(name).search(cleaned)
     if match is None:
         raise CannotAnswer(f"{path_label}: no `fn {name}` found")
-    open_brace = source.find("{", match.end())
+    open_brace = cleaned.find("{", match.end())
     if open_brace == -1:
         raise CannotAnswer(f"{path_label}: `fn {name}` has no body")
 
-    cleaned = strip_rust_comments(source[open_brace:])
     depth = 0
-    for offset, ch in enumerate(cleaned):
+    for offset in range(open_brace, len(cleaned)):
+        ch = cleaned[offset]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return source[match.start() : open_brace] + cleaned[: offset + 1]
+                return cleaned[match.start() : offset + 1]
     raise CannotAnswer(f"{path_label}: `fn {name}` body is unbalanced")
 
 
@@ -215,7 +226,16 @@ def fingerprint(regions: list[str]) -> str:
 
 
 def read_const_value(source: str) -> str:
-    match = CONST_DECL.search(source)
+    """Read the LIVE constant, never a commented-out one.
+
+    Stripping first matters because the natural way to bump this constant is to
+    leave the previous line commented out above the new one. Searching raw text
+    returns that corpse: measured, a commented `...OLD.v0+fp0000000000` above
+    the live declaration was what the gate read. Both directions are wrong --
+    a stale comment reds a healthy tree, and a comment carrying the CORRECT
+    fingerprint greens a stale constant.
+    """
+    match = CONST_DECL.search(strip_rust_comments(source))
     if match is None:
         raise CannotAnswer(f"{CONST_FILE.name}: no `{CONST_NAME}` string constant found")
     return match.group("value")
@@ -501,6 +521,51 @@ def self_test() -> int:
         rc(baseline_analyzer.replace(CONST_NAME, "SOMETHING_ELSE"), baseline_maintenance) == 3,
     )
 
+    # Regression arms for two defects found reading this file back with fresh
+    # eyes. Both were silent-false-pass shaped, and neither synthetic arm above
+    # could see them, because both live in the step BEFORE the fingerprint: the
+    # located region and the read constant.
+    brace_in_signature_comment = baseline_analyzer.replace(
+        "fn configure_lexical_analyzer(index: TantivyIndex) -> SearchResult<TantivyIndex> {",
+        "fn configure_lexical_analyzer(index: TantivyIndex) "
+        "/* registers {content,title} */ -> SearchResult<TantivyIndex> {",
+    )
+    check(
+        "arm19 a brace inside a signature comment does not derail the region",
+        rc(brace_in_signature_comment, baseline_maintenance) == 0,
+    )
+    check(
+        "arm20 and with that comment present, a real body change is still caught",
+        rc(
+            brace_in_signature_comment.replace(
+                ".filter(Stemmer::new(Language::English))", ".filter(AsciiFoldingFilter)"
+            ),
+            baseline_maintenance,
+        )
+        == 1,
+    )
+
+    commented_out_decl = baseline_analyzer.replace(
+        "pub(crate) const",
+        f'// pub(crate) const {CONST_NAME}: &str = '
+        f'"ee.lexical_analyzer.OLD.v0+fp0000000000";\npub(crate) const',
+        1,
+    )
+    check(
+        "arm21 a commented-out stale declaration does not red a healthy tree",
+        rc(commented_out_decl, baseline_maintenance) == 0,
+    )
+    commented_out_correct = SYNTH_ANALYZER.replace("%s", "deadbeefff").replace(
+        "pub(crate) const",
+        f'// pub(crate) const {CONST_NAME}: &str = '
+        f'"{read_const_value(baseline_analyzer)}";\npub(crate) const',
+        1,
+    )
+    check(
+        "arm22 a commented-out CORRECT declaration cannot green a stale constant",
+        rc(commented_out_correct, baseline_maintenance) == 1,
+    )
+
     # Control on the real tree. Without this the whole self-test could pass
     # because the extractor returns nothing on real input -- the twin hole of
     # every synthetic suite.
@@ -520,7 +585,7 @@ def self_test() -> int:
     except (CannotAnswer, OSError):
         real_ok = False
     check(
-        "arm19 control: both regions extract non-trivially from the real tree",
+        "arm23 control: both regions extract non-trivially from the real tree",
         real_ok,
     )
 
