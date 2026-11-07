@@ -968,10 +968,15 @@ fn hydrated_evidence_admission_preserves_subjects_domains_and_explicit_floors() 
         for (candidate, expected_index) in candidates.iter().zip(expected_indices) {
             assert_eq!(candidate.item.evidence_id, ids[expected_index]);
             assert_eq!(candidate.item.content, rows[expected_index].0);
-            assert_eq!(candidate.item.relevance.into_inner(), rows[expected_index].1);
+            assert_eq!(
+                candidate.item.relevance.into_inner(),
+                rows[expected_index].1
+            );
         }
         assert_eq!(
-            degraded.iter().any(|entry| entry.code == "context_evidence_below_relative_floor"),
+            degraded
+                .iter()
+                .any(|entry| entry.code == "context_evidence_below_relative_floor"),
             floor.is_none(),
         );
     }

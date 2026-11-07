@@ -15807,7 +15807,8 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                 (
                     *source,
                     item.relevance.into_inner(),
-                    *lexical_match && shares_context_pack_query_subject(&query_terms, &item.content),
+                    *lexical_match
+                        && shares_context_pack_query_subject(&query_terms, &item.content),
                 ),
             );
         }
@@ -16189,7 +16190,9 @@ fn apply_direct_evidence_query_relative_floor(
         let Some((source, lexical_match)) = sources.get(candidate.item.evidence_id.as_str()) else {
             return true;
         };
-        if *lexical_match && shares_context_pack_query_subject(&query_terms, &candidate.item.content) {
+        if *lexical_match
+            && shares_context_pack_query_subject(&query_terms, &candidate.item.content)
+        {
             return true;
         }
         best_by_source.get(source).is_none_or(|best| {
@@ -17632,7 +17635,9 @@ mod relevance_floor_tests {
         assert_eq!(candidates.evidence[1].item.relevance.into_inner(), 0.05);
         assert!(degraded.iter().any(|entry| {
             entry.code == "context_evidence_below_relative_floor"
-                && entry.message.starts_with("2 imported evidence candidate(s)")
+                && entry
+                    .message
+                    .starts_with("2 imported evidence candidate(s)")
         }));
 
         let omitted = filter_context_pack_candidates_by_query_relative_elbow(
@@ -17686,7 +17691,11 @@ mod relevance_floor_tests {
             );
             assert_eq!(candidates.evidence[0].item.evidence_id, "ev_0");
             assert_eq!(degraded.len(), 1);
-            assert!(degraded[0].message.starts_with("3 imported evidence candidate(s)"));
+            assert!(
+                degraded[0]
+                    .message
+                    .starts_with("3 imported evidence candidate(s)")
+            );
         }
     }
 
@@ -17715,16 +17724,27 @@ mod relevance_floor_tests {
             candidates
                 .evidence
                 .iter()
-                .map(|candidate| (candidate.item.evidence_id.as_str(), candidate.item.relevance.into_inner()))
+                .map(|candidate| (
+                    candidate.item.evidence_id.as_str(),
+                    candidate.item.relevance.into_inner()
+                ))
                 .collect::<Vec<_>>(),
             vec![("ev_0", 1.0), ("ev_2", 0.2), ("ev_4", 0.1)],
         );
         assert_eq!(degraded.len(), 1);
-        assert!(degraded[0].message.starts_with("3 imported evidence candidate(s)"));
+        assert!(
+            degraded[0]
+                .message
+                .starts_with("3 imported evidence candidate(s)")
+        );
         for source in ["lexical=", "semantic_fast=", "hybrid="] {
             assert!(degraded[0].message.contains(source));
         }
-        assert!(degraded[0].message.contains("ranking heuristics, not calibrated confidence"));
+        assert!(
+            degraded[0]
+                .message
+                .contains("ranking heuristics, not calibrated confidence")
+        );
     }
 
     #[test]
@@ -17770,7 +17790,11 @@ mod relevance_floor_tests {
                 "{protection}",
             );
             assert_eq!(degraded.len(), 1, "{protection}");
-            assert!(degraded[0].message.starts_with("1 imported evidence candidate(s)"));
+            assert!(
+                degraded[0]
+                    .message
+                    .starts_with("1 imported evidence candidate(s)")
+            );
             assert!(degraded[0].message.contains("lexical=0.0500"));
         }
     }
