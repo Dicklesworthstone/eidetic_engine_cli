@@ -2278,11 +2278,16 @@ fn backup_restore_relative_destination_remains_addressable_from_other_directorie
         #[cfg(unix)]
         (
             "missing-detour/../canonical-parent/nested/restored",
-            base.join("canonical-parent").join("nested").join("restored"),
+            base.join("canonical-parent")
+                .join("nested")
+                .join("restored"),
         ),
     ] {
         let side_path_arg = side_path.to_string_lossy();
-        ensure(!side_path.exists(), "relative restore destination starts absent")?;
+        ensure(
+            !side_path.exists(),
+            "relative restore destination starts absent",
+        )?;
         let before_preview = workspace_file_digests(&base)?;
         let preview = run(
             &base,
@@ -2385,10 +2390,8 @@ fn backup_restore_relative_destination_remains_addressable_from_other_directorie
         )?;
         db.close().map_err(|error| error.to_string())?;
 
-        for (cwd, addressed_workspace) in [
-            (&side_path, "."),
-            (&elsewhere, side_path_arg.as_ref()),
-        ] {
+        for (cwd, addressed_workspace) in [(&side_path, "."), (&elsewhere, side_path_arg.as_ref())]
+        {
             let searched = run(
                 cwd,
                 &[

@@ -459,7 +459,6 @@ fn lens_list_rejects_unknown_task_lens_override_key() -> TestResult {
     assert_config_file_unknown_key_error(&output, "lens list")
 }
 
-
 fn isolated_config_explain(workspace: &std::path::Path, key: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
@@ -495,7 +494,10 @@ fn config_explain_data(command: &mut Command) -> Result<Value, String> {
 
 fn config_lint_count(data: &Value, code: &str) -> usize {
     data["lintFindings"].as_array().map_or(0, |findings| {
-        findings.iter().filter(|finding| finding["code"] == code).count()
+        findings
+            .iter()
+            .filter(|finding| finding["code"] == code)
+            .count()
     })
 }
 
@@ -528,7 +530,9 @@ fn config_explain_lints_real_lens_modes_without_treating_fast_as_lexical() -> Te
             config_lint_count(&data, LINT_CONTRADICTORY_LEXICAL_MODE) == expected_findings,
             format!("source_mode={mode} did not reach the real lint rule: {data}"),
         )?;
-        let findings = data["lintFindings"].as_array().ok_or("lint findings missing")?;
+        let findings = data["lintFindings"]
+            .as_array()
+            .ok_or("lint findings missing")?;
         ensure(
             findings.len() == expected_findings,
             "unknown neural posture or fast speed must not invent additional findings",
@@ -548,7 +552,10 @@ fn config_explain_lints_real_lens_modes_without_treating_fast_as_lexical() -> Te
         )?;
     }
     ensure(
-        fs::read_dir(&ee_dir).map_err(|error| error.to_string())?.count() == 1,
+        fs::read_dir(&ee_dir)
+            .map_err(|error| error.to_string())?
+            .count()
+            == 1,
         "config explain must not create a store, index, or lock beside config.toml",
     )
 }
@@ -589,7 +596,9 @@ fn config_explain_surfaces_real_env_faults_without_values_or_store_writes() -> T
             && rendered.contains("fault-injection")
             && !rendered.contains(unknown_value)
             && !rendered.contains("OTHER_APPLICATION_SETTING")
-            && !missing["lintFindings"].to_string().contains("deterministic hash"),
+            && !missing["lintFindings"]
+                .to_string()
+                .contains("deterministic hash"),
         "environment diagnostics must report names and observed faults without values or invented hash state",
     )?;
 
@@ -628,8 +637,14 @@ fn config_explain_surfaces_real_env_faults_without_values_or_store_writes() -> T
         !workspace.path().join(".ee").exists()
             && !workspace.path().join("home").exists()
             && !workspace.path().join("user-config").exists()
-            && fs::read_dir(&model_dir).map_err(|error| error.to_string())?.count() == 0
-            && fs::read_dir(&injected_path).map_err(|error| error.to_string())?.count() == 0,
+            && fs::read_dir(&model_dir)
+                .map_err(|error| error.to_string())?
+                .count()
+                == 0
+            && fs::read_dir(&injected_path)
+                .map_err(|error| error.to_string())?
+                .count()
+                == 0,
         "config explain must remain storeless and must not download or load model files",
     )
 }

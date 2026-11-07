@@ -59755,8 +59755,9 @@ fn remember_attempt_family_from_args(
 fn validate_remember_index_deferral(args: &RememberArgs) -> Result<(), DomainError> {
     if args.defer_index && (args.batch || args.stdin || args.reinforce || args.global) {
         return Err(DomainError::Usage {
-            message: "--defer-index cannot be combined with --batch, --stdin, --reinforce, or --global"
-                .to_owned(),
+            message:
+                "--defer-index cannot be combined with --batch, --stdin, --reinforce, or --global"
+                    .to_owned(),
             repair: Some("ee remember \"<content>\" --defer-index --json".to_owned()),
         });
     }
@@ -99420,7 +99421,12 @@ demos:
             "remember publication remains synchronous by default",
         )?;
         for argv in [
-            vec!["ee", "remember", "Queue an explicit memory.", "--defer-index"],
+            vec![
+                "ee",
+                "remember",
+                "Queue an explicit memory.",
+                "--defer-index",
+            ],
             vec![
                 "ee",
                 "remember",

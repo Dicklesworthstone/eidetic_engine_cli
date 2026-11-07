@@ -643,9 +643,10 @@ fn remember_defer_index_persists_plain_and_git_captures_before_publication() -> 
                 "20",
             ],
         )?;
-        let found = search["data"]["results"]
-            .as_array()
-            .is_some_and(|hits| hits.iter().any(|hit| hit["docId"].as_str() == Some(id.as_str())));
+        let found = search["data"]["results"].as_array().is_some_and(|hits| {
+            hits.iter()
+                .any(|hit| hit["docId"].as_str() == Some(id.as_str()))
+        });
         assert_logged(
             &log_path,
             "published_deferred_memory_is_retrievable_by_exact_identity",

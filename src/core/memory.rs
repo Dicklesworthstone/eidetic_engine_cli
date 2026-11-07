@@ -21627,7 +21627,11 @@ mod tests {
         let pending = connection
             .list_pending_search_index_jobs(&stable_workspace_id(&canonical), None)
             .map_err(|error| error.to_string())?;
-        ensure(pending.len(), 0, "final batch drain completes deferred jobs")?;
+        ensure(
+            pending.len(),
+            0,
+            "final batch drain completes deferred jobs",
+        )?;
         let search = crate::core::search::run_search_with_filters(
             &crate::core::search::SearchOptions {
                 workspace_path: canonical,

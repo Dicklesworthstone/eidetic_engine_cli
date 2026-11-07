@@ -453,7 +453,10 @@ pub fn gather_config_lint_facts(config: &crate::config::ConfigFile) -> ConfigLin
         // Match the retrieval path's UTF-8/trim handling for the fault injector.
         // The actual model-directory override accepts an unmodified OS path.
         let path = if variable == EnvVar::EmbedModelPath {
-            let Some(value) = value.to_str().map(str::trim).filter(|value| !value.is_empty())
+            let Some(value) = value
+                .to_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
             else {
                 continue;
             };
