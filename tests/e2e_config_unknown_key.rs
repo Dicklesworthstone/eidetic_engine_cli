@@ -458,3 +458,178 @@ fn lens_list_rejects_unknown_task_lens_override_key() -> TestResult {
 
     assert_config_file_unknown_key_error(&output, "lens list")
 }
+
+
+fn isolated_config_explain(workspace: &std::path::Path, key: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
+        .current_dir(workspace)
+        .env_clear()
+        .env("HOME", workspace.join("home"))
+        .env("XDG_CONFIG_HOME", workspace.join("user-config"))
+        .arg("--workspace")
+        .arg(workspace)
+        .args(["--json", "config", "explain", key]);
+    command
+}
+
+fn config_explain_data(command: &mut Command) -> Result<Value, String> {
+    let output = command.output().map_err(|error| error.to_string())?;
+    ensure(
+        output.status.success(),
+        format!(
+            "config explain failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let response: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        response["data"]["schema"] == "ee.config_explain.v1"
+            && response["data"]["lintFindings"].is_array(),
+        format!("missing config explanation contract: {response}"),
+    )?;
+    Ok(response["data"].clone())
+}
+
+fn config_lint_count(data: &Value, code: &str) -> usize {
+    data["lintFindings"].as_array().map_or(0, |findings| {
+        findings.iter().filter(|finding| finding["code"] == code).count()
+    })
+}
+
+/// These assertions drive the production config reader, fact gathering, and
+/// renderer. A shape-only lintFindings assertion cannot substitute for them.
+#[test]
+fn config_explain_lints_real_lens_modes_without_treating_fast_as_lexical() -> TestResult {
+    use ee::core::config_explain::LINT_CONTRADICTORY_LEXICAL_MODE;
+
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let ee_dir = workspace.path().join(".ee");
+    fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+    let config_path = ee_dir.join("config.toml");
+    for (mode, expected_findings) in [("lexical-only", 1), ("lexical_only", 1), ("hybrid", 0)] {
+        let contents = format!(
+            "[search]\ndefault_speed = \"fast\"\nsemantic_weight = 0.45\n\
+             [[task_lens.overrides]]\nid = \"local-review\"\nversion = 1\n\
+             description = \"Config lint regression fixture.\"\nsource_mode = \"{mode}\"\n"
+        );
+        fs::write(&config_path, &contents).map_err(|error| error.to_string())?;
+        let data = config_explain_data(&mut isolated_config_explain(
+            workspace.path(),
+            "search.semantic_weight",
+        ))?;
+        ensure(
+            data["effectiveValue"] == "0.45" && data["sourceLayer"] == "project",
+            format!("explain lost the effective project config: {data}"),
+        )?;
+        ensure(
+            config_lint_count(&data, LINT_CONTRADICTORY_LEXICAL_MODE) == expected_findings,
+            format!("source_mode={mode} did not reach the real lint rule: {data}"),
+        )?;
+        let findings = data["lintFindings"].as_array().ok_or("lint findings missing")?;
+        ensure(
+            findings.len() == expected_findings,
+            "unknown neural posture or fast speed must not invent additional findings",
+        )?;
+        for finding in findings {
+            let message = finding["message"].as_str().unwrap_or_default();
+            ensure(
+                finding["severity"] == "advisory"
+                    && message.contains("local-review")
+                    && message.contains("when this lens is selected"),
+                format!("lens warning must be conditional and advisory: {finding}"),
+            )?;
+        }
+        ensure(
+            fs::read(&config_path).map_err(|error| error.to_string())? == contents.as_bytes(),
+            "config explain must preserve the inspected config",
+        )?;
+    }
+    ensure(
+        fs::read_dir(&ee_dir).map_err(|error| error.to_string())?.count() == 1,
+        "config explain must not create a store, index, or lock beside config.toml",
+    )
+}
+
+#[test]
+fn config_explain_surfaces_real_env_faults_without_values_or_store_writes() -> TestResult {
+    use std::os::unix::ffi::OsStringExt;
+
+    use ee::core::config_explain::{
+        LINT_EMBEDDING_MODEL_PATH_MISSING, LINT_UNKNOWN_ENV_VAR, LINT_WEIGHT_WITHOUT_NEURAL_TIER,
+    };
+
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let model_dir = workspace.path().join("model-cache");
+    let injected_path = workspace.path().join("injected-model");
+    let unknown_value = "opaque-config-lint-canary-value";
+    let invalid_name = std::ffi::OsString::from_vec(vec![b'E', b'E', b'_', 0xff]);
+    let mut command = isolated_config_explain(workspace.path(), "search.semantic_weight");
+    command
+        .env("EE_EMBED_MODEL_DIR", &model_dir)
+        .env("EE_EMBED_MODEL_PATH", &injected_path)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_UNRECOGNIZED_CONFIG_LINT", unknown_value)
+        .env("OTHER_APPLICATION_SETTING", unknown_value)
+        .env(invalid_name, unknown_value);
+    let missing = config_explain_data(&mut command)?;
+    ensure(
+        config_lint_count(&missing, LINT_EMBEDDING_MODEL_PATH_MISSING) == 2
+            && config_lint_count(&missing, LINT_UNKNOWN_ENV_VAR) == 1
+            && config_lint_count(&missing, LINT_WEIGHT_WITHOUT_NEURAL_TIER) == 1,
+        format!("real bad environment did not populate lintFindings: {missing}"),
+    )?;
+    let rendered = missing.to_string();
+    ensure(
+        rendered.contains("EE_UNRECOGNIZED_CONFIG_LINT")
+            && rendered.contains("EE_EMBED_MODEL_DIR")
+            && rendered.contains("EE_EMBED_MODEL_PATH")
+            && rendered.contains("fault-injection")
+            && !rendered.contains(unknown_value)
+            && !rendered.contains("OTHER_APPLICATION_SETTING")
+            && !missing["lintFindings"].to_string().contains("deterministic hash"),
+        "environment diagnostics must report names and observed faults without values or invented hash state",
+    )?;
+
+    let unrelated = config_explain_data(
+        isolated_config_explain(workspace.path(), "storage.database_path")
+            .env("EE_EMBED_MODEL_DIR", &model_dir)
+            .env("EE_UNRECOGNIZED_CONFIG_LINT", unknown_value),
+    )?;
+    ensure(
+        unrelated["lintFindings"] == serde_json::json!([]),
+        "search environment findings must not leak into unrelated storage explanations",
+    )?;
+
+    // A missing model cache alone is not proof of an inactive neural tier:
+    // normal execution may download models. The explicit fault caused the
+    // previous neural warning, and removing that fault must remove the warning.
+    command.env_remove("EE_EMBED_MODEL_PATH");
+    let cache_only = config_explain_data(&mut command)?;
+    ensure(
+        config_lint_count(&cache_only, LINT_EMBEDDING_MODEL_PATH_MISSING) == 1
+            && config_lint_count(&cache_only, LINT_WEIGHT_WITHOUT_NEURAL_TIER) == 0,
+        "missing cache assets must leave neural posture unknown",
+    )?;
+
+    fs::create_dir(&model_dir).map_err(|error| error.to_string())?;
+    fs::create_dir(&injected_path).map_err(|error| error.to_string())?;
+    command
+        .env("EE_EMBED_MODEL_PATH", &injected_path)
+        .env_remove("EE_UNRECOGNIZED_CONFIG_LINT");
+    let existing = config_explain_data(&mut command)?;
+    ensure(
+        existing["lintFindings"] == serde_json::json!([]),
+        format!("repaired paths/recognized environment should clear the findings: {existing}"),
+    )?;
+    ensure(
+        !workspace.path().join(".ee").exists()
+            && !workspace.path().join("home").exists()
+            && !workspace.path().join("user-config").exists()
+            && fs::read_dir(&model_dir).map_err(|error| error.to_string())?.count() == 0
+            && fs::read_dir(&injected_path).map_err(|error| error.to_string())?.count() == 0,
+        "config explain must remain storeless and must not download or load model files",
+    )
+}

@@ -28840,6 +28840,9 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
 
+    let facts = crate::core::config_explain::gather_config_lint_facts(&merged.values);
+    let findings = crate::core::config_explain::run_config_lint(&facts);
+    let explanation = explanation.with_lint_findings(&findings);
     let data = explanation.data_json();
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {

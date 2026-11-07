@@ -21,10 +21,15 @@
 //! This module is the pure, deterministic policy core: the knob registry, the
 //! explain assembly, and the lint rules as pure functions over config facts —
 //! unit-testable without a live config. The CLI/doctor wiring adapts the merged
-//! config to these cores in the follow-on leaves.
+//! config to these cores. The config-explain adapter below gathers configuration,
+//! environment names, and path existence without opening stores or loading models.
+
+use std::path::PathBuf;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+
+use crate::config::env_registry::{EmbeddingTrapEnvVar, EnvVar, read_os};
 
 use crate::config::merge::{
     ConfigValueSource, MESH_ENABLED_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_MMR_LAMBDA_KEY,
@@ -221,13 +226,23 @@ impl ConfigExplanation {
         })
     }
 
-    /// Attach advisory config-lint findings for this key, preserving only
-    /// findings that actually refer to the explained key.
+    /// Attach key-specific findings. Search explanations also carry model-path
+    /// and ignored-environment advisories: those inputs affect retrieval but
+    /// are not TOML keys in the knob registry. Unknown EE_* names are reported
+    /// here as configuration diagnostics, without their values. Other config
+    /// categories retain exact-key scoping.
     #[must_use]
     pub fn with_lint_findings(mut self, findings: &[ConfigLintFinding]) -> Self {
         self.lint_findings = findings
             .iter()
-            .filter(|finding| finding.key == self.knob.key)
+            .filter(|finding| {
+                finding.key == self.knob.key
+                    || (self.knob.category == "search"
+                        && matches!(
+                            finding.code,
+                            LINT_EMBEDDING_MODEL_PATH_MISSING | LINT_UNKNOWN_ENV_VAR
+                        ))
+            })
             .cloned()
             .collect();
         self
@@ -288,17 +303,18 @@ impl ConfigLintFinding {
     }
 }
 
-/// Lint code: a semantic weight is set but the active vector tier is non-neural.
+/// Lint code: a semantic weight is set but neural retrieval is unavailable.
 pub const LINT_WEIGHT_WITHOUT_NEURAL_TIER: &str = "config_semantic_weight_without_neural_tier";
 /// Lint code: an embedding-model path is configured but does not exist on disk.
 pub const LINT_EMBEDDING_MODEL_PATH_MISSING: &str = "config_embedding_model_path_missing";
-/// Lint code: an environment variable was set that `ee` does not consume.
+/// Lint code: an environment variable was set that ee does not consume.
 pub const LINT_UNKNOWN_ENV_VAR: &str = "config_unknown_env_var";
-/// Lint code: `search.mode = lexical` while a semantic weight is also set.
+/// Lint code: a configured task lens selects lexical-only retrieval while a
+/// semantic weight is also set.
 pub const LINT_CONTRADICTORY_LEXICAL_MODE: &str = "config_contradictory_lexical_mode";
 
-/// Advisory: `search.semantic_weight` is set but the active vector tier is not
-/// neural, so the weight does not buy neural semantics (the analyst trap).
+/// Advisory for a known unavailable neural tier. Callers must not pass false
+/// merely because a configuration-only inspection has not loaded a model.
 #[must_use]
 pub fn lint_semantic_weight_without_neural_tier(
     semantic_weight: Option<f64>,
@@ -309,14 +325,14 @@ pub fn lint_semantic_weight_without_neural_tier(
             LINT_WEIGHT_WITHOUT_NEURAL_TIER,
             SEARCH_SEMANTIC_WEIGHT_KEY,
             format!(
-                "search.semantic_weight={weight} is set, but the active vector tier is deterministic hash, not neural — this does not enable neural semantic search. Check `ee index status` for the active embedding mode."
+                "search.semantic_weight={weight} is set, but neural semantic retrieval is unavailable in this configuration; the weight alone does not enable it. Check `ee index status` for the active embedding mode."
             ),
         )),
         _ => None,
     }
 }
 
-/// Advisory: an embedding-model path is configured but does not exist.
+/// Advisory: an explicit embedding-model path is configured but does not exist.
 #[must_use]
 pub fn lint_embedding_model_path_missing(
     key: &str,
@@ -324,18 +340,26 @@ pub fn lint_embedding_model_path_missing(
     path_exists: bool,
 ) -> Option<ConfigLintFinding> {
     match configured_path {
-        Some(path) if !path_exists => Some(ConfigLintFinding::advisory(
-            LINT_EMBEDDING_MODEL_PATH_MISSING,
-            key,
-            format!("configured embedding model path does not exist: {path}"),
-        )),
+        Some(path) if !path_exists => {
+            let message = if key == EnvVar::EmbedModelPath.name() {
+                format!(
+                    "{key} points at missing path `{path}`; this fault-injection override makes the search embedder unavailable. Unset it to stop simulating an unavailable model; it does not load alternate models."
+                )
+            } else {
+                format!("{key}: configured embedding model path does not exist: {path}")
+            };
+            Some(ConfigLintFinding::advisory(
+                LINT_EMBEDDING_MODEL_PATH_MISSING,
+                key,
+                message,
+            ))
+        }
         _ => None,
     }
 }
 
-/// Advisory: an `EE_*`-adjacent environment variable was set that `ee` does not
-/// consume (e.g. the `EMBEDDING_MODEL` trap). `recognized` is whether the env
-/// registry recognizes the variable.
+/// Advisory: an EE_* or foreign embedding environment variable is set that ee
+/// does not consume. Only its name is reported; its value is never retained.
 #[must_use]
 pub fn lint_unknown_env_var(var_name: &str, recognized: bool) -> Option<ConfigLintFinding> {
     if recognized {
@@ -351,60 +375,129 @@ pub fn lint_unknown_env_var(var_name: &str, recognized: bool) -> Option<ConfigLi
     }
 }
 
-/// Advisory: `search.mode = lexical` while a semantic weight is also configured
-/// — the semantic weight cannot take effect under lexical-only mode.
+/// Advisory for the real task-lens source_mode setting. A lexical-only lens
+/// makes the global semantic weight ineffective only when that lens is used.
 #[must_use]
 pub fn lint_contradictory_lexical_mode(
-    mode: Option<&str>,
+    lens_id: &str,
+    source_mode: &str,
     semantic_weight: Option<f64>,
 ) -> Option<ConfigLintFinding> {
-    match (mode, semantic_weight) {
-        (Some("lexical"), Some(weight)) => Some(ConfigLintFinding::advisory(
+    let lexical_only = source_mode.eq_ignore_ascii_case("lexical_only")
+        || source_mode.eq_ignore_ascii_case("lexical-only");
+    match semantic_weight {
+        Some(weight) if lexical_only => Some(ConfigLintFinding::advisory(
             LINT_CONTRADICTORY_LEXICAL_MODE,
             SEARCH_SEMANTIC_WEIGHT_KEY,
             format!(
-                "search mode is `lexical`, so search.semantic_weight={weight} has no effect. Set mode to `hybrid` to use the vector tier."
+                "task_lens.overrides entry `{lens_id}` sets source_mode=lexical_only, so search.semantic_weight={weight} has no effect when this lens is selected. Use source_mode=hybrid in that lens to include the vector tier."
             ),
         )),
         _ => None,
     }
 }
 
-/// Config facts the lint rules operate over. Pure inputs gathered by the doctor
-/// wiring from the merged config + filesystem + env registry.
+/// Observed inputs to the pure lint rules. Unknown neural posture is distinct
+/// from an observed unavailable tier.
 #[derive(Clone, Debug, Default)]
 pub struct ConfigLintFacts {
-    /// Effective `search.semantic_weight`, if set.
+    /// Effective search.semantic_weight, if set.
     pub semantic_weight: Option<f64>,
-    /// Whether the active vector tier is a neural model (vs hash fallback).
-    pub neural_tier_active: bool,
-    /// Effective `search.mode`, if set.
-    pub search_mode: Option<String>,
-    /// A configured embedding-model path key + value + existence, if any.
-    pub embedding_model_path: Option<(String, String, bool)>,
-    /// Set-but-unrecognized environment variables: (name, recognized).
+    /// Whether neural retrieval is active, if known. None means uninspected.
+    pub neural_tier_active: Option<bool>,
+    /// Effective configured task-lens IDs and their source_mode values.
+    pub task_lens_source_modes: Vec<(String, String)>,
+    /// Explicit embedding-model environment keys, paths, and existence facts.
+    pub embedding_model_paths: Vec<(String, String, bool)>,
+    /// Environment variable names and registry recognition, never their values.
     pub env_vars: Vec<(String, bool)>,
 }
 
-/// Run all config-lint rules over the gathered facts, returning advisory
-/// findings sorted by `(code, key)` for byte-stable output. Deterministic, and
-/// — by construction — every finding is advisory; this function can never
-/// produce a health-degrading result.
+/// Gather real config-explain facts without opening a database, initializing
+/// an embedder, or downloading models. Path errors are unknown, not proof that
+/// a path is missing. Existing model files do not prove an active neural tier.
+#[must_use]
+pub fn gather_config_lint_facts(config: &crate::config::ConfigFile) -> ConfigLintFacts {
+    let mut facts = ConfigLintFacts {
+        semantic_weight: config.search.semantic_weight,
+        task_lens_source_modes: config
+            .task_lens
+            .overrides
+            .iter()
+            .filter_map(|lens| {
+                lens.overlay
+                    .source_mode
+                    .as_ref()
+                    .map(|mode| (lens.id.clone(), mode.clone()))
+            })
+            .collect(),
+        env_vars: std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .filter(|name| name.starts_with("EE_"))
+            .map(|name| {
+                let recognized = EnvVar::all().iter().any(|var| var.name() == name);
+                (name, recognized)
+            })
+            .collect(),
+        ..ConfigLintFacts::default()
+    };
+    for trap in EmbeddingTrapEnvVar::all() {
+        if trap.is_present() {
+            facts.env_vars.push((trap.name().to_owned(), false));
+        }
+    }
+    for variable in [EnvVar::EmbedModelDir, EnvVar::EmbedModelPath] {
+        let Some(value) = read_os(variable).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        // Match the retrieval path's UTF-8/trim handling for the fault injector.
+        // The actual model-directory override accepts an unmodified OS path.
+        let path = if variable == EnvVar::EmbedModelPath {
+            let Some(value) = value.to_str().map(str::trim).filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            PathBuf::from(value)
+        } else {
+            PathBuf::from(value)
+        };
+        let Ok(exists) = path.try_exists() else {
+            continue;
+        };
+        if variable == EnvVar::EmbedModelPath && !exists {
+            // resolve_source_mode treats this explicit fault as unavailable,
+            // including when a neural model would otherwise be ready.
+            facts.neural_tier_active = Some(false);
+        }
+        facts.embedding_model_paths.push((
+            variable.name().to_owned(),
+            path.to_string_lossy().into_owned(),
+            exists,
+        ));
+    }
+    facts
+}
+
+/// Run the rules over observed facts. Findings are always advisory and sorted
+/// by (code, key, message), including multiple lenses concerning the same key.
 #[must_use]
 pub fn run_config_lint(facts: &ConfigLintFacts) -> Vec<ConfigLintFinding> {
     let mut findings = Vec::new();
 
-    if let Some(finding) =
-        lint_semantic_weight_without_neural_tier(facts.semantic_weight, facts.neural_tier_active)
+    if let Some(neural_tier_active) = facts.neural_tier_active
+        && let Some(finding) =
+            lint_semantic_weight_without_neural_tier(facts.semantic_weight, neural_tier_active)
     {
         findings.push(finding);
     }
-    if let Some(finding) =
-        lint_contradictory_lexical_mode(facts.search_mode.as_deref(), facts.semantic_weight)
-    {
-        findings.push(finding);
+    for (lens_id, source_mode) in &facts.task_lens_source_modes {
+        if let Some(finding) =
+            lint_contradictory_lexical_mode(lens_id, source_mode, facts.semantic_weight)
+        {
+            findings.push(finding);
+        }
     }
-    if let Some((key, path, exists)) = &facts.embedding_model_path {
+    for (key, path, exists) in &facts.embedding_model_paths {
         if let Some(finding) = lint_embedding_model_path_missing(key, Some(path), *exists) {
             findings.push(finding);
         }
@@ -415,7 +508,12 @@ pub fn run_config_lint(facts: &ConfigLintFacts) -> Vec<ConfigLintFinding> {
         }
     }
 
-    findings.sort_by(|a, b| a.code.cmp(b.code).then_with(|| a.key.cmp(&b.key)));
+    findings.sort_by(|a, b| {
+        a.code
+            .cmp(b.code)
+            .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| a.message.cmp(&b.message))
+    });
     findings
 }
 
@@ -555,17 +653,17 @@ mod tests {
     }
 
     #[test]
-    fn explain_can_attach_key_scoped_lint_findings() {
+    fn explain_attaches_search_environment_diagnostics() {
         let facts = ConfigLintFacts {
             semantic_weight: Some(0.45),
-            neural_tier_active: false,
-            search_mode: Some("lexical".to_owned()),
-            embedding_model_path: Some((
-                "embedding.model_path".to_owned(),
+            neural_tier_active: Some(false),
+            task_lens_source_modes: vec![("local-review".to_owned(), "lexical_only".to_owned())],
+            embedding_model_paths: vec![(
+                EnvVar::EmbedModelDir.name().to_owned(),
                 "/no/such".to_owned(),
                 false,
-            )),
-            env_vars: vec![("EMBEDDING_MODEL".to_owned(), false)],
+            )],
+            env_vars: vec![("EE_UNRECOGNIZED_SETTING".to_owned(), false)],
         };
         let findings = run_config_lint(&facts);
         let explanation = explain(
@@ -579,12 +677,20 @@ mod tests {
         let attached = json["lintFindings"]
             .as_array()
             .expect("lint findings array");
-        assert_eq!(attached.len(), 2);
+        assert_eq!(attached.len(), 4);
         assert!(
-            attached
-                .iter()
-                .all(|finding| finding["key"] == SEARCH_SEMANTIC_WEIGHT_KEY),
-            "only findings for the explained key are attached"
+            attached.iter().any(|finding| {
+                finding["code"] == LINT_UNKNOWN_ENV_VAR
+                    && finding["key"] == "EE_UNRECOGNIZED_SETTING"
+            }),
+            "unknown environment names must not be dropped by exact-key filtering"
+        );
+        assert!(
+            attached.iter().any(|finding| {
+                finding["code"] == LINT_EMBEDDING_MODEL_PATH_MISSING
+                    && finding["key"] == EnvVar::EmbedModelDir.name()
+            }),
+            "model-path advisories retain the real environment key"
         );
         assert!(
             attached
@@ -664,20 +770,22 @@ mod tests {
 
     #[test]
     fn lint_flags_missing_embedding_model_path() {
-        let finding = lint_embedding_model_path_missing(
-            "embedding.model_path",
+        let key = EnvVar::EmbedModelDir.name();
+        let finding = lint_embedding_model_path_missing(key, Some("/no/such/model"), false)
+            .expect("a missing model path is suspicious");
+        assert_eq!(finding.code, LINT_EMBEDDING_MODEL_PATH_MISSING);
+        assert_eq!(finding.key, key);
+        assert!(lint_embedding_model_path_missing(key, Some("/exists"), true).is_none());
+        assert!(lint_embedding_model_path_missing(key, None, false).is_none());
+
+        let injected = lint_embedding_model_path_missing(
+            EnvVar::EmbedModelPath.name(),
             Some("/no/such/model"),
             false,
         )
-        .expect("a missing model path is suspicious");
-        assert_eq!(finding.code, LINT_EMBEDDING_MODEL_PATH_MISSING);
-        // Present path → no finding.
-        assert!(
-            lint_embedding_model_path_missing("embedding.model_path", Some("/exists"), true)
-                .is_none()
-        );
-        // Unconfigured path → no finding, regardless of the path existence probe.
-        assert!(lint_embedding_model_path_missing("embedding.model_path", None, false).is_none());
+        .expect("the missing fault-injection path is diagnosed");
+        assert!(injected.message.contains("fault-injection"));
+        assert!(injected.message.contains("does not load alternate models"));
     }
 
     #[test]
@@ -697,28 +805,34 @@ mod tests {
     }
 
     #[test]
-    fn lint_flags_contradictory_lexical_mode() {
-        let finding = lint_contradictory_lexical_mode(Some("lexical"), Some(0.45))
-            .expect("lexical mode + semantic weight is contradictory");
-        assert_eq!(finding.code, LINT_CONTRADICTORY_LEXICAL_MODE);
-        assert!(lint_contradictory_lexical_mode(Some("hybrid"), Some(0.45)).is_none());
-        assert!(lint_contradictory_lexical_mode(Some("lexical"), None).is_none());
+    fn lint_flags_real_lexical_lens_source_modes() {
+        for mode in ["lexical-only", "lexical_only"] {
+            let finding = lint_contradictory_lexical_mode("local-review", mode, Some(0.45))
+                .expect("lexical-only lens + semantic weight is diagnosed");
+            assert_eq!(finding.code, LINT_CONTRADICTORY_LEXICAL_MODE);
+            assert!(finding.message.contains("local-review"));
+            assert!(finding.message.contains("when this lens is selected"));
+        }
+        for mode in ["hybrid", "semantic_only", "fast", "lexical"] {
+            assert!(lint_contradictory_lexical_mode("local-review", mode, Some(0.45)).is_none());
+        }
+        assert!(lint_contradictory_lexical_mode("local-review", "lexical_only", None).is_none());
     }
 
     #[test]
     fn run_config_lint_is_advisory_only_and_deterministic() {
         let facts = ConfigLintFacts {
             semantic_weight: Some(0.45),
-            neural_tier_active: false,
-            search_mode: Some("lexical".to_owned()),
-            embedding_model_path: Some((
-                "embedding.model_path".to_owned(),
+            neural_tier_active: Some(false),
+            task_lens_source_modes: vec![("local-review".to_owned(), "lexical_only".to_owned())],
+            embedding_model_paths: vec![(
+                EnvVar::EmbedModelDir.name().to_owned(),
                 "/no/such".to_owned(),
                 false,
-            )),
+            )],
             env_vars: vec![
                 ("EMBEDDING_MODEL".to_owned(), false),
-                ("EE_DB".to_owned(), true),
+                (EnvVar::DatabasePath.name().to_owned(), true),
             ],
         };
         let findings = run_config_lint(&facts);
@@ -734,34 +848,63 @@ mod tests {
     #[test]
     fn run_config_lint_orders_same_code_findings_by_key() {
         let facts = ConfigLintFacts {
-            semantic_weight: None,
-            neural_tier_active: false,
-            search_mode: None,
-            embedding_model_path: None,
             env_vars: vec![
-                ("EEZ_UNUSED".to_owned(), false),
-                ("EEA_UNUSED".to_owned(), false),
-                ("EE_REAL".to_owned(), true),
+                ("EE_Z_UNUSED".to_owned(), false),
+                ("EE_A_UNUSED".to_owned(), false),
+                (EnvVar::DatabasePath.name().to_owned(), true),
             ],
+            ..ConfigLintFacts::default()
         };
         let findings = run_config_lint(&facts);
 
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0].code, LINT_UNKNOWN_ENV_VAR);
-        assert_eq!(findings[0].key.as_str(), "EEA_UNUSED");
+        assert_eq!(findings[0].key.as_str(), "EE_A_UNUSED");
         assert_eq!(findings[1].code, LINT_UNKNOWN_ENV_VAR);
-        assert_eq!(findings[1].key.as_str(), "EEZ_UNUSED");
+        assert_eq!(findings[1].key.as_str(), "EE_Z_UNUSED");
     }
 
     #[test]
     fn run_config_lint_clean_config_has_no_findings() {
         let facts = ConfigLintFacts {
             semantic_weight: Some(0.45),
-            neural_tier_active: true,
-            search_mode: Some("hybrid".to_owned()),
-            embedding_model_path: None,
-            env_vars: vec![("EE_DB".to_owned(), true)],
+            neural_tier_active: Some(true),
+            task_lens_source_modes: vec![("local-review".to_owned(), "hybrid".to_owned())],
+            embedding_model_paths: Vec::new(),
+            env_vars: vec![(EnvVar::DatabasePath.name().to_owned(), true)],
         };
         assert!(run_config_lint(&facts).is_empty());
+    }
+
+    #[test]
+    fn run_config_lint_preserves_unknown_neural_posture() {
+        let mut facts = ConfigLintFacts {
+            semantic_weight: Some(0.45),
+            ..ConfigLintFacts::default()
+        };
+        assert!(run_config_lint(&facts).is_empty());
+        facts.neural_tier_active = Some(false);
+        let findings = run_config_lint(&facts);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, LINT_WEIGHT_WITHOUT_NEURAL_TIER);
+        assert!(!findings[0].message.contains("deterministic hash"));
+        facts.neural_tier_active = Some(true);
+        assert!(run_config_lint(&facts).is_empty());
+    }
+
+    #[test]
+    fn run_config_lint_orders_multiple_lenses_for_the_same_key() {
+        let mut facts = ConfigLintFacts {
+            semantic_weight: Some(0.45),
+            task_lens_source_modes: vec![
+                ("z-review".to_owned(), "lexical_only".to_owned()),
+                ("a-review".to_owned(), "lexical_only".to_owned()),
+            ],
+            ..ConfigLintFacts::default()
+        };
+        let findings = run_config_lint(&facts);
+        assert_eq!(findings.len(), 2);
+        facts.task_lens_source_modes.reverse();
+        assert_eq!(findings, run_config_lint(&facts));
     }
 }
