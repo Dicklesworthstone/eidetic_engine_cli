@@ -11,12 +11,15 @@
 //! byte-identical for identical `(workspace_id, db_generation, config_hash,
 //! budget, format)` keys, which is also the `primer_cache` cache key. The
 //! internal config key also binds the observed graph, global-lane and seal
-//! state: changes to those sources need not advance the workspace generation.
-//! Nothing here reads the wall clock: ordering uses stored timestamps and
-//! ids only, so a cache hit and a cold assembly produce identical bytes.
+//! state and the currently applicable memory identities: changes to those
+//! inputs need not advance the workspace generation. Orchestration samples
+//! one reference time for validity admission; pure assembly still uses only
+//! stored timestamps and ids. Time passing without a validity transition
+//! preserves the cache key and the assembled bytes.
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{DbConnection, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation};
@@ -665,9 +668,10 @@ fn render_markdown(sections: &[PrimerSection]) -> String {
 /// Fetch candidates + persisted centrality, assemble (or serve from the
 /// `primer_cache` derived table), and persist the cold result. The cache key
 /// is `(workspace_id, db_generation, config_hash, budget, format)`; the internal
-/// config hash also binds observed graph, global-lane and seal state. A DB
-/// generation advance or a change to those inputs invalidates. `refresh`
-/// forces re-assembly (still deterministic ⇒ byte-identical to a cold assembly).
+/// config hash also binds observed graph, global-lane, seal and validity
+/// admission state. A DB generation advance or a change to those inputs
+/// invalidates. `refresh` forces re-assembly (still deterministic ⇒
+/// byte-identical to a cold assembly).
 pub fn run_primer(
     connection: &DbConnection,
     workspace_id: &str,
@@ -719,6 +723,29 @@ pub fn run_primer_with_global_lane(
     persist: bool,
     global_paths: Option<&crate::core::global_store::GlobalStorePaths>,
 ) -> crate::db::Result<PrimerReport> {
+    run_primer_with_global_lane_at(
+        connection,
+        workspace_id,
+        settings,
+        refresh,
+        persist,
+        global_paths,
+        Utc::now(),
+    )
+}
+
+/// Keep one applicability instant across metadata admission, body hydration
+/// and both source lanes. Tests supply exact boundary instants without sleeps;
+/// the pure assembler and the cache identity never read or hash the clock.
+fn run_primer_with_global_lane_at(
+    connection: &DbConnection,
+    workspace_id: &str,
+    settings: &PrimerSettings,
+    refresh: bool,
+    persist: bool,
+    global_paths: Option<&crate::core::global_store::GlobalStorePaths>,
+    reference_time: DateTime<Utc>,
+) -> crate::db::Result<PrimerReport> {
     let db_generation = i64::try_from(
         connection
             .get_workspace_generation(workspace_id)?
@@ -727,6 +754,8 @@ pub fn run_primer_with_global_lane(
     .unwrap_or(i64::MAX);
 
     let (closed_seals, seal_authority_hash) = primer_seal_admission(connection, workspace_id)?;
+    let (applicable_memories, validity_state_hash) =
+        primer_validity_admission(connection, workspace_id, reference_time)?;
     // Graph refresh/status writes do not advance the workspace generation.
     // Read the selected snapshot once, before a cache lookup, so the identity
     // and the scores used below describe the same observation. In particular,
@@ -739,7 +768,17 @@ pub fn run_primer_with_global_lane(
     // the lane's content fingerprint must be part of the cache key or a
     // cached primer would silently omit fresh global rows. When the lane is
     // off the key is byte-identical to the pre-lane form.
-    let (global_rows, global_lane_degraded) = load_global_lane_rows(global_paths);
+    let (mut global_rows, global_lane_degraded) = load_global_lane_rows(global_paths);
+    // The global reader owns revision/seal admission but deliberately leaves
+    // author validity to callers. Filter before both hashing and precedence:
+    // an expired local twin must not suppress an applicable global rule.
+    global_rows.retain(|memory| {
+        primer_validity_admits(
+            memory.valid_from.as_deref(),
+            memory.valid_to.as_deref(),
+            reference_time,
+        )
+    });
     let cache_config_hash = if global_rows.is_empty() && global_lane_degraded.is_none() {
         settings.config_hash.clone()
     } else {
@@ -752,8 +791,9 @@ pub fn run_primer_with_global_lane(
     // Seal-only writes do not advance workspace generations. Bind admission
     // before any cache lookup, and version the key so pre-admission cached
     // responses cannot reappear when all seals have subsequently been revealed.
-    let cache_config_hash =
-        format!("{cache_config_hash}+seals:{seal_authority_hash}+graph:{centrality_state_hash}");
+    let cache_config_hash = format!(
+        "{cache_config_hash}+seals:{seal_authority_hash}+graph:{centrality_state_hash}+validity:{validity_state_hash}"
+    );
 
     if !refresh
         && let Some(cached) = connection.get_primer_cache(
@@ -772,13 +812,23 @@ pub fn run_primer_with_global_lane(
         return Ok(report);
     }
 
-    // Candidate fetch: non-tombstoned memories; decision-supersession via
-    // explicit links (a decision is superseded when another memory points a
-    // `supersedes` link at it).
+    // Candidate fetch: applicable, non-tombstoned current revisions;
+    // decision-supersession via explicit links (a decision is superseded when
+    // another memory points a `supersedes` link at it).
     let memories = connection.list_memories(workspace_id, None, false)?;
     let mut candidates = Vec::with_capacity(memories.len());
     for memory in &memories {
-        if closed_seals.contains(&memory.id) {
+        if closed_seals.contains(&memory.id)
+            || !applicable_memories.contains(&memory.id)
+            // Recheck the hydrated row at the same instant. Without a
+            // caller-owned snapshot, a concurrent validity edit must not
+            // turn an earlier metadata admission into an invalid body.
+            || !primer_validity_admits(
+                memory.valid_from.as_deref(),
+                memory.valid_to.as_deref(),
+                reference_time,
+            )
+        {
             continue;
         }
         let superseded = if memory.kind == "decision" {
@@ -842,6 +892,58 @@ pub fn run_primer_with_global_lane(
     Ok(report)
 }
 
+/// Applicability changes independently of the DB generation when a bound is
+/// crossed. Hash the sorted admitted identities, not the reference time, so
+/// warm responses stay reusable until their eligible source set changes.
+/// The versioned domain also prevents pre-admission cache rows from returning.
+fn primer_validity_admission(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+) -> crate::db::Result<(BTreeSet<String>, String)> {
+    let admitted = connection
+        .list_current_memory_validity(workspace_id)?
+        .into_iter()
+        .filter(|memory| {
+            primer_validity_admits(
+                memory.valid_from.as_deref(),
+                memory.valid_to.as_deref(),
+                reference_time,
+            )
+        })
+        .map(|memory| memory.memory_id)
+        .collect::<BTreeSet<_>>();
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.primer.validity_admission.v1\0");
+    for id in &admitted {
+        hash_primer_cache_field(&mut hash, id.as_bytes());
+    }
+    Ok((admitted, hash.finalize().to_hex().to_string()))
+}
+
+/// Match ordinary search admission: exact RFC3339 instants and inclusive
+/// author endpoints, with absent bounds open. Malformed or inverted windows
+/// never grant admission. No lexical ordering or SQL date rounding is used.
+fn primer_validity_admits(
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+    reference_time: DateTime<Utc>,
+) -> bool {
+    let parse = |raw: Option<&str>| {
+        raw.map(|value| {
+            DateTime::parse_from_rfc3339(value).map(|instant| instant.with_timezone(&Utc))
+        })
+        .transpose()
+    };
+    let (Ok(start), Ok(end)) = (parse(valid_from), parse(valid_to)) else {
+        return false;
+    };
+    if start.zip(end).is_some_and(|(start, end)| start > end) {
+        return false;
+    }
+    start.is_none_or(|start| start <= reference_time) && end.is_none_or(|end| end >= reference_time)
+}
+
 /// A sealed row is not ordinary recall evidence, including on a warm cache.
 /// The caller's connection (and any caller-owned snapshot) is reused, never
 /// nested or released. Only an irreversible digest of sorted public identities
@@ -874,6 +976,10 @@ fn primer_seal_admission(
 #[cfg(test)]
 #[path = "primer_seal_admission_tests.rs"]
 mod seal_tests;
+
+#[cfg(test)]
+#[path = "primer_validity_tests.rs"]
+mod validity_tests;
 
 /// Read the global-store rows for the primer lane (bd-1bfwa.3).
 ///

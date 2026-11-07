@@ -25900,6 +25900,16 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+/// Applicability bounds for a non-tombstoned current memory revision.
+/// This projection deliberately omits bodies and sidecars so cached read
+/// surfaces can revalidate temporal admission without hydrating every memory.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct MemoryValidityMetadata {
+    pub memory_id: String,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+}
+
 impl StoredMemory {
     pub(crate) fn consolidation_view(&self) -> crate::models::memory::MemoryConsolidationView<'_> {
         use crate::models::memory::{MemoryConsolidationScope, MemoryConsolidationView};
@@ -28901,6 +28911,30 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// Read current-head applicability metadata in the caller's read view.
+    /// Expired, future and malformed bounds remain present so the caller can
+    /// evaluate both endpoints at one explicit reference time. No body read,
+    /// timestamp coercion, clock sample, transaction or write is performed.
+    pub(crate) fn list_current_memory_validity(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<MemoryValidityMetadata>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok(MemoryValidityMetadata {
+                    memory_id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                    valid_from: optional_text(row, 1)?.map(str::to_owned),
+                    valid_to: optional_text(row, 2)?.map(str::to_owned),
+                })
+            })
+            .collect()
     }
 
     /// List memories that are still temporally valid at `as_of`.
@@ -62712,6 +62746,38 @@ UPDATE memories
                 memory.id == "mem_00000000000000000000000002" && memory.tombstoned_at.is_some()
             }),
             "current-head listing includes tombstoned memory",
+        )?;
+
+        // The lightweight applicability projection excludes retired identities
+        // but preserves raw bounds, including expired heads, for its caller.
+        let validity = connection.list_current_memory_validity("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &validity
+                .iter()
+                .map(|memory| memory.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec![
+                "mem_00000000000000000000000001",
+                "mem_00000000000000000000000030",
+            ],
+            "validity metadata includes current heads without tombstones",
+        )?;
+        ensure_equal(
+            &validity[1].valid_to.as_deref(),
+            &Some("2026-01-02T00:00:00Z"),
+            "validity metadata preserves author expiry without filtering it",
+        )?;
+        ensure(
+            connection.restore_imported_memory_supersession(
+                "mem_00000000000000000000000001",
+                "2026-09-16T00:00:00Z",
+            )?,
+            "retire a revision before reading applicability metadata",
+        )?;
+        ensure_equal(
+            &connection.list_current_memory_validity("wsp_01234567890123456789012345")?,
+            &vec![validity[1].clone()],
+            "validity metadata excludes superseded revisions",
         )?;
 
         connection.close()?;
