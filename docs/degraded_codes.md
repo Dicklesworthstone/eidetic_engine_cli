@@ -3429,14 +3429,16 @@ ee context 'J6 changed source freshness marker' --workspace . --json
 
 **Introduced by:** bd-16imy (epic RC)
 
-**Trigger.** An imported evidence-span document (source=import) matched the retrieval query, but the span has not been distilled into a memory (memory_id is unset — the common state for a fresh `ee import cass`), or its recorded memory linkage was invalid. Pack candidates are memory-centric, so an undistilled span cannot hydrate into a pack item; the response degrades honestly with the distillation path as the repair instead of silently dropping the matched evidence. The excerpt remains retrievable via ee search.
+**Trigger.** Live imported-evidence hydration or incident-card verification could not be completed normally. Missing, malformed, denied, or unreadable source rows are excluded; failed incident-card lookups retain original transcript candidates. Native evidence does not require distillation into a memory. The batch-failure case covered here reports fallback to individual source reads: readable, admitted evidence survives with the same content and provenance, and denied evidence stays excluded. Its diagnostic is stable and excludes raw database errors.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
-ee import cass --workspace . --limit 1   # spans persist with memory_id unset
+ee import cass --workspace . --limit 1
 ee index rebuild --workspace .
+# Regression-only fault: make the recorded-verdict lookup fail in a disposable store while keeping evidence and session rows readable.
+# Executable regression: scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked --lib direct_evidence_batch_failure_reports_fallback_and_preserves_admission
 ```
 
 **Invocation.**
@@ -3445,9 +3447,9 @@ ee index rebuild --workspace .
 ee pack "<unique transcript phrase from the imported session>" --workspace . --json
 ```
 
-**Expected emission.** Message contains: `has not been distilled into a memory`
+**Expected emission.** Message contains: `batch hydration failed ... individual source reads`
 
-**Repair hint.** `ee index rebuild`
+**Repair hint.** `ee doctor --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/context_evidence_hit_unhydrated.json`](../tests/fixtures/failure_modes/context_evidence_hit_unhydrated.json)
 

@@ -15986,8 +15986,8 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     let mut filtered_count = 0_usize;
 
     // Hydrate every evidence hit with one batched read instead of two point
-    // queries per hit (bd-reality-core-convergence-1azkt.64). A failed batch
-    // leaves the map empty and each hit falls back to its own point reads.
+    // queries per hit (bd-reality-core-convergence-1azkt.64). Report a failed
+    // batch before falling back to each hit's point reads (bd-p42mq).
     let hit_ids = search_report
         .results
         .iter()
@@ -15995,14 +15995,24 @@ fn collect_direct_evidence_pack_candidates_with_probe(
         .map(|id| id.to_string())
         .collect::<BTreeSet<_>>();
     let hit_id_refs = hit_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut hydrated = connection
-        .get_evidence_spans_with_sessions(&hit_id_refs)
-        .map(|rows| {
-            rows.into_iter()
-                .map(|row| (row.span.id.clone(), row))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let mut hydrated = match connection.get_evidence_spans_with_sessions(&hit_id_refs) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| (row.span.id.clone(), row))
+            .collect::<BTreeMap<_, _>>(),
+        Err(_) => {
+            // Degradation prose participates in pack identity. Keep this
+            // stable and do not expose database paths or SQL error details.
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                "Imported-evidence batch hydration failed; individual source reads were used before pack admission.",
+                Some("ee doctor --json".to_owned()),
+            );
+            BTreeMap::new()
+        }
+    };
 
     for hit in &search_report.results {
         if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {

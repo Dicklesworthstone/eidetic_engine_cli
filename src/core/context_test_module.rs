@@ -4054,6 +4054,212 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn direct_evidence_batch_failure_reports_fallback_and_preserves_admission() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory.path();
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0xe720)).to_string();
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session_id,
+                &crate::db::CreateSessionInput {
+                    workspace_id: workspace_id.clone(),
+                    cass_session_id: "batch-hydration-session".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 3,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(b"batch-session").to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut hits = Vec::new();
+        let mut evidence_ids = Vec::new();
+        for (line, excerpt) in [
+            (
+                1_u32,
+                "Release evidence: pin the replay clock before hashing.",
+            ),
+            (
+                2,
+                "Release evidence: record the schema revision with the artifact.",
+            ),
+            (3, "Release evidence that the operator withheld from packs."),
+        ] {
+            let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0xe720 + u128::from(line),
+            ))
+            .to_string();
+            connection
+                .insert_evidence_span(
+                    &evidence_id,
+                    &crate::db::CreateEvidenceSpanInput {
+                        workspace_id: workspace_id.clone(),
+                        session_id: session_id.clone(),
+                        memory_id: None,
+                        producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("batch-hydration-span-{line}"),
+                        span_kind: "message".to_owned(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some("assistant".to_owned()),
+                        excerpt: excerpt.to_owned(),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let mut hit = ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
+            hit.doc_id = evidence_id.clone();
+            hits.push(hit);
+            evidence_ids.push(evidence_id);
+        }
+        connection
+            .execute(
+                "UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = ?1",
+                &[sqlmodel_core::Value::Text(evidence_ids[2].clone())],
+            )
+            .map_err(|error| error.to_string())?;
+        hits.push(hits[0].clone());
+        let search = ppr_search_report(hits);
+        let request = ContextRequest::new(ContextRequestInput::for_query("release evidence"))
+            .map_err(|error| error.to_string())?;
+        let collect = || {
+            let mut degraded = Vec::new();
+            let candidates = super::collect_direct_evidence_pack_candidates(
+                &connection,
+                workspace,
+                &search,
+                &request,
+                &Default::default(),
+                Some(0.0),
+                &mut degraded,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok::<_, String>((
+                candidates
+                    .into_iter()
+                    .map(|candidate| candidate.item)
+                    .collect::<Vec<_>>(),
+                degraded,
+            ))
+        };
+        let id_refs = evidence_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            connection
+                .get_evidence_spans_with_sessions(&id_refs)
+                .map_err(|error| error.to_string())?
+                .len(),
+            3,
+            "the healthy bulk read must actually load the populated source rows"
+        );
+        let (healthy_items, healthy_degraded) = collect()?;
+        assert_eq!(
+            healthy_items
+                .iter()
+                .map(|item| item.evidence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![evidence_ids[0].as_str(), evidence_ids[1].as_str()]
+        );
+        assert!(
+            healthy_degraded
+                .iter()
+                .all(|entry| !entry.message.contains("batch hydration")),
+            "healthy hydration must not report a fallback"
+        );
+
+        // Break only the bulk path's optional cached-verdict read. The real
+        // span and session reads remain usable, with admission re-derived
+        // from the complete live row rather than a cached binding.
+        connection
+            .execute_raw(
+                "ALTER TABLE evidence_admission_verdicts RENAME COLUMN verdict_binding TO unavailable_verdict_binding",
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .get_evidence_spans_with_sessions(&id_refs)
+                .is_err()
+        );
+        let live_session = connection
+            .get_session(&session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "fixture session disappeared".to_owned())?;
+        for (index, evidence_id) in evidence_ids.iter().enumerate() {
+            let span = connection
+                .get_evidence_span(evidence_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fixture span disappeared".to_owned())?;
+            assert_eq!(
+                span.is_direct_pack_admitted_for_session(&workspace_id, &live_session),
+                index < 2,
+                "point reads must preserve the explicit pack denial"
+            );
+        }
+        let (recovered_items, degraded) = collect()?;
+        assert_eq!(recovered_items, healthy_items);
+        let fallbacks = degraded
+            .iter()
+            .filter(|entry| entry.message.contains("batch hydration"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fallbacks.len(),
+            1,
+            "one diagnostic per failed batch, not per hit"
+        );
+        assert_eq!(fallbacks[0].code, "context_evidence_hit_unhydrated");
+        assert_eq!(fallbacks[0].severity, ContextResponseSeverity::Low);
+        assert_eq!(fallbacks[0].repair.as_deref(), Some("ee doctor --json"));
+        assert_eq!(
+            fallbacks[0].message,
+            "Imported-evidence batch hydration failed; individual source reads were used before pack admission."
+        );
+        assert!(
+            degraded
+                .iter()
+                .all(|entry| !entry.message.contains("verdict_binding"))
+        );
+        let (repeated_items, repeated_degraded) = collect()?;
+        assert_eq!(repeated_items, recovered_items);
+        assert_eq!(
+            repeated_degraded, degraded,
+            "hash-bearing diagnostics must be stable"
+        );
+
+        connection
+            .execute_raw(
+                "ALTER TABLE evidence_admission_verdicts RENAME COLUMN unavailable_verdict_binding TO verdict_binding",
+            )
+            .map_err(|error| error.to_string())?;
+        let (restored_items, restored_degraded) = collect()?;
+        assert_eq!(restored_items, healthy_items);
+        assert_eq!(restored_degraded, healthy_degraded);
+        Ok(())
+    }
+
+    #[test]
     fn direct_evidence_pack_applies_request_filters_and_combined_limit() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = directory.path();
