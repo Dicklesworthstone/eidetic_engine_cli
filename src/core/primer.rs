@@ -1821,7 +1821,10 @@ mod tests {
             serde_json::from_str(&snapshot.metrics_json).expect("metrics JSON");
         for (path, value) in [
             ("/graph/nodes/0/authority", serde_json::Value::Null),
-            ("/graph/nodes/0/betweenness", serde_json::json!("not a number")),
+            (
+                "/graph/nodes/0/betweenness",
+                serde_json::json!("not a number"),
+            ),
             ("/graph/nodes/0/authority", serde_json::json!(-0.1)),
             ("/graph/nodes/0/memoryId", serde_json::json!("")),
             (
