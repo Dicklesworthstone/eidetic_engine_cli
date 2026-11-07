@@ -137,6 +137,21 @@ esac
 # surviving grandchild and finally closes the pipe. The shell fallback escalates
 # the same way; it previously sent SIGTERM alone and inherited the identical bug.
 TERM_TO_KILL_GRACE_SECONDS="${TERM_TO_KILL_GRACE_SECONDS:-2}"
+# Validated like every other bound in this script, and for a sharper reason than
+# consistency. Measured with GNU coreutils 9.11 against a SIGTERM-ignoring child:
+#
+#   timeout -k 0s 2s ...   rc=124 after the child's FULL 20s lifetime
+#   timeout -k 2s 2s ...   rc=137 after 4s
+#
+# A zero grace does not mean "escalate immediately" -- a zero duration means NO
+# timeout, so the SIGKILL never fires and the unbounded wait this wrapper exists
+# to prevent comes straight back, from a value a reader would reasonably set. A
+# non-numeric value fails differently and worse: timeout exits 125 for an invalid
+# interval, and is_timeout_status() classifies 125 as neither a timeout nor a
+# success, so a typo here would be reported as a defect in whatever was probed.
+case "$TERM_TO_KILL_GRACE_SECONDS" in
+    ''|*[!0-9]*|0) TERM_TO_KILL_GRACE_SECONDS=2 ;;
+esac
 
 run_bounded_command() {
     local seconds="${1:?seconds required}"
