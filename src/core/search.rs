@@ -800,25 +800,37 @@ fn drop_stopword_only_lexical_hits(
         embed_backend == EmbedBackend::HashFallback
             || matches!(hit.source, ScoreSource::Lexical | ScoreSource::HashControl)
     };
+    let global_store_hit = |hit: &SearchHit| {
+        hit.metadata.as_ref().and_then(|metadata| {
+            metadata
+                .get("storeLane")
+                .and_then(serde_json::Value::as_str)
+        }) == Some(super::global_store::GLOBAL_PROVENANCE_LANE)
+    };
     // Only a complete body can prove absence; unknown means keep.
     let preview_truncated = |metadata: &serde_json::Value| match metadata.get("content_truncated") {
         Some(serde_json::Value::Bool(flag)) => *flag,
         Some(serde_json::Value::String(flag)) => flag != "false",
         _ => true,
     };
-    // A long evidence span's preview is cut at 240 characters; judge it on
-    // the exact text that was indexed for it, read in one batch. The text is
-    // only tokenized here, never returned.
-    let truncated_evidence = hits
+    // All native document previews are cut at 240 characters. Missing subject
+    // words in a preview cannot prove absence, but treating every long memory
+    // or rule as unknown admits stopword-only matches from the entire corpus.
+    // Read complete bodies only for these bounded candidate IDs, from the
+    // caller's source snapshot. The text is tokenized here, never attached to
+    // response metadata. A failed read remains unknown rather than a rejection.
+    let truncated_hits = hits
         .iter()
         .filter(|hit| {
-            hit.doc_id.starts_with("ev_")
-                && lexical_only(hit)
-                && hit.metadata.as_ref().is_some_and(preview_truncated)
+            lexical_only(hit) && hit.metadata.as_ref().is_some_and(preview_truncated)
         })
+        .collect::<Vec<_>>();
+    let truncated_evidence = truncated_hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("ev_"))
         .map(|hit| hit.doc_id.as_str())
         .collect::<Vec<_>>();
-    let indexed_evidence_text = match read_connection {
+    let mut complete_text = match read_connection {
         Some(connection) if !truncated_evidence.is_empty() => connection
             .get_evidence_spans_with_sessions(&truncated_evidence)
             .map(|rows| {
@@ -832,6 +844,45 @@ fn drop_stopword_only_lexical_hits(
             .unwrap_or_default(),
         _ => BTreeMap::new(),
     };
+    if let Some(connection) = read_connection {
+        let memory_ids = truncated_hits
+            .iter()
+            .filter(|hit| {
+                hit.doc_id.starts_with("mem_")
+                    // A user-global hit belongs to another store. A colliding
+                    // local ID is not authority for its lexical content.
+                    && !global_store_hit(hit)
+            })
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for page in memory_ids.chunks(256) {
+            match connection.get_memories_batch(page) {
+                Ok(rows) => {
+                    complete_text.extend(rows.into_iter().map(|(id, memory)| (id, memory.content)));
+                }
+                Err(_) => tracing::debug!(
+                    target: "ee::search",
+                    "Complete memory bodies unavailable for lexical admission; retaining unknown candidates"
+                ),
+            }
+        }
+        let rule_ids = truncated_hits
+            .iter()
+            .filter(|hit| rule_admission::is_rule_hit(hit))
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        match connection.get_procedural_rules_batch(&rule_ids) {
+            Ok(rows) => {
+                complete_text.extend(rows.into_iter().map(|(id, rule)| (id, rule.content)));
+            }
+            Err(_) => tracing::debug!(
+                target: "ee::search",
+                "Complete rule bodies unavailable for lexical admission; retaining unknown candidates"
+            ),
+        }
+    }
     let before = hits.len();
     let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
     hits.retain(|hit| {
@@ -842,7 +893,13 @@ fn drop_stopword_only_lexical_hits(
             return true;
         };
         let content = if preview_truncated(metadata) {
-            indexed_evidence_text.get(&hit.doc_id).cloned()
+            // Another local hit in this batch may share the same ID. Do not
+            // let its complete body become authority for a different store.
+            if global_store_hit(hit) {
+                None
+            } else {
+                complete_text.get(&hit.doc_id).cloned()
+            }
         } else {
             search_hit_content_text(metadata)
         };
@@ -30890,6 +30947,177 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stopword_filter_checks_complete_memory_and_rule_bodies_without_expanding_previews()
+    -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000931";
+        const MEMORY_MATCH: &str = "mem_00000000000000000000000931";
+        const MEMORY_UNRELATED: &str = "mem_00000000000000000000000932";
+        const RULE_MATCH: &str = "rule_00000000000000000000000931";
+        const RULE_UNRELATED: &str = "rule_00000000000000000000000932";
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/tmp/ee-lexical-body-fixture".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let prefix = "How do I maintain the equipment? Check the water filter. ".repeat(8);
+        let relevant = format!("{prefix} Run the release checks before publishing.");
+        let unrelated = format!("{prefix} Descale the espresso machine every month.");
+        for (id, content) in [(MEMORY_MATCH, &relevant), (MEMORY_UNRELATED, &unrelated)] {
+            db.insert_memory(id, &test_memory_input(WORKSPACE, content))
+                .map_err(|error| error.to_string())?;
+        }
+        for (id, content) in [(RULE_MATCH, &relevant), (RULE_UNRELATED, &unrelated)] {
+            db.insert_procedural_rule(
+                id,
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    content: content.clone(),
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: vec![MEMORY_MATCH.to_owned()],
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let preview: String = prefix.chars().take(240).collect();
+        assert!(!preview.contains("release"));
+        for (backend, source) in [
+            (EmbedBackend::HashFallback, ScoreSource::Hybrid),
+            (EmbedBackend::NeuralLocal, ScoreSource::Lexical),
+        ] {
+            let mut hits = [MEMORY_MATCH, MEMORY_UNRELATED, RULE_MATCH, RULE_UNRELATED]
+                .into_iter()
+                .map(|id| stopword_probe_hit(id, source, &preview, true))
+                .collect::<Vec<_>>();
+            let metadata = hits[0].metadata.clone();
+            let mut degraded = Vec::new();
+            drop_stopword_only_lexical_hits(
+                "How do I prepare for releasing?",
+                &mut hits,
+                backend,
+                None,
+                Some(&db),
+                &mut degraded,
+            );
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![MEMORY_MATCH, RULE_MATCH],
+                "complete bodies must distinguish subject matches beyond the preview from stopword-only hits",
+            );
+            assert_eq!(
+                degraded,
+                vec![SearchDegradation::lexical_stopword_only_filtered(2)],
+            );
+            assert!(hits.iter().all(|hit| hit.metadata == metadata));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stopword_filter_never_substitutes_local_bodies_for_global_or_unknown_sources()
+    -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000933";
+        const COLLISION: &str = "mem_00000000000000000000000933";
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/tmp/ee-lexical-source-fixture".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let body = "How do I descale the espresso machine? ".repeat(12);
+        db.insert_memory(COLLISION, &test_memory_input(WORKSPACE, &body))
+            .map_err(|error| error.to_string())?;
+        let mut global =
+            stopword_probe_hit(COLLISION, ScoreSource::Lexical, "How do I ...", true);
+        global.metadata.as_mut().ok_or("missing metadata")?["storeLane"] =
+            serde_json::json!(super::super::global_store::GLOBAL_PROVENANCE_LANE);
+        let original = vec![
+            global,
+            stopword_probe_hit(
+                "mem_00000000000000000000000934",
+                ScoreSource::Lexical,
+                "How do I ...",
+                true,
+            ),
+            stopword_probe_hit(
+                "rule_00000000000000000000000934",
+                ScoreSource::Lexical,
+                "How do I ...",
+                true,
+            ),
+        ];
+        let mut hits = original.clone();
+        hits.insert(
+            1,
+            stopword_probe_hit(COLLISION, ScoreSource::Lexical, "How do I ...", true),
+        );
+        let mut degraded = Vec::new();
+        drop_stopword_only_lexical_hits(
+            "How do I prepare a release?",
+            &mut hits,
+            EmbedBackend::HashFallback,
+            None,
+            Some(&db),
+            &mut degraded,
+        );
+        assert_eq!(
+            hits.len(),
+            original.len(),
+            "unknown source text is not proof of no match",
+        );
+        for (actual, expected) in hits.iter().zip(&original) {
+            assert_eq!(actual.doc_id, expected.doc_id);
+            assert_eq!(actual.metadata, expected.metadata);
+        }
+        assert_eq!(
+            degraded,
+            vec![SearchDegradation::lexical_stopword_only_filtered(1)],
+        );
+
+        // The same local body is known and unrelated when its own store owns
+        // the hit; the global exemption above cannot disable local filtering.
+        degraded.clear();
+        let mut local = vec![stopword_probe_hit(
+            COLLISION,
+            ScoreSource::Lexical,
+            "How do I ...",
+            true,
+        )];
+        drop_stopword_only_lexical_hits(
+            "How do I prepare a release?",
+            &mut local,
+            EmbedBackend::HashFallback,
+            None,
+            Some(&db),
+            &mut degraded,
+        );
+        assert!(local.is_empty());
+        assert_eq!(
+            degraded,
+            vec![SearchDegradation::lexical_stopword_only_filtered(1)],
+        );
+        Ok(())
     }
 
     #[test]
