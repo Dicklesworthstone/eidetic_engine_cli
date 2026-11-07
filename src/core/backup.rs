@@ -3655,7 +3655,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
 ) -> Result<BackupRestoreReport, DomainError> {
     let workspace_path = normalize_path(&options.workspace_path);
     let backup_path = normalize_backup_input_path(&options.backup_path)?;
-    let side_path = normalize_restore_side_path(&options.side_path)?;
+    let mut side_path = normalize_restore_side_path(&options.side_path)?;
     ensure_side_path_outside_workspace(&workspace_path, &side_path)?;
 
     // Keep the exact manifest snapshot through authentication, path selection,
@@ -3710,28 +3710,43 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // or a real restore creates any staged files.
     let recovery_inventory = recovery::RestoreInventory::from_manifest(&manifest)?;
     let mut restored_workspace = read_backup_workspace_metadata(&manifest)?;
-    restored_workspace.path = side_path.to_string_lossy().into_owned();
     let source_records_path = backup_artifact_path(&backup_path, &inspect, RECORDS_FILE)?;
     let source_manifest_path = backup_path.join(MANIFEST_FILE);
+    // Preview the same recovery limitations as execution. Authentication and
+    // inventory checks above establish which artifact is being restored; a
+    // dry run must not erase its evidence-loss or peer-repair requirements.
+    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
+
+    // Preview the same destination constraints that a real restore enforces.
+    ensure_side_path_is_isolated(&side_path)?;
+    if !options.dry_run {
+        fs::create_dir_all(&side_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create restore destination '{}': {error}",
+                side_path.display()
+            ),
+            repair: Some("choose a writable --side-path".to_owned()),
+        })?;
+        // Resolve parent components only after the destination exists. All
+        // durable bindings, recovery expectations and report paths must name
+        // the same canonical destination before any staged data is written.
+        side_path = normalize_restore_side_path(&side_path)?;
+        ensure_side_path_outside_workspace(&workspace_path, &side_path)?;
+        ensure_side_path_is_isolated(&side_path)?;
+    }
+    restored_workspace.path = side_path.to_string_lossy().into_owned();
     let restore_artifact_dir = side_path
         .join(WORKSPACE_MARKER)
         .join(DEFAULT_RESTORE_DIR)
         .join(&inspect.backup_id);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
     let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
-    // Preview the same recovery limitations as execution. Authentication and
-    // inventory checks above establish which artifact is being restored; a
-    // dry run must not erase its evidence-loss or peer-repair requirements.
-    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
     if restore_degraded
         .iter()
         .any(|entry| entry.code == "mesh_restore_requires_repair")
     {
         next_actions.push(restore_mesh_doctor_next_action(&side_path));
     }
-
-    // Preview the same destination constraints that a real restore enforces.
-    ensure_side_path_is_isolated(&side_path)?;
     if options.dry_run {
         return Ok(BackupRestoreReport {
             schema: BACKUP_RESTORE_SCHEMA_V1,
@@ -3785,13 +3800,6 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     let published_artifact_dir = restore_artifact_dir;
     let published_database_path = restored_database_path;
     let staging_workspace = side_path.join(format!(".ee-restore-{}", uuid::Uuid::now_v7()));
-    fs::create_dir_all(&side_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to create restore destination '{}': {error}",
-            side_path.display()
-        ),
-        repair: Some("choose a writable --side-path".to_owned()),
-    })?;
     let staging_builder = &mut fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -12908,6 +12916,8 @@ fn normalize_backup_input_path(path: &Path) -> Result<PathBuf, DomainError> {
 }
 
 fn normalize_restore_side_path(path: &Path) -> Result<PathBuf, DomainError> {
+    // Check the caller's spelling before absolute-path normalization can
+    // collapse parent components on Windows and hide a traversed symlink.
     if let Some(symlink_path) = first_existing_symlink_component(path)? {
         let message = if symlink_path == path {
             format!(
@@ -12926,7 +12936,29 @@ fn normalize_restore_side_path(path: &Path) -> Result<PathBuf, DomainError> {
             repair: Some("choose a real, non-symlink directory for --side-path".to_owned()),
         });
     }
-    Ok(normalize_path(path))
+    // A new destination cannot be canonicalized yet. Bind it to this process's
+    // working directory before persisting the workspace row, or a later CLI
+    // process launched elsewhere will resolve that row to a different path.
+    let absolute = std::path::absolute(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to resolve restore side path '{}': {error}",
+            path.display()
+        ),
+        repair: Some("choose an absolute --side-path or a readable working directory".to_owned()),
+    })?;
+    match absolute.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        // On Unix, keep parent components in a missing tail: resolving
+        // `missing/../x` lexically would skip the real filesystem traversal.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(absolute),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect restore side path '{}': {error}",
+                absolute.display()
+            ),
+            repair: Some("inspect filesystem permissions or choose another --side-path".to_owned()),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -14256,6 +14288,74 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn normalize_restore_side_path_anchors_missing_relative_targets_without_writing() -> TestResult
+    {
+        let relative_root = PathBuf::from(format!(".ee-relative-restore-{}", Uuid::now_v7()));
+        let relative = relative_root.join("missing-parent").join("restored");
+        let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
+        let expected = current_dir.join(&relative);
+        ensure(!expected.exists(), "relative restore fixture starts absent")?;
+
+        let normalized = normalize_restore_side_path(&relative).map_err(|error| error.message())?;
+        ensure_equal(
+            normalized,
+            expected,
+            "new restore target has an absolute binding",
+        )?;
+        ensure(
+            !current_dir.join(relative_root).exists(),
+            "normalizing a relative destination does not create its missing parents",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_restore_side_path_preserves_missing_parent_traversal() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let candidate = root.join("missing").join("..").join("restored");
+        let normalized =
+            normalize_restore_side_path(&candidate).map_err(|error| error.message())?;
+        ensure_equal(
+            normalized,
+            candidate,
+            "normalization retains filesystem traversal through a missing parent",
+        )?;
+        ensure(
+            fs::read_dir(root)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            "normalization does not create a directory to resolve parent traversal",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_restore_side_path_rejects_non_directory_parent() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let occupied = root.join("existing-file");
+        fs::write(&occupied, b"preserve existing bytes").map_err(|error| error.to_string())?;
+        let result = normalize_restore_side_path(&occupied.join("restored"));
+        ensure(
+            matches!(result, Err(DomainError::Storage { .. })),
+            format!("invalid parent must report a storage error: {result:?}"),
+        )?;
+        ensure_equal(
+            fs::read(occupied).map_err(|error| error.to_string())?,
+            b"preserve existing bytes".to_vec(),
+            "failed path normalization preserves the blocking file",
+        )
     }
 
     /// Same class, symlink arm: a symlinked side path, and a path that merely

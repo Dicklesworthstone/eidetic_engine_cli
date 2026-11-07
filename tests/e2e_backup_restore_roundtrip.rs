@@ -2204,6 +2204,224 @@ fn backup_list_does_not_accept_create_staging_debris() -> TestResult {
 }
 
 #[test]
+fn backup_restore_relative_destination_remains_addressable_from_other_directories() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let base = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = base.join("source");
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    fs::create_dir(&elsewhere).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy();
+    let content = "The copper compass release must preserve authenticated recovery records.";
+
+    // Change only child-process CWDs: process-wide chdir would race every
+    // other test and could conceal the broken persisted workspace binding.
+    let run = |cwd: &Path, args: &[&str]| -> Result<JsonValue, String> {
+        let output = Command::new(ee_bin())
+            .current_dir(cwd)
+            .args(args)
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .output()
+            .map_err(|error| format!("spawn ee {args:?} in {}: {error}", cwd.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "ee {args:?} in {} failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+                cwd.display(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("parse ee {args:?} response: {error}"))
+    };
+
+    run(&base, &["init", "--workspace", &workspace_arg, "--json"])?;
+    let remembered = run(
+        &base,
+        &[
+            "remember",
+            content,
+            "--workspace",
+            &workspace_arg,
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--json",
+        ],
+    )?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?;
+    let created = run(
+        &base,
+        &[
+            "backup",
+            "create",
+            "--workspace",
+            &workspace_arg,
+            "--redaction",
+            "none",
+            "--include-graph-cache=false",
+            "--json",
+        ],
+    )?;
+    let archive = json_str(&created, "/data/backupPath", "backup create")?;
+    let source_workspace_id = json_str(&created, "/data/workspaceId", "backup create")?;
+    for (relative_side_path, side_path) in [
+        (
+            "missing-parent/nested/restored",
+            base.join("missing-parent").join("nested").join("restored"),
+        ),
+        #[cfg(unix)]
+        (
+            "missing-detour/../canonical-parent/nested/restored",
+            base.join("canonical-parent").join("nested").join("restored"),
+        ),
+    ] {
+        let side_path_arg = side_path.to_string_lossy();
+        ensure(!side_path.exists(), "relative restore destination starts absent")?;
+        let before_preview = workspace_file_digests(&base)?;
+        let preview = run(
+            &base,
+            &[
+                "backup",
+                "restore",
+                archive,
+                "--workspace",
+                &workspace_arg,
+                "--side-path",
+                relative_side_path,
+                "--skip-graph-cache",
+                "--dry-run",
+                "--json",
+            ],
+        )?;
+        let preview_path = PathBuf::from(json_str(&preview, "/data/sidePath", "restore preview")?);
+        ensure(
+            preview_path.is_absolute(),
+            "restore preview reports an absolute destination",
+        )?;
+        #[cfg(unix)]
+        ensure_equal(
+            &preview_path,
+            &base.join(relative_side_path),
+            "preview anchors the path and preserves traversal through missing parents",
+        )?;
+        ensure_store_unchanged(
+            "relative restore dry run",
+            &before_preview,
+            &workspace_file_digests(&base)?,
+        )?;
+
+        let restored = run(
+            &base,
+            &[
+                "backup",
+                "restore",
+                archive,
+                "--workspace",
+                &workspace_arg,
+                "--side-path",
+                relative_side_path,
+                "--skip-graph-cache",
+                "--json",
+            ],
+        )?;
+        ensure_equal(
+            &preview_path
+                .canonicalize()
+                .map_err(|error| error.to_string())?,
+            &side_path,
+            "restore preview and execution address the same destination",
+        )?;
+        ensure_equal(
+            &json_u64(&restored, "/data/counts/memoriesImported", "restore")?,
+            &1,
+            "relative restore imports its memory",
+        )?;
+        ensure_equal(
+            &json_str(&restored, "/data/sidePath", "restore")?,
+            &side_path_arg.as_ref(),
+            "restore reports its canonical destination after creation",
+        )?;
+        let restored_database = side_path.join(".ee").join("ee.db");
+        ensure_equal(
+            &json_str(&restored, "/data/restoredDatabasePath", "restore")?,
+            &restored_database.to_string_lossy().as_ref(),
+            "restore reports its canonical database path",
+        )?;
+        let db = DbConnection::open_file_read_only(&restored_database)
+            .map_err(|error| error.to_string())?;
+        let workspaces = db.list_workspaces().map_err(|error| error.to_string())?;
+        ensure_equal(
+            &workspaces.len(),
+            &1,
+            "restore keeps one workspace identity",
+        )?;
+        let row = workspaces
+            .first()
+            .ok_or_else(|| "restored workspace missing".to_owned())?;
+        ensure_equal(
+            &row.path.as_str(),
+            &side_path_arg.as_ref(),
+            "stored canonical workspace path",
+        )?;
+        ensure_equal(
+            &row.id.as_str(),
+            &source_workspace_id,
+            "restore preserves the source workspace id",
+        )?;
+        let memory = db
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "restored memory missing".to_owned())?;
+        ensure_equal(
+            &memory.content.as_str(),
+            &content,
+            "restored memory content",
+        )?;
+        db.close().map_err(|error| error.to_string())?;
+
+        for (cwd, addressed_workspace) in [
+            (&side_path, "."),
+            (&elsewhere, side_path_arg.as_ref()),
+        ] {
+            let searched = run(
+                cwd,
+                &[
+                    "search",
+                    "copper compass release",
+                    "--workspace",
+                    addressed_workspace,
+                    "--json",
+                ],
+            )?;
+            let ids = searched
+                .pointer("/data/results")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "search from {} has no results array: {searched}",
+                        cwd.display()
+                    )
+                })?
+                .iter()
+                .filter_map(|hit| hit.get("docId").and_then(JsonValue::as_str))
+                .collect::<Vec<_>>();
+            ensure_equal(
+                &ids,
+                &vec![memory_id],
+                "search retains the exact memory across working directories",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().join("workspace");
