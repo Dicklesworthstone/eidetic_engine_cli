@@ -805,8 +805,27 @@ fn evidence_far_below_the_best_match_stays_out_of_the_pack() {
         fixture.candidate(&lines[1], 0.14),
         fixture.candidate(&lines[2], 0.04),
     ];
+    let hits = lines
+        .iter()
+        .map(|id| SearchHit {
+            doc_id: id.clone(),
+            score: 0.0,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        })
+        .collect::<Vec<_>>();
     let mut degraded = Vec::new();
-    apply_direct_evidence_query_relative_floor(&mut candidates, &mut degraded);
+    apply_direct_evidence_query_relative_floor(
+        "clippy needless borrow error in CI",
+        &hits,
+        &mut candidates,
+        &mut degraded,
+    );
 
     let kept = candidates
         .iter()
@@ -827,9 +846,135 @@ fn evidence_far_below_the_best_match_stays_out_of_the_pack() {
         fixture.candidate(&lines[2], 0.0),
     ];
     let mut degraded = Vec::new();
-    apply_direct_evidence_query_relative_floor(&mut flat, &mut degraded);
+    apply_direct_evidence_query_relative_floor(
+        "clippy needless borrow error in CI",
+        &hits,
+        &mut flat,
+        &mut degraded,
+    );
     assert_eq!(flat.len(), 2);
     assert!(degraded.is_empty());
+}
+
+#[test]
+fn hydrated_evidence_admission_preserves_subjects_domains_and_explicit_floors() {
+    let fixture = Fixture::new();
+    let session = fixture.session(0x59_0202);
+    let query = "what should I know before releasing this project?";
+    let rows: [(&str, f32, ScoreSource, Option<f32>); 4] = [
+        (
+            "Always run cargo test before creating a release tag.",
+            0.8,
+            ScoreSource::Hybrid,
+            Some(2.0),
+        ),
+        (
+            "Never force-push to main branch during release.",
+            0.08,
+            ScoreSource::Hybrid,
+            Some(0.001),
+        ),
+        (
+            "Keep a verified database checkpoint after deployment.",
+            0.1,
+            ScoreSource::SemanticFast,
+            None,
+        ),
+        (
+            "Descale the espresso machine before use.",
+            0.04,
+            ScoreSource::Hybrid,
+            Some(2.0),
+        ),
+    ];
+    let mut ids = Vec::new();
+    let hits = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (text, relevance, source, lexical_score))| {
+            let id = fixture.excerpt(
+                &session,
+                u32::try_from(index + 1).unwrap(),
+                "message",
+                Some("assistant"),
+                text,
+            );
+            ids.push(id.clone());
+            SearchHit {
+                doc_id: id,
+                score: 0.9,
+                source: *source,
+                fast_score: Some(0.9),
+                quality_score: None,
+                lexical_score: *lexical_score,
+                rerank_score: None,
+                metadata: Some(json!({
+                    "_ee_quality_scoring": {
+                        "schema": crate::search::scoring::SEARCH_SCORING_POLICY_V1,
+                        "rankingBound": 2.0,
+                        "components": { "finalScore": relevance * 2.0 }
+                    }
+                })),
+                explanation: None,
+            }
+        })
+        .collect();
+    let search = SearchReport {
+        index_freshness: None,
+        status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
+        query: query.to_owned(),
+        requested_limit: u32::try_from(rows.len()).unwrap(),
+        results: hits,
+        elapsed_ms: 0.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            crate::core::profile::OperatingProfile::Workstation,
+            "test_fixture",
+        ),
+        rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
+        relevance_floor_applied: Some(0.0),
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+    };
+    let request = ContextRequest::new(ContextRequestInput::for_query(query)).unwrap();
+    for (floor, expected_indices) in [
+        (None, vec![0, 1, 2]),
+        (Some(0.0), vec![0, 1, 2, 3]),
+        (Some(0.15), vec![0]),
+    ] {
+        let mut degraded = Vec::new();
+        let candidates = collect_direct_evidence_pack_candidates(
+            &fixture.db,
+            Path::new("/tmp/incident-card-pack"),
+            &search,
+            &request,
+            &crate::models::QueryFilters::default(),
+            floor,
+            &mut degraded,
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), expected_indices.len(), "floor: {floor:?}");
+        for (candidate, expected_index) in candidates.iter().zip(expected_indices) {
+            assert_eq!(candidate.item.evidence_id, ids[expected_index]);
+            assert_eq!(candidate.item.content, rows[expected_index].0);
+            assert_eq!(candidate.item.relevance.into_inner(), rows[expected_index].1);
+        }
+        assert_eq!(
+            degraded.iter().any(|entry| entry.code == "context_evidence_below_relative_floor"),
+            floor.is_none(),
+        );
+    }
 }
 
 #[test]

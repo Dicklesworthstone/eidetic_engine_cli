@@ -8882,9 +8882,9 @@ fn context_pack_l2_feature_flags_hash(
     // Old cached prose and Pack DNA can retain score noise even when numeric
     // hash inputs already occupy the same fixed-point bin.
     hash_labeled_bytes(&mut hasher, "pack_score_explanation_policy", b"q20_12.v1");
-    // Reassemble older packs whose uncalibrated elbow discarded candidates
-    // with lexical evidence for the task's subject.
-    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v3");
+    // Reassemble older packs under full-body lexical admission and consistent
+    // per-source heuristics that preserve lexical evidence for the task's subject.
+    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v4");
     // Reassemble adjacency-only packs so verified command-tool interludes can
     // supply the opposite native message under the current admission policy.
     hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v2");
@@ -15672,6 +15672,49 @@ struct DirectEvidencePackCandidate {
     source: String,
 }
 
+fn context_pack_query_subject_terms(query: &str) -> BTreeSet<String> {
+    let mut terms = lexical_terms(query);
+    // These words frame a task or name its workspace; sharing only "before"
+    // must not protect an espresso instruction from a release-task cutoff.
+    // This exclusion applies only to the heuristic exemption, not retrieval.
+    for term in lexical_terms("before after know project repo repository workspace") {
+        terms.remove(&term);
+    }
+    terms
+}
+
+fn shares_context_pack_query_subject(terms: &BTreeSet<String>, content: &str) -> bool {
+    !terms.is_empty() && !terms.is_disjoint(&lexical_terms(content))
+}
+
+/// Only local, uncalibrated observations may shape a query-relative heuristic.
+/// Preserve the native source domain and whether retrieval actually observed a
+/// positive lexical match; body overlap alone must not invent lexical evidence.
+fn uncalibrated_local_pack_sources(search_hits: &[SearchHit]) -> BTreeMap<&str, (&str, bool)> {
+    search_hits
+        .iter()
+        .filter(|hit| {
+            !search_hit_is_global_store_lane(hit)
+                && hit
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("calibrated"))
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+        })
+        .map(|hit| {
+            (
+                hit.doc_id.as_str(),
+                (
+                    hit.source.as_str(),
+                    hit.lexical_score
+                        .is_some_and(|score| score.is_finite() && score > 0.0),
+                ),
+            )
+        })
+        .collect()
+}
+
 /// Find a clear separation in one query's uncalibrated ranking domain.
 ///
 /// This is admission policy, not a relevance estimator: scores and their
@@ -15729,38 +15772,8 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
     if relevance_floor.is_some() {
         return Vec::new();
     }
-    let mut query_terms = lexical_terms(query);
-    // These words frame a task or name its workspace; sharing only "before"
-    // must not protect an espresso instruction from a release-task cutoff.
-    // This exclusion applies only to the heuristic exemption, not retrieval.
-    for term in lexical_terms("before after know project repo repository workspace") {
-        query_terms.remove(&term);
-    }
-    let shares_query_subject = |content: &str| {
-        !query_terms.is_empty() && !query_terms.is_disjoint(&lexical_terms(content))
-    };
-    let sources = search_hits
-        .iter()
-        .filter(|hit| {
-            !search_hit_is_global_store_lane(hit)
-                && hit
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.get("calibrated"))
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-        })
-        .map(|hit| {
-            (
-                hit.doc_id.as_str(),
-                (
-                    hit.source.as_str(),
-                    hit.lexical_score
-                        .is_some_and(|score| score.is_finite() && score > 0.0),
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let query_terms = context_pack_query_subject_terms(query);
+    let sources = uncalibrated_local_pack_sources(search_hits);
     let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32, bool)>::new();
     for candidate in candidates.iter() {
         // Focus, explicit graph seeds, warnings, and independently normalized
@@ -15774,7 +15787,8 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
         if let Some((source, lexical_match)) = sources.get(candidate.memory_id.to_string().as_str())
         {
             let score = candidate.relevance.into_inner();
-            let subject_match = *lexical_match && shares_query_subject(&candidate.content);
+            let subject_match = *lexical_match
+                && shares_context_pack_query_subject(&query_terms, &candidate.content);
             population
                 .entry(ContextPackEntityKey::Memory(candidate.memory_id))
                 .and_modify(|entry| {
@@ -15793,7 +15807,7 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                 (
                     *source,
                     item.relevance.into_inner(),
-                    *lexical_match && shares_query_subject(&item.content),
+                    *lexical_match && shares_context_pack_query_subject(&query_terms, &item.content),
                 ),
             );
         }
@@ -15809,7 +15823,8 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                 (
                     *source,
                     candidate.item.relevance.into_inner(),
-                    *lexical_match && shares_query_subject(&candidate.item.content),
+                    *lexical_match
+                        && shares_context_pack_query_subject(&query_terms, &candidate.item.content),
                 ),
             );
         }
@@ -16068,7 +16083,12 @@ fn collect_direct_evidence_pack_candidates_with_probe(
         probe.observe_evidence(&candidates, OmissionCause::Filter);
     }
     if relevance_floor.is_none() {
-        apply_direct_evidence_query_relative_floor(&mut candidates, degraded);
+        apply_direct_evidence_query_relative_floor(
+            &request.query,
+            &search_report.results,
+            &mut candidates,
+            degraded,
+        );
     }
     // Card preference can discard source turns. Apply the
     // caller's final-score floor first so a weak directly matched card cannot
@@ -16121,8 +16141,9 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     Ok(candidates)
 }
 
-/// Share of the best direct-evidence relevance a transcript span must reach to
-/// enter a pack when the caller set no explicit relevance floor.
+/// Share of the best direct-evidence relevance in the same retrieval domain a
+/// transcript span must reach unless it has lexical evidence for the query's
+/// subject. Used only when the caller set no explicit relevance floor.
 const DIRECT_EVIDENCE_RELATIVE_FLOOR: f32 = 0.25;
 
 /// Keep imported evidence that is competitive with the best evidence hit for
@@ -16134,32 +16155,65 @@ const DIRECT_EVIDENCE_RELATIVE_FLOOR: f32 = 0.25;
 /// a 3,000-token pack for "clippy needless borrow error in CI" carried 17
 /// spans, 11 of them from unrelated sessions at 8-15% of the top hit's
 /// relevance. Spans below [`DIRECT_EVIDENCE_RELATIVE_FLOOR`] times the best
-/// evidence relevance are therefore left out and counted in a degradation. An
-/// explicit `--relevance-floor` (including 0) replaces this default entirely.
+/// uncalibrated evidence relevance in their own retrieval domain are therefore
+/// left out and counted in a degradation. Calibrated and nonlocal hits neither
+/// shape these cutoffs nor lose admission to them. Like the later elbow policy,
+/// this early cutoff cannot discard a proven lexical subject match merely for
+/// its quality-adjusted score. An explicit `--relevance-floor` (including 0)
+/// replaces this default entirely.
 fn apply_direct_evidence_query_relative_floor(
+    query: &str,
+    search_hits: &[SearchHit],
     candidates: &mut Vec<DirectEvidencePackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
-    let best = candidates
-        .iter()
-        .map(|candidate| candidate.item.relevance.into_inner())
-        .filter(|relevance| relevance.is_finite())
-        .fold(0.0_f32, f32::max);
-    if best <= 0.0 {
+    let query_terms = context_pack_query_subject_terms(query);
+    let sources = uncalibrated_local_pack_sources(search_hits);
+    let mut best_by_source = BTreeMap::<&str, f32>::new();
+    for candidate in candidates.iter() {
+        if let Some((source, _)) = sources.get(candidate.item.evidence_id.as_str()) {
+            let relevance = candidate.item.relevance.into_inner();
+            if relevance.is_finite() && relevance > 0.0 {
+                best_by_source
+                    .entry(source)
+                    .and_modify(|best| *best = best.max(relevance))
+                    .or_insert(relevance);
+            }
+        }
+    }
+    if best_by_source.is_empty() {
         return;
     }
-    let floor = best * DIRECT_EVIDENCE_RELATIVE_FLOOR;
     let before = candidates.len();
-    candidates.retain(|candidate| candidate.item.relevance.into_inner() >= floor);
+    candidates.retain(|candidate| {
+        let Some((source, lexical_match)) = sources.get(candidate.item.evidence_id.as_str()) else {
+            return true;
+        };
+        if *lexical_match && shares_context_pack_query_subject(&query_terms, &candidate.item.content) {
+            return true;
+        }
+        best_by_source.get(source).is_none_or(|best| {
+            candidate.item.relevance.into_inner() >= best * DIRECT_EVIDENCE_RELATIVE_FLOOR
+        })
+    });
     let excluded = before - candidates.len();
     if excluded > 0 {
-        let display_floor = canonical_pack_explanation_score(floor);
+        let cutoffs = best_by_source
+            .iter()
+            .map(|(source, best)| {
+                format!(
+                    "{source}={:.4}",
+                    canonical_pack_explanation_score(best * DIRECT_EVIDENCE_RELATIVE_FLOOR)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         push_degradation(
             degraded,
             "context_evidence_below_relative_floor",
             ContextResponseSeverity::Low,
             format!(
-                "{excluded} imported evidence candidate(s) scored below {:.0}% of the best evidence match (relevance {display_floor:.4}) and were left out of the pack.",
+                "{excluded} imported evidence candidate(s) without lexical subject evidence scored below {:.0}% of the best evidence match in their own retrieval source and were left out of the pack; per-source cutoffs: {cutoffs}. These cutoffs are ranking heuristics, not calibrated confidence.",
                 DIRECT_EVIDENCE_RELATIVE_FLOOR * 100.0
             ),
             Some("Pass --relevance-floor 0 to include every admitted evidence match.".to_owned()),
@@ -17552,6 +17606,173 @@ mod relevance_floor_tests {
                     .message
                     .contains("2 memory, 2 procedural rule, and 2 imported evidence")
         }));
+    }
+
+    #[test]
+    fn evidence_subject_matches_survive_both_automatic_admission_stages() {
+        let (mut candidates, mut hits) = release_admission_candidates();
+        for (candidate, score) in candidates.evidence.iter_mut().zip([0.4, 0.05, 0.04, 0.03]) {
+            candidate.item.relevance = UnitScore::parse(score).expect("fixture relevance");
+        }
+        for hit in &mut hits {
+            // Positive lexical evidence need not be large. A tiny native
+            // lexical match plus an inflected subject still proves overlap.
+            hit.lexical_score = Some(f32::MIN_POSITIVE);
+        }
+        let query = "what should I know before releasing this project?";
+        let mut degraded = Vec::new();
+        apply_direct_evidence_query_relative_floor(
+            query,
+            &hits,
+            &mut candidates.evidence,
+            &mut degraded,
+        );
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.evidence[1].item.evidence_id, "ev_1");
+        assert_eq!(candidates.evidence[1].item.relevance.into_inner(), 0.05);
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_evidence_below_relative_floor"
+                && entry.message.starts_with("2 imported evidence candidate(s)")
+        }));
+
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            query,
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 2);
+        assert_eq!(candidates.memories.len(), 2);
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.evidence[1].item.evidence_id, "ev_1");
+        assert_eq!(candidates.evidence[1].item.relevance.into_inner(), 0.05);
+    }
+
+    #[test]
+    fn evidence_relative_floor_requires_lexical_evidence_for_a_real_subject() {
+        for (query, lexical_score) in [
+            ("releasing", None),
+            ("releasing", Some(0.0)),
+            ("releasing", Some(-1.0)),
+            ("releasing", Some(f32::NAN)),
+            ("releasing", Some(f32::INFINITY)),
+            ("what should I know before this project?", Some(2.0)),
+            ("lease", Some(2.0)),
+            ("car", Some(2.0)),
+        ] {
+            let (mut candidates, mut hits) = release_admission_candidates();
+            for (candidate, score) in candidates.evidence.iter_mut().zip([0.4, 0.05, 0.04, 0.03]) {
+                candidate.item.relevance = UnitScore::parse(score).expect("fixture relevance");
+            }
+            for hit in &mut hits {
+                hit.lexical_score = lexical_score;
+            }
+            let mut degraded = Vec::new();
+            apply_direct_evidence_query_relative_floor(
+                query,
+                &hits,
+                &mut candidates.evidence,
+                &mut degraded,
+            );
+            assert_eq!(
+                candidates.evidence.len(),
+                1,
+                "query: {query}; lexical evidence: {lexical_score:?}",
+            );
+            assert_eq!(candidates.evidence[0].item.evidence_id, "ev_0");
+            assert_eq!(degraded.len(), 1);
+            assert!(degraded[0].message.starts_with("3 imported evidence candidate(s)"));
+        }
+    }
+
+    #[test]
+    fn evidence_relative_floor_never_compares_distinct_score_sources() {
+        let mut candidates = elbow_candidate_set(&[1.0, 0.24, 0.2, 0.04, 0.1, 0.02]);
+        candidates.memories.clear();
+        candidates.rules.clear();
+        let mut hits = retrieval_hits(&candidates);
+        for (index, hit) in hits.iter_mut().enumerate() {
+            hit.source = match index / 2 {
+                0 => ScoreSource::Lexical,
+                1 => ScoreSource::SemanticFast,
+                _ => ScoreSource::Hybrid,
+            };
+            candidates.evidence[index].source = hit.source.as_str().to_owned();
+        }
+        let mut degraded = Vec::new();
+        apply_direct_evidence_query_relative_floor(
+            "release",
+            &hits,
+            &mut candidates.evidence,
+            &mut degraded,
+        );
+        assert_eq!(
+            candidates
+                .evidence
+                .iter()
+                .map(|candidate| (candidate.item.evidence_id.as_str(), candidate.item.relevance.into_inner()))
+                .collect::<Vec<_>>(),
+            vec![("ev_0", 1.0), ("ev_2", 0.2), ("ev_4", 0.1)],
+        );
+        assert_eq!(degraded.len(), 1);
+        assert!(degraded[0].message.starts_with("3 imported evidence candidate(s)"));
+        for source in ["lexical=", "semantic_fast=", "hybrid="] {
+            assert!(degraded[0].message.contains(source));
+        }
+        assert!(degraded[0].message.contains("ranking heuristics, not calibrated confidence"));
+    }
+
+    #[test]
+    fn evidence_relative_floor_excludes_protected_hits_from_its_population() {
+        for protection in ["calibrated", "nonlocal", "not_retrieved"] {
+            let mut candidates = elbow_candidate_set(&[0.99, 0.2, 0.19, 0.18, 0.01, 0.001]);
+            candidates.memories.clear();
+            candidates.rules.clear();
+            let mut hits = retrieval_hits(&candidates);
+            match protection {
+                "calibrated" => {
+                    for index in [0, 4] {
+                        hits[index].metadata = Some(serde_json::json!({"calibrated": true}));
+                    }
+                }
+                "nonlocal" => {
+                    for index in [0, 4] {
+                        hits[index].metadata = Some(serde_json::json!({
+                            "storeLane": crate::core::global_store::GLOBAL_PROVENANCE_LANE
+                        }));
+                    }
+                }
+                "not_retrieved" => {
+                    hits.remove(4);
+                    hits.remove(0);
+                }
+                _ => unreachable!(),
+            }
+            let mut degraded = Vec::new();
+            apply_direct_evidence_query_relative_floor(
+                "release",
+                &hits,
+                &mut candidates.evidence,
+                &mut degraded,
+            );
+            assert_eq!(
+                candidates
+                    .evidence
+                    .iter()
+                    .map(|candidate| candidate.item.evidence_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["ev_0", "ev_1", "ev_2", "ev_3", "ev_4"],
+                "{protection}",
+            );
+            assert_eq!(degraded.len(), 1, "{protection}");
+            assert!(degraded[0].message.starts_with("1 imported evidence candidate(s)"));
+            assert!(degraded[0].message.contains("lexical=0.0500"));
+        }
     }
 
     #[test]

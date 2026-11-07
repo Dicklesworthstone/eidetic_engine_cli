@@ -12,7 +12,7 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "Imported evidence spans matched the query only weakly (below 25% of the best evidence hit's relevance), typically on a common query word, and the caller set no explicit relevance floor. They are left out of the pack instead of filling the token budget with off-topic transcript lines; the degradation counts them and names the floor applied.",
+    "description": "Imported evidence spans without a proven lexical match to the query's subject scored below 25% of the best uncalibrated evidence hit in the same retrieval source, and the caller set no explicit relevance floor. Calibrated and nonlocal hits neither set this heuristic cutoff nor lose admission to it. Weak off-topic spans are left out of the pack; the degradation counts them and names the per-source cutoffs without presenting them as calibrated confidence.",
     "setup_commands": [
       "ee init --workspace .",
       "ee import cass --workspace . --limit 20",
