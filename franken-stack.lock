@@ -41,6 +41,19 @@
 # (fsqlite-core, fsqlite-error, sqlmodel-*, tru) that Cargo.toml never names.
 # Sibling checkouts remain NOT required to use this lock; they are required only
 # to re-run this check.
+#
+# If you re-run it, PARSE THE TOML -- do not match `^version = "..."` with a
+# line-anchored regex. Such a regex reads whichever `version` comes first in the
+# file, so a `[dependencies.x]` table above `[package]`, or a crate that
+# inherits via `version.workspace = true`, yields some dependency's version and
+# no error. Read `[package].version`, falling back to the root's
+# `[workspace.package].version` on an inherit (two sqlmodel crates do inherit).
+# Both readings were taken on 2026-11-07 and agree at 12 of 12; the regex was
+# right here only because `[workspace.package]` happens to precede
+# `[workspace.dependencies]` in that root. Also note 33 of the 537 names in
+# Cargo.lock carry MORE THAN ONE version, so a name -> version map is safe only
+# because each of these 12 appears exactly once -- check that before extending
+# this check to another package.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	99ae86cdf8c71c53cec1df5760766038eca20375
 franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
