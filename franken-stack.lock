@@ -48,8 +48,12 @@
 # inherits via `version.workspace = true`, yields some dependency's version and
 # no error. Read `[package].version`, falling back to the root's
 # `[workspace.package].version` on an inherit (two sqlmodel crates do inherit).
-# Both readings were taken on 2026-11-07 and agree at 12 of 12; the regex was
-# right here only because `[workspace.package]` happens to precede
+# The two readings were taken a day apart -- the regex one on 2026-11-07, the
+# TOML one on 2026-11-08 -- and agree at 12 of 12. They are comparable because
+# BOTH sides of the comparison held still: no commit touched this file's seven
+# data rows or Cargo.lock between them, and all 12 selected versions are
+# identical across the two revisions. The regex was right here only because
+# `[workspace.package]` happens to precede
 # `[workspace.dependencies]` in that root. Also note 33 of the 537 names in
 # Cargo.lock carry MORE THAN ONE version, so a name -> version map is safe only
 # because each of these 12 appears exactly once -- check that before extending
