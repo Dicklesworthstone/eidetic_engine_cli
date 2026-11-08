@@ -108,6 +108,8 @@ pub enum PromotionRefusal {
     AttemptFamily {
         posture: crate::models::AttemptFamilyPromotionPosture,
     },
+    /// The source or selected exact global twin is awaiting feedback review.
+    ReviewPending,
     /// Secret-like content detected; promotion refuses rather than redacts.
     RedactionRefused { reasons: Vec<&'static str> },
 }
@@ -122,9 +124,9 @@ impl PromotionRefusal {
             Self::Superseded => "global_promotion_superseded",
             Self::NotYetValid => "global_promotion_not_yet_valid",
             Self::Expired => "global_promotion_expired",
-            Self::EvidenceGateTrustTooLow { .. } | Self::AttemptFamily { .. } => {
-                "global_promotion_evidence_gate"
-            }
+            Self::EvidenceGateTrustTooLow { .. }
+            | Self::AttemptFamily { .. }
+            | Self::ReviewPending => "global_promotion_evidence_gate",
             Self::RedactionRefused { .. } => GLOBAL_PROMOTION_REDACTION_REFUSED_CODE,
         }
     }
@@ -159,6 +161,9 @@ impl PromotionRefusal {
                 "Attempt-family evidence blocks global promotion ({}): {}.",
                 posture.as_str(), posture.reason()
             ),
+            Self::ReviewPending => {
+                "The source memory or selected global twin is awaiting feedback review; promotion cannot bypass that hold.".to_owned()
+            }
             Self::RedactionRefused { reasons } => format!(
                 "Secret-like content blocks promotion across workspace boundaries ({}); promotion refuses rather than silently redacting.",
                 reasons.join(", ")
@@ -190,6 +195,9 @@ impl PromotionRefusal {
             }
             Self::AttemptFamily { .. } => {
                 "Record the actual sibling attempts and resolve family conflicts before retrying; a stored trust label does not bypass incomplete evidence.".to_owned()
+            }
+            Self::ReviewPending => {
+                "Inspect pending feedback with ee outcome quarantine list in the affected store and resolve the review before retrying.".to_owned()
             }
             Self::RedactionRefused { .. } => {
                 "Remove or externalize the secret-like content, re-remember, and promote the clean row."
@@ -500,7 +508,16 @@ fn persist_global_promotion(
     reference: chrono::DateTime<chrono::Utc>,
 ) -> crate::db::Result<(String, bool, Option<String>)> {
     connection.with_transaction(|| {
-        persist_global_promotion_inner(connection, workspace, memory, payload, actor, reference)
+        let twin = match admission::find_twin(connection, workspace, memory, payload, reference)? {
+            admission::TwinAdmission::Absent => None,
+            admission::TwinAdmission::Admitted(id) => Some(id),
+            admission::TwinAdmission::ReviewPending(_) => {
+                return Err(global_mutation_error(
+                    "Global promotion requires feedback review",
+                ));
+            }
+        };
+        persist_global_promotion_inner(connection, workspace, memory, payload, actor, twin)
     })
 }
 
@@ -510,11 +527,10 @@ fn persist_global_promotion_inner(
     memory: &crate::db::StoredMemory,
     payload: &PromotionPayload,
     actor: Option<&str>,
-    reference: chrono::DateTime<chrono::Utc>,
+    twin: Option<String>,
 ) -> crate::db::Result<(String, bool, Option<String>)> {
-    // Select the twin inside the write transaction, not in a snapshot
-    // released before publication. Never trust a stale preview decision.
-    let twin = admission::find_twin(connection, workspace, memory, payload, reference)?;
+    // The caller selected and admitted this twin inside the same write
+    // transaction. A stale preview cannot authorize either reuse or insertion.
     let (id, already_promoted, job) = match twin {
         Some(id) => {
             let job = unfinished_promotion_index_job(connection, workspace, &id)?;
@@ -594,6 +610,7 @@ fn persist_global_promotion_inner(
 enum PromotionWrite {
     Memory(String, bool, Option<String>),
     Proposal(merge::MergeProposal),
+    Refused(PromotionRefusal, String),
 }
 
 fn persist_promotion_or_proposal(
@@ -605,18 +622,34 @@ fn persist_promotion_or_proposal(
     reference: chrono::DateTime<chrono::Utc>,
 ) -> crate::db::Result<PromotionWrite> {
     connection.with_transaction(|| {
-        if admission::find_twin(connection, workspace, memory, payload, reference)?.is_none()
+        let twin = match admission::find_twin(connection, workspace, memory, payload, reference)? {
+            admission::TwinAdmission::Absent => None,
+            admission::TwinAdmission::Admitted(id) => Some(id),
+            admission::TwinAdmission::ReviewPending(id) => {
+                return Ok(PromotionWrite::Refused(PromotionRefusal::ReviewPending, id));
+            }
+        };
+        if twin.is_none()
             && let Some(proposal) =
                 merge::find_proposal(connection, workspace, memory, payload, reference)?
         {
             merge::persist_proposal(connection, workspace, &proposal, actor)?;
             return Ok(PromotionWrite::Proposal(proposal));
         }
-        let (id, already_promoted, job) = persist_global_promotion_inner(
-            connection, workspace, memory, payload, actor, reference,
-        )?;
+        let (id, already_promoted, job) =
+            persist_global_promotion_inner(connection, workspace, memory, payload, actor, twin)?;
         Ok(PromotionWrite::Memory(id, already_promoted, job))
     })
+}
+
+fn refusal_report(
+    mut plan: PromotionPlan,
+    refusal: PromotionRefusal,
+    observed_twin: String,
+) -> PromotionReport {
+    plan.verdict = PromotionVerdict::Refuse { refusal };
+    plan.audit_action = "memory.promote_global_refused";
+    admission::preview_report(plan, Some(observed_twin))
 }
 
 fn proposal_report(
@@ -668,6 +701,13 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     if options.dry_run {
         let (twin, proposal) =
             admission::preview_destination(options.global_paths, &memory, &payload, reference)?;
+        let twin = match twin {
+            admission::TwinAdmission::Absent => None,
+            admission::TwinAdmission::Admitted(id) => Some(id),
+            admission::TwinAdmission::ReviewPending(id) => {
+                return Ok(refusal_report(plan, PromotionRefusal::ReviewPending, id));
+            }
+        };
         if let Some(proposal) = proposal {
             return Ok(proposal_report(
                 plan,
@@ -699,6 +739,9 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     })?;
     let (global_memory_id, already_promoted, index_job_id) = match publication {
         PromotionWrite::Memory(id, already_promoted, job) => (id, already_promoted, job),
+        PromotionWrite::Refused(refusal, id) => {
+            return Ok(refusal_report(plan, refusal, id));
+        }
         PromotionWrite::Proposal(proposal) => {
             let mut report = proposal_report(plan, &proposal, options.global_paths, true);
             if proposal.already_applied {

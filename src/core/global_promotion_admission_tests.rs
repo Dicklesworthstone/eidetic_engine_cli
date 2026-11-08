@@ -122,6 +122,277 @@ fn disk(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     result
 }
 
+fn review_hold(
+    db: &DbConnection,
+    number: u32,
+    workspace: &str,
+    target_type: &str,
+    target: &str,
+) -> String {
+    let id = format!("fq_{number:026}");
+    db.insert_feedback_quarantine(
+        &id,
+        &crate::db::CreateFeedbackQuarantineInput {
+            workspace_id: workspace.to_owned(),
+            source_id: "PRIVATE-PROMOTION-REVIEW-SOURCE".to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+            reason: "PRIVATE-PROMOTION-REVIEW-REASON".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        },
+    )
+    .unwrap();
+    id
+}
+
+fn assert_review_refusal(report: &PromotionReport, observed_twin: Option<&str>) {
+    assert!(matches!(
+        &report.plan.verdict,
+        PromotionVerdict::Refuse {
+            refusal: PromotionRefusal::ReviewPending
+        }
+    ));
+    assert!(!report.executed);
+    assert_eq!(report.already_promoted, observed_twin.is_some());
+    assert_eq!(report.global_memory_id.as_deref(), observed_twin);
+    assert!(report.index_job_id.is_none() && report.merge_candidate_id.is_none());
+    assert_eq!(report.index_status, "not_applicable");
+    assert_eq!(report.plan.audit_action, "memory.promote_global_refused");
+    assert_eq!(
+        report.plan.data_json()["detail"]["code"],
+        "global_promotion_evidence_gate"
+    );
+    let rendered = report.data_json().to_string();
+    assert!(!rendered.contains("PRIVATE-PROMOTION-REVIEW"));
+    assert!(!rendered.contains(BODY));
+}
+
+#[test]
+fn pending_source_review_cannot_escape_into_a_new_global_identity() {
+    let fixture = Fixture::new();
+    review_hold(&fixture.db, 1, WORKSPACE, "memory", MEMORY);
+    // Even an unusable destination must not be inspected for a held source.
+    std::fs::write(&fixture.global.root, b"not a directory").unwrap();
+    let before = disk(&fixture.root);
+    let source = fixture.db.get_memory(MEMORY).unwrap().unwrap();
+    assert_eq!(source.trust_class, "human_explicit");
+    for dry_run in [true, false] {
+        assert_review_refusal(&promote_global(&fixture.options(dry_run)).unwrap(), None);
+        assert_eq!(disk(&fixture.root), before);
+        assert_eq!(fixture.db.get_memory(MEMORY).unwrap().unwrap(), source);
+        assert_eq!(fixture.db.count_table_rows("audit_log").unwrap(), 0);
+        assert_eq!(fixture.db.count_table_rows("search_index_jobs").unwrap(), 0);
+    }
+}
+
+#[test]
+fn source_review_requires_native_scope_and_every_pending_hold_to_be_resolved() {
+    let fixture = Fixture::new();
+    let foreign = "wsp_00000000000000000000000072";
+    fixture
+        .db
+        .insert_workspace(
+            foreign,
+            &CreateWorkspaceInput {
+                path: fixture.root.join("foreign").to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+    review_hold(&fixture.db, 1, foreign, "memory", MEMORY);
+    review_hold(&fixture.db, 2, WORKSPACE, "rule", MEMORY);
+    assert!(
+        promote_global(&fixture.options(true))
+            .unwrap()
+            .plan
+            .allowed()
+    );
+    let first = review_hold(&fixture.db, 3, WORKSPACE, "memory", MEMORY);
+    let second = review_hold(&fixture.db, 4, WORKSPACE, "memory", MEMORY);
+    assert_review_refusal(&promote_global(&fixture.options(true)).unwrap(), None);
+    assert!(
+        fixture
+            .db
+            .update_feedback_quarantine_status(&first, "released", Some("reviewer"), None)
+            .unwrap()
+    );
+    assert_review_refusal(&promote_global(&fixture.options(false)).unwrap(), None);
+    assert!(!fixture.global.root.exists());
+    assert!(
+        fixture
+            .db
+            .update_feedback_quarantine_status(&second, "rejected", Some("reviewer"), None)
+            .unwrap()
+    );
+    let report = promote_global(&fixture.options(false)).unwrap();
+    assert!(report.executed && report.plan.allowed() && !report.already_promoted);
+    let global = DbConnection::open_file_read_only(&fixture.global.database_path).unwrap();
+    let copy = global
+        .get_memory(report.global_memory_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(copy.content, BODY);
+    assert_eq!(
+        fixture.db.count_table_rows("feedback_quarantine").unwrap(),
+        4
+    );
+    assert_eq!(global.count_table_rows("feedback_quarantine").unwrap(), 0);
+}
+
+#[test]
+fn promotion_source_review_uses_the_same_snapshot_as_the_body() {
+    let fixture = Fixture::new();
+    let reference = timestamp("2030-01-01T00:00:00Z").unwrap();
+    let (memory, _, admitted) =
+        load_source_with_boundary(&fixture.options(true), reference, || {
+            review_hold(&fixture.db, 1, WORKSPACE, "memory", MEMORY);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(memory.content, BODY);
+    assert!(admitted.allowed());
+    let (_, _, next) = load_source(&fixture.options(true), reference).unwrap();
+    assert!(matches!(
+        next.verdict,
+        PromotionVerdict::Refuse {
+            refusal: PromotionRefusal::ReviewPending
+        }
+    ));
+    assert!(!fixture.global.root.exists());
+}
+
+#[test]
+fn selected_global_twin_review_is_rechecked_without_mutation_or_duplicate_fallback() {
+    let fixture = Fixture::new();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&fixture.global).unwrap();
+    let later = "mem_00000000000000000000000073";
+    for id in [OTHER, later] {
+        global
+            .insert_memory(id, &memory_input(&workspace, BODY))
+            .unwrap();
+    }
+    global
+        .insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: fixture
+                    .root
+                    .join("foreign-global")
+                    .to_string_lossy()
+                    .into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+    review_hold(&global, 1, WORKSPACE, "memory", OTHER);
+    review_hold(&global, 2, &workspace, "rule", OTHER);
+    // An earlier clean preview is not authority for the later write.
+    let preview = promote_global(&fixture.options(true)).unwrap();
+    assert!(preview.plan.allowed() && preview.already_promoted);
+    assert_eq!(preview.global_memory_id.as_deref(), Some(OTHER));
+    let hold = review_hold(&global, 3, &workspace, "memory", OTHER);
+    let before_disk = disk(&fixture.root);
+    let source = fixture.db.get_memory(MEMORY).unwrap().unwrap();
+    let target = global.get_memory(OTHER).unwrap().unwrap();
+    let generation = global.get_workspace_generation(&workspace).unwrap();
+    let before_counts = [
+        "memories",
+        "audit_log",
+        "search_index_jobs",
+        "curation_candidates",
+        "feedback_quarantine",
+        "feedback_events",
+    ]
+    .map(|table| (table, global.count_table_rows(table).unwrap()));
+    assert_review_refusal(
+        &promote_global(&fixture.options(true)).unwrap(),
+        Some(OTHER),
+    );
+    assert_eq!(disk(&fixture.root), before_disk);
+    assert_review_refusal(
+        &promote_global(&fixture.options(false)).unwrap(),
+        Some(OTHER),
+    );
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap().unwrap(), source);
+    assert_eq!(fixture.db.count_table_rows("audit_log").unwrap(), 0);
+    assert_eq!(global.get_memory(OTHER).unwrap().unwrap(), target);
+    assert_eq!(
+        global.get_workspace_generation(&workspace).unwrap(),
+        generation
+    );
+    for (table, count) in before_counts {
+        assert_eq!(global.count_table_rows(table).unwrap(), count, "{table}");
+    }
+
+    assert!(
+        global
+            .update_feedback_quarantine_status(&hold, "released", Some("reviewer"), None)
+            .unwrap()
+    );
+    // Preserve the existing first-compatible-ID rule: a later held duplicate
+    // does not make the earlier clean row unusable or change which row wins.
+    review_hold(&global, 4, &workspace, "memory", later);
+    let resumed = promote_global(&fixture.options(false)).unwrap();
+    assert!(resumed.executed && resumed.plan.allowed() && resumed.already_promoted);
+    assert_eq!(resumed.global_memory_id.as_deref(), Some(OTHER));
+    assert_eq!(global.count_table_rows("memories").unwrap(), 2);
+    assert_eq!(global.count_table_rows("search_index_jobs").unwrap(), 0);
+    assert_eq!(global.count_table_rows("curation_candidates").unwrap(), 0);
+    assert_eq!(global.get_memory(OTHER).unwrap().unwrap(), target);
+}
+
+#[test]
+fn unavailable_review_authority_fails_closed_before_promotion_side_effects() {
+    let fixture = Fixture::new();
+    fixture
+        .db
+        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO PRIVATE_REVIEW_AUTHORITY")
+        .unwrap();
+    let before = disk(&fixture.root);
+    for dry_run in [true, false] {
+        let error = promote_global(&fixture.options(dry_run)).unwrap_err();
+        assert!(error.contains("pending review authority"));
+        assert!(!error.contains("PRIVATE_REVIEW_AUTHORITY") && !error.contains(BODY));
+        assert_eq!(disk(&fixture.root), before);
+        assert!(!fixture.global.root.exists());
+    }
+
+    let fixture = Fixture::new();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&fixture.global).unwrap();
+    global
+        .insert_memory(OTHER, &memory_input(&workspace, BODY))
+        .unwrap();
+    global
+        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO PRIVATE_REVIEW_AUTHORITY")
+        .unwrap();
+    let generation = global.get_workspace_generation(&workspace).unwrap();
+    let target = global.get_memory(OTHER).unwrap().unwrap();
+    for dry_run in [true, false] {
+        let error = promote_global(&fixture.options(dry_run)).unwrap_err();
+        assert!(!error.contains("PRIVATE_REVIEW_AUTHORITY") && !error.contains(BODY));
+        assert_eq!(fixture.db.count_table_rows("audit_log").unwrap(), 0);
+        assert_eq!(global.count_table_rows("memories").unwrap(), 1);
+        assert_eq!(global.count_table_rows("audit_log").unwrap(), 0);
+        assert_eq!(global.count_table_rows("search_index_jobs").unwrap(), 0);
+        assert_eq!(global.count_table_rows("curation_candidates").unwrap(), 0);
+        assert_eq!(
+            global.get_workspace_generation(&workspace).unwrap(),
+            generation
+        );
+        assert_eq!(global.get_memory(OTHER).unwrap().unwrap(), target);
+    }
+}
+
 #[test]
 fn promotion_preview_of_an_absent_global_store_is_bytewise_read_only() {
     let fixture = Fixture::new();

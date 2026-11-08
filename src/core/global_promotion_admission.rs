@@ -1,8 +1,9 @@
 //! Source authority and non-mutating previews for cross-workspace promotion.
 //!
 //! Promotion copies an admitted source snapshot; it is not an escape hatch
-//! from author expiry, supersession, or commit/reveal. A refused source never
-//! opens the destination. Previewing an absent store never creates it.
+//! from author expiry, supersession, feedback review, or commit/reveal. A
+//! refused source never opens the destination. Previewing an absent store
+//! never creates it.
 
 use chrono::{DateTime, Utc};
 use sqlmodel_core::Value;
@@ -136,6 +137,20 @@ fn load_source_with_boundary(
         plan.verdict = PromotionVerdict::Refuse { refusal };
         plan.audit_action = "memory.promote_global_refused";
     }
+    if plan.allowed()
+        && !crate::core::memory_lifecycle::pending_memory_review_ids(
+            &db,
+            &memory.workspace_id,
+            &[memory.id.as_str()],
+        )
+        .map_err(|_| "Could not verify pending review authority for promotion".to_owned())?
+        .is_empty()
+    {
+        plan.verdict = PromotionVerdict::Refuse {
+            refusal: PromotionRefusal::ReviewPending,
+        };
+        plan.audit_action = "memory.promote_global_refused";
+    }
     // Capture sidecars inside the same body/authority snapshot. Do not inspect
     // withheld payloads or open a destination for an already-refused source.
     let payload = if plan.allowed() {
@@ -175,10 +190,9 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
     // fact disagreed, and the caller had already marked the PLAN a duplicate
     // via set_duplicate() immediately before constructing this.
     //
-    // Derived from `twin` rather than passed in, because the two call sites are
-    // exactly "refusal, no twin" (None) and "dry-run, twin looked up", so the
-    // Option already carries the answer. Preview stays read-only: this reports
-    // what was observed and writes nothing.
+    // The Option records destination observation: a source refusal has none,
+    // while a preview or a refusal on a held exact twin still observed that
+    // row. This reports existing state without claiming any mutation.
     let already_promoted = twin.is_some();
     PromotionReport {
         plan,
@@ -193,20 +207,30 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
     }
 }
 
+/// An exact match on hold must remain distinct from absence. Treating it as
+/// absent would permit a fresh global copy to bypass the selected row's hold.
+pub(super) enum TwinAdmission {
+    Absent,
+    Admitted(String),
+    ReviewPending(String),
+}
+
 /// Read only the exact-content candidate identities and lifecycle columns.
 /// The caller owns the snapshot/transaction. Expired, sealed, superseded,
 /// differently trusted, and differently typed twins cannot absorb a source.
 /// Authored bounds must match as instants, including null/unbounded starts and
 /// ends. Distinct default capture starts may corroborate one row only when
 /// both origins have positive, snapshot-bound creation evidence. Promotion
-/// changes scope, never either row's lifetime or attestation.
+/// changes scope, never either row's lifetime or attestation. The first
+/// compatible ID remains authoritative: a pending review on that row refuses
+/// promotion instead of falling through to another twin or a fresh insert.
 pub(super) fn find_twin(
     db: &DbConnection,
     workspace: &str,
     source: &StoredMemory,
     payload: &PromotionPayload,
     reference: DateTime<Utc>,
-) -> DbResult<Option<String>> {
+) -> DbResult<TwinAdmission> {
     let source_start = source.valid_from.as_deref().map(timestamp).transpose()?;
     let source_end = source.valid_to.as_deref().map(timestamp).transpose()?;
     let rows = db.query(
@@ -260,9 +284,21 @@ pub(super) fn find_twin(
                 continue;
             }
         }
-        return Ok(Some(id.clone()));
+        return Ok(
+            if crate::core::memory_lifecycle::pending_memory_review_ids(
+                db,
+                workspace,
+                &[id.as_str()],
+            )?
+            .is_empty()
+            {
+                TwinAdmission::Admitted(id.clone())
+            } else {
+                TwinAdmission::ReviewPending(id.clone())
+            },
+        );
     }
-    Ok(None)
+    Ok(TwinAdmission::Absent)
 }
 
 pub(super) fn bound_global_workspace(
@@ -290,13 +326,13 @@ pub(super) fn preview_destination(
     source: &StoredMemory,
     payload: &PromotionPayload,
     reference: DateTime<Utc>,
-) -> Result<(Option<String>, Option<super::merge::MergeProposal>), String> {
+) -> Result<(TwinAdmission, Option<super::merge::MergeProposal>), String> {
     if !paths
         .database_path
         .try_exists()
         .map_err(|_| "Could not inspect global store".to_owned())?
     {
-        return Ok((None, None));
+        return Ok((TwinAdmission::Absent, None));
     }
     let db = DbConnection::open_file_read_only(&paths.database_path)
         .map_err(|_| "Could not open existing global store read-only".to_owned())?;
@@ -305,7 +341,7 @@ pub(super) fn preview_destination(
     let workspace = bound_global_workspace(&db, paths)?;
     let twin = find_twin(&db, &workspace, source, payload, reference)
         .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
-    let proposal = if twin.is_none() {
+    let proposal = if matches!(twin, TwinAdmission::Absent) {
         super::merge::find_proposal(&db, &workspace, source, payload, reference)
             .map_err(|_| "Could not verify global merge proposal authority".to_owned())?
     } else {
@@ -479,7 +515,11 @@ mod duplicate_compatibility_tests {
             )
             .unwrap();
             snapshot.finish().unwrap();
-            matched
+            match matched {
+                TwinAdmission::Absent => None,
+                TwinAdmission::Admitted(id) => Some(id),
+                TwinAdmission::ReviewPending(_) => panic!("unexpected held exact twin"),
+            }
         }
 
         fn update(&self, id: &str, fields: &str) {
