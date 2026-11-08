@@ -66,6 +66,7 @@ const DOC_DIGESTS_SCHEMA_V2: &str = "ee.index.doc_digests.v2";
 const DOC_DIGESTS_SCHEMA_V3: &str = "ee.index.doc_digests.v3";
 const DOC_DIGEST_DOMAIN: &[u8] = b"ee.index.doc_digest.v1\0";
 const EMBEDDING_INPUT_DOMAIN: &[u8] = b"ee.index.embedding_input.v1\0";
+const DIGEST_READ_BUFFER_BYTES: usize = 16 * 1024;
 
 /// Bound changed vector inputs plus removals. V2 cannot prove input reuse and
 /// charges every change; v3 metadata-only updates have separate lexical limits.
@@ -88,11 +89,66 @@ pub(super) struct DocDigests {
     // None preserves full-build availability for an embedder that cannot yet
     // attest its identity, but never authorizes incremental reuse.
     embedder: Option<String>,
+    #[serde(deserialize_with = "deserialize_digest_map")]
     documents: BTreeMap<String, String>,
     // Absent only in v2. Never infer input equality from a metadata-only
     // heuristic or let an incomplete v3 map silently authorize reuse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_digest_map"
+    )]
     embedding_inputs: Option<BTreeMap<String, String>>,
+}
+
+/// Duplicate JSON keys are corruption, not permission to reuse whichever
+/// vector proof happens to be last. Ordinary BTreeMap deserialization erases
+/// that evidence before the complete-schema checks can inspect it.
+fn deserialize_digest_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueDigests;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueDigests {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of unique document identities to digests")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut digests = BTreeMap::new();
+            while let Some(id) = map.next_key::<String>()? {
+                let std::collections::btree_map::Entry::Vacant(entry) = digests.entry(id) else {
+                    return Err(serde::de::Error::custom(
+                        "duplicate document identity in index digest map",
+                    ));
+                };
+                entry.insert(map.next_value::<String>()?);
+            }
+            Ok(digests)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueDigests)
+}
+
+fn deserialize_optional_digest_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct UniqueDigests(
+        #[serde(deserialize_with = "deserialize_digest_map")] BTreeMap<String, String>,
+    );
+
+    Option::<UniqueDigests>::deserialize(deserializer).map(|digests| digests.map(|value| value.0))
 }
 
 #[derive(Debug)]
@@ -337,8 +393,18 @@ impl DocDigests {
 }
 
 fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback> {
+    let request = asupersync::Cx::current();
+    let checkpoint = || {
+        if let Some(cx) = &request {
+            batch::checkpoint(cx, "document digest loading")?;
+        }
+        Ok(())
+    };
+    checkpoint()?;
     let path = generation_dir.join(DOC_DIGESTS_FILE);
-    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+    let metadata = std::fs::symlink_metadata(&path);
+    checkpoint()?;
+    let metadata = metadata.map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::IndexAbsent,
             format!("live generation has no document digests: {error}"),
@@ -350,29 +416,100 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             "live document digests are not a regular file",
         ));
     }
-    let raw = std::fs::read(&path).map_err(|error| {
+    let file = std::fs::File::open(&path);
+    checkpoint()?;
+    let file = file.map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::TierUnavailable,
             format!("failed to read live document digests: {error}"),
         )
     })?;
-    let digests: DocDigests = serde_json::from_slice(&raw).map_err(|error| {
-        incremental_fallback(
-            IncrementalFallbackReason::CorpusRevisionMismatch,
-            format!("live document digests are malformed: {error}"),
-        )
+    read_digests_with_checkpoint(file, checkpoint)
+}
+
+/// Check the installed request around each bounded filesystem read. Keep its
+/// original refusal separate from serde's I/O error so cancellation cannot be
+/// mislabeled as a corrupt manifest or retried as Interrupted by the decoder.
+struct DigestReader<R, C> {
+    reader: R,
+    checkpoint: C,
+    interrupted: Option<IncrementalFallback>,
+}
+
+impl<R, C> DigestReader<R, C>
+where
+    C: FnMut() -> Result<(), IncrementalFallback>,
+{
+    fn checkpoint(&mut self) -> std::io::Result<()> {
+        if self.interrupted.is_none() {
+            self.interrupted = (self.checkpoint)().err();
+        }
+        if self.interrupted.is_some() {
+            Err(std::io::Error::other("index digest loading interrupted"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<R, C> std::io::Read for DigestReader<R, C>
+where
+    R: std::io::Read,
+    C: FnMut() -> Result<(), IncrementalFallback>,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.checkpoint()?;
+        let result = self.reader.read(buffer);
+        // Cancellation wins even when this read returned invalid bytes, EOF,
+        // an ordinary failure or EINTR. No further refill may follow it.
+        self.checkpoint()?;
+        result
+    }
+}
+
+/// Retain the required digest maps, not a second serialized copy of the whole
+/// corpus. Buffering goes outside the checkpoint reader: serde reads bytes
+/// individually, while filesystem I/O and cooperative checks stay bounded to
+/// refills. An individual decoded field can still exceed the input buffer.
+fn read_digests_with_checkpoint(
+    reader: impl std::io::Read,
+    checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<DocDigests, IncrementalFallback> {
+    let mut reader = std::io::BufReader::with_capacity(
+        DIGEST_READ_BUFFER_BYTES,
+        DigestReader {
+            reader,
+            checkpoint,
+            interrupted: None,
+        },
+    );
+    let parsed = serde_json::from_reader::<_, DocDigests>(&mut reader);
+    let mut reader = reader.into_inner();
+    if let Some(error) = reader.interrupted.take() {
+        return Err(error);
+    }
+    // Parsing can finish (or fail) within the last buffer. Observe any request
+    // change before returning a schema/I/O error or accepting the manifest.
+    (reader.checkpoint)()?;
+    let digests = parsed.map_err(|error| {
+        if error.is_io() {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("failed to read live document digests: {error}"),
+            )
+        } else {
+            incremental_fallback(
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+                format!("live document digests are malformed: {error}"),
+            )
+        }
     })?;
     let valid_schema = match digests.schema.as_str() {
         DOC_DIGESTS_SCHEMA_V2 => digests.embedding_inputs.is_none(),
-        DOC_DIGESTS_SCHEMA_V3 => digests.embedding_inputs.as_ref().is_some_and(|inputs| {
-            inputs.keys().eq(digests.documents.keys())
-                && inputs.values().all(|digest| {
-                    digest.len() == 64
-                        && digest
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                })
-        }),
+        DOC_DIGESTS_SCHEMA_V3 => digests
+            .embedding_inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.len() == digests.documents.len()),
         _ => false,
     };
     if !valid_schema {
@@ -384,6 +521,33 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             ),
         ));
     }
+    let valid_digest = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    };
+    for (id, digest) in &digests.documents {
+        (reader.checkpoint)()?;
+        if id.is_empty() || !valid_digest(digest) {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+                "live document digest map is malformed",
+            ));
+        }
+    }
+    if let Some(inputs) = &digests.embedding_inputs {
+        for ((id, _), (input_id, input)) in digests.documents.iter().zip(inputs) {
+            (reader.checkpoint)()?;
+            if id != input_id || !valid_digest(input) {
+                return Err(incremental_fallback(
+                    IncrementalFallbackReason::CorpusRevisionMismatch,
+                    "live embedding-input digest map is malformed",
+                ));
+            }
+        }
+    }
+    (reader.checkpoint)()?;
     Ok(digests)
 }
 
@@ -1995,5 +2159,357 @@ mod tests {
                 }));
             }
         }
+    }
+
+    struct ObservedDigestReads<R> {
+        reader: R,
+        chunk_bytes: usize,
+        calls: usize,
+        requested_bytes: usize,
+        consumed_bytes: usize,
+    }
+
+    impl<R: std::io::Read> std::io::Read for ObservedDigestReads<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.requested_bytes = self.requested_bytes.max(buffer.len());
+            let available = buffer.len().min(self.chunk_bytes);
+            let count = self.reader.read(&mut buffer[..available])?;
+            self.consumed_bytes += count;
+            Ok(count)
+        }
+    }
+
+    fn observed_digest_reads<R>(reader: R, chunk_bytes: usize) -> ObservedDigestReads<R> {
+        ObservedDigestReads {
+            reader,
+            chunk_bytes,
+            calls: 0,
+            requested_bytes: 0,
+            consumed_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn streamed_digest_reads_preserve_v2_and_v3_across_short_utf8_reads() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let documents = [
+            doc("mem_資料", "first source"),
+            doc("mem_é", "second source"),
+        ];
+        for schema in [DOC_DIGESTS_SCHEMA_V2, DOC_DIGESTS_SCHEMA_V3] {
+            let mut expected = DocDigests::new(&stack, &documents);
+            expected.schema = schema.to_owned();
+            if schema == DOC_DIGESTS_SCHEMA_V2 {
+                expected.embedding_inputs = None;
+            }
+            let mut bytes = serde_json::to_vec(&expected).map_err(|error| error.to_string())?;
+            bytes.extend_from_slice(b" \n\t");
+            for chunk_bytes in [1, 7, DIGEST_READ_BUFFER_BYTES] {
+                let mut reader = observed_digest_reads(bytes.as_slice(), chunk_bytes);
+                let actual = read_digests_with_checkpoint(&mut reader, || Ok(()))
+                    .map_err(|error| error.detail)?;
+                assert_eq!(actual.schema, expected.schema);
+                assert_eq!(actual.embedder, expected.embedder);
+                assert_eq!(actual.documents, expected.documents);
+                assert_eq!(actual.embedding_inputs, expected.embedding_inputs);
+                assert_eq!(reader.consumed_bytes, bytes.len());
+                assert!(reader.requested_bytes <= DIGEST_READ_BUFFER_BYTES);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn large_digest_manifest_uses_fixed_input_buffers_and_keeps_every_identity() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let documents = (0..8192)
+            .map(|number| doc(&format!("mem_{number:05}_資料"), "exact input"))
+            .collect::<Vec<_>>();
+        let expected = DocDigests::new(&stack, &documents);
+        let directory = generation_with_digests("bounded-read", &stack, &documents)?;
+        let file = std::fs::File::open(directory.path().join(DOC_DIGESTS_FILE))
+            .map_err(|error| error.to_string())?;
+        let length = file.metadata().map_err(|error| error.to_string())?.len();
+        assert!(length > 64 * DIGEST_READ_BUFFER_BYTES as u64);
+        let mut reader = observed_digest_reads(file, usize::MAX);
+        let actual =
+            read_digests_with_checkpoint(&mut reader, || Ok(())).map_err(|error| error.detail)?;
+        assert_eq!(actual.documents, expected.documents);
+        assert_eq!(actual.embedding_inputs, expected.embedding_inputs);
+        assert_eq!(reader.consumed_bytes as u64, length);
+        assert!(reader.calls > 64);
+        assert_eq!(reader.requested_bytes, DIGEST_READ_BUFFER_BYTES);
+        Ok(())
+    }
+
+    struct FailedDigestRead<'a> {
+        bytes: &'a [u8],
+        remaining: usize,
+        kind: std::io::ErrorKind,
+        calls: usize,
+    }
+
+    impl std::io::Read for FailedDigestRead<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.remaining == 0 {
+                return Err(std::io::Error::new(
+                    self.kind,
+                    "injected digest read failure",
+                ));
+            }
+            let count = buffer.len().min(self.remaining).min(self.bytes.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            self.remaining -= count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn streamed_digest_reads_refuse_truncation_trailing_data_and_io_failures() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let digests = DocDigests::new(&stack, &[doc("mem_one", "source")]);
+        let bytes = serde_json::to_vec(&digests).map_err(|error| error.to_string())?;
+        for length in [0, 1, bytes.len() / 2, bytes.len() - 1] {
+            let error = read_digests_with_checkpoint(&bytes[..length], || Ok(()))
+                .expect_err("an incomplete prefix must not authorize reuse");
+            assert_eq!(
+                error.reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.extend_from_slice(b" {}");
+        assert_eq!(
+            read_digests_with_checkpoint(trailing.as_slice(), || Ok(()))
+                .expect_err("extra JSON after a complete manifest")
+                .reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch,
+        );
+        // Failure while confirming EOF is still a read failure: accepting the
+        // first object without checking the suffix would miss trailing data.
+        for remaining in [0, bytes.len() / 2, bytes.len()] {
+            let reader = FailedDigestRead {
+                bytes: &bytes,
+                remaining,
+                kind: std::io::ErrorKind::Other,
+                calls: 0,
+            };
+            let error = read_digests_with_checkpoint(reader, || Ok(()))
+                .expect_err("underlying read failure cannot yield a usable manifest");
+            assert_eq!(error.reason, IncrementalFallbackReason::TierUnavailable);
+            assert!(error.detail.contains("injected digest read failure"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_digest_ids_are_rejected_before_json_can_collapse_them() {
+        let hash = "a".repeat(64);
+        let unique = format!(r#"{{"mem_one":"{hash}"}}"#);
+        // The escaped spelling decodes to the same key. Even equal duplicate
+        // values must be refused; a last-wins map would otherwise hide both.
+        let duplicate = format!(r#"{{"mem_one":"{hash}","mem_\u006fne":"{hash}"}}"#);
+        for schema in [DOC_DIGESTS_SCHEMA_V2, DOC_DIGESTS_SCHEMA_V3] {
+            for duplicate_inputs in [false, true] {
+                if schema == DOC_DIGESTS_SCHEMA_V2 && duplicate_inputs {
+                    continue;
+                }
+                let documents = if duplicate_inputs {
+                    &unique
+                } else {
+                    &duplicate
+                };
+                let inputs = if duplicate_inputs {
+                    &duplicate
+                } else {
+                    &unique
+                };
+                let suffix = if schema == DOC_DIGESTS_SCHEMA_V3 {
+                    format!(r#", "embeddingInputs":{inputs}"#)
+                } else {
+                    String::new()
+                };
+                let bytes = format!(
+                    r#"{{"schema":"{schema}","embedder":null,"documents":{documents}{suffix}}}"#
+                );
+                let error = read_digests_with_checkpoint(bytes.as_bytes(), || Ok(()))
+                    .expect_err("duplicate identities must not authorize vector reuse");
+                assert_eq!(
+                    error.reason,
+                    IncrementalFallbackReason::CorpusRevisionMismatch
+                );
+                assert!(error.detail.contains("duplicate document identity"));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_document_digests_and_mismatched_input_ids_require_rebuild() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        for schema in [DOC_DIGESTS_SCHEMA_V2, DOC_DIGESTS_SCHEMA_V3] {
+            for case in 0..4 {
+                let mut broken = DocDigests::new(&stack, &[doc("mem_one", "source")]);
+                broken.schema = schema.to_owned();
+                match case {
+                    0 => {
+                        broken
+                            .documents
+                            .insert("mem_one".to_owned(), "short".to_owned());
+                    }
+                    1 => {
+                        broken
+                            .documents
+                            .insert("mem_one".to_owned(), "A".repeat(64));
+                    }
+                    2 => {
+                        let digest = broken
+                            .documents
+                            .remove("mem_one")
+                            .ok_or("document digest")?;
+                        broken.documents.insert(String::new(), digest);
+                    }
+                    _ => {
+                        let digest = broken
+                            .documents
+                            .remove("mem_one")
+                            .ok_or("document digest")?;
+                        broken.documents.insert("different_id".to_owned(), digest);
+                    }
+                }
+                if schema == DOC_DIGESTS_SCHEMA_V2 {
+                    if case == 3 {
+                        continue;
+                    }
+                    broken.embedding_inputs = None;
+                }
+                let bytes = serde_json::to_vec(&broken).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    read_digests_with_checkpoint(bytes.as_slice(), || Ok(()))
+                        .expect_err("malformed proof cannot authorize incremental reuse")
+                        .reason,
+                    IncrementalFallbackReason::CorpusRevisionMismatch,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn digest_read_and_validation_checkpoints_never_return_a_partial_manifest() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let documents = (0..4)
+            .map(|number| doc(&format!("mem_{number}"), "source"))
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(&DocDigests::new(&stack, &documents))
+            .map_err(|error| error.to_string())?;
+        let mut total = 0;
+        read_digests_with_checkpoint(observed_digest_reads(bytes.as_slice(), 97), || {
+            total += 1;
+            Ok(())
+        })
+        .map_err(|error| error.detail)?;
+        for stop_at in 1..=total {
+            let mut calls = 0;
+            let mut reader = observed_digest_reads(bytes.as_slice(), 97);
+            let error = read_digests_with_checkpoint(&mut reader, || {
+                calls += 1;
+                if calls == stop_at {
+                    Err(incremental_fallback(
+                        IncrementalFallbackReason::TierUnavailable,
+                        "stop digest loading at this checkpoint",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("cancelled read or schema scan must not return partial maps");
+            assert_eq!(calls, stop_at);
+            assert_eq!(error.reason, IncrementalFallbackReason::TierUnavailable);
+            assert_eq!(error.detail, "stop digest loading at this checkpoint");
+            if stop_at <= 2 {
+                assert_eq!(reader.calls, usize::from(stop_at == 2));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn digest_read_cancellation_wins_over_io_failure_and_is_never_retried() {
+        for kind in [std::io::ErrorKind::Other, std::io::ErrorKind::Interrupted] {
+            let mut reader = FailedDigestRead {
+                bytes: &[],
+                remaining: 0,
+                kind,
+                calls: 0,
+            };
+            let mut checks = 0;
+            let error = read_digests_with_checkpoint(&mut reader, || {
+                checks += 1;
+                if checks == 2 {
+                    Err(incremental_fallback(
+                        IncrementalFallbackReason::TierUnavailable,
+                        "caller cancelled during the failed read",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("cancellation must precede both retry and ordinary I/O fallback");
+            assert_eq!(reader.calls, 1);
+            assert_eq!(checks, 2);
+            assert_eq!(error.detail, "caller cancelled during the failed read");
+        }
+    }
+
+    #[test]
+    fn installed_digest_read_cancellation_preserves_the_terminal_index_reason() -> TestResult {
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(10), |cx| async move {
+            struct CancellingRead<'a> {
+                cx: &'a asupersync::Cx,
+                reason: asupersync::CancelReason,
+                calls: usize,
+            }
+            impl std::io::Read for CancellingRead<'_> {
+                fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                    self.calls += 1;
+                    self.cx.set_cancel_reason(self.reason.clone());
+                    buffer[0] = b'{';
+                    Ok(1)
+                }
+            }
+            let request = asupersync::Cx::current().ok_or("installed request")?;
+            let reason = asupersync::CancelReason::user("stop large digest intake");
+            let mut reader = CancellingRead {
+                cx: &cx,
+                reason: reason.clone(),
+                calls: 0,
+            };
+            let error = read_digests_with_checkpoint(&mut reader, || {
+                batch::checkpoint(&request, "document digest loading")
+            })
+            .expect_err("cancellation during the first real request read");
+            assert_eq!(reader.calls, 1);
+            assert_eq!(error.reason, IncrementalFallbackReason::TierUnavailable);
+            // Both publication paths check this same request before preparing
+            // a full rebuild. The terminal result retains the exact reason.
+            let terminal = super::super::index_operation_checkpoint(&cx, None)
+                .expect_err("a rebuild must not renew the cancelled request");
+            let IndexRebuildError::Cancelled(actual) = terminal else {
+                return Err(format!("expected cancellation, got {terminal}"));
+            };
+            assert_eq!(actual, reason);
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            assert_eq!(
+                read_digests(directory.path())
+                    .expect_err("cancellation precedes missing-file fallback")
+                    .reason,
+                IncrementalFallbackReason::TierUnavailable,
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
     }
 }
