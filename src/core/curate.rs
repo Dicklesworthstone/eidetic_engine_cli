@@ -6111,8 +6111,7 @@ pub fn show_curation_candidate(
         &connection,
         &prepared.workspace_id,
         &stored,
-    )
-    {
+    ) {
         let decision = blocked_apply(
             &stored,
             None,

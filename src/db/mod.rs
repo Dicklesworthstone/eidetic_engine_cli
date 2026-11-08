@@ -32870,7 +32870,7 @@ impl DbConnection {
         }))
     }
 
-/// Queue a single-document reindex for one memory inside the caller's
+    /// Queue a single-document reindex for one memory inside the caller's
     /// transaction.
     ///
     /// Every `UPDATE memories` bumps the workspace generation, so a write path
