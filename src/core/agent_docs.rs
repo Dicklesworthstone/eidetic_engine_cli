@@ -1173,6 +1173,19 @@ pub const JOURNAL_CAPTURE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+const OUTCOME_HARVEST_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "the bounded scan has no eligible corroborated promotion candidates",
+        jq: r#".data | select(.proposedCount == 0) | {scannedPacks, skipped, bounded, coverage}"#,
+        next_action: "Inspect skipped reasons and the explicit window; use --pack-id to address an older exact pack. Additional task, git, recorder attribution and calibration are not provided by this command.",
+    },
+    FailureBranchEntry {
+        condition: "the addressed store or window cannot be read",
+        jq: r#".error? | {code, message, repair}"#,
+        next_action: "Follow the reported repair, then retry the same explicit window in dry-run mode before saving candidates.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "local-attestation",
@@ -1353,6 +1366,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{status: .data.status, targetId: .data.targetId, targetType: .data.targetType, feedback: .data.feedback, degraded: (.data.degraded // .degraded // [])}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: JOURNAL_CAPTURE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "harvest-pack-outcomes",
+        title: "Review promotion candidates from pack outcomes",
+        description: "Preview bounded, corroborated authoritative verification tied directly to packs for eligible episodic native memories. --apply only saves pending candidates and evidence for curation review; promotion remains a separate validated action.",
+        category: "feedback",
+        command: "ee outcome harvest --since <RFC3339-start> --until <RFC3339-end> --dry-run --workspace . --json",
+        jq: r#".data | {dryRun, since, until, scannedPacks, proposedCount, persistedCount, replayedCount, proposals, skipped, bounded, coverage}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.outcome.harvest.v1" and .data.dryRun == true"#,
+        failure_branches: OUTCOME_HARVEST_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "goal-to-recipe",

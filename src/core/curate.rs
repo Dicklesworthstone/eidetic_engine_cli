@@ -67,7 +67,7 @@ mod corroboration;
 #[path = "curate_session_arc.rs"]
 pub(crate) mod session_arc;
 #[path = "curate_source_admission.rs"]
-mod source_admission;
+pub(crate) mod source_admission;
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -5973,6 +5973,21 @@ pub fn validate_curation_candidate(
             Vec::new(),
         );
     }
+    if let Err(error) = crate::core::outcome_harvest::validate_candidate(
+        &connection,
+        &prepared.workspace_id,
+        &stored,
+    ) {
+        decision = blocked_validation(
+            &stored,
+            vec![validation_issue(
+                error.code(),
+                error.message(),
+                error.repair().unwrap_or("ee outcome harvest --help"),
+            )],
+            Vec::new(),
+        );
+    }
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -6087,6 +6102,24 @@ pub fn show_curation_candidate(
                 "global_merge_snapshot_changed",
                 message,
                 "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+        Some(planned_application_from_decision(&stored, &decision))
+    } else if let Err(error) = crate::core::outcome_harvest::validate_candidate(
+        &connection,
+        &prepared.workspace_id,
+        &stored,
+    )
+    {
+        let decision = blocked_apply(
+            &stored,
+            None,
+            vec![validation_issue(
+                error.code(),
+                error.message(),
+                error.repair().unwrap_or("ee outcome harvest --help"),
             )],
             Vec::new(),
             "ee curate candidates --json".to_owned(),
@@ -6443,6 +6476,23 @@ fn apply_curation_candidate_with_recipe(
                 "global_merge_snapshot_changed",
                 message,
                 "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+    }
+    if let Err(error) = crate::core::outcome_harvest::validate_candidate(
+        &connection,
+        &prepared.workspace_id,
+        &stored,
+    ) {
+        decision = blocked_apply(
+            &stored,
+            decision.target_before.clone(),
+            vec![validation_issue(
+                error.code(),
+                error.message(),
+                error.repair().unwrap_or("ee outcome harvest --help"),
             )],
             Vec::new(),
             "ee curate candidates --json".to_owned(),
@@ -7003,7 +7053,7 @@ pub fn review_curation_candidate(
 
     let now = Utc::now().to_rfc3339();
     if options.action == CurateReviewAction::Accept {
-        validate_guarded_candidate_for_review(&connection, &stored)?;
+        validate_guarded_candidate_for_review(&connection, &prepared.workspace_id, &stored)?;
     }
     let decision = evaluate_candidate_for_review(
         &stored,
@@ -10892,6 +10942,7 @@ fn evaluate_conflict_candidate_for_apply(
 
 fn validate_guarded_candidate_for_review(
     connection: &DbConnection,
+    workspace_id: &str,
     stored: &StoredCurationCandidate,
 ) -> Result<(), DomainError> {
     crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
@@ -10904,6 +10955,7 @@ fn validate_guarded_candidate_for_review(
             details_json: "{}".to_owned(),
         },
     )?;
+    crate::core::outcome_harvest::validate_candidate(connection, workspace_id, stored)?;
     if crate::core::conflict_proposal::is_candidate(stored) {
         let current = connection
             .get_curation_candidate(&stored.workspace_id, &stored.id)
@@ -15020,7 +15072,7 @@ fn persist_candidate_validation_inner(
     decision: &ValidationDecision,
 ) -> Result<String, DomainError> {
     if to_status == CandidateStatus::Approved.as_str() {
-        validate_guarded_candidate_for_review(connection, stored)?;
+        validate_guarded_candidate_for_review(connection, workspace_id, stored)?;
         corroboration::validate_recorded(connection, stored)
             .map_err(session_arc::pair_domain_error)?;
     }
@@ -15147,7 +15199,7 @@ fn persist_candidate_review_inner(
     reason: Option<&str>,
 ) -> Result<String, DomainError> {
     if action == CurateReviewAction::Accept {
-        validate_guarded_candidate_for_review(connection, stored)?;
+        validate_guarded_candidate_for_review(connection, workspace_id, stored)?;
     }
     let updated = connection
         .update_curation_candidate_review(
@@ -15282,6 +15334,7 @@ fn persist_candidate_application_inner(
             details_json: "{}".to_owned(),
         },
     )?;
+    crate::core::outcome_harvest::validate_candidate(connection, workspace_id, stored)?;
     if decision.rule_create.is_some() || recipe.is_some() {
         let sources = audited_source_memory_ids_for_rule_candidate(connection, stored)?;
         let sources_changed = if let Some(rule) = &decision.rule_create {

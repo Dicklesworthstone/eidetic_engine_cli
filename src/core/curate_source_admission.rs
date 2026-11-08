@@ -12,7 +12,7 @@ use super::{CurateValidationIssue, validation_issue};
 
 /// Keep source bodies and their current sidecars in one view. Borrow an apply
 /// or ingest transaction without committing or rolling back its owner's work.
-pub(super) fn with_snapshot<T>(
+pub(crate) fn with_snapshot<T>(
     connection: &DbConnection,
     read: impl FnOnce() -> Result<T, DomainError>,
 ) -> Result<T, DomainError> {
@@ -60,7 +60,7 @@ pub(super) fn unavailable_issue() -> CurateValidationIssue {
 
 /// The caller has already checked source ownership and tombstone state and
 /// owns the snapshot spanning that memory read and these authority reads.
-pub(super) fn validate_memory_authority(
+pub(crate) fn validate_memory_authority(
     connection: &DbConnection,
     memory: &StoredMemory,
 ) -> Result<(), CurateValidationIssue> {

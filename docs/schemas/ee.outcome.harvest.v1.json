@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.outcome.harvest.v1.json",
+  "title": "ee.outcome.harvest.v1",
+  "description": "Bounded attribution of authoritative verification tied directly to persisted packs. The completion window is [since, until). Default mode previews pending Promote candidates for eligible episodic native memories; apply saves candidates, derived evidence and audit only. It does not promote memories or record explicit feedback.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "command", "status", "dryRun", "workspaceId", "since", "until",
+    "scannedPacks", "proposedCount", "persistedCount", "replayedCount", "cappedCount",
+    "skippedCount", "proposals", "skipped", "bounded", "coverage"
+  ],
+  "properties": {
+    "schema": { "const": "ee.outcome.harvest.v1" },
+    "command": { "const": "outcome harvest" },
+    "status": { "enum": ["dry_run", "applied"] },
+    "dryRun": { "type": "boolean" },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "since": { "type": "string", "format": "date-time" },
+    "until": { "type": "string", "format": "date-time" },
+    "scannedPacks": { "type": "integer", "minimum": 0 },
+    "proposedCount": { "type": "integer", "minimum": 0 },
+    "persistedCount": { "type": "integer", "minimum": 0 },
+    "replayedCount": { "type": "integer", "minimum": 0 },
+    "cappedCount": { "type": "integer", "minimum": 0 },
+    "skippedCount": { "type": "integer", "minimum": 0 },
+    "proposals": {
+      "type": "array",
+      "maxItems": 512,
+      "items": { "$ref": "#/$defs/proposal" }
+    },
+    "skipped": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/skipped" }
+    },
+    "bounded": {
+      "type": "boolean",
+      "description": "True when a scan, selection-work or report limit was reached; this report does not claim full coverage."
+    },
+    "coverage": {
+      "type": "string",
+      "enum": [
+        "exact_pack", "all_recorded_packs", "recent_packs_truncated",
+        "selection_work_limit_reached", "proposal_limit_reached"
+      ]
+    }
+  },
+  "$defs": {
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId", "memoryId", "direction", "baseWeightMilli", "corroboratingCount",
+        "packId", "proofRefs", "receiptHash", "sourceBinding", "status"
+      ],
+      "properties": {
+        "candidateId": { "type": "string", "minLength": 1 },
+        "memoryId": { "type": "string", "minLength": 1 },
+        "direction": { "const": "positive" },
+        "baseWeightMilli": { "const": 400 },
+        "corroboratingCount": { "const": 2 },
+        "packId": { "type": "string", "minLength": 1 },
+        "proofRefs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "receiptHash": { "type": "string", "pattern": "^blake3:[a-f0-9]{64}$" },
+        "sourceBinding": { "const": "unchanged_since_pack" },
+        "status": { "enum": ["proposed", "pending", "already_recorded", "cap_exceeded"] }
+      }
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packId", "memoryId", "reason"],
+      "properties": {
+        "packId": { "type": "string", "minLength": 1 },
+        "memoryId": { "type": ["string", "null"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -2276,6 +2276,257 @@ pub fn verification_records_for_target(
     parse_verification_audit_entries(entries)
 }
 
+/// A validated, exact-pack proof retained by the passive outcome harvester.
+/// The full record is internal evidence, not a public harvest response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HarvestVerificationProof {
+    pub audit_id: String,
+    pub audit_receipt_hash: String,
+    pub workspace_id: String,
+    pub pack_id: String,
+    pub content_hash: String,
+    pub authority: String,
+    pub command_identity: String,
+    /// Stable digests within the authority's command domain: raw text for RCH,
+    /// encoded argv for validated runs. Consumers must compare the same domain.
+    pub command_aliases: Vec<String>,
+    pub record: VerificationEvidenceRecord,
+}
+
+const HARVEST_VERIFICATION_MAX_ROWS: usize = 128;
+const HARVEST_VERIFICATION_MAX_DETAILS_BYTES: usize = 256 * 1024;
+
+/// Read bounded proof authority from stored audit ownership, never from fields
+/// inside a caller's evidence envelope. The caller owns the snapshot spanning
+/// this read and its pack/source reads; this function does not release it.
+pub(crate) fn verification_proofs_for_pack_harvest(
+    connection: &DbConnection,
+    workspace_id: &str,
+    pack_id: &str,
+) -> Result<Vec<HarvestVerificationProof>, String> {
+    use sqlmodel_core::Value;
+
+    let rows = connection
+        .query(
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id,
+                CASE WHEN length(CAST(details AS BLOB)) <= ?3 THEN details ELSE NULL END,
+                surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash,
+                CAST(length(CAST(details AS BLOB)) AS TEXT)
+         FROM audit_log
+         WHERE workspace_id = ?1 AND target_type = 'pack' AND target_id = ?2
+           AND action IN (?4, ?5)
+         ORDER BY id ASC LIMIT ?6",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(pack_id.to_owned()),
+                Value::BigInt(HARVEST_VERIFICATION_MAX_DETAILS_BYTES as i64),
+                Value::Text(audit_actions::VERIFICATION_INGEST.to_owned()),
+                Value::Text(LEGACY_VERIFICATION_RECORD_ACTION.to_owned()),
+                Value::BigInt((HARVEST_VERIFICATION_MAX_ROWS + 1) as i64),
+            ],
+        )
+        .map_err(|_| "Pack verification proof storage is unavailable".to_owned())?;
+    if rows.len() > HARVEST_VERIFICATION_MAX_ROWS {
+        return Err("Pack verification proof count exceeds the harvest limit".to_owned());
+    }
+    let mut identities = std::collections::BTreeMap::new();
+    let mut proofs = Vec::new();
+    for row in rows {
+        let text = |column| {
+            row.get(column)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "Pack verification audit metadata is malformed".to_owned())
+        };
+        let optional_text = |column| match row.get(column) {
+            Some(Value::Null) => Ok(None),
+            Some(Value::Text(value)) => Ok(Some(value.clone())),
+            _ => Err("Pack verification audit metadata is malformed".to_owned()),
+        };
+        let details_len = text(14)?
+            .parse::<usize>()
+            .map_err(|_| "Pack verification details size is malformed".to_owned())?;
+        if details_len > HARVEST_VERIFICATION_MAX_DETAILS_BYTES {
+            return Err("Pack verification proof details exceed the harvest limit".to_owned());
+        }
+        let entry = crate::db::StoredAuditEntry {
+            id: text(0)?,
+            workspace_id: Some(text(1)?),
+            timestamp: text(2)?,
+            actor: optional_text(3)?,
+            action: text(4)?,
+            target_type: Some(text(5)?),
+            target_id: Some(text(6)?),
+            details: Some(text(7)?),
+            surface: text(8)?,
+            mutation_kind: text(9)?,
+            before_hash: optional_text(10)?,
+            after_hash: optional_text(11)?,
+            prev_row_hash: optional_text(12)?,
+            this_row_hash: optional_text(13)?,
+        };
+        let audit_id_valid = crate::models::AuditId::from_str(&entry.id).is_ok()
+            || entry.id.strip_prefix("audit_").is_some_and(|payload| {
+                payload.len() == 32 && payload.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        let expected_row_hash = crate::db::compute_audit_row_hash(&entry);
+        if !audit_id_valid
+            || entry.workspace_id.as_deref() != Some(workspace_id)
+            || entry.target_type.as_deref() != Some("pack")
+            || entry.target_id.as_deref() != Some(pack_id)
+            || !is_verification_audit_action(&entry.action)
+            || DateTime::parse_from_rfc3339(&entry.timestamp).is_err()
+            || entry.this_row_hash.as_deref() != Some(expected_row_hash.as_str())
+        {
+            return Err("Pack verification audit identity or row hash is invalid".to_owned());
+        }
+        let raw = entry
+            .details
+            .as_deref()
+            .ok_or_else(|| "Pack verification proof details are missing".to_owned())?;
+        if raw.len() != details_len {
+            return Err("Pack verification proof details size changed".to_owned());
+        }
+        let (mut record, content_hash, authority) =
+            match serde_json::from_str::<VerificationAuditDetails>(raw) {
+                Ok(details) => {
+                    if details.schema != VERIFICATION_LEDGER_ENTRY_SCHEMA_V1
+                        || details.status != details.evidence.status
+                        || details.producer != details.evidence.producer
+                    {
+                        return Err("Pack verification proof envelope is inconsistent".to_owned());
+                    }
+                    (details.evidence, details.content_hash, details.authority)
+                }
+                Err(_) => {
+                    // Legacy bare evidence has no parser-established authority.
+                    // Embedded caller fields cannot upgrade it into a trusted pass.
+                    let record: VerificationEvidenceRecord = serde_json::from_str(raw)
+                        .map_err(|_| "Pack verification proof JSON is malformed".to_owned())?;
+                    let content_hash = verification_evidence_content_hash(&record)
+                        .map_err(|_| "Pack verification proof hash is unavailable".to_owned())?;
+                    (
+                        record,
+                        content_hash,
+                        VerificationEvidenceAuthority::CallerAuthored,
+                    )
+                }
+            };
+        validate_verification_evidence_authority(&record, authority)
+            .and_then(|()| validate_verification_record(&record))
+            .map_err(|_| "Pack verification proof authority or record is invalid".to_owned())?;
+        normalize_validated_verification_evidence(&mut record, authority);
+        if verification_evidence_content_hash(&record)
+            .map_err(|_| "Pack verification proof hash is unavailable".to_owned())?
+            != content_hash
+        {
+            return Err("Pack verification proof content hash does not match".to_owned());
+        }
+        for timestamp in [&record.started_at, &record.finished_at]
+            .into_iter()
+            .flatten()
+        {
+            DateTime::parse_from_rfc3339(timestamp)
+                .map_err(|_| "Pack verification proof timestamp is malformed".to_owned())?;
+        }
+        let identity = (content_hash.clone(), authority);
+        if let Some(existing) = identities.get(&record.verification_id) {
+            if existing != &identity {
+                return Err("Pack verification identity has conflicting proof rows".to_owned());
+            }
+        } else {
+            identities.insert(record.verification_id.clone(), identity);
+        }
+        // Keep each consistent stored audit receipt. A later import with a
+        // smaller audit ID must not hide the exact receipt a reviewed harvest
+        // already names. The harvester separately requires distinct verified
+        // identities, so duplicate rows never become independent checks.
+        if !authority.can_authorize_pass() || !record.is_authoritative_pass() {
+            continue;
+        }
+        // Check-run evidence retains a run/head metadata summary, not raw argv
+        // or a validated command identity. Different runs of the same check
+        // must not manufacture independent commands for passive attribution.
+        if authority == VerificationEvidenceAuthority::ValidatedGithubActions {
+            continue;
+        }
+        let command_identity = harvest_verification_command_identity(&record, authority)?;
+        let mut command_aliases = vec![command_identity.clone()];
+        if authority != VerificationEvidenceAuthority::ValidatedRunRecord {
+            command_aliases.push(crate::models::command_hash(&record.command));
+            command_aliases.sort_unstable();
+            command_aliases.dedup();
+        }
+        let receipt = serde_json::to_vec(&entry)
+            .map_err(|_| "Pack verification audit receipt is unavailable".to_owned())?;
+        proofs.push(HarvestVerificationProof {
+            audit_id: entry.id,
+            audit_receipt_hash: format!("blake3:{}", blake3::hash(&receipt).to_hex()),
+            workspace_id: workspace_id.to_owned(),
+            pack_id: pack_id.to_owned(),
+            content_hash,
+            authority: authority.as_str().to_owned(),
+            command_identity,
+            command_aliases,
+            record,
+        });
+    }
+    Ok(proofs)
+}
+
+fn canonical_harvest_command_digest(raw: &str) -> Result<String, String> {
+    let lower = raw.to_ascii_lowercase();
+    let (algorithm, digest) = if let Some(digest) = lower.strip_prefix("blake3:") {
+        ("blake3", digest)
+    } else {
+        ("sha256", lower.strip_prefix("sha256:").unwrap_or(&lower))
+    };
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Pack verification command digest is malformed".to_owned());
+    }
+    Ok(format!("{algorithm}:{digest}"))
+}
+
+fn harvest_verification_command_identity(
+    record: &VerificationEvidenceRecord,
+    authority: VerificationEvidenceAuthority,
+) -> Result<String, String> {
+    use sha2::Digest;
+
+    let digest = canonical_harvest_command_digest(&record.command_hash)?;
+    if authority == VerificationEvidenceAuthority::ValidatedRunRecord {
+        // A run's optional command_hash override may hash raw text or another
+        // producer encoding. Its dedicated argv_hash always identifies encoded
+        // argv. Keep that domain distinct from RCH's raw command text; neither
+        // the summary nor an override can manufacture another independent run.
+        let parts = record.command.split_whitespace().collect::<Vec<_>>();
+        if parts.len() != 4 || parts[0] != "verification_run" {
+            return Err("Pack verification run summary is malformed".to_owned());
+        }
+        let embedded = parts[2]
+            .strip_prefix("command_hash=")
+            .ok_or_else(|| "Pack verification run command identity is missing".to_owned())?;
+        let argv = parts[3]
+            .strip_prefix("argv_hash=")
+            .ok_or_else(|| "Pack verification run argv identity is missing".to_owned())?;
+        if canonical_harvest_command_digest(embedded)? != digest {
+            return Err("Pack verification run command identity does not match".to_owned());
+        }
+        return canonical_harvest_command_digest(argv);
+    }
+    let sha256 = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(record.command.as_bytes())
+    );
+    if digest != sha256 && digest != crate::models::command_hash(&record.command) {
+        return Err("Pack verification command hash does not match".to_owned());
+    }
+    // Producer hash spelling or algorithm cannot make one raw command count
+    // as two independent checks in the harvester.
+    Ok(sha256)
+}
+
 fn open_verification_database(database_path: &Path) -> Result<DbConnection, DomainError> {
     let connection =
         DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
@@ -3110,6 +3361,582 @@ pub fn gitignore_patterns() -> Vec<&'static str> {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod harvest_proof_tests {
+    use super::*;
+    use crate::testing::{TestResult, ensure, ensure_equal};
+
+    const WORKSPACE: &str = "wsp_01234567890123456789012345";
+    const OTHER_WORKSPACE: &str = "wsp_01234567890123456789012346";
+    const PACK: &str = "pack_01234567890123456789012345";
+    const FINISHED_AT: &str = "2026-11-08T02:00:00.123456789+02:00";
+
+    fn database() -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        for (id, path) in [
+            (WORKSPACE, "/tmp/harvest-proof-workspace"),
+            (OTHER_WORKSPACE, "/tmp/harvest-proof-other-workspace"),
+        ] {
+            connection
+                .insert_workspace(
+                    id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: path.to_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(connection)
+    }
+
+    fn evidence(command: &str) -> Result<VerificationEvidenceRecord, String> {
+        use sha2::Digest;
+
+        crate::models::verification_evidence_record_from_rch_verify(&serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": command,
+            "command_hash": format!("{:x}", sha2::Sha256::digest(command.as_bytes())),
+            "command_kind": "cargo_test",
+            "status": "remote_pass",
+            "exit_code": 0,
+            "worker_id": "worker-01",
+            "remote_required": true,
+            "started_at": "2026-11-08T00:00:00.123456788Z",
+            "finished_at": FINISHED_AT,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    fn details(
+        record: &VerificationEvidenceRecord,
+        authority: VerificationEvidenceAuthority,
+    ) -> Result<VerificationAuditDetails, String> {
+        let mut record = record.clone();
+        normalize_validated_verification_evidence(&mut record, authority);
+        Ok(VerificationAuditDetails::new(
+            verification_evidence_content_hash(&record)?,
+            &record,
+            authority,
+        ))
+    }
+
+    fn insert_raw(
+        connection: &DbConnection,
+        workspace_id: &str,
+        target_type: &str,
+        target_id: &str,
+        raw: &str,
+    ) -> Result<String, String> {
+        let audit_id = generate_audit_id();
+        connection
+            .insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_owned()),
+                    actor: Some("harvest-proof-test".to_owned()),
+                    action: audit_actions::VERIFICATION_INGEST.to_owned(),
+                    target_type: Some(target_type.to_owned()),
+                    target_id: Some(target_id.to_owned()),
+                    details: Some(raw.to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(audit_id)
+    }
+
+    fn insert_proof(
+        connection: &DbConnection,
+        record: &VerificationEvidenceRecord,
+        authority: VerificationEvidenceAuthority,
+    ) -> Result<String, String> {
+        let raw = serde_json::to_string(&details(record, authority)?)
+            .map_err(|error| error.to_string())?;
+        insert_raw(connection, WORKSPACE, "pack", PACK, &raw)
+    }
+
+    #[test]
+    fn pack_harvest_proofs_require_exact_stored_ownership_and_validated_passes() -> TestResult {
+        let connection = database()?;
+        let accepted = evidence("cargo test --lib harvest_accept")?;
+        let audit_id = insert_proof(
+            &connection,
+            &accepted,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        for (workspace, target_type, target_id) in [
+            (OTHER_WORKSPACE, "pack", PACK),
+            (WORKSPACE, "memory", PACK),
+            (WORKSPACE, "pack", "pack_01234567890123456789012346"),
+        ] {
+            // These rows must be excluded by stored ownership before parsing.
+            insert_raw(
+                &connection,
+                workspace,
+                target_type,
+                target_id,
+                "private invalid proof",
+            )?;
+        }
+        let caller = evidence("cargo test --lib harvest_caller")?;
+        insert_proof(
+            &connection,
+            &caller,
+            VerificationEvidenceAuthority::CallerAuthored,
+        )?;
+        let mut bare =
+            serde_json::to_value(evidence("cargo test --lib harvest_embedded_authority")?)
+                .map_err(|error| error.to_string())?;
+        bare["authority"] = serde_json::json!("validated_rch_verify");
+        bare["workspaceId"] = serde_json::json!(WORKSPACE);
+        bare["packId"] = serde_json::json!(PACK);
+        insert_raw(&connection, WORKSPACE, "pack", PACK, &bare.to_string())?;
+        let mut failed = evidence("cargo test --lib harvest_failed")?;
+        failed.status = VerificationStatus::Failed;
+        failed.exit_code = Some(1);
+        insert_proof(
+            &connection,
+            &failed,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let mut fallback = evidence("cargo test --lib harvest_fallback")?;
+        fallback.offload.fallback_detected = true;
+        insert_proof(
+            &connection,
+            &fallback,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let opaque_check =
+            crate::models::verification_evidence_record_from_github_actions_check_run(
+                &serde_json::json!({
+                    "name": "historical-check",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "workflow_name": "historical-workflow",
+                    "run_id": "historical-run",
+                    "head_sha": "historical-source",
+                    "command_hash": "opaque-producer-command-identity",
+                    "started_at": "2026-11-08T00:00:00.123456788Z",
+                    "completed_at": FINISHED_AT,
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+        insert_proof(
+            &connection,
+            &opaque_check,
+            VerificationEvidenceAuthority::ValidatedGithubActions,
+        )?;
+
+        let proofs = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?;
+        ensure_equal(
+            &proofs.len(),
+            &1,
+            "only one exact-pack trusted pass with command authority qualifies",
+        )?;
+        let proof = proofs.first().ok_or("accepted proof is present")?;
+        ensure_equal(
+            &proof.audit_id,
+            &audit_id,
+            "stored audit identity is retained",
+        )?;
+        ensure_equal(
+            &proof.workspace_id.as_str(),
+            &WORKSPACE,
+            "stored workspace is retained",
+        )?;
+        ensure_equal(
+            &proof.pack_id.as_str(),
+            &PACK,
+            "stored pack identity is retained",
+        )?;
+        ensure_equal(
+            &proof.authority.as_str(),
+            &"validated_rch_verify",
+            "parser authority is retained",
+        )?;
+        ensure_equal(
+            &proof.record,
+            &accepted,
+            "normalized evidence is retained exactly",
+        )?;
+        ensure_equal(
+            &proof.record.finished_at.as_deref(),
+            &Some(FINISHED_AT),
+            "nanoseconds and RFC3339 offset survive receipt capture",
+        )?;
+        let stored = connection
+            .get_audit(&audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("stored proof audit is present")?;
+        let receipt = serde_json::to_vec(&stored).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &proof.audit_receipt_hash,
+            &format!("blake3:{}", blake3::hash(&receipt).to_hex()),
+            "receipt covers the complete stored audit row",
+        )
+    }
+
+    #[test]
+    fn pack_harvest_proofs_revalidate_envelope_record_hash_and_command() -> TestResult {
+        for fault in [
+            "schema",
+            "status",
+            "producer",
+            "authority",
+            "record",
+            "content_hash",
+            "command_hash",
+            "timestamp",
+        ] {
+            let connection = database()?;
+            let mut record = evidence("cargo test --lib harvest_integrity")?;
+            record.output_summary.stdout_tail = Some("private-proof-output".to_owned());
+            match fault {
+                "authority" => record.offload.offload_tool = Some("caller-tool".to_owned()),
+                "record" => record.schema = "private-invalid-schema".to_owned(),
+                "command_hash" => record.command_hash = format!("sha256:{}", "0".repeat(64)),
+                "timestamp" => record.finished_at = Some("private-invalid-timestamp".to_owned()),
+                _ => {}
+            }
+            let mut envelope = details(&record, VerificationEvidenceAuthority::ValidatedRchVerify)?;
+            match fault {
+                "schema" => envelope.schema = "private-invalid-ledger".to_owned(),
+                "status" => envelope.status = VerificationStatus::Failed,
+                "producer" => envelope.producer.run.run_id = None,
+                "content_hash" => envelope.content_hash = format!("blake3:{}", "0".repeat(64)),
+                _ => {}
+            }
+            let raw = serde_json::to_string(&envelope).map_err(|error| error.to_string())?;
+            insert_raw(&connection, WORKSPACE, "pack", PACK, &raw)?;
+            let error = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)
+                .expect_err("malformed proof must not authorize passive learning");
+            ensure(
+                !error.contains("private-"),
+                format!("{fault} error cannot expose proof text"),
+            )?;
+        }
+        let connection = database()?;
+        insert_raw(&connection, WORKSPACE, "pack", PACK, "{ private-proof-json")?;
+        let error = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)
+            .expect_err("malformed exact-pack JSON is an error");
+        ensure(
+            !error.contains("private-proof-json"),
+            "JSON parser detail stays private",
+        )
+    }
+
+    #[test]
+    fn pack_harvest_proofs_reject_audit_hash_mismatch_and_conflicting_verification_ids()
+    -> TestResult {
+        let connection = database()?;
+        let record = evidence("cargo test --lib harvest_duplicate")?;
+        let first = insert_proof(
+            &connection,
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let second = insert_proof(
+            &connection,
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let proofs = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?;
+        ensure_equal(
+            &proofs.len(),
+            &2,
+            "identical proofs retain both immutable audit receipts for replay",
+        )?;
+        let mut expected_audits = vec![first, second];
+        expected_audits.sort();
+        ensure_equal(
+            &proofs
+                .iter()
+                .map(|proof| proof.audit_id.clone())
+                .collect::<Vec<_>>(),
+            &expected_audits,
+            "consistent duplicate receipts have deterministic audit ordering",
+        )?;
+        ensure_equal(
+            &proofs[0].record.verification_id,
+            &proofs[1].record.verification_id,
+            "duplicate receipts retain one verification identity, not independent corroboration",
+        )?;
+        let mut conflict = evidence("cargo test --lib harvest_conflicting_command")?;
+        conflict.verification_id = record.verification_id;
+        insert_proof(
+            &connection,
+            &conflict,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        ensure(
+            verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK).is_err(),
+            "one verification ID cannot name conflicting normalized records",
+        )?;
+
+        let connection = database()?;
+        let record = evidence("cargo test --lib harvest_audit_integrity")?;
+        let audit_id = insert_proof(
+            &connection,
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        // Seed a corrupt imported row without weakening the append-only audit
+        // trigger: its identity/actor change but its copied row hash does not.
+        connection
+            .execute(
+                "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action,
+                target_type, target_id, details, surface, mutation_kind,
+                before_hash, after_hash, prev_row_hash, this_row_hash)
+             SELECT ?1, workspace_id, timestamp, ?2, action, target_type, target_id,
+                details, surface, mutation_kind, before_hash, after_hash,
+                prev_row_hash, this_row_hash FROM audit_log WHERE id = ?3",
+                &[
+                    sqlmodel_core::Value::Text(generate_audit_id()),
+                    sqlmodel_core::Value::Text("private-mutated-actor".to_owned()),
+                    sqlmodel_core::Value::Text(audit_id),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        let error = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)
+            .expect_err("mutated complete audit row cannot authorize learning");
+        ensure(
+            !error.contains("private-mutated-actor"),
+            "audit integrity error stays private",
+        )
+    }
+
+    #[test]
+    fn pack_harvest_proofs_canonicalize_command_hash_algorithms_and_spellings() -> TestResult {
+        let connection = database()?;
+        let record = evidence("cargo test --lib harvest_one_command")?;
+        let variants = [
+            record.command_hash.clone(),
+            format!("SHA256:{}", record.command_hash.to_ascii_uppercase()),
+            crate::models::command_hash(&record.command),
+        ];
+        for (index, command_hash) in variants.into_iter().enumerate() {
+            let mut variant = record.clone();
+            variant.verification_id = format!("verification-harvest-command-{index}");
+            variant.command_hash = command_hash;
+            insert_proof(
+                &connection,
+                &variant,
+                VerificationEvidenceAuthority::ValidatedRchVerify,
+            )?;
+        }
+        let distinct = evidence("cargo test --lib harvest_other_command")?;
+        insert_proof(
+            &connection,
+            &distinct,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let proofs = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?;
+        ensure_equal(
+            &proofs.len(),
+            &4,
+            "distinct verification events retain their receipts",
+        )?;
+        let identities = proofs
+            .iter()
+            .map(|proof| proof.command_identity.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure_equal(
+            &identities.len(),
+            &2,
+            "one command cannot become independent checks through digest spelling or algorithm",
+        )?;
+
+        let raw_command = record.command;
+        let argv = ["cargo", "test", "--lib", "harvest_one_command"];
+        let make_run = |run_id: &str, command_hash: Option<&str>, argv: &[&str]| {
+            crate::models::VerificationRunRecord::from_input(crate::models::VerificationRunInput {
+                run_id: Some(run_id),
+                bead_id: None,
+                agent_name: Some("harvest-test"),
+                source_hash: None,
+                command_hash,
+                command_argv: argv,
+                cargo_target_dir: None,
+                execution_substrate: "rch",
+                worker_host: Some("worker-01"),
+                started_at: Some("2026-11-08T00:00:00.123456788Z"),
+                finished_at: Some(FINISHED_AT),
+                exit_code: Some(0),
+                stdout_hash: None,
+                stderr_excerpt: None,
+                artifact_manifest_hash: None,
+                retained_log_path: None,
+                provenance: Vec::new(),
+            })
+        };
+        let baseline_run = make_run("harvest-default-argv", None, &argv);
+        let expected = canonical_harvest_command_digest(&baseline_run.command_argv_hash)?;
+        for (index, override_hash) in [
+            None,
+            Some(record.command_hash),
+            Some(crate::models::command_hash(&raw_command).to_ascii_uppercase()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let run = make_run(
+                &format!("harvest-command-override-{index}"),
+                override_hash.as_deref(),
+                &argv,
+            );
+            ensure_equal(
+                &run.command_argv_hash,
+                &baseline_run.command_argv_hash,
+                "producer command_hash overrides do not change the argv digest",
+            )?;
+            let normalized = crate::models::verification_evidence_record_from_run_record(&run);
+            ensure_equal(
+                &harvest_verification_command_identity(
+                    &normalized,
+                    VerificationEvidenceAuthority::ValidatedRunRecord,
+                )?,
+                &expected,
+                "run identity uses encoded argv regardless of producer command_hash override",
+            )?;
+            insert_proof(
+                &connection,
+                &normalized,
+                VerificationEvidenceAuthority::ValidatedRunRecord,
+            )?;
+        }
+        let proofs = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?;
+        let raw_proof = proofs
+            .iter()
+            .find(|proof| proof.record.command == raw_command)
+            .ok_or("raw-command proof is present")?;
+        let run_proofs = proofs
+            .iter()
+            .filter(|proof| proof.authority == "validated_run_record")
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &run_proofs.len(),
+            &3,
+            "each consistent run audit receipt is retained",
+        )?;
+        for proof in &run_proofs {
+            ensure_equal(
+                &proof.command_identity,
+                &expected,
+                "same argv has one identity",
+            )?;
+            ensure_equal(
+                &proof.command_aliases,
+                &vec![expected.clone()],
+                "run aliases use only the encoded-argv domain",
+            )?;
+        }
+        ensure(
+            !raw_proof.command_aliases.contains(&expected),
+            "same argv and raw command text have distinct preimages, requiring authority-domain isolation",
+        )?;
+        let other_run = make_run(
+            "harvest-other-argv",
+            None,
+            &["cargo", "test", "--lib", "other_check"],
+        );
+        let other = crate::models::verification_evidence_record_from_run_record(&other_run);
+        ensure(
+            harvest_verification_command_identity(
+                &other,
+                VerificationEvidenceAuthority::ValidatedRunRecord,
+            )? != expected,
+            "different encoded argv remains distinguishable within the run-record domain",
+        )?;
+        let mut mismatched = run_proofs[0].record.clone();
+        mismatched.command_hash = format!("sha256:{}", "0".repeat(64));
+        ensure(
+            harvest_verification_command_identity(
+                &mismatched,
+                VerificationEvidenceAuthority::ValidatedRunRecord,
+            )
+            .is_err(),
+            "run summary and stored command digest must agree",
+        )
+    }
+
+    #[test]
+    fn pack_harvest_proofs_enforce_row_and_detail_limits_at_the_boundary() -> TestResult {
+        let connection = database()?;
+        let record = evidence("cargo test --lib harvest_row_limit")?;
+        for _ in 0..HARVEST_VERIFICATION_MAX_ROWS {
+            insert_proof(
+                &connection,
+                &record,
+                VerificationEvidenceAuthority::ValidatedRchVerify,
+            )?;
+        }
+        ensure_equal(
+            &verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?.len(),
+            &HARVEST_VERIFICATION_MAX_ROWS,
+            "every bounded duplicate receipt remains available for exact replay",
+        )?;
+        insert_proof(
+            &connection,
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let error = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)
+            .expect_err("overflow witness rejects a partially loaded proof set");
+        ensure(
+            error.contains("count exceeds"),
+            "row overflow is reported explicitly",
+        )?;
+
+        let connection = database()?;
+        let mut record = evidence("cargo test --lib harvest_detail_limit")?;
+        record.output_summary.stdout_tail = Some(String::new());
+        let empty_size = serde_json::to_string(&details(
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?)
+        .map_err(|error| error.to_string())?
+        .len();
+        let remaining = HARVEST_VERIFICATION_MAX_DETAILS_BYTES
+            .checked_sub(empty_size)
+            .ok_or("fixture envelope must fit below the detail limit")?;
+        record.output_summary.stdout_tail = Some("x".repeat(remaining));
+        let exact = serde_json::to_string(&details(
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?)
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &exact.len(),
+            &HARVEST_VERIFICATION_MAX_DETAILS_BYTES,
+            "fixture reaches exact byte limit",
+        )?;
+        insert_raw(&connection, WORKSPACE, "pack", PACK, &exact)?;
+        ensure_equal(
+            &verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)?.len(),
+            &1,
+            "exact-limit proof is accepted",
+        )?;
+        record
+            .output_summary
+            .stdout_tail
+            .as_mut()
+            .ok_or("tail exists")?
+            .push('x');
+        insert_proof(
+            &connection,
+            &record,
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )?;
+        let error = verification_proofs_for_pack_harvest(&connection, WORKSPACE, PACK)
+            .expect_err("oversized details must not be admitted or hydrated");
+        ensure(
+            error.contains("details exceed"),
+            "detail overflow is rejected before proof parsing",
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {

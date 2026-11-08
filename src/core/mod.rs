@@ -101,6 +101,7 @@ pub mod memory_scope;
 pub mod model;
 pub mod orient;
 pub mod outcome;
+pub mod outcome_harvest;
 pub mod ownership_snapshot;
 pub(crate) mod pack_selection_identity;
 pub mod path_safety;

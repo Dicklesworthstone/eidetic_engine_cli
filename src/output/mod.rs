@@ -11033,6 +11033,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: learn_gaps_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::outcome_harvest::OUTCOME_HARVEST_SCHEMA_V1,
+            version: "1",
+            description: "Bounded pack-linked verification harvest preview and pending promotion candidate receipts",
+            category: "curation",
+            definition: outcome_harvest_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::memory_debt::MEMORY_DEBT_DOCTOR_SCHEMA_V1,
             version: "1",
             description: "Read-only memory-debt doctor report with ranked curation repairs",
@@ -12859,6 +12866,10 @@ fn query_assist_schema_definition() -> String {
 
 fn learn_gaps_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.learn.gaps.v1.json").to_string()
+}
+
+fn outcome_harvest_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.outcome.harvest.v1.json").to_string()
 }
 
 fn memory_debt_doctor_schema_definition() -> String {
@@ -14734,13 +14745,22 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "outcome",
-        description: "Record observed feedback about a memory or related target",
+        description: "Record feedback, inspect its history, or harvest pending promotion candidates",
         available: true,
-        subcommands: &[],
+        subcommands: &[
+            SubcommandEntry {
+                name: "trace",
+                description: "Inspect a memory's feedback and resulting learning updates",
+            },
+            SubcommandEntry {
+                name: "harvest",
+                description: "Preview promotion candidates from direct-pack verification; --apply saves pending review candidates only",
+            },
+        ],
         args: &[CommandArg {
             name: "ID",
-            description: "Memory or target identifier",
-            required: true,
+            description: "Memory or target identifier when recording a single outcome",
+            required: false,
             default: None,
         }],
     },

@@ -207,6 +207,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     SEARCH_DOCUMENT_SCHEMA_V1,
     SEARCH_FAMILY_SCHEMA_V1,
     "ee.query_assist.v1",
+    "ee.outcome.harvest.v1",
     GRAPH_MODULE_SCHEMA_V1,
     MESH_EVENT_SCHEMA_V1,
     MESH_PEER_GROUP_BINDING_SCHEMA_V1,

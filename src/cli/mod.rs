@@ -6,6 +6,8 @@ mod cass_import_proposal_tests;
 mod context_delta_evidence;
 mod evidence;
 #[cfg(test)]
+mod outcome_harvest_tests;
+#[cfg(test)]
 mod pack_diff_native_tests;
 #[cfg(test)]
 #[path = "pack_stream_tests.rs"]
@@ -385,7 +387,7 @@ const HELP_PRELUDE_SUFFIX: &str = concat!(
     "  Assert:         claim, certificate, attest, demo, tripwire\n",
     "  Coordinate:     swarm, handoff, preflight, situation, plan, workflow\n",
     "  Mesh consent:   mesh preview-grant <peer-id> --lane <lane> [--issue-approval-token]; mesh grant <peer-id> --lane <lane> --preview-token-stdin; mesh revoke-lane <peer-id> --lane <lane>\n",
-    "  Curate:         capture, curate (candidates|validate|apply), reflect, playbook, review\n",
+    "  Curate:         capture, curate (candidates|validate|apply), outcome harvest, reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, daemon\n",
     "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup\n",
@@ -1309,7 +1311,7 @@ pub enum Command {
     /// Inspect the workspace model registry.
     #[command(subcommand)]
     Model(ModelCommand),
-    /// Record observed feedback about a memory or related target.
+    /// Record feedback, inspect its history, or harvest pending promotion candidates.
     Outcome(OutcomeArgs),
     /// Read-only orientation bundle for an agent starting a task.
     Orient(OrientArgs),
@@ -11326,7 +11328,7 @@ pub struct RuleUpdateArgs {
 /// Arguments for `ee outcome`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct OutcomeArgs {
-    /// Introspection subcommands (`ee outcome trace <memory-id>`).
+    /// Feedback introspection and bounded outcome harvesting.
     #[command(subcommand)]
     pub command: Option<OutcomeCommand>,
 
@@ -11424,6 +11426,46 @@ pub enum OutcomeCommand {
     /// Read-only report joining one memory's feedback events with the
     /// bayes posterior updates and trust transitions they triggered.
     Trace(OutcomeTraceArgs),
+    /// Preview promotion candidates from authoritative verification tied directly to packs.
+    /// Defaults to dry-run; --apply saves pending candidates for review and
+    /// does not promote memories. Only eligible episodic native memories qualify.
+    Harvest(OutcomeHarvestArgs),
+}
+
+/// Arguments for `ee outcome harvest`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeHarvestArgs {
+    /// Inclusive start of the verification completion window, as RFC3339 with an explicit offset.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: String,
+
+    /// Exclusive end of the verification completion window, as RFC3339 with an explicit offset.
+    #[arg(long, value_name = "RFC3339")]
+    pub until: String,
+
+    /// Inspect one exact persisted pack, including packs outside the recent scan.
+    #[arg(long, value_name = "PACK_ID")]
+    pub pack_id: Option<String>,
+
+    /// Maximum packs to inspect in the bounded scan (1..=256).
+    #[arg(long, default_value_t = 128, value_name = "COUNT")]
+    pub pack_limit: u32,
+
+    /// Preview proposals without writing storage (the default).
+    #[arg(long, conflicts_with = "apply", action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Save pending promotion candidates and audit evidence; do not apply promotion.
+    #[arg(long, conflicts_with = "dry_run", action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded when saving pending candidates.
+    #[arg(long)]
+    pub actor: Option<String>,
 }
 
 /// Arguments for `ee outcome trace`.
@@ -52541,8 +52583,15 @@ where
     W: Write,
     E: Write,
 {
-    if let Some(OutcomeCommand::Trace(trace_args)) = &args.command {
-        return handle_outcome_trace(cli, trace_args, stdout, stderr);
+    if let Some(command) = &args.command {
+        return match command {
+            OutcomeCommand::Trace(trace_args) => {
+                handle_outcome_trace(cli, trace_args, stdout, stderr)
+            }
+            OutcomeCommand::Harvest(harvest_args) => {
+                handle_outcome_harvest(cli, args, harvest_args, stdout, stderr)
+            }
+        };
     }
     if args.batch || args.stdin {
         return handle_outcome_batch(cli, args, stdout, stderr);
@@ -52690,6 +52739,74 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
+    }
+}
+
+fn handle_outcome_harvest<W, E>(
+    cli: &Cli,
+    parent: &OutcomeArgs,
+    args: &OutcomeHarvestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let usage = |message: &str| DomainError::Usage {
+        message: message.to_owned(),
+        repair: Some("ee outcome harvest --help".to_owned()),
+    };
+    // Parent outcome flags may precede the subcommand. A preview request must
+    // never silently turn into an apply, nor a single-event payload into harvest.
+    if args.apply && (args.dry_run || parent.dry_run) {
+        return write_domain_error(
+            &usage("--dry-run and --apply are mutually exclusive"),
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
+    if parent.target_id.is_some()
+        || parent.batch
+        || parent.stdin
+        || parent.pack.is_some()
+        || parent.item.is_some()
+        || parent.signal.is_some()
+        || parent.weight.is_some()
+        || parent.workspace_id.is_some()
+        || parent.source_id.is_some()
+        || parent.reason.is_some()
+        || parent.evidence_json.is_some()
+        || parent.session_id.is_some()
+        || parent.event_id.is_some()
+        || parent.target_type != "memory"
+        || parent.source_type != "outcome_observed"
+        || parent.harmful_per_source_per_hour != DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR
+        || parent.harmful_burst_window_seconds != DEFAULT_HARMFUL_BURST_WINDOW_SECONDS
+    {
+        return write_domain_error(
+            &usage("harvest cannot be combined with single-target or batch outcome flags"),
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
+    let options = crate::core::outcome_harvest::OutcomeHarvestOptions {
+        workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone().or_else(|| parent.database.clone()),
+        since: args.since.clone(),
+        until: args.until.clone(),
+        pack_id: args.pack_id.clone(),
+        pack_limit: args.pack_limit,
+        apply: args.apply,
+        actor: args.actor.clone().or_else(|| parent.actor.clone()),
+    };
+    match crate::core::outcome_harvest::harvest_outcomes(&options) {
+        Ok(report) => {
+            write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
+        }
         Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
@@ -70840,6 +70957,7 @@ const MESH_PEER_SUBCOMMANDS: &[&str] =
     &["add", "list", "show", "rotate", "revoke", "unknown-attempt"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest", "serve-stdio", "validate"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
+const OUTCOME_SUBCOMMANDS: &[&str] = &["trace", "harvest"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
 const PERF_SUBCOMMANDS: &[&str] = &["compare", "budget"];
 const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
@@ -71301,7 +71419,13 @@ impl NormalizedInvocation {
                     ModelCommand::List(_) => "model list".to_string(),
                     ModelCommand::Fetch(_) => "model fetch".to_string(),
                 },
-                Command::Outcome(_) => "outcome".to_string(),
+                Command::Outcome(args) => match &args.command {
+                    Some(OutcomeCommand::Harvest(harvest)) if harvest.apply => {
+                        "outcome harvest --apply".to_string()
+                    }
+                    Some(OutcomeCommand::Harvest(_)) => "outcome harvest".to_string(),
+                    Some(OutcomeCommand::Trace(_)) | None => "outcome".to_string(),
+                },
                 Command::Orient(_) => "orient".to_string(),
                 Command::OutcomeQuarantine(command) => match command {
                     OutcomeQuarantineCommand::List(_) => "outcome quarantine list".to_string(),
@@ -71805,6 +71929,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "mesh peer" => Some(MESH_PEER_SUBCOMMANDS),
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
+        "outcome" => Some(OUTCOME_SUBCOMMANDS),
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
         "perf" => Some(PERF_SUBCOMMANDS),
         "perf budget" => Some(PERF_BUDGET_SUBCOMMANDS),
@@ -87614,7 +87739,30 @@ mod tests {
             resolved += 1;
             let parser_has_flag = command
                 .get_arguments()
-                .any(|arg| arg.get_long() == Some("dry-run"));
+                .find(|arg| arg.get_long() == Some("dry-run"))
+                .is_some_and(|dry_run| {
+                    // A selector in a manifest variant is required to reach
+                    // that effect. A conflicting preview flag cannot describe
+                    // the selected variant, even when the base leaf has it.
+                    !path
+                        .split_whitespace()
+                        .filter_map(|token| token.strip_prefix("--"))
+                        .filter_map(|flag| {
+                            command
+                                .get_arguments()
+                                .find(|arg| arg.get_long() == Some(flag))
+                        })
+                        .any(|selector| {
+                            command
+                                .get_arg_conflicts_with(dry_run)
+                                .iter()
+                                .any(|arg| arg.get_id() == selector.get_id())
+                                || command
+                                    .get_arg_conflicts_with(selector)
+                                    .iter()
+                                    .any(|arg| arg.get_id() == dry_run.get_id())
+                        })
+                });
 
             if effect.dry_run_effect.is_none() && parser_has_flag {
                 understated.push(path);

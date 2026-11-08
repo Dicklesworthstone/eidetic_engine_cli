@@ -1809,6 +1809,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("mesh status", "Inspect mesh status"),
             CommandEffect::read_only_db("model list", "List model registry entries"),
             CommandEffect::read_only_db("model status", "Inspect model registry status"),
+            CommandEffect::read_only_db(
+                "outcome harvest",
+                "Preview bounded promotion candidates from verification tied directly to packs without writing storage",
+            ),
             CommandEffect::read_only_db("outcome quarantine list", "List feedback quarantine rows"),
             CommandEffect::read_only_db("pack diff", "Compare persisted pack ledgers"),
             CommandEffect::read_only_db("pack replay", "Inspect persisted pack ledger"),
@@ -2894,6 +2898,17 @@ impl EffectManifest {
                 vec!["feedback_events", "audit_log"],
                 "Record observed outcome feedback",
             ),
+            {
+                let mut harvest = CommandEffect::durable_write(
+                    "outcome harvest --apply",
+                    vec!["curation_candidates", "outcome_evidence_rows", "audit_log"],
+                    "Save pending promotion candidates with receipt evidence and audit; does not promote memories or write feedback",
+                );
+                harvest.idempotency = IdempotencyClass::Idempotent;
+                harvest.mutation_contract.idempotency_key =
+                    Some("workspace and deterministic direct-pack verification receipt");
+                harvest
+            },
             CommandEffect::durable_write(
                 "procedure promote",
                 vec!["procedures", "procedure_events", "audit_log"],
