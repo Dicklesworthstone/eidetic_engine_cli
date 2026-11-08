@@ -166,7 +166,17 @@ def contains_word(haystack: str, needle: str, ignore_case: bool) -> bool:
         if begin < 0:
             return False
         end = begin + len(needle)
-        before_ok = begin == 0 or not is_word_byte(haystack[begin - 1])
+        # A backslash escape is a boundary. Mirrors the matching arm in
+        # tests/fleet_identifier_guard.rs, which carries the full reasoning:
+        # `.beads/issues.jsonl` is JSON, so a newline inside bead prose is the
+        # two-character escape `\n`, and a host name right after a line break is
+        # preceded in the raw bytes by the LETTER `n`. Without this the name is
+        # invisible to the whole-word rule, and one was hiding that way.
+        before_ok = (
+            begin == 0
+            or not is_word_byte(haystack[begin - 1])
+            or (begin >= 2 and haystack[begin - 2] == "\\")
+        )
         after_ok = end == len(haystack) or not is_word_byte(haystack[end])
         if before_ok and after_ok:
             return True
@@ -386,9 +396,13 @@ def self_test(rules: dict, positive: list[str], negative: list[str]) -> bool:
     # Floors, not equalities: the guard may add arms, but a regex that stops
     # matching its fixtures would otherwise leave this "passing" on nothing.
     # Measured against the guard as of this file's commit:
-    # `guard_detects_each_banned_identifier_shape` carries 10 arms and
-    # `guard_does_not_flag_neutral_placeholders` carries 15.
-    if len(positive) < 10 or len(negative) < 15:
+    # `guard_detects_each_banned_identifier_shape` carries 11 arms and
+    # `guard_does_not_flag_neutral_placeholders` carries 15. The positive floor
+    # moved 10 -> 11 on 2026-11-08 with the backslash-escape arm, deliberately:
+    # that arm is the only cover for a host name sitting right after a JSON `\n`
+    # escape, and pinning the floor means deleting it is a failure here rather
+    # than a quiet loss of the one control that catches that shape.
+    if len(positive) < 11 or len(negative) < 15:
         failures.append(
             f"control arms came back thin: {len(positive)} positive, "
             f"{len(negative)} negative"

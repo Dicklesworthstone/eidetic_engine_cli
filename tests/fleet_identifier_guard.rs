@@ -154,7 +154,19 @@ fn contains_word(haystack: &str, needle: &str, ignore_case: bool) -> bool {
     while let Some(offset) = haystack[start..].find(needle) {
         let begin = start + offset;
         let end = begin + needle_bytes.len();
-        let before_ok = begin == 0 || !is_word_byte(bytes[begin - 1]);
+        // A BACKSLASH ESCAPE IS A BOUNDARY, and leaving it out hid a real leak.
+        // `.beads/issues.jsonl` is the project's main carrying file and is
+        // entirely JSON, where a newline inside a string is the TWO-CHARACTER
+        // sequence `\n`. So a host name that lands right after a line break in
+        // bead prose is preceded in the raw bytes by the LETTER `n`, the
+        // whole-word rule sees no boundary, and the name is invisible. Measured
+        // 2026-11-08: `worker\nhz4` was missed while `worker hz4` was caught, on
+        // this predicate and on its Python mirror, and exactly one tracked line
+        // was hiding that way. This arm only ADDS boundaries, so it can only
+        // find more -- the fail-safe direction for a gate that under-detects.
+        let before_ok = begin == 0
+            || !is_word_byte(bytes[begin - 1])
+            || (begin >= 2 && bytes[begin - 2] == b'\\');
         let after_ok = end == bytes.len() || !is_word_byte(bytes[end]);
         if before_ok && after_ok {
             return true;
@@ -690,6 +702,12 @@ fn guard_detects_each_banned_identifier_shape() {
     assert!(banned_token_in_line("Isolated CSD pinned tree").is_some());
     // ...but lower-case `css` is always the host, never the language.
     assert!(banned_token_in_line("selected worker css").is_some());
+    // A host name right after a JSON `\n` escape, which is how bead prose
+    // stores a line break. The `\\n` here is a literal backslash and `n` in the
+    // scanned bytes, so the character before `hz4` is a word byte and the
+    // whole-word rule needs the escape arm in `contains_word` to see it. This
+    // shape went undetected in a tracked comment before that arm existed.
+    assert!(banned_token_in_line("verified green on worker\\nhz4 today").is_some());
 }
 
 #[test]
