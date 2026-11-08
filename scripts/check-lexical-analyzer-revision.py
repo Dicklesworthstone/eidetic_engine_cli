@@ -102,14 +102,19 @@ def strip_rust_comments(source: str) -> str:
     every invocation, and a regression in any of them moves the computed
     fingerprint off the pinned constant and reds the lint. That is louder than a
     synthetic arm and cannot be skipped. One hand-verified example, worth citing
-    because it exercises the nastiest branch: src/core/index.rs:15084 holds a
-    byte RAW string whose contents include both a brace and double quotes.
+    because it exercises the nastiest branch: the `br#"..."#` byte RAW string
+    holding `ee.index.rebuild_request.v99` in src/core/index.rs (around :15084;
+    grep the schema name, since that file is edited often enough for a line
+    number to rot) has both a brace and double quotes inside the literal.
 
-    Do not try to re-measure those populations with a regex over the source. A
-    `b"` pattern also matches inside words such as `lib"`, and an `r"` pattern
-    matches the `r"` in a plain string like `"r"`, so grep-shaped counts here
-    overstate by more than 2x; an earlier draft of this comment carried such
-    numbers and they were wrong. Raw IDENTIFIERS (`r#type`) are the one form
+    Do not try to re-measure those populations with a regex over the source, and
+    do not assume the error has a direction. Substring false positives INFLATE:
+    a `b"` pattern matches inside words such as `lib"`, an `r"` pattern matches
+    the `r"` in the plain string `"r"`, and a `c"` pattern matches `.arg("-c")`.
+    Counting matching LINES rather than occurrences DEFLATES, because one line
+    can carry several literals. An earlier draft of this comment quoted such
+    numbers; they were wrong in both directions at once, which is why no
+    population figure appears here now. Raw IDENTIFIERS (`r#type`) are the one form
     that must NOT be consumed as a raw string; the `source[j] == '"'` guard is
     what makes them fall through, and removing it would swallow the file from
     there to the next quote.
