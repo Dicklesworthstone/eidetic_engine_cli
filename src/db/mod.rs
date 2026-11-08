@@ -31623,6 +31623,20 @@ pub struct WorkflowMemoryPromotion {
     pub audit_id: String,
 }
 
+/// Audit details for one working memory logically expired by workflow closure.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WorkflowMemoryExpiration {
+    pub memory_id: String,
+    pub audit_id: String,
+}
+
+/// Actual lifecycle effects committed together when a workflow closes.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct WorkflowMemoryClosure {
+    pub promotions: Vec<WorkflowMemoryPromotion>,
+    pub expirations: Vec<WorkflowMemoryExpiration>,
+}
+
 fn default_curation_ttl_policy_id_for_status(status: &str) -> &'static str {
     match status {
         "approved" => "curation.validated.default",
@@ -32627,6 +32641,110 @@ impl DbConnection {
         })
     }
 
+    /// Complete the live, admitted working set in one writer transaction.
+    ///
+    /// Admission reads run after the source rows are loaded and before any
+    /// mutation, under the same writer fence. The caller supplies current seal
+    /// and review authority; only returned source identities can transition.
+    /// Importance retains the existing promotion threshold: there is no stored
+    /// access counter from which to infer a different eligibility rule.
+    pub fn close_workflow_working_memories_audited(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        actor: &str,
+        closed_at: &str,
+        admit_sources: impl FnOnce(&[StoredMemory]) -> Result<BTreeSet<String>>,
+    ) -> Result<WorkflowMemoryClosure> {
+        let closed =
+            chrono::DateTime::parse_from_rfc3339(closed_at).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Workflow closure time must be RFC3339".to_owned(),
+            })?;
+        let parse_bound = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "Workflow source validity must be RFC3339".to_owned(),
+            })
+        };
+        self.with_transaction(|| {
+            let rows = self.query_for(
+                DbOperation::Query,
+                "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
+                &[
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(workflow_id.to_owned()),
+                ],
+            )?;
+            let memories = rows.iter().map(stored_memory_from_row).collect::<Result<Vec<_>>>()?;
+            let admitted = admit_sources(&memories)?;
+            let mut closure = WorkflowMemoryClosure::default();
+            for memory in memories {
+                if !admitted.contains(&memory.id) {
+                    continue;
+                }
+                let start = memory.valid_from.as_deref().map(parse_bound).transpose()?;
+                let end = memory.valid_to.as_deref().map(parse_bound).transpose()?;
+                // Closing a workflow must neither revive expired history nor
+                // activate a future-authored fact. Parse exact instants so an
+                // offset or sub-millisecond endpoint cannot change this choice.
+                if start.is_some_and(|start| start > closed)
+                    || end.is_some_and(|end| end <= closed)
+                {
+                    continue;
+                }
+                if !memory.importance.is_finite() || !(0.0..=1.0).contains(&memory.importance) {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "Workflow source importance must be within [0, 1]".to_owned(),
+                    });
+                }
+                if memory.importance >= 0.5 {
+                    if let Some(promotion) = self.promote_workflow_memory_in_current_transaction(
+                        &memory, workspace_id, workflow_id, actor, closed_at,
+                    )? {
+                        closure.promotions.push(promotion);
+                    }
+                    continue;
+                }
+                // Tightening preserves an earlier author end verbatim and
+                // never deletes the source or changes its revision identity.
+                if !self.expire_memory_valid_to(&memory.id, closed_at)? {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "Workflow source did not persist its planned expiry".to_owned(),
+                    });
+                }
+                let audit_id = generate_audit_id();
+                self.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: Some(actor.to_owned()),
+                        action: audit_actions::MEMORY_EXPIRE.to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some(memory.id.clone()),
+                        details: Some(serde_json::json!({
+                            "schema": "ee.audit.memory_expire.v1",
+                            "reason": "workflow_close",
+                            "deletion": "none_valid_to_only",
+                            "workflowId": workflow_id,
+                            "closedAt": closed_at,
+                            "previousValidTo": memory.valid_to,
+                            "validTo": closed_at,
+                        }).to_string()),
+                    },
+                )?;
+                self.enqueue_memory_reindex_job(workspace_id, &memory.id)?;
+                closure.expirations.push(WorkflowMemoryExpiration {
+                    memory_id: memory.id,
+                    audit_id,
+                });
+            }
+            Ok(closure)
+        })
+    }
+
     /// Promote eligible working memories for a workflow and record per-memory audit entries.
     pub fn promote_workflow_working_memories_audited(
         &self,
@@ -32667,10 +32785,32 @@ impl DbConnection {
         let mut promotions = Vec::with_capacity(memories.len());
 
         for memory in memories {
-            let mut updated = memory.clone();
-            updated.level = "episodic".to_string();
-            let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
-            let affected = self.execute_for(
+            if let Some(promotion) = self.promote_workflow_memory_in_current_transaction(
+                &memory,
+                workspace_id,
+                workflow_id,
+                actor,
+                closed_at,
+            )? {
+                promotions.push(promotion);
+            }
+        }
+
+        Ok(promotions)
+    }
+
+    fn promote_workflow_memory_in_current_transaction(
+        &self,
+        memory: &StoredMemory,
+        workspace_id: &str,
+        workflow_id: &str,
+        actor: &str,
+        closed_at: &str,
+    ) -> Result<Option<WorkflowMemoryPromotion>> {
+        let mut updated = memory.clone();
+        updated.level = "episodic".to_string();
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+        let affected = self.execute_for(
                 DbOperation::Execute,
                 "UPDATE memories SET level = 'episodic', updated_at = ?1, provenance_chain_hash = ?2, provenance_chain_hash_version = ?3, provenance_verification_status = ?4, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?5 AND workspace_id = ?6 AND workflow_id = ?7 AND level = 'working' AND tombstoned_at IS NULL",
                 &[
@@ -32683,57 +32823,54 @@ impl DbConnection {
                     Value::Text(workflow_id.to_string()),
                 ],
             )?;
-            if affected == 0 {
-                continue;
-            }
-            self.garbage_collect_auto_memory_links_for_memory_inner(&memory.id)?;
-
-            let audit_id =
-                self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
-                    workspace_id: workspace_id.to_string(),
-                    actor: Some(actor.to_string()),
-                    memory_id: memory.id.clone(),
-                    previous_level: "working".to_string(),
-                    new_level: "episodic".to_string(),
-                    reason: "workflow_close".to_string(),
-                    automatic: true,
-                    event: "workflow.completed".to_string(),
-                    evidence_refs: vec![workflow_id.to_string(), closed_at.to_string()],
-                    source_action: Some("ee workflow close".to_string()),
-                    previous_trust_class: None,
-                    new_trust_class: None,
-                })?;
-
-            // bd-fdw88: ENQUEUE THE REINDEX. This promotion rewrites `level` from
-            // "working" to "episodic", and `level` is part of the indexed document's
-            // metadata (CanonicalSearchDocument::into_indexable inserts it), so without
-            // a job the indexed copy keeps saying "working" indefinitely and the memory
-            // stays findable under the wrong level filter.
-            //
-            // Every other level transition already does this. update_memory_level
-            // (src/core/memory.rs:10056) enqueues a SingleDocument job INSIDE its
-            // `with_transaction` and only when the audit actually happened; so do
-            // expire_memory, update_memory_tags and revise_memory_with_transaction_hook.
-            // This path wrote the audit and skipped the job -- the one level transition in
-            // the codebase that did not reindex.
-            //
-            // Placed after the `affected == 0` continue and after the audit, so a row that
-            // did not actually transition enqueues nothing. It is inside the caller's
-            // `with_transaction`, which makes the enqueue part of the promotion's
-            // all-or-nothing unit: if this insert fails, the UPDATE and the audit roll back
-            // with it rather than leaving a promoted memory that is never reindexed.
-            self.enqueue_memory_reindex_job(workspace_id, &memory.id)?;
-
-            promotions.push(WorkflowMemoryPromotion {
-                memory_id: memory.id,
-                audit_id,
-            });
+        if affected == 0 {
+            return Ok(None);
         }
+        self.garbage_collect_auto_memory_links_for_memory_inner(&memory.id)?;
 
-        Ok(promotions)
+        let audit_id =
+            self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+                workspace_id: workspace_id.to_string(),
+                actor: Some(actor.to_string()),
+                memory_id: memory.id.clone(),
+                previous_level: "working".to_string(),
+                new_level: "episodic".to_string(),
+                reason: "workflow_close".to_string(),
+                automatic: true,
+                event: "workflow.completed".to_string(),
+                evidence_refs: vec![workflow_id.to_string(), closed_at.to_string()],
+                source_action: Some("ee workflow close".to_string()),
+                previous_trust_class: None,
+                new_trust_class: None,
+            })?;
+
+        // bd-fdw88: ENQUEUE THE REINDEX. This promotion rewrites `level` from
+        // "working" to "episodic", and `level` is part of the indexed document's
+        // metadata (CanonicalSearchDocument::into_indexable inserts it), so without
+        // a job the indexed copy keeps saying "working" indefinitely and the memory
+        // stays findable under the wrong level filter.
+        //
+        // Every other level transition already does this. update_memory_level
+        // (src/core/memory.rs:10056) enqueues a SingleDocument job INSIDE its
+        // `with_transaction` and only when the audit actually happened; so do
+        // expire_memory, update_memory_tags and revise_memory_with_transaction_hook.
+        // This path wrote the audit and skipped the job -- the one level transition in
+        // the codebase that did not reindex.
+        //
+        // Placed after the no-change guard and after the audit, so a row that
+        // did not actually transition enqueues nothing. It is inside the caller's
+        // `with_transaction`, which makes the enqueue part of the promotion's
+        // all-or-nothing unit: if this insert fails, the UPDATE and the audit roll back
+        // with it rather than leaving a promoted memory that is never reindexed.
+        self.enqueue_memory_reindex_job(workspace_id, &memory.id)?;
+
+        Ok(Some(WorkflowMemoryPromotion {
+            memory_id: memory.id.clone(),
+            audit_id,
+        }))
     }
 
-    /// Queue a single-document reindex for one memory inside the caller's
+/// Queue a single-document reindex for one memory inside the caller's
     /// transaction.
     ///
     /// Every `UPDATE memories` bumps the workspace generation, so a write path

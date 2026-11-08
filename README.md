@@ -2141,6 +2141,12 @@ same adjacent edges: `working` -> `episodic`, `episodic` -> `semantic`,
 transition writes a `memory.level_transition` audit row with previous level, new
 level, event, reason, evidence references, and a stable details hash.
 
+Workflow closure promotes current working memories with importance at least
+0.5 to episodic and logically expires lower-importance scratch, retaining its
+body and provenance in history. Sealed, pending-review, expired, superseded,
+and future-dated sources remain unchanged. Each promotion or expiry is audited
+and queues index refresh in the same transaction.
+
 Memory `kind` is orthogonal: `rule`, `fact`, `decision`, `failure`, `command`, `convention`, `anti-pattern`, `risk`, `playbook-step`, …
 
 Every memory carries: `id`, `level`, `kind`, `content`, `content_hash`, `tags[]`, `confidence`, `utility`, `importance`, `created_at`, `last_seen_at`, `access_count`, `source_type`, `source_uri`, `evidence_spans[]`, `links[]`, `trust_class`.

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use ee::core::curate::{CurateApplyOptions, apply_curation_candidate};
 use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{
-    ExpireMemoryOptions, MemoryLevelOptions, RememberMemoryOptions, expire_memory, remember_memory,
-    update_memory_level,
+    ExpireMemoryOptions, MemoryLevelOptions, RememberMemoryOptions, WorkflowCloseOptions,
+    close_workflow, expire_memory, remember_memory, update_memory_level,
 };
 use ee::core::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
@@ -14,8 +14,9 @@ use ee::core::memory_lifecycle::{
     TRANSITIONS, level_transition_audit_details, transition_for,
 };
 use ee::db::{
-    ApplyMemoryDecayDemotionInput, CreateCurationCandidateInput, CreateMemoryInput,
-    CreateWorkspaceInput, DbConnection, MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1, audit_actions,
+    ApplyMemoryDecayDemotionInput, CreateCurationCandidateInput, CreateFeedbackQuarantineInput,
+    CreateMemoryInput, CreateWorkspaceInput, DbConnection, MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1,
+    audit_actions,
 };
 use ee::output::error_response_json;
 use serde_json::Value;
@@ -181,6 +182,10 @@ fn workflow_close_writes_canonical_level_transition_audit() {
     let connection = open_db();
     let memory_id = "mem_lifecycleworkflow000000010";
     insert_memory(&connection, memory_id, "working", Some("wf-lifecycle"));
+    let mut scratch_input = workflow_memory_input(WORKSPACE_ID, 0.1);
+    scratch_input.workflow_id = Some("wf-lifecycle".to_owned());
+    let scratch = insert_workflow_source(&connection, 100, &scratch_input);
+    let scratch_before = connection.get_memory(&scratch).unwrap();
 
     let promotions = connection
         .promote_workflow_working_memories_audited(
@@ -193,6 +198,11 @@ fn workflow_close_writes_canonical_level_transition_audit() {
 
     assert_eq!(promotions.len(), 1);
     assert_eq!(promotions[0].memory_id, memory_id);
+    assert_eq!(
+        connection.get_memory(&scratch).unwrap(),
+        scratch_before,
+        "the promotion-only API does not expire remaining scratch"
+    );
     let audit = connection
         .get_audit(&promotions[0].audit_id)
         .expect("audit query succeeds")
@@ -209,6 +219,529 @@ fn workflow_close_writes_canonical_level_transition_audit() {
         details["event"],
         Value::String("workflow.completed".to_owned())
     );
+}
+
+fn workflow_memory_input(workspace_id: &str, importance: f32) -> CreateMemoryInput {
+    CreateMemoryInput {
+        workspace_id: workspace_id.to_owned(),
+        level: "working".to_owned(),
+        kind: "fact".to_owned(),
+        content: "A workflow source whose history must remain intact.".to_owned(),
+        workflow_id: Some("wf-complete".to_owned()),
+        confidence: 0.8,
+        utility: 0.8,
+        importance,
+        provenance_uri: Some("test://workflow-complete".to_owned()),
+        trust_class: "human_explicit".to_owned(),
+        trust_subclass: None,
+        tags: vec!["workflow-test".to_owned()],
+        valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
+        valid_to: None,
+    }
+}
+
+fn insert_workflow_source(
+    connection: &DbConnection,
+    number: u128,
+    input: &CreateMemoryInput,
+) -> String {
+    let id = ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+    connection
+        .insert_memory(&id, input)
+        .expect("source inserts");
+    connection
+        .execute_raw(&format!(
+            "UPDATE memories SET created_at = '2026-01-01T00:00:00Z', updated_at = '2026-01-01T00:00:00Z' WHERE id = '{id}'"
+        ))
+        .expect("fixture bookkeeping is earlier than the closure");
+    id
+}
+
+#[test]
+fn workflow_close_completes_mixed_sources_with_exact_expiry_and_idempotent_jobs() {
+    let connection = open_db();
+    let closed_at = "2026-11-08T00:00:00.000000500Z";
+    let mut valuable = workflow_memory_input(WORKSPACE_ID, 0.5);
+    valuable.valid_to = Some("2026-11-09T03:00:00+03:00".to_owned());
+    let promoted = insert_workflow_source(&connection, 1, &valuable);
+    let mut scratch = workflow_memory_input(WORKSPACE_ID, 0.499);
+    scratch.valid_to = Some("2026-11-08T03:00:00.000000501+03:00".to_owned());
+    let expired = insert_workflow_source(&connection, 2, &scratch);
+    let no_end = insert_workflow_source(&connection, 3, &workflow_memory_input(WORKSPACE_ID, 0.1));
+
+    let mut ended = valuable.clone();
+    ended.valid_to = Some("2026-11-08T03:00:00.000000500+03:00".to_owned());
+    let already_ended = insert_workflow_source(&connection, 4, &ended);
+    let mut future = valuable.clone();
+    future.valid_from = Some("2026-11-08T00:00:00.000000501Z".to_owned());
+    let future = insert_workflow_source(&connection, 5, &future);
+    let superseded = insert_workflow_source(&connection, 6, &valuable);
+    connection
+        .mark_memory_superseded(&superseded, closed_at)
+        .unwrap();
+    let tombstoned = insert_workflow_source(&connection, 7, &valuable);
+    connection.tombstone_memory(&tombstoned).unwrap();
+    let mut other = valuable.clone();
+    other.workflow_id = Some("wf-other".to_owned());
+    let other_workflow = insert_workflow_source(&connection, 8, &other);
+    other.level = "semantic".to_owned();
+    other.workflow_id = Some("wf-complete".to_owned());
+    let other_level = insert_workflow_source(&connection, 9, &other);
+    let withheld = insert_workflow_source(&connection, 10, &valuable);
+    let untouched = [
+        already_ended,
+        future,
+        superseded,
+        tombstoned,
+        other_workflow,
+        other_level,
+        withheld.clone(),
+    ];
+    let before = untouched
+        .iter()
+        .map(|id| connection.get_memory(id).unwrap().unwrap())
+        .collect::<Vec<_>>();
+
+    let closure = connection
+        .close_workflow_working_memories_audited(
+            WORKSPACE_ID,
+            "wf-complete",
+            "workflow-test",
+            closed_at,
+            |memories| {
+                Ok(memories
+                    .iter()
+                    .filter(|memory| memory.id != withheld)
+                    .map(|memory| memory.id.clone())
+                    .collect())
+            },
+        )
+        .expect("complete admitted workflow");
+    assert_eq!(closure.promotions.len(), 1);
+    assert_eq!(closure.promotions[0].memory_id, promoted);
+    assert_eq!(
+        closure
+            .expirations
+            .iter()
+            .map(|row| &row.memory_id)
+            .collect::<Vec<_>>(),
+        [&expired, &no_end]
+    );
+    let promoted_row = connection.get_memory(&promoted).unwrap().unwrap();
+    assert_eq!(promoted_row.level, "episodic");
+    assert_eq!(promoted_row.valid_from, valuable.valid_from);
+    assert_eq!(
+        promoted_row.valid_to, valuable.valid_to,
+        "promotion cannot widen an authored end"
+    );
+    for id in [&expired, &no_end] {
+        let row = connection.get_memory(id).unwrap().unwrap();
+        assert_eq!(row.level, "working");
+        assert_eq!(row.valid_to.as_deref(), Some(closed_at));
+        assert_eq!(row.content, scratch.content);
+        assert_eq!(row.tombstoned_at, None);
+        assert_eq!(connection.get_memory_superseded_at(id).unwrap(), None);
+        assert_eq!(connection.get_memory_tags(id).unwrap(), scratch.tags);
+    }
+    for row in &before {
+        assert_eq!(connection.get_memory(&row.id).unwrap().as_ref(), Some(row));
+    }
+    let jobs = connection
+        .list_search_index_jobs(WORKSPACE_ID, None)
+        .unwrap();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(
+        jobs.iter()
+            .filter_map(|job| job.document_id.as_deref())
+            .collect::<std::collections::BTreeSet<_>>(),
+        [promoted.as_str(), expired.as_str(), no_end.as_str()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    for expiry in &closure.expirations {
+        let audit = connection.get_audit(&expiry.audit_id).unwrap().unwrap();
+        assert_eq!(audit.action, audit_actions::MEMORY_EXPIRE);
+        assert_eq!(audit.target_id.as_deref(), Some(expiry.memory_id.as_str()));
+        let details: Value = serde_json::from_str(audit.details.as_deref().unwrap()).unwrap();
+        assert_eq!(details["reason"], "workflow_close");
+        assert_eq!(details["deletion"], "none_valid_to_only");
+    }
+    let current = connection
+        .list_recent_current_memories_for_retrieval(
+            WORKSPACE_ID,
+            "2026-11-08T00:00:00.000000501Z",
+            u32::MAX,
+        )
+        .unwrap();
+    assert!(current.iter().any(|row| row.id == promoted));
+    assert!(
+        !current
+            .iter()
+            .any(|row| row.id == expired || row.id == no_end)
+    );
+    let audits_before = connection
+        .list_audit_entries(Some(WORKSPACE_ID), None)
+        .unwrap()
+        .len();
+    let generation_before = connection.get_workspace_generation(WORKSPACE_ID).unwrap();
+    let repeated = connection
+        .close_workflow_working_memories_audited(
+            WORKSPACE_ID,
+            "wf-complete",
+            "workflow-test",
+            closed_at,
+            |memories| {
+                Ok(memories
+                    .iter()
+                    .filter(|memory| memory.id != withheld)
+                    .map(|memory| memory.id.clone())
+                    .collect())
+            },
+        )
+        .unwrap();
+    assert!(repeated.promotions.is_empty() && repeated.expirations.is_empty());
+    assert_eq!(
+        connection
+            .list_search_index_jobs(WORKSPACE_ID, None)
+            .unwrap()
+            .len(),
+        jobs.len()
+    );
+    assert_eq!(
+        connection
+            .list_audit_entries(Some(WORKSPACE_ID), None)
+            .unwrap()
+            .len(),
+        audits_before
+    );
+    assert_eq!(
+        connection.get_workspace_generation(WORKSPACE_ID).unwrap(),
+        generation_before
+    );
+}
+
+#[test]
+fn workflow_close_rolls_back_prior_promotion_when_expiry_obligation_fails() {
+    for fail_at in ["audit", "index"] {
+        let connection = open_db();
+        let valuable =
+            insert_workflow_source(&connection, 1, &workflow_memory_input(WORKSPACE_ID, 0.8));
+        let scratch =
+            insert_workflow_source(&connection, 2, &workflow_memory_input(WORKSPACE_ID, 0.1));
+        let before = [&valuable, &scratch].map(|id| connection.get_memory(id).unwrap().unwrap());
+        let generation = connection.get_workspace_generation(WORKSPACE_ID).unwrap();
+        let (table, condition) = if fail_at == "audit" {
+            (
+                "audit_log",
+                format!("NEW.action = 'memory.expire' AND NEW.target_id = '{scratch}'"),
+            )
+        } else {
+            (
+                "search_index_jobs",
+                format!("NEW.document_id = '{scratch}'"),
+            )
+        };
+        connection
+            .execute_raw(&format!(
+            "CREATE TRIGGER refuse_workflow_obligation BEFORE INSERT ON {table} WHEN {condition}
+             BEGIN SELECT CASE WHEN
+               (SELECT level FROM memories WHERE id = '{valuable}') = 'episodic'
+               AND (SELECT valid_to FROM memories WHERE id = '{scratch}') IS NOT NULL
+               AND EXISTS(SELECT 1 FROM search_index_jobs WHERE document_id = '{valuable}')
+             THEN RAISE(ABORT, 'late_workflow_obligation')
+             ELSE RAISE(ABORT, 'wrong_workflow_order') END; END"
+        ))
+            .unwrap();
+        let error = connection
+            .close_workflow_working_memories_audited(
+                WORKSPACE_ID,
+                "wf-complete",
+                "workflow-test",
+                "2026-11-08T00:00:00Z",
+                |memories| Ok(memories.iter().map(|memory| memory.id.clone()).collect()),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("late_workflow_obligation"),
+            "{error}"
+        );
+        for row in &before {
+            assert_eq!(connection.get_memory(&row.id).unwrap().as_ref(), Some(row));
+        }
+        assert!(
+            connection
+                .list_search_index_jobs(WORKSPACE_ID, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_audit_entries(Some(WORKSPACE_ID), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            connection.get_workspace_generation(WORKSPACE_ID).unwrap(),
+            generation
+        );
+        connection
+            .execute_raw("DROP TRIGGER refuse_workflow_obligation")
+            .unwrap();
+        let retry = connection
+            .close_workflow_working_memories_audited(
+                WORKSPACE_ID,
+                "wf-complete",
+                "workflow-test",
+                "2026-11-08T00:00:00Z",
+                |memories| Ok(memories.iter().map(|memory| memory.id.clone()).collect()),
+            )
+            .unwrap();
+        assert_eq!((retry.promotions.len(), retry.expirations.len()), (1, 1));
+        assert_eq!(
+            connection
+                .list_search_index_jobs(WORKSPACE_ID, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(WORKSPACE_ID), None)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}
+
+fn workflow_review_hold(
+    connection: &DbConnection,
+    workspace_id: &str,
+    target_type: &str,
+    memory_id: &str,
+    label: &str,
+) -> String {
+    let id = format!(
+        "fq_{}",
+        ee::models::MemoryId::now()
+            .to_string()
+            .trim_start_matches("mem_")
+    );
+    connection
+        .insert_feedback_quarantine(
+            &id,
+            &CreateFeedbackQuarantineInput {
+                workspace_id: workspace_id.to_owned(),
+                source_id: "workflow-review".to_owned(),
+                target_type: target_type.to_owned(),
+                target_id: memory_id.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "human_explicit".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+                reason: "Review this source before changing its lifecycle.".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", blake3::hash(label.as_bytes()).to_hex()),
+            },
+        )
+        .unwrap();
+    id
+}
+
+#[test]
+fn public_workflow_close_preserves_withdrawn_sources_and_respects_review_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let database_path = init_fixture_workspace(temp.path());
+    let connection = DbConnection::open_file(&database_path).unwrap();
+    let workspace_id =
+        ee::core::workspace::stable_workspace_id(&temp.path().canonicalize().unwrap());
+    let foreign_workspace = "wsp_01234567890123456789012346";
+    connection
+        .insert_workspace(
+            foreign_workspace,
+            &CreateWorkspaceInput {
+                path: "/tmp/ee-workflow-foreign".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+    let valuable = workflow_memory_input(&workspace_id, 0.8);
+    let scratch = workflow_memory_input(&workspace_id, 0.1);
+    let promoted = insert_workflow_source(&connection, 1, &valuable);
+    let expired = insert_workflow_source(&connection, 2, &scratch);
+    let held_high = insert_workflow_source(&connection, 3, &valuable);
+    let held_low = insert_workflow_source(&connection, 4, &scratch);
+    let sealed_high = insert_workflow_source(&connection, 5, &valuable);
+    let sealed_low = insert_workflow_source(&connection, 6, &scratch);
+    let mut placeholder_input = valuable.clone();
+    placeholder_input.content = ee::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();
+    let placeholder = insert_workflow_source(&connection, 7, &placeholder_input);
+    let resolved = insert_workflow_source(&connection, 8, &valuable);
+    let revealed = insert_workflow_source(&connection, 9, &valuable);
+    let foreign = insert_workflow_source(
+        &connection,
+        10,
+        &workflow_memory_input(foreign_workspace, 0.1),
+    );
+    workflow_review_hold(
+        &connection,
+        &workspace_id,
+        "memory",
+        &held_high,
+        "held-high",
+    );
+    workflow_review_hold(&connection, &workspace_id, "memory", &held_low, "held-low");
+    workflow_review_hold(&connection, &workspace_id, "rule", &promoted, "wrong-type");
+    workflow_review_hold(
+        &connection,
+        foreign_workspace,
+        "memory",
+        &expired,
+        "wrong-workspace",
+    );
+    let resolved_hold =
+        workflow_review_hold(&connection, &workspace_id, "memory", &resolved, "resolved");
+    connection
+        .update_feedback_quarantine_status(&resolved_hold, "rejected", Some("reviewer"), None)
+        .unwrap();
+    let commitment = format!(
+        "blake3:{}",
+        blake3::hash(valuable.content.as_bytes()).to_hex()
+    );
+    for id in [&sealed_high, &sealed_low, &revealed] {
+        connection
+            .insert_memory_seal(id, &commitment, "2026-01-01T00:00:00Z")
+            .unwrap();
+    }
+    connection
+        .mark_memory_seal_revealed(&revealed, "2026-01-02T00:00:00Z")
+        .unwrap();
+    let unchanged_ids = [
+        held_high,
+        held_low,
+        sealed_high,
+        sealed_low,
+        placeholder,
+        foreign,
+    ];
+    let before = unchanged_ids
+        .iter()
+        .map(|id| connection.get_memory(id).unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let audit_count = connection.list_audit_entries(None, None).unwrap().len();
+    let options = WorkflowCloseOptions {
+        workspace_path: temp.path(),
+        database_path: Some(&database_path),
+        workflow_id: "wf-complete",
+    };
+    let report = close_workflow(&options).expect("public workflow closure succeeds");
+    assert_eq!((report.promoted_count, report.expired_count), (3, 1));
+    assert_eq!(
+        report.promoted_memory_ids,
+        [promoted.clone(), resolved, revealed]
+    );
+    assert_eq!(report.audit_ids.len(), 4);
+    for row in &before {
+        assert_eq!(connection.get_memory(&row.id).unwrap().as_ref(), Some(row));
+    }
+    assert_eq!(
+        connection.get_memory(&promoted).unwrap().unwrap().level,
+        "episodic"
+    );
+    assert!(
+        connection
+            .get_memory(&expired)
+            .unwrap()
+            .unwrap()
+            .valid_to
+            .is_some()
+    );
+    assert_eq!(
+        connection
+            .list_search_index_jobs(&workspace_id, None)
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(
+        connection
+            .list_search_index_jobs(foreign_workspace, None)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        connection.list_audit_entries(None, None).unwrap().len(),
+        audit_count + 4
+    );
+    let generation = connection.get_workspace_generation(&workspace_id).unwrap();
+    let repeated = close_workflow(&options).unwrap();
+    assert_eq!((repeated.promoted_count, repeated.expired_count), (0, 0));
+    assert!(repeated.audit_ids.is_empty());
+    assert_eq!(
+        connection
+            .list_search_index_jobs(&workspace_id, None)
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        connection.list_audit_entries(None, None).unwrap().len(),
+        audit_count + 4
+    );
+    assert_eq!(
+        connection.get_workspace_generation(&workspace_id).unwrap(),
+        generation
+    );
+}
+
+#[test]
+fn workflow_close_refuses_missing_authority_before_any_lifecycle_write() {
+    for missing_table in ["feedback_quarantine", "memory_seals"] {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = init_fixture_workspace(temp.path());
+        let connection = DbConnection::open_file(&database_path).unwrap();
+        let workspace_id =
+            ee::core::workspace::stable_workspace_id(&temp.path().canonicalize().unwrap());
+        let valuable =
+            insert_workflow_source(&connection, 1, &workflow_memory_input(&workspace_id, 0.8));
+        let scratch =
+            insert_workflow_source(&connection, 2, &workflow_memory_input(&workspace_id, 0.1));
+        let before = [&valuable, &scratch].map(|id| connection.get_memory(id).unwrap().unwrap());
+        let audit_count = connection.list_audit_entries(None, None).unwrap().len();
+        let generation = connection.get_workspace_generation(&workspace_id).unwrap();
+        connection
+            .execute_raw(&format!("DROP TABLE {missing_table}"))
+            .unwrap();
+        assert!(
+            close_workflow(&WorkflowCloseOptions {
+                workspace_path: temp.path(),
+                database_path: Some(&database_path),
+                workflow_id: "wf-complete",
+            })
+            .is_err(),
+            "{missing_table}"
+        );
+        for row in &before {
+            assert_eq!(connection.get_memory(&row.id).unwrap().as_ref(), Some(row));
+        }
+        assert!(
+            connection
+                .list_search_index_jobs(&workspace_id, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            connection.list_audit_entries(None, None).unwrap().len(),
+            audit_count
+        );
+        assert_eq!(
+            connection.get_workspace_generation(&workspace_id).unwrap(),
+            generation
+        );
+    }
 }
 
 #[test]

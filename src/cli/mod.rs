@@ -10211,7 +10211,7 @@ pub struct WorkspaceAliasArgs {
 /// Memory workflow lifecycle commands.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum WorkflowCommand {
-    /// Close a workflow and promote eligible working memories.
+    /// Close a workflow, promote eligible working memories, and expire current scratch.
     Close(WorkflowCloseArgs),
     /// Create a new workflow lifecycle group.
     Create(WorkflowCreateArgs),
@@ -99853,7 +99853,7 @@ demos:
     }
 
     #[test]
-    fn workflow_close_promotes_working_memory_to_episodic_json() -> TestResult {
+    fn workflow_close_promotes_and_expires_working_memories_json() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path().to_string_lossy().into_owned();
         let workflow_id = "wf-release-close-001";
@@ -99884,6 +99884,39 @@ demos:
         let memory_id = remembered["data"]["memory_id"]
             .as_str()
             .ok_or_else(|| "remember output missing memory_id".to_string())?;
+        let database_path = remembered["data"]["database_path"]
+            .as_str()
+            .ok_or_else(|| "remember output missing database_path".to_string())?;
+        let connection = crate::db::DbConnection::open_file(Path::new(database_path))
+            .map_err(|error| error.to_string())?;
+        let source = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "remembered workflow source missing".to_string())?;
+        let scratch_id = crate::models::MemoryId::now().to_string();
+        connection
+            .insert_memory(
+                &scratch_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: source.workspace_id.clone(),
+                    level: "working".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Temporary release scratch must leave current recall after closure."
+                        .to_owned(),
+                    workflow_id: Some(workflow_id.to_owned()),
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.1,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
 
         let (close_exit, close_stdout, close_stderr) = invoke(&[
             "ee",
@@ -99909,7 +99942,7 @@ demos:
         )?;
         ensure_equal(
             &closed["data"]["expired_count"],
-            &serde_json::json!(0),
+            &serde_json::json!(1),
             "expired count",
         )?;
         ensure_equal(
@@ -99919,7 +99952,7 @@ demos:
         )?;
         ensure_equal(
             &closed["data"]["audit_ids"].as_array().map(Vec::len),
-            &Some(1),
+            &Some(2),
             "audit id count",
         )?;
 
@@ -99940,6 +99973,89 @@ demos:
             &shown["data"]["memory"]["level"],
             &serde_json::json!("episodic"),
             "promoted level",
+        )?;
+        let connection = crate::db::DbConnection::open_file(Path::new(database_path))
+            .map_err(|error| error.to_string())?;
+        let scratch = connection
+            .get_memory(&scratch_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expired source must remain in history".to_string())?;
+        ensure(
+            scratch.valid_to.is_some() && scratch.tombstoned_at.is_none(),
+            "scratch logically expired without deletion",
+        )?;
+        let current = connection
+            .list_recent_current_memories_for_retrieval(
+                &source.workspace_id,
+                &chrono::Utc::now().to_rfc3339(),
+                u32::MAX,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !current.iter().any(|memory| memory.id == scratch_id),
+            "expired scratch excluded from current recall",
+        )?;
+        let jobs = connection
+            .list_search_index_jobs(&source.workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &jobs
+                .iter()
+                .filter(|job| job.document_id.as_deref() == Some(scratch_id.as_str()))
+                .count(),
+            &1,
+            "expiry queued exactly one reindex",
+        )?;
+        let audit_count = connection
+            .list_audit_entries(Some(&source.workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        drop(connection);
+        let (repeat_exit, repeat_stdout, repeat_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "workflow",
+            "close",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(&repeat_exit, &ProcessExitCode::Success, "repeat close exit")?;
+        ensure(repeat_stderr.is_empty(), "repeat close stderr clean")?;
+        let repeated: serde_json::Value =
+            serde_json::from_str(&repeat_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &repeated["data"]["promoted_count"],
+            &serde_json::json!(0),
+            "repeat promoted count",
+        )?;
+        ensure_equal(
+            &repeated["data"]["expired_count"],
+            &serde_json::json!(0),
+            "repeat expired count",
+        )?;
+        ensure_equal(
+            &repeated["data"]["audit_ids"],
+            &serde_json::json!([]),
+            "repeat audit ids",
+        )?;
+        let connection = crate::db::DbConnection::open_file(Path::new(database_path))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &connection
+                .list_search_index_jobs(&source.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            &jobs.len(),
+            "repeat creates no index work",
+        )?;
+        ensure_equal(
+            &connection
+                .list_audit_entries(Some(&source.workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            &audit_count,
+            "repeat creates no audit rows",
         )
     }
 

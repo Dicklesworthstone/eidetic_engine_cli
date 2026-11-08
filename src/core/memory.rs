@@ -334,7 +334,7 @@ pub struct WorkflowCloseReport {
     pub expired_count: u32,
     /// Promoted memory IDs in deterministic order.
     pub promoted_memory_ids: Vec<String>,
-    /// Audit IDs created for promoted memories.
+    /// Audit IDs created for promoted and expired memories.
     pub audit_ids: Vec<String>,
 }
 
@@ -1911,7 +1911,8 @@ fn remember_memory_outcome_inner_with_store(
     Ok(RememberOutcome::Created(Box::new(report)))
 }
 
-/// Close a workflow and promote eligible working memories to episodic.
+/// Close a workflow, promoting valuable working memories and expiring scratch.
+/// Historical and withheld sources retain their existing lifecycle state.
 pub fn close_workflow(
     options: &WorkflowCloseOptions<'_>,
 ) -> Result<WorkflowCloseReport, DomainError> {
@@ -1939,26 +1940,58 @@ pub fn close_workflow(
         &[&workspace_path, options.workspace_path],
     )?;
 
-    let promotions = connection
-        .promote_workflow_working_memories_audited(
+    let closure = connection
+        .close_workflow_working_memories_audited(
             &workspace_id,
             &workflow_id,
             "ee workflow close",
             &closed_at,
+            |memories| {
+                let ids = memories
+                    .iter()
+                    .map(|memory| memory.id.as_str())
+                    .collect::<Vec<_>>();
+                let seals = connection.get_memory_seals_batch(&ids)?;
+                let held = super::memory_lifecycle::pending_memory_review_ids(
+                    &connection,
+                    &workspace_id,
+                    &ids,
+                )?;
+                Ok(memories
+                    .iter()
+                    .filter(|memory| {
+                        memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+                            && !held.contains(&memory.id)
+                            && !seals
+                                .get(&memory.id)
+                                .is_some_and(crate::models::MemorySeal::is_sealed)
+                    })
+                    .map(|memory| memory.id.clone())
+                    .collect())
+            },
         )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to close workflow: {error}"),
             repair: Some("ee doctor".to_string()),
         })?;
 
-    let promoted_count = capped_u32(promotions.len());
-    let promoted_memory_ids = promotions
+    let promoted_count = capped_u32(closure.promotions.len());
+    let expired_count = capped_u32(closure.expirations.len());
+    let promoted_memory_ids = closure
+        .promotions
         .iter()
         .map(|promotion| promotion.memory_id.clone())
         .collect();
-    let audit_ids = promotions
+    let audit_ids = closure
+        .promotions
         .into_iter()
         .map(|promotion| promotion.audit_id)
+        .chain(
+            closure
+                .expirations
+                .into_iter()
+                .map(|expiry| expiry.audit_id),
+        )
         .collect();
 
     Ok(WorkflowCloseReport {
@@ -1966,7 +1999,7 @@ pub fn close_workflow(
         workspace_id,
         workflow_id,
         promoted_count,
-        expired_count: 0,
+        expired_count,
         promoted_memory_ids,
         audit_ids,
     })
