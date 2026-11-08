@@ -43682,6 +43682,28 @@ impl DbConnection {
         result_hash: &str,
         consumed_at: &str,
     ) -> Result<ReflectionRequestCandidateConsumptionOutcome> {
+        self.insert_reflection_result_candidate_and_consume_ledger_checked(
+            request_id,
+            candidate_id,
+            candidate,
+            result_hash,
+            consumed_at,
+            || Ok(()),
+        )
+    }
+
+    /// Revalidate source authority in the same writer transaction as a new
+    /// candidate and ledger consumption. Existing accepted replays are receipts
+    /// and deliberately do not re-authorize their historical source package.
+    pub(crate) fn insert_reflection_result_candidate_and_consume_ledger_checked(
+        &self,
+        request_id: &str,
+        candidate_id: &str,
+        candidate: &CreateCurationCandidateInput,
+        result_hash: &str,
+        consumed_at: &str,
+        validate_sources: impl FnOnce() -> Result<()>,
+    ) -> Result<ReflectionRequestCandidateConsumptionOutcome> {
         validate_reflection_request_id(request_id)?;
         validate_reflection_candidate_id(candidate_id)?;
         validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
@@ -43716,6 +43738,7 @@ impl DbConnection {
                     Ok(ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus { status })
                 }
                 ReflectionRequestReplayStatus::Pending => {
+                    validate_sources()?;
                     self.insert_curation_candidate(candidate_id, candidate)?;
                     let consumed = self.mark_reflection_request_consumed(
                         &candidate.workspace_id,

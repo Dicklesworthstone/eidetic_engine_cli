@@ -66,6 +66,8 @@ use crate::search::HashEmbedder;
 mod corroboration;
 #[path = "curate_session_arc.rs"]
 pub(crate) mod session_arc;
+#[path = "curate_source_admission.rs"]
+mod source_admission;
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -8532,6 +8534,22 @@ pub fn propose_derived_candidate(
     }
 
     let connection = open_bound_curate_read(&mut prepared)?;
+    let propose = || propose_derived_candidate_in_snapshot(&connection, prepared, options);
+    if options.dry_run {
+        source_admission::with_snapshot(&connection, propose)
+    } else {
+        persist_curation_transaction(&connection, "propose derived memory", propose)
+    }
+}
+
+fn propose_derived_candidate_in_snapshot(
+    connection: &DbConnection,
+    prepared: PreparedCurateRead,
+    options: &ProposeDerivedOptions<'_>,
+) -> Result<ProposeDerivedReport, DomainError> {
+    let level = options.level.trim();
+    let kind = options.kind.trim();
+    let content = options.content;
 
     // Resolve source ids -> canonical (kind, id, contentHash) tuples.
     // Deduplicate via BTreeSet so the array is sorted and idempotent
@@ -8562,6 +8580,13 @@ pub fn propose_derived_candidate(
                 "ee curate propose-derived --help",
             ));
         }
+        if memory.tombstoned_at.is_some() {
+            return Err(curate_usage_error(
+                format!("propose-derived source memory {id} is tombstoned"),
+                "ee curate propose-derived --help",
+            ));
+        }
+        source_admission::require_memory_authority(connection, &memory)?;
         let content_hash = format!(
             "blake3:{}",
             blake3::hash(memory.content.as_bytes()).to_hex()
@@ -8901,24 +8926,39 @@ pub fn propose_reflection_request(
     validate_reflection_propose_limits(options.limits)?;
 
     let connection = open_bound_curate_read(&mut prepared)?;
+    let propose =
+        || propose_reflection_request_in_snapshot(&connection, prepared, reflection_kind, options);
+    if options.dry_run {
+        source_admission::with_snapshot(&connection, propose)
+    } else {
+        persist_curation_transaction(&connection, "propose reflection request", propose)
+    }
+}
+
+fn propose_reflection_request_in_snapshot(
+    connection: &DbConnection,
+    prepared: PreparedCurateRead,
+    reflection_kind: ReflectionKind,
+    options: &ReflectionProposeOptions<'_>,
+) -> Result<ReflectionProposeReport, DomainError> {
     let mut source_inputs = Vec::new();
     for raw_id in options.source_ids {
         source_inputs.push(resolve_reflection_source(
-            &connection,
+            connection,
             &prepared.workspace_id,
             raw_id,
         )?);
     }
     for raw_id in options.source_memory_ids {
         source_inputs.push(resolve_reflection_memory_source(
-            &connection,
+            connection,
             &prepared.workspace_id,
             raw_id,
         )?);
     }
     for raw_id in options.source_evidence_span_ids {
         source_inputs.push(resolve_reflection_evidence_span_source(
-            &connection,
+            connection,
             &prepared.workspace_id,
             raw_id,
         )?);
@@ -8971,7 +9011,7 @@ pub fn propose_reflection_request(
         None
     } else {
         Some(persist_prepared_reflection_request_ledger(
-            &connection,
+            connection,
             &prepared_request,
         )?)
     };
@@ -9059,7 +9099,9 @@ fn resolve_reflection_source(
         })?;
 
     match (memory, evidence_span) {
-        (Some(memory), None) => reflection_source_input_from_memory(memory, workspace_id),
+        (Some(memory), None) => {
+            reflection_source_input_from_memory(connection, memory, workspace_id)
+        }
         (None, Some(span)) => reflection_source_input_from_evidence_span(span, workspace_id),
         (Some(_), Some(_)) => Err(curate_usage_error(
             format!(
@@ -9098,7 +9140,7 @@ fn resolve_reflection_memory_source(
             id: id.to_owned(),
             repair: Some(format!("ee memory show {id} --json")),
         })?;
-    reflection_source_input_from_memory(memory, workspace_id)
+    reflection_source_input_from_memory(connection, memory, workspace_id)
 }
 
 fn resolve_reflection_evidence_span_source(
@@ -9128,6 +9170,7 @@ fn resolve_reflection_evidence_span_source(
 }
 
 fn reflection_source_input_from_memory(
+    connection: &DbConnection,
     memory: StoredMemory,
     workspace_id: &str,
 ) -> Result<ReflectionSourceInput, DomainError> {
@@ -9146,6 +9189,7 @@ fn reflection_source_input_from_memory(
             "ee memory show --json",
         ));
     }
+    source_admission::require_memory_authority(connection, &memory)?;
     let content_hash = memory_content_hash(memory.content.as_str());
     Ok(ReflectionSourceInput::new(
         DerivationSourceRef::new(
@@ -9419,6 +9463,16 @@ fn validate_reflection_current_source_hashes(
     workspace_id: &str,
     material: &ReflectionRequestLedgerMaterial,
 ) -> Result<(), DomainError> {
+    source_admission::with_snapshot(connection, || {
+        validate_reflection_current_source_hashes_in_snapshot(connection, workspace_id, material)
+    })
+}
+
+fn validate_reflection_current_source_hashes_in_snapshot(
+    connection: &DbConnection,
+    workspace_id: &str,
+    material: &ReflectionRequestLedgerMaterial,
+) -> Result<(), DomainError> {
     for source_ref in
         reflection_ledger_source_refs(material).map_err(reflection_result_validation_error)?
     {
@@ -9453,6 +9507,7 @@ fn validate_reflection_current_source_hashes(
                         "ee reflect propose --workspace . --json",
                     ));
                 }
+                source_admission::require_memory_authority(connection, &memory)?;
                 let current_hash = memory_content_hash(memory.content.as_str());
                 if current_hash != source_ref.content_hash {
                     return Err(curate_usage_error(
@@ -9859,20 +9914,54 @@ pub fn persist_reflection_result_ingest_decision(
                 candidate,
                 consumed_at,
             );
+            let mut source_error = None;
             let outcome = connection
-                .insert_reflection_result_candidate_and_consume_ledger(
+                .insert_reflection_result_candidate_and_consume_ledger_checked(
                     request_id,
                     &candidate_id,
                     &input,
                     result_hash,
                     consumed_at,
+                    || {
+                        let validation = (|| {
+                            let stored = connection
+                                .get_reflection_request_ledger(workspace_id, request_id)
+                                .map_err(|_| DomainError::Storage {
+                                    message: "Could not revalidate reflection source ledger"
+                                        .to_owned(),
+                                    repair: Some("ee doctor --json".to_owned()),
+                                })?
+                                .ok_or_else(|| DomainError::NotFound {
+                                    resource: "reflection_request_ledger".to_owned(),
+                                    id: request_id.to_owned(),
+                                    repair: Some(
+                                        "ee reflect propose --workspace . --json".to_owned(),
+                                    ),
+                                })?;
+                            validate_reflection_current_source_hashes(
+                                connection,
+                                workspace_id,
+                                &reflection_request_ledger_material_from_stored(&stored),
+                            )
+                        })();
+                        validation.map_err(|error| {
+                            let message = error.message();
+                            source_error = Some(error);
+                            DbError::MalformedRow {
+                                operation: DbOperation::Query,
+                                message,
+                            }
+                        })
+                    },
                 )
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to persist reflection result ingest: {error}"),
-                    repair: Some(
-                        "Re-run ee reflect propose for the source request, then retry ingest."
-                            .to_owned(),
-                    ),
+                .map_err(|error| {
+                    source_error.unwrap_or_else(|| DomainError::Storage {
+                        message: format!("Failed to persist reflection result ingest: {error}"),
+                        repair: Some(
+                            "Re-run ee reflect propose for the source request, then retry ingest."
+                                .to_owned(),
+                        ),
+                    })
                 })?;
             Ok(reflection_result_durable_outcome_from_db(
                 outcome,
@@ -11128,6 +11217,22 @@ fn validate_derivation_source_refs(
     source_refs: &[DerivationSourceRef],
     errors: &mut Vec<CurateValidationIssue>,
 ) {
+    if source_admission::with_snapshot(connection, || {
+        validate_derivation_source_refs_in_snapshot(connection, stored, source_refs, errors);
+        Ok(())
+    })
+    .is_err()
+    {
+        errors.push(source_admission::unavailable_issue());
+    }
+}
+
+fn validate_derivation_source_refs_in_snapshot(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    source_refs: &[DerivationSourceRef],
+    errors: &mut Vec<CurateValidationIssue>,
+) {
     if let Err(issue) = corroboration::validate_recorded(connection, stored) {
         errors.push(issue);
         return;
@@ -11173,6 +11278,10 @@ fn validate_memory_derivation_source(
             ));
         }
         Ok(Some(memory)) => {
+            if let Err(issue) = source_admission::validate_memory_authority(connection, &memory) {
+                errors.push(issue);
+                return;
+            }
             let actual_hash = memory_content_hash(memory.content.as_str());
             if actual_hash != source_ref.content_hash {
                 errors.push(validation_issue(
@@ -17578,6 +17687,9 @@ mod tests {
     mod session_arc_tests {
         include!("curate_session_arc_tests.rs");
     }
+    mod source_admission_tests {
+        include!("curate_source_admission_tests.rs");
+    }
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;
@@ -19723,6 +19835,16 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x24_80)).to_string();
+        let source_content = "Reflection ingestion must preserve its source authority.";
+        insert_consolidate_absorb_memory(
+            &connection,
+            &workspace_id,
+            &source_memory_id,
+            source_content,
+            0.8,
+        )?;
+        let source_hash = super::memory_content_hash(source_content);
         let ledger_material = ReflectionRequestLedgerMaterial {
             request_id: request_id.to_owned(),
             request_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -19730,23 +19852,21 @@ mod tests {
             workspace_id: workspace_id.clone(),
             reflection_kind: "summary".to_owned(),
             source_package_hash:
-                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    .to_owned(),
-            source_refs_json: r#"[{"kind":"memory","id":"mem_a","contentHash":"blake3:1111111111111111111111111111111111111111111111111111111111111111"},{"kind":"evidence_span","id":"ev_a","contentHash":"blake3:2222222222222222222222222222222222222222222222222222222222222222"}]"#
-                .to_owned(),
-            source_content_hashes_json: r#"["blake3:1111111111111111111111111111111111111111111111111111111111111111","blake3:2222222222222222222222222222222222222222222222222222222222222222"]"#
-                .to_owned(),
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            source_refs_json: serde_json::json!([{
+                "kind": "memory", "id": source_memory_id, "contentHash": source_hash
+            }])
+            .to_string(),
+            source_content_hashes_json: serde_json::json!([source_hash]).to_string(),
             prompt_template_hash:
-                "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                    .to_owned(),
+                "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
             response_schema_hash:
-                "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-                    .to_owned(),
+                "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
             created_at: "2026-05-24T00:00:00Z".to_owned(),
             expires_at: "2026-05-24T01:00:00Z".to_owned(),
             challenge_key_id: "reflect-key-v1".to_owned(),
-            challenge_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-                .to_owned(),
+            challenge_hash:
+                "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
         };
         connection
             .insert_reflection_request_ledger(
