@@ -95,6 +95,24 @@ def strip_rust_comments(source: str) -> str:
     blind to a real analysis change, which is a silent false pass. A `//` inside
     a string literal must therefore survive, and self-test arms assert that
     direction explicitly rather than only asserting that comments are removed.
+
+    Only the plain-string form has a synthetic arm (arm11/arm12), and that is a
+    measured decision rather than a gap: the three files this gate strips are
+    full of the other forms, so every branch below runs against real code on
+    every invocation, and a regression in any of them moves the computed
+    fingerprint off the pinned constant and reds the lint. That is louder than a
+    synthetic arm and cannot be skipped. One hand-verified example, worth citing
+    because it exercises the nastiest branch: src/core/index.rs:15084 holds a
+    byte RAW string whose contents include both a brace and double quotes.
+
+    Do not try to re-measure those populations with a regex over the source. A
+    `b"` pattern also matches inside words such as `lib"`, and an `r"` pattern
+    matches the `r"` in a plain string like `"r"`, so grep-shaped counts here
+    overstate by more than 2x; an earlier draft of this comment carried such
+    numbers and they were wrong. Raw IDENTIFIERS (`r#type`) are the one form
+    that must NOT be consumed as a raw string; the `source[j] == '"'` guard is
+    what makes them fall through, and removing it would swallow the file from
+    there to the next quote.
     """
     out: list[str] = []
     i = 0
