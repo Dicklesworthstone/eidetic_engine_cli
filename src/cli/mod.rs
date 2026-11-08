@@ -53078,6 +53078,21 @@ where
         Ok(corpus) => corpus,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
+    let feedback_scoring_config = if corpus.evidence_harmful_counts.is_empty() {
+        crate::search::scoring::SearchScoringConfig::default()
+    } else {
+        match crate::core::search::resolved_search_scoring_config(&workspace_path) {
+            Ok(config) => config,
+            Err(_) => {
+                let error = DomainError::Configuration {
+                    message: "Failed to resolve the ask evidence feedback policy; answer withheld"
+                        .to_owned(),
+                    repair: Some("ee config show --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
+            }
+        }
+    };
     let candidates = corpus.candidates;
     let contradictions = corpus.contradictions;
 
@@ -53092,6 +53107,8 @@ where
         require_confidence: args.require_confidence,
         contradictions,
         native_sources: corpus.native_sources,
+        evidence_harmful_counts: corpus.evidence_harmful_counts,
+        feedback_scoring_config,
     };
 
     let report =

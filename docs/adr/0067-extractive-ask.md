@@ -125,6 +125,16 @@ span_score = w1·lexical_overlap(question, span)
   class (human_explicit > peer_human_attested > agent_validated >
   agent_assertion > cass_evidence > legacy_import, using the established trust
   ordering).
+- Native transcript evidence also multiplies that span score by the existing
+  `[scoring] harmful_penalty_per_hit` / `harmful_penalty_floor` policy. Accepted
+  harmful outcomes are read under the same workspace-owned snapshot as the
+  admitted body, through the request's exact reference time; future outcomes,
+  other target kinds, foreign-workspace events, and pending quarantine rows do
+  not count. The multiplier applies before candidate limits and consistently
+  to lexical scoring, local semantic scoring, and semantic fallback. Citation
+  confidence remains the source confidence. Memory and rule outcomes continue
+  to use their existing persisted confidence updates. Unavailable or malformed
+  relevant feedback withholds the corpus rather than assuming zero harm.
 - **Corroboration**: spans are clustered with the existing MI-dedup
   machinery (cosine ≥ 0.85, NMI ≥ 0.72 constants reused, not redefined);
   a cluster's representative span gains a corroboration multiplier

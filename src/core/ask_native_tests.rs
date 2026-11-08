@@ -361,6 +361,7 @@ fn request(corpus: &AskCorpus) -> AskRequest {
         question: QUESTION.to_owned(),
         native_sources: corpus.native_sources.clone(),
         contradictions: corpus.contradictions.clone(),
+        evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
         ..AskRequest::default()
     }
 }

@@ -205,6 +205,7 @@ fn answer(corpus: &AskCorpus) -> crate::core::ask::AskReport {
             question: QUESTION.to_owned(),
             native_sources: corpus.native_sources.clone(),
             contradictions: corpus.contradictions.clone(),
+            evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
             ..AskRequest::default()
         },
         &corpus.candidates,

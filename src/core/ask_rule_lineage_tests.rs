@@ -138,6 +138,7 @@ fn answer_json(corpus: &AskCorpus) -> serde_json::Value {
             question: "Which command must run before every release tag?".to_owned(),
             contradictions: corpus.contradictions.clone(),
             native_sources: corpus.native_sources.clone(),
+            evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
             ..AskRequest::default()
         },
         &corpus.candidates,

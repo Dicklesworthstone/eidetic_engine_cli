@@ -271,6 +271,7 @@ fn assert_answer(corpus: &AskCorpus, id: &str, body: &str, kind: &str) {
             question: QUESTION.to_owned(),
             native_sources: corpus.native_sources.clone(),
             contradictions: corpus.contradictions.clone(),
+            evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
             ..AskRequest::default()
         },
         &corpus.candidates,
@@ -377,6 +378,7 @@ fn structured_cass_projection_preserves_exact_unicode_citations_after_reopen() {
                 question: QUESTION.to_owned(),
                 native_sources: corpus.native_sources.clone(),
                 contradictions: corpus.contradictions.clone(),
+                evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
                 ..AskRequest::default()
             },
             &corpus.candidates,

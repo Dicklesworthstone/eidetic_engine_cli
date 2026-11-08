@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
 use crate::obs::audit_events::query_hash as audit_query_hash;
+use crate::search::scoring::SearchScoringConfig;
 
 #[path = "ask_retrieval.rs"]
 mod retrieval;
@@ -169,6 +170,12 @@ pub struct AskRequest {
     pub contradictions: Vec<AskContradiction>,
     /// Native entity metadata from the same source snapshot as the candidates.
     pub native_sources: BTreeMap<String, AskNativeSource>,
+    /// Accepted harmful outcomes for admitted native evidence, captured in the
+    /// same source snapshot at the caller's exact reference time.
+    pub evidence_harmful_counts: BTreeMap<String, u32>,
+    /// One resolved policy for the entire evaluation, including admission and
+    /// semantic fallback. Only its existing harmful-outcome multiplier is used.
+    pub feedback_scoring_config: SearchScoringConfig,
 }
 
 impl Default for AskRequest {
@@ -180,8 +187,47 @@ impl Default for AskRequest {
             require_confidence: None,
             contradictions: Vec::new(),
             native_sources: BTreeMap::new(),
+            evidence_harmful_counts: BTreeMap::new(),
+            feedback_scoring_config: SearchScoringConfig::default(),
         }
     }
+}
+
+fn candidate_feedback_multiplier(request: &AskRequest, candidate: &AskCandidate) -> f32 {
+    let Some(source) = request.native_sources.get(&candidate.memory_id) else {
+        return 1.0;
+    };
+    if !matches!(source.entity, crate::pack::PackEntityRef::EvidenceSpan(_))
+        || source.entity.id_string() != candidate.memory_id
+    {
+        return 1.0;
+    }
+    request
+        .evidence_harmful_counts
+        .get(&candidate.memory_id)
+        .map_or(1.0, |&count| {
+            request
+                .feedback_scoring_config
+                .harmful_feedback_multiplier(count)
+        })
+}
+
+/// Apply source feedback after the lexical/semantic score, without rewriting
+/// the source confidence carried by citations. Every bounded selection pass
+/// and the final composition must use this same source-aware score.
+fn score_candidate_span(
+    request: &AskRequest,
+    candidate: &AskCandidate,
+    question_terms: &[String],
+    text: &str,
+    scorer: SpanScorer<'_>,
+) -> f32 {
+    scorer(
+        question_terms,
+        text,
+        candidate.confidence,
+        &candidate.trust_class,
+    ) * candidate_feedback_multiplier(request, candidate)
 }
 
 // ─── scored span ─────────────────────────────────────────────────────────────
@@ -1101,12 +1147,7 @@ fn evaluate_ask_inner(
         let span_ranges = segment_spans(&candidate.content);
         for (start, end) in span_ranges {
             let text = candidate.content[start..end].to_owned();
-            let score = scorer(
-                &question_terms,
-                &text,
-                candidate.confidence,
-                &candidate.trust_class,
-            );
+            let score = score_candidate_span(request, candidate, &question_terms, &text, scorer);
             all_spans.push(AskSpan {
                 memory_id: candidate.memory_id.clone(),
                 byte_start: start,
@@ -2071,6 +2112,7 @@ mod tests {
             max_evidence: ASK_MAX_EVIDENCE_DEFAULT,
             require_confidence: None,
             contradictions: Vec::new(),
+            ..AskRequest::default()
         };
         let report = evaluate_ask(&request, &[]);
         assert!(report.abstained);
@@ -2341,6 +2383,7 @@ mod tests {
             max_evidence: 3,
             require_confidence: None,
             contradictions: Vec::new(),
+            ..AskRequest::default()
         };
         let candidates = vec![AskCandidate {
             memory_id: "mem1".into(),

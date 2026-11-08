@@ -289,6 +289,109 @@ fn native_evidence_keeps_identity_revision_trust_and_exact_utf8_offsets() {
 }
 
 #[test]
+fn evidence_feedback_is_source_specific_before_semantic_admission_and_lexical_fallback() {
+    let mut request = request();
+    request.min_confidence = 0.1;
+    request.feedback_scoring_config.harmful_penalty_per_hit = 0.25;
+    let mut rows = Vec::new();
+    for number in 1..=ASK_CANDIDATE_SCAN_CAP + 2 {
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number as u128));
+        let mut source = candidate(&id.to_string(), ANSWER);
+        source.kind = "evidence_span".to_owned();
+        source.level = "episodic".to_owned();
+        source.confidence = 0.5;
+        source.trust_class = "cass_evidence".to_owned();
+        request.native_sources.insert(
+            source.memory_id.clone(),
+            AskNativeSource {
+                entity: PackEntityRef::EvidenceSpan(id),
+                entity_revision: format!("blake3:{}", blake3::hash(ANSWER.as_bytes()).to_hex()),
+                source_memory_ids: Vec::new(),
+            },
+        );
+        request.evidence_harmful_counts.insert(
+            source.memory_id.clone(),
+            u32::from(number <= ASK_CANDIDATE_SCAN_CAP + 1),
+        );
+        rows.push(source);
+    }
+    let clean = rows.last().unwrap().memory_id.clone();
+    // The semantic table has just one text key. It must not merge the source
+    // outcomes or allow hundreds of harmful copies to consume the scan cap.
+    assert_eq!(selected(&request, &rows, 1), [clean.clone()]);
+    for actual in [
+        report(&request, &rows),
+        evaluate_ask(&request, &rows),
+        finish_evaluation(&request, &rows, Err(SemanticFailure::Unavailable)).unwrap(),
+    ] {
+        assert!(!actual.abstained && !actual.conflict_detected);
+        assert_eq!(actual.citations[0].memory_id, clean);
+        assert_eq!(actual.citations[0].confidence, 0.5);
+        assert_eq!(actual.confidence_components.corroboration, 1.0);
+        assert_eq!(actual.candidates_scanned, rows.len());
+    }
+    let one = std::slice::from_ref(&rows[0]);
+    let mut neutral = request.clone();
+    neutral.evidence_harmful_counts.clear();
+    let multiplier = request
+        .feedback_scoring_config
+        .harmful_feedback_multiplier(1);
+    for (before, after) in [
+        (report(&neutral, one), report(&request, one)),
+        (evaluate_ask(&neutral, one), evaluate_ask(&request, one)),
+    ] {
+        assert!(!after.abstained);
+        assert_eq!(
+            after.confidence_components.top_span_score.to_bits(),
+            (before.confidence_components.top_span_score * multiplier).to_bits(),
+        );
+        assert_eq!(
+            after.citations[0].confidence,
+            before.citations[0].confidence
+        );
+    }
+    let expected = ask_data_json(&report(&request, &rows));
+    rows.reverse();
+    assert_eq!(expected, ask_data_json(&report(&request, &rows)));
+    assert_eq!(
+        ask_data_json(&evaluate_ask(&request, &rows)),
+        ask_data_json(
+            &finish_evaluation(&request, &rows, Err(SemanticFailure::Unavailable)).unwrap()
+        ),
+    );
+}
+
+#[test]
+fn evidence_counts_do_not_apply_a_second_penalty_to_memory_or_native_rule_confidence() {
+    let mut request = request();
+    request.min_confidence = 0.1;
+    let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(500));
+    let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(500));
+    let rows = [
+        candidate(&memory_id.to_string(), ANSWER),
+        candidate(&rule_id.to_string(), ANSWER),
+    ];
+    request.native_sources.insert(
+        rule_id.to_string(),
+        AskNativeSource {
+            entity: PackEntityRef::Rule(rule_id),
+            entity_revision: format!("blake3:{}", blake3::hash(ANSWER.as_bytes()).to_hex()),
+            source_memory_ids: Vec::new(),
+        },
+    );
+    let expected = ask_data_json(&report(&request, &rows));
+    for row in &rows {
+        request
+            .evidence_harmful_counts
+            .insert(row.memory_id.clone(), 100);
+    }
+    assert_eq!(expected, ask_data_json(&report(&request, &rows)));
+    let expected = ask_data_json(&evaluate_ask(&request, &rows));
+    request.evidence_harmful_counts.clear();
+    assert_eq!(expected, ask_data_json(&evaluate_ask(&request, &rows)));
+}
+
+#[test]
 fn invalid_source_identity_fails_closed_even_with_semantic_support() {
     let rows = [candidate("same", ANSWER), candidate("same", OPPOSING)];
     let report = report(&request(), &rows);

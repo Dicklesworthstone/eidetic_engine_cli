@@ -53,7 +53,7 @@ pub(super) fn preserve_independent_support<'a>(
         }
         let entry = RankedCandidate {
             candidate,
-            score: best_span_score(question_terms, candidate, scorer),
+            score: best_span_score(request, question_terms, candidate, scorer),
         };
         if entry.score < minimum {
             continue;

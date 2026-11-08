@@ -153,6 +153,18 @@ impl SearchScoringConfig {
         finite_nonnegative(self.anchor_match_bias_cap).min(DEFAULT_ANCHOR_MATCH_BIAS_CAP)
     }
 
+    /// Accepted harmful outcomes use the same bounded multiplier on every
+    /// retrieval surface. A missing observation must be handled by the caller,
+    /// not silently converted into an observed zero here.
+    #[must_use]
+    pub fn harmful_feedback_multiplier(self, harmful_count: u32) -> f32 {
+        harmful_penalty(
+            harmful_count,
+            self.harmful_penalty_per_hit,
+            self.harmful_penalty_floor,
+        )
+    }
+
     /// Common bound for every lane, including candidates with neutral signals.
     /// Include the fixed proven-rule boost, configurable maturities and active
     /// anchor cap so unit-interval pack projection preserves distinct scores.
@@ -574,11 +586,7 @@ impl SearchScoreComponents {
             }
             maturity => maturity.multiplier(),
         };
-        let harmful_penalty = harmful_penalty(
-            signals.harmful_count,
-            config.harmful_penalty_per_hit,
-            config.harmful_penalty_floor,
-        );
+        let harmful_penalty = config.harmful_feedback_multiplier(signals.harmful_count);
         let scope_match = if signals.scope_match {
             finite_nonnegative(config.scope_match_bonus)
         } else {

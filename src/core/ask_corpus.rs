@@ -35,6 +35,8 @@ pub struct AskCorpus {
     pub candidates: Vec<AskCandidate>,
     pub contradictions: Vec<AskContradiction>,
     pub native_sources: BTreeMap<String, AskNativeSource>,
+    /// Accepted native-evidence feedback observed with the admitted bodies.
+    pub evidence_harmful_counts: BTreeMap<String, u32>,
 }
 
 /// Load live, public command advice without searching transcripts or indexes.
@@ -75,6 +77,7 @@ pub(crate) fn load_command_advice_corpus(
         candidates,
         contradictions: Vec::new(),
         native_sources,
+        evidence_harmful_counts: BTreeMap::new(),
     })
 }
 
@@ -259,11 +262,23 @@ fn load_corpus_with_path_boundary(
         &mut candidates,
         &mut native_sources,
     )?;
+    let evidence_ids: Vec<_> = native_sources
+        .iter()
+        .filter(|(_, source)| matches!(source.entity, crate::pack::PackEntityRef::EvidenceSpan(_)))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let evidence_harmful_counts = connection
+        .evidence_harmful_feedback_counts_at(workspace_id, &evidence_ids, reference_time)
+        .map_err(|_| DomainError::Storage {
+            message: "Failed to read accepted ask evidence feedback; answer withheld".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
     snapshot.finish()?;
     Ok(AskCorpus {
         candidates,
         contradictions,
         native_sources,
+        evidence_harmful_counts,
     })
 }
 
@@ -722,6 +737,7 @@ mod source_authority_tests {
                 question: "Run cargo fmt before release".to_owned(),
                 contradictions: corpus.contradictions.clone(),
                 native_sources: corpus.native_sources.clone(),
+                evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
                 ..AskRequest::default()
             },
             &corpus.candidates,

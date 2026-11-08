@@ -1,7 +1,8 @@
 //! Native CASS answers through the actual CLI; all rows use the real store API.
 use super::*;
 use ee::db::{
-    CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind, StoredEvidenceSpan,
+    CreateEvidenceSpanInput, CreateFeedbackEventInput, CreateSessionInput, EvidenceProducerKind,
+    StoredEvidenceSpan,
 };
 use ee::models::{EvidenceId, SessionId};
 use std::path::{Path, PathBuf};
@@ -294,6 +295,87 @@ fn ordinary_transcript_answers_audit_evidence_not_a_surrogate_memory() -> Result
         db.get_evidence_span(&row.id)
             .map_err(|error| error.to_string())?,
         Some(row)
+    );
+    Ok(())
+}
+
+#[test]
+fn transcript_answers_use_the_workspace_feedback_policy_and_keep_source_confidence()
+-> Result<(), String> {
+    let (_root, workspace, database, workspace_id, harmed) = fixture()?;
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let clean = insert(&db, &workspace_id, &harmed.session_id, 78003, TEXT)?;
+    db.insert_feedback_event(
+        "fb_01234567890123456789012345",
+        &CreateFeedbackEventInput {
+            workspace_id: workspace_id.clone(),
+            target_type: "evidence".to_owned(),
+            target_id: harmed.id.clone(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    db.execute_raw("UPDATE feedback_events SET created_at = '2026-01-01T00:00:00Z'")
+        .map_err(|error| error.to_string())?;
+    drop(db);
+    let config = workspace.join(".ee/config.toml");
+    std::fs::write(
+        &config,
+        "[scoring]\nharmful_penalty_per_hit = 0.0\nharmful_penalty_floor = 0.2\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let neutral = run(&workspace, &["--read-only"])?;
+    check_citation(&neutral["data"]["citations"][0], &harmed)?;
+    let base = neutral["data"]["confidenceComponents"]["topSpanScore"]
+        .as_f64()
+        .ok_or("missing base span score")?;
+    std::fs::write(
+        &config,
+        "[scoring]\nharmful_penalty_per_hit = 0.9\nharmful_penalty_floor = 0.4\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let preferred = run(&workspace, &["--read-only"])?;
+    check_citation(&preferred["data"]["citations"][0], &clean)?;
+    assert_eq!(preferred["data"]["citations"][0]["confidence"], 0.5);
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'",
+        clean.id
+    ))
+    .map_err(|error| error.to_string())?;
+    let events = db
+        .list_feedback_events(&workspace_id)
+        .map_err(|error| error.to_string())?;
+    drop(db);
+    let adjusted = run(&workspace, &["--read-only", "--min-confidence", "0"])?;
+    check_citation(&adjusted["data"]["citations"][0], &harmed)?;
+    assert_eq!(adjusted["data"]["citations"][0]["confidence"], 0.5);
+    let score = adjusted["data"]["confidenceComponents"]["topSpanScore"]
+        .as_f64()
+        .ok_or("missing adjusted span score")?;
+    assert!((score - base * 0.4).abs() < 0.000001, "{base} -> {score}");
+    let withheld = run(&workspace, &["--read-only"])?;
+    assert_eq!(withheld["data"]["abstained"], true);
+    assert_eq!(
+        withheld["data"]["nearestEvidence"][0]["evidenceId"],
+        harmed.id
+    );
+    let db = DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    assert_eq!(
+        db.list_feedback_events(&workspace_id)
+            .map_err(|error| error.to_string())?,
+        events
+    );
+    assert_eq!(
+        db.get_evidence_span(&harmed.id)
+            .map_err(|error| error.to_string())?,
+        Some(harmed)
     );
     Ok(())
 }

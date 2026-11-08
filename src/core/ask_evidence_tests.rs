@@ -6,8 +6,8 @@ use crate::core::ask::{
     render_ask_markdown,
 };
 use crate::db::{
-    CreateEvidenceSpanInput, CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput,
-    EvidenceProducerKind,
+    CreateEvidenceSpanInput, CreateFeedbackEventInput, CreateFeedbackQuarantineInput,
+    CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
 };
 use crate::models::{EvidenceId, MemoryId, SessionId, WorkspaceId};
 
@@ -104,12 +104,221 @@ fn request(corpus: &AskCorpus) -> AskRequest {
         question: QUESTION.to_owned(),
         contradictions: corpus.contradictions.clone(),
         native_sources: corpus.native_sources.clone(),
+        evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
         ..AskRequest::default()
     }
 }
 
 fn answer(corpus: &AskCorpus) -> AskReport {
     evaluate_ask(&request(corpus), &corpus.candidates)
+}
+
+fn feedback(
+    db: &DbConnection,
+    workspace: &str,
+    target_type: &str,
+    target_id: &str,
+    number: u32,
+    created_at: &str,
+) {
+    let id = format!("fb_{number:026}");
+    db.insert_feedback_event(
+        &id,
+        &CreateFeedbackEventInput {
+            workspace_id: workspace.to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target_id.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        },
+    )
+    .unwrap();
+    db.execute_raw(&format!(
+        "UPDATE feedback_events SET created_at = '{created_at}' WHERE id = '{id}'"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn accepted_evidence_feedback_changes_answers_at_the_exact_cutoff() {
+    let (_root, db, workspace) = fixture();
+    let session = session(&db, &workspace, 1);
+    let harmed = evidence(&db, &workspace, &session, 1, BODY);
+    let clean = evidence(&db, &workspace, &session, 2, BODY);
+    let cutoff = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let baseline = load_current_ask_corpus(&db, &workspace, cutoff).unwrap();
+    let baseline_report = answer(&baseline);
+    assert!(!baseline_report.abstained);
+    assert_eq!(baseline_report.citations[0].memory_id, harmed);
+    assert_eq!(baseline.evidence_harmful_counts.get(&harmed), Some(&0));
+    feedback(
+        &db,
+        &workspace,
+        "evidence",
+        &harmed,
+        1,
+        "2026-09-28T14:00:00.123456789+02:00",
+    );
+    // A one-nanosecond future event must not demote today's clean answer.
+    for number in 2..10 {
+        feedback(
+            &db,
+            &workspace,
+            "evidence",
+            &clean,
+            number,
+            "2026-09-28T12:00:00.123456790Z",
+        );
+    }
+    // Target kind is part of the identity even when the raw ID collides.
+    feedback(
+        &db,
+        &workspace,
+        "memory",
+        &clean,
+        10,
+        "invalid-other-kind-time",
+    );
+    let foreign = WorkspaceId::from_uuid(uuid::Uuid::from_u128(711)).to_string();
+    db.insert_workspace(
+        &foreign,
+        &CreateWorkspaceInput {
+            path: "/other-ask-feedback-workspace".to_owned(),
+            name: None,
+        },
+    )
+    .unwrap();
+    feedback(
+        &db,
+        &foreign,
+        "evidence",
+        &clean,
+        11,
+        "invalid-foreign-time",
+    );
+    db.insert_feedback_quarantine(
+        "fq_01234567890123456789012345",
+        &CreateFeedbackQuarantineInput {
+            workspace_id: workspace.clone(),
+            source_id: "test:pending-ask-evidence".to_owned(),
+            target_type: "evidence".to_owned(),
+            target_id: clean.clone(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "human_explicit".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-09-28T00:00:00Z".to_owned(),
+            reason: "pending review".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        },
+    )
+    .unwrap();
+    let before =
+        load_current_ask_corpus(&db, &workspace, cutoff - chrono::Duration::nanoseconds(1))
+            .unwrap();
+    assert_eq!(answer(&before).citations[0].memory_id, harmed);
+    let corpus = load_current_ask_corpus(&db, &workspace, cutoff).unwrap();
+    assert_eq!(corpus.evidence_harmful_counts.get(&harmed), Some(&1));
+    assert_eq!(corpus.evidence_harmful_counts.get(&clean), Some(&0));
+    let report = answer(&corpus);
+    assert!(!report.abstained && !report.conflict_detected);
+    assert_eq!(report.citations[0].memory_id, clean);
+    assert_eq!(
+        report.confidence.to_bits(),
+        baseline_report.confidence.to_bits()
+    );
+    let stored = db.get_evidence_span(&clean).unwrap().unwrap();
+    let data = ask_data_json(&report);
+    assert_eq!(data["citations"][0]["evidenceId"], clean);
+    assert_eq!(
+        data["citations"][0]["entityRevision"],
+        stored.pack_entity_revision()
+    );
+    assert_eq!(data["citations"][0]["confidence"], 0.5);
+    assert_eq!(data["citations"][0]["text"], BODY);
+    assert!(data["citations"][0].get("memoryId").is_none());
+    let mut reversed = corpus.clone();
+    reversed.candidates.reverse();
+    assert_eq!(data, ask_data_json(&answer(&reversed)));
+    let later = load_current_ask_corpus(&db, &workspace, cutoff + chrono::Duration::nanoseconds(1))
+        .unwrap();
+    assert_eq!(later.evidence_harmful_counts.get(&clean), Some(&8));
+    let mut lower_floor = request(&later);
+    lower_floor.min_confidence = 0.1;
+    assert_eq!(
+        evaluate_ask(&lower_floor, &later.candidates).citations[0].memory_id,
+        harmed
+    );
+    // The configured risk penalty affects answer confidence, not the source's
+    // confidence or its byte-exact abstention hint.
+    let only_harmed: Vec<_> = corpus
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.memory_id == harmed)
+        .cloned()
+        .collect();
+    let mut strict = request(&corpus);
+    strict.feedback_scoring_config.harmful_penalty_per_hit = 0.8;
+    let withheld = evaluate_ask(&strict, &only_harmed);
+    assert!(withheld.abstained);
+    assert!(withheld.citations.is_empty());
+    assert_eq!(
+        ask_data_json(&withheld)["nearestEvidence"][0]["evidenceId"],
+        harmed
+    );
+    assert_eq!(only_harmed[0].confidence, 0.5);
+}
+
+#[test]
+fn evidence_feedback_belongs_to_the_corpus_snapshot_and_unavailable_is_not_zero() {
+    let (root, db, workspace) = fixture();
+    let session = session(&db, &workspace, 1);
+    let harmed = evidence(&db, &workspace, &session, 1, BODY);
+    let clean = evidence(&db, &workspace, &session, 2, BODY);
+    let cutoff = DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let writer = DbConnection::open_file(&root.path().join(".ee/ee.db")).unwrap();
+    let pinned = load_corpus_with_boundary(&db, &workspace, cutoff, || {
+        feedback(
+            &writer,
+            &workspace,
+            "evidence",
+            &harmed,
+            1,
+            "2026-09-28T12:00:00Z",
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(pinned.evidence_harmful_counts.get(&harmed), Some(&0));
+    assert_eq!(answer(&pinned).citations[0].memory_id, harmed);
+    let fresh = load_current_ask_corpus(&db, &workspace, cutoff).unwrap();
+    assert_eq!(fresh.evidence_harmful_counts.get(&harmed), Some(&1));
+    assert_eq!(answer(&fresh).citations[0].memory_id, clean);
+    db.execute_raw("UPDATE feedback_events SET created_at = 'private-feedback-time-canary'")
+        .unwrap();
+    let error = load_current_ask_corpus(&db, &workspace, cutoff).unwrap_err();
+    assert!(matches!(error, DomainError::Storage { .. }));
+    assert!(!error.to_string().contains("private-feedback-time-canary"));
+    assert!(!error.to_string().contains(&harmed));
+    db.begin_read_snapshot().unwrap();
+    db.rollback_read_snapshot().unwrap();
+    // No evidence is admitted in this scope, so an irrelevant malformed
+    // evidence event cannot introduce a new failure into a memory/rule ask.
+    let narrow = load_scoped_ask_corpus(&db, &workspace, cutoff, MemoryScope::Global).unwrap();
+    assert!(narrow.candidates.is_empty());
+    assert!(narrow.evidence_harmful_counts.is_empty());
 }
 
 #[test]

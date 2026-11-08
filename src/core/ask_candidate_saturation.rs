@@ -8,18 +8,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::core::ask::{candidate_feedback_multiplier, score_candidate_span};
+
 use super::{
     AskCandidate, AskRequest, CORROBORATION_CAP, RankedCandidate, SpanScorer, best_span_score,
     support_key,
 };
 
-type SourceSignature<'a> = (&'a str, u32, &'a str);
+type SourceSignature<'a> = (&'a str, u32, &'a str, u32);
 
-fn source_signature(candidate: &AskCandidate) -> SourceSignature<'_> {
+fn source_signature<'a>(request: &AskRequest, candidate: &'a AskCandidate) -> SourceSignature<'a> {
     (
         candidate.content.as_str(),
         candidate.confidence.to_bits(),
         candidate.trust_class.as_str(),
+        candidate_feedback_multiplier(request, candidate).to_bits(),
     )
 }
 
@@ -56,8 +59,11 @@ pub(super) fn preserve_distinct_answers<'a>(
         admitted_bodies.insert(candidate.content.as_str());
         // Matching only the best sentence would lose other facts in the body.
         // Matching only the body could discard a distinct trust/confidence
-        // input that changes scores for its other spans. Require all three.
-        let origins = support.entry(source_signature(candidate)).or_default();
+        // input that changes scores for its other spans. Feedback must match
+        // too: identical prose can have different accepted outcomes.
+        let origins = support
+            .entry(source_signature(request, candidate))
+            .or_default();
         if origins.len() >= support_limit
             || !origins.insert(support_key(&candidate.memory_id, groups))
         {
@@ -84,7 +90,7 @@ pub(super) fn preserve_distinct_answers<'a>(
         }
         let entry = RankedCandidate {
             candidate,
-            score: best_span_score(question_terms, candidate, scorer),
+            score: best_span_score(request, question_terms, candidate, scorer),
         };
         if !entry.score.is_finite() || entry.score <= 0.0 || entry.score < request.min_confidence {
             continue;
@@ -160,21 +166,21 @@ fn corroborated_answers<'a>(
         })
         .collect();
     candidates.sort_by(|left, right| {
-        source_signature(left)
-            .cmp(&source_signature(right))
+        source_signature(request, left)
+            .cmp(&source_signature(request, right))
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     let mut by_cost: Vec<Vec<Vec<RankedCandidate<'a>>>> =
         (0..=max_support).map(|_| Vec::new()).collect();
     for body in candidates.chunk_by(|left, right| left.content == right.content) {
         let mut best_bundle: Option<Vec<RankedCandidate<'a>>> = None;
-        for signature in
-            body.chunk_by(|left, right| source_signature(left) == source_signature(right))
-        {
+        for signature in body.chunk_by(|left, right| {
+            source_signature(request, left) == source_signature(request, right)
+        }) {
             // chunk_by only yields nonempty slices, ordered by source ID
-            // within one body/confidence/trust signature.
+            // within one body/confidence/trust/feedback signature.
             let first = signature[0];
-            let score = best_span_score(question_terms, first, scorer);
+            let score = best_span_score(request, question_terms, first, scorer);
             if !score.is_finite() || score <= 0.0 || score >= request.min_confidence {
                 continue;
             }
@@ -188,7 +194,7 @@ fn corroborated_answers<'a>(
                     if tokenize_for_ask(text).is_empty() {
                         return None;
                     }
-                    let score = scorer(question_terms, text, first.confidence, &first.trust_class);
+                    let score = score_candidate_span(request, first, question_terms, text, scorer);
                     (score.is_finite() && score > 0.0).then_some(score)
                 })
                 .fold(0.0, f32::max);
@@ -549,6 +555,67 @@ mod tests {
         }
         assert!(crate::core::ask::tokenize_for_ask("+++").is_empty());
         assert!(select(&rows, 32).iter().all(|row| row.content == COMMON));
+    }
+
+    #[test]
+    fn harmful_exact_copies_cannot_borrow_a_clean_sources_bundle_score() {
+        let mut request = AskRequest::default();
+        let mut rows: Vec<_> = (0..80)
+            .map(|index| candidate(&format!("a-{index:05}"), COMMON, 0.7))
+            .collect();
+        for number in 1..=2 {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(number));
+            let mut source = candidate(&id.to_string(), DISTINCT, 0.54);
+            source.provenance_uri = Some(format!("cass-session://distinct-{number}#L1"));
+            request.native_sources.insert(
+                source.memory_id.clone(),
+                crate::core::ask::AskNativeSource {
+                    entity: crate::pack::PackEntityRef::EvidenceSpan(id),
+                    entity_revision: format!(
+                        "blake3:{}",
+                        blake3::hash(DISTINCT.as_bytes()).to_hex()
+                    ),
+                    source_memory_ids: Vec::new(),
+                },
+            );
+            request
+                .evidence_harmful_counts
+                .insert(source.memory_id.clone(), 0);
+            rows.push(source);
+        }
+        let scorer = |_: &[String], _: &str, confidence: f32, _: &str| confidence;
+        let selected = select_candidates_with_scorer(&request, &[], &rows, 32, &scorer).unwrap();
+        assert_eq!(distinct_ids(&selected).len(), 2);
+        let clean = rows[80].memory_id.clone();
+        let harmed = rows[81].memory_id.clone();
+        request.evidence_harmful_counts.insert(harmed.clone(), 8);
+        let unique = rows
+            .iter()
+            .map(|row| (row.memory_id.as_str(), row))
+            .collect();
+        // Test the bundle stage directly: its first source is clean and has
+        // the exact same text/confidence/trust as the harmful second source.
+        // One clean subthreshold source cannot manufacture two clean votes.
+        let bundles = corroborated_answers(
+            &request,
+            &[],
+            &unique,
+            &BTreeSet::from([COMMON]),
+            &BTreeMap::new(),
+            &scorer,
+            8,
+            8,
+        );
+        assert!(bundles.is_empty());
+        assert_ne!(
+            source_signature(&request, &rows[80]),
+            source_signature(&request, &rows[81])
+        );
+        // Applying equal feedback again makes the signatures match, but their
+        // shared score is now too weak to form a corroborating answer.
+        request.evidence_harmful_counts.insert(clean, 8);
+        let selected = select_candidates_with_scorer(&request, &[], &rows, 32, &scorer).unwrap();
+        assert!(distinct_ids(&selected).is_empty());
     }
 
     #[test]

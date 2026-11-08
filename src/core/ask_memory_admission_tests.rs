@@ -107,6 +107,7 @@ fn inactive_and_withheld_bodies_never_reach_the_body_decoder() {
             question: "Run cargo fmt before release".to_owned(),
             contradictions: corpus.contradictions,
             native_sources: corpus.native_sources,
+            evidence_harmful_counts: corpus.evidence_harmful_counts,
             ..AskRequest::default()
         },
         &corpus.candidates,
@@ -374,6 +375,7 @@ fn metadata_paging_bounds_inactive_history_without_dropping_late_evidence() {
             question: BODY.to_owned(),
             contradictions: corpus.contradictions,
             native_sources: corpus.native_sources,
+            evidence_harmful_counts: corpus.evidence_harmful_counts,
             ..AskRequest::default()
         },
         &corpus.candidates,

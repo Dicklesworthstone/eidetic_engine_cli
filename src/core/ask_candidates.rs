@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 use super::{
     AskCandidate, AskContradiction, AskRequest, SpanScorer, has_negation, same_conflict_topic,
-    score_span, segment_spans, tokenize_for_ask, trust_tilt,
+    score_candidate_span, score_span, segment_spans, tokenize_for_ask, trust_tilt,
 };
 
 #[path = "ask_candidate_diversity.rs"]
@@ -64,6 +64,7 @@ fn same_source(left: &AskCandidate, right: &AskCandidate) -> bool {
 }
 
 fn best_span_score(
+    request: &AskRequest,
     question_terms: &[String],
     candidate: &AskCandidate,
     scorer: SpanScorer<'_>,
@@ -71,11 +72,12 @@ fn best_span_score(
     segment_spans(&candidate.content)
         .into_iter()
         .map(|(start, end)| {
-            scorer(
+            score_candidate_span(
+                request,
+                candidate,
                 question_terms,
                 &candidate.content[start..end],
-                candidate.confidence,
-                &candidate.trust_class,
+                scorer,
             )
         })
         .fold(0.0, f32::max)
@@ -138,7 +140,7 @@ pub(super) fn select_candidates_with_scorer<'a>(
         }
         let ranked = RankedCandidate {
             candidate,
-            score: best_span_score(question_terms, candidate, scorer),
+            score: best_span_score(request, question_terms, candidate, scorer),
         };
         if retained.len() < limit {
             retained.push(ranked);
@@ -262,7 +264,7 @@ fn preserve_linked_opposition<'a>(
             let last = ranked.len() - 1;
             ranked[last] = RankedCandidate {
                 candidate: other,
-                score: best_span_score(question_terms, other, scorer),
+                score: best_span_score(request, question_terms, other, scorer),
             };
             ranked.sort();
         }
@@ -301,11 +303,12 @@ fn preserve_inferred_opposition<'a>(
         segment_spans(&anchor.candidate.content)
             .into_iter()
             .find(|&(start, end)| {
-                scorer(
+                score_candidate_span(
+                    request,
+                    anchor.candidate,
                     question_terms,
                     &anchor.candidate.content[start..end],
-                    anchor.candidate.confidence,
-                    &anchor.candidate.trust_class,
+                    scorer,
                 )
                 .total_cmp(&anchor.score)
                     == Ordering::Equal
@@ -327,12 +330,7 @@ fn preserve_inferred_opposition<'a>(
             {
                 continue;
             }
-            let score = scorer(
-                question_terms,
-                text,
-                candidate.confidence,
-                &candidate.trust_class,
-            );
+            let score = score_candidate_span(request, candidate, question_terms, text, scorer);
             if score < request.min_confidence
                 || (!numeric_opposition
                     && !same_conflict_topic(&anchor_terms, &tokenize_for_ask(text)))
@@ -359,7 +357,7 @@ fn preserve_inferred_opposition<'a>(
     let last = ranked.len() - 1;
     ranked[last] = RankedCandidate {
         candidate: opposition.candidate,
-        score: best_span_score(question_terms, opposition.candidate, scorer),
+        score: best_span_score(request, question_terms, opposition.candidate, scorer),
     };
     ranked.sort();
 }

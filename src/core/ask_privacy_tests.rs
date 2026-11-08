@@ -202,6 +202,7 @@ fn citation_metadata_is_sanitized_without_rewriting_the_body() {
             candidates: vec![admitted],
             contradictions: vec![],
             native_sources: BTreeMap::new(),
+            evidence_harmful_counts: BTreeMap::new(),
         },
         0.0,
     );
@@ -225,6 +226,7 @@ fn public_provenance_and_unicode_byte_offsets_are_preserved() {
             candidates: vec![candidate],
             contradictions: vec![],
             native_sources: BTreeMap::new(),
+            evidence_harmful_counts: BTreeMap::new(),
         },
         0.55,
     );
@@ -382,6 +384,7 @@ fn risk_advice_reaches_answers_without_laundering_private_or_authority_content()
         question: "What should I avoid when cleaning the workspace?".to_owned(),
         contradictions: corpus.contradictions.clone(),
         native_sources: corpus.native_sources.clone(),
+        evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
         ..AskRequest::default()
     };
     let report = evaluate_ask(&request, &corpus.candidates);
@@ -453,6 +456,7 @@ fn encoded_citation_fallback_preserves_real_identity_and_extractive_bytes() {
             candidates: vec![admitted],
             contradictions: Vec::new(),
             native_sources: BTreeMap::new(),
+            evidence_harmful_counts: BTreeMap::new(),
         };
         let report = answer(&corpus, 0.55);
         assert!(!report.abstained);
@@ -531,6 +535,7 @@ fn real_store_document_copies_abstain_but_a_direct_answer_remains_retrievable() 
             question: question.to_owned(),
             contradictions: corpus.contradictions.clone(),
             native_sources: corpus.native_sources.clone(),
+            evidence_harmful_counts: corpus.evidence_harmful_counts.clone(),
             ..AskRequest::default()
         };
         let report = evaluate_ask(&request, &corpus.candidates);
