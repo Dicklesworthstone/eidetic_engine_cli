@@ -1,7 +1,7 @@
 //! Real global-store authority reads, including historical and primer semantics.
 
 use super::*;
-use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+use crate::db::{CreateFeedbackQuarantineInput, CreateMemoryInput, CreateWorkspaceInput};
 use chrono::{DateTime, Utc};
 
 const PRIOR: &str = "mem_00000000000000000000000041";
@@ -62,6 +62,37 @@ fn ids(rows: &[StoredMemory]) -> Vec<&str> {
     let mut ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
     ids.sort_unstable();
     ids
+}
+
+fn hold(
+    db: &DbConnection,
+    number: u32,
+    workspace: &str,
+    target_type: &str,
+    target: &str,
+) -> Result<String, String> {
+    let id = format!("fq_{number:026}");
+    db.insert_feedback_quarantine(
+        &id,
+        &CreateFeedbackQuarantineInput {
+            workspace_id: workspace.to_owned(),
+            source_id: "PRIVATE-GLOBAL-REVIEW-SOURCE".to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+            reason: "PRIVATE-GLOBAL-REVIEW-REASON".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 #[test]
@@ -153,6 +184,134 @@ fn global_reader_preserves_tombstone_flags_and_workspace_ownership() -> TestResu
     db.tombstone_memory(HEAD).map_err(|e| e.to_string())?;
     assert!(read_global_store_memories(&paths, false)?.is_empty());
     assert_eq!(ids(&read_global_store_memories(&paths, true)?), [HEAD]);
+    Ok(())
+}
+
+#[test]
+fn global_review_holds_apply_to_current_and_historical_reads_without_mutation() -> TestResult {
+    let (_root, paths, db, workspace) = fixture()?;
+    db.insert_memory(SEALED, &input(&workspace, "Uncontested global guidance."))
+        .map_err(|e| e.to_string())?;
+    let historical = Some(at("2026-05-01T00:00:00Z"));
+    assert_eq!(
+        ids(&read_global_store_memories_at(&paths, true, historical)?),
+        [PRIOR, HEAD, SEALED]
+    );
+    hold(&db, 1, &workspace, "memory", PRIOR)?;
+    hold(&db, 2, &workspace, "memory", HEAD)?;
+    let rows = db
+        .list_memories(&workspace, None, true)
+        .map_err(|e| e.to_string())?;
+    let generation = db
+        .get_workspace_generation(&workspace)
+        .map_err(|e| e.to_string())?;
+    let audits = db
+        .count_table_rows("audit_log")
+        .map_err(|e| e.to_string())?;
+    for include_tombstoned in [false, true] {
+        for reference in [None, historical, Some(at(CUTOFF))] {
+            let admitted = read_global_store_memories_at(&paths, include_tombstoned, reference)?;
+            assert_eq!(ids(&admitted), [SEALED]);
+            assert_eq!(admitted[0].content, "Uncontested global guidance.");
+        }
+    }
+    assert_eq!(
+        db.list_memories(&workspace, None, true)
+            .map_err(|e| e.to_string())?,
+        rows
+    );
+    assert_eq!(
+        db.get_workspace_generation(&workspace)
+            .map_err(|e| e.to_string())?,
+        generation
+    );
+    assert_eq!(
+        db.count_table_rows("audit_log")
+            .map_err(|e| e.to_string())?,
+        audits
+    );
+    Ok(())
+}
+
+#[test]
+fn global_review_release_requires_all_matching_holds_to_be_resolved() -> TestResult {
+    let (_root, paths, db, workspace) = fixture()?;
+    let foreign = "wsp_00000000000000000000000044";
+    db.insert_workspace(
+        foreign,
+        &CreateWorkspaceInput {
+            path: paths.root.join("other").to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    hold(&db, 1, foreign, "memory", HEAD)?;
+    hold(&db, 2, &workspace, "rule", HEAD)?;
+    assert_eq!(ids(&read_global_store_memories(&paths, false)?), [HEAD]);
+    let first = hold(&db, 3, &workspace, "memory", HEAD)?;
+    let second = hold(&db, 4, &workspace, "memory", HEAD)?;
+    assert!(read_global_store_memories(&paths, false)?.is_empty());
+    assert!(
+        db.update_feedback_quarantine_status(&first, "released", Some("operator"), None)
+            .map_err(|e| e.to_string())?
+    );
+    assert!(read_global_store_memories(&paths, false)?.is_empty());
+    assert!(
+        db.update_feedback_quarantine_status(&second, "rejected", Some("operator"), None)
+            .map_err(|e| e.to_string())?
+    );
+    assert_eq!(ids(&read_global_store_memories(&paths, false)?), [HEAD]);
+    // Resolving review does not override another live exclusion.
+    db.tombstone_memory(HEAD).map_err(|e| e.to_string())?;
+    assert!(read_global_store_memories(&paths, false)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn global_review_changes_preserve_the_callers_read_snapshot() -> TestResult {
+    let (_root, paths, writer, workspace) = fixture()?;
+    let reader =
+        DbConnection::open_file_read_only(&paths.database_path).map_err(|e| e.to_string())?;
+    reader.begin_read_snapshot().map_err(|e| e.to_string())?;
+    let before = read_global_rows_in_snapshot(&reader, &paths, false, None)?;
+    assert_eq!(ids(&before), [HEAD]);
+    let pending = hold(&writer, 1, &workspace, "memory", HEAD)?;
+    assert_eq!(
+        read_global_rows_in_snapshot(&reader, &paths, false, None)?,
+        before
+    );
+    reader.commit_read_snapshot().map_err(|e| e.to_string())?;
+    reader.begin_read_snapshot().map_err(|e| e.to_string())?;
+    assert!(read_global_rows_in_snapshot(&reader, &paths, false, None)?.is_empty());
+    assert!(
+        writer
+            .update_feedback_quarantine_status(&pending, "released", Some("operator"), None)
+            .map_err(|e| e.to_string())?
+    );
+    assert!(read_global_rows_in_snapshot(&reader, &paths, false, None)?.is_empty());
+    reader.commit_read_snapshot().map_err(|e| e.to_string())?;
+    assert_eq!(ids(&read_global_store_memories(&paths, false)?), [HEAD]);
+    Ok(())
+}
+
+#[test]
+fn unreadable_global_review_authority_withholds_the_lane_without_private_details() -> TestResult {
+    let (_root, paths, db, workspace) = fixture()?;
+    hold(&db, 1, &workspace, "memory", HEAD)?;
+    db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO PRIVATE_GLOBAL_REVIEW_AUTHORITY")
+        .map_err(|e| e.to_string())?;
+    let before = std::fs::read(&paths.database_path).map_err(|e| e.to_string())?;
+    for reference in [None, Some(at("2026-05-01T00:00:00Z"))] {
+        let error = read_global_store_memories_at(&paths, true, reference)
+            .expect_err("missing review authority must withhold the global lane");
+        assert_eq!(error, global_read_error("ignored"));
+        assert!(!error.contains("PRIVATE"));
+        assert!(!error.contains(&paths.database_path.to_string_lossy().into_owned()));
+    }
+    assert_eq!(
+        std::fs::read(&paths.database_path).map_err(|e| e.to_string())?,
+        before
+    );
     Ok(())
 }
 

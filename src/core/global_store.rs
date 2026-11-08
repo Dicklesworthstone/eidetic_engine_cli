@@ -743,7 +743,8 @@ pub fn read_global_store_memories(
     read_global_store_memories_at(paths, include_tombstoned, None)
 }
 
-/// Read global memory bodies, revision markers and seals in one source snapshot.
+/// Read global memory bodies, revision markers, seals and pending review holds
+/// in one source snapshot. Live review holds apply even to historical reads.
 /// `Some(as_of)` preserves history until the exclusive supersession boundary;
 /// `None` selects current heads without consulting the clock. Author expiry is
 /// deliberately left to each caller's existing validity-window policy.
@@ -817,6 +818,16 @@ fn read_global_rows_in_snapshot(
         .filter(|seal| seal.is_sealed())
         .map(|seal| seal.memory_id)
         .collect::<std::collections::BTreeSet<_>>();
+    let candidate_ids = memories
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<_>>();
+    let pending_review = crate::core::memory_lifecycle::pending_memory_review_ids(
+        connection,
+        &workspace.id,
+        &candidate_ids,
+    )
+    .map_err(global_read_error)?;
     let mut admitted = Vec::with_capacity(memories.len());
     for memory in memories {
         if memory.tombstoned_at.is_some() && !include_tombstoned {
@@ -828,7 +839,7 @@ fn read_global_rows_in_snapshot(
                 continue;
             }
         }
-        if !closed_seals.contains(&memory.id) {
+        if !closed_seals.contains(&memory.id) && !pending_review.contains(&memory.id) {
             admitted.push(memory);
         }
     }
