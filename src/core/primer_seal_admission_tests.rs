@@ -1,7 +1,7 @@
 //! Real cold/warm primer admission, including changes with no generation bump.
 
 use super::*;
-use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+use crate::db::{CreateFeedbackQuarantineInput, CreateMemoryInput, CreateWorkspaceInput};
 use crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT;
 
 type TestResult = Result<(), String>;
@@ -81,6 +81,217 @@ fn seal(db: &DbConnection, id: &str) -> TestResult {
         "2026-06-01T00:00:00Z",
     )
     .map_err(|e| e.to_string())
+}
+
+fn hold(
+    db: &DbConnection,
+    number: u32,
+    workspace: &str,
+    target_type: &str,
+    target: &str,
+) -> TestResult {
+    db.insert_feedback_quarantine(
+        &format!("fq_{number:026}"),
+        &CreateFeedbackQuarantineInput {
+            workspace_id: workspace.to_owned(),
+            source_id: "PRIVATE-PRIMER-REVIEW-SOURCE".to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-06-01T00:00:00Z".to_owned(),
+            reason: "PRIVATE-PRIMER-REVIEW-REASON".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn resolve_hold(db: &DbConnection, number: u32, status: &str) -> TestResult {
+    assert!(
+        db.update_feedback_quarantine_status(
+            &format!("fq_{number:026}"),
+            status,
+            Some("operator"),
+            None,
+        )
+        .map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+#[test]
+fn primer_pending_reviews_invalidate_warm_cache_without_generation_changes() -> TestResult {
+    let db = fixture()?;
+    let original = primer(&db, true)?;
+    assert_eq!(ids(&original), BTreeSet::from([CONTROL, SEALED]));
+    assert!(primer(&db, true)?.cache_hit);
+    let generation = db
+        .get_workspace_generation(WORKSPACE)
+        .map_err(|e| e.to_string())?;
+    hold(&db, 70, WORKSPACE, "memory", CONTROL)?;
+    hold(&db, 71, WORKSPACE, "memory", CONTROL)?;
+    let admitted = primer(&db, true)?;
+    assert!(!admitted.cache_hit);
+    assert_eq!(ids(&admitted), BTreeSet::from([SEALED]));
+    let serialized = serde_json::to_string(&admitted).map_err(|e| e.to_string())?;
+    for private in [
+        CONTROL,
+        "Always retain reviewed deployment evidence.",
+        "PRIVATE-PRIMER-REVIEW",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+    let mut repeated = primer(&db, true)?;
+    assert!(repeated.cache_hit);
+    repeated.cache_hit = false;
+    assert_eq!(repeated, admitted);
+
+    // Resolving one of several pending events cannot restore the memory.
+    resolve_hold(&db, 70, "released")?;
+    assert_eq!(ids(&primer(&db, true)?), BTreeSet::from([SEALED]));
+    resolve_hold(&db, 71, "rejected")?;
+    let restored = primer(&db, true)?;
+    assert_eq!(restored.sections, original.sections);
+    assert_eq!(
+        db.get_workspace_generation(WORKSPACE)
+            .map_err(|e| e.to_string())?,
+        generation
+    );
+    Ok(())
+}
+
+#[test]
+fn primer_review_admission_preserves_ownership_source_and_caller_snapshot() -> TestResult {
+    let db = fixture()?;
+    let other = "wsp_00000000000000000000000059";
+    db.insert_workspace(
+        other,
+        &CreateWorkspaceInput {
+            path: "/primer-other-review-owner".to_owned(),
+            name: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    hold(&db, 72, other, "memory", CONTROL)?;
+    hold(&db, 73, WORKSPACE, "rule", CONTROL)?;
+    assert_eq!(ids(&primer(&db, true)?), BTreeSet::from([CONTROL, SEALED]));
+    assert!(primer(&db, true)?.cache_hit);
+    hold(&db, 74, WORKSPACE, "memory", SEALED)?;
+    let memories = db
+        .list_memories(WORKSPACE, None, true)
+        .map_err(|e| e.to_string())?;
+    let reviews = db
+        .list_feedback_quarantine(WORKSPACE, None)
+        .map_err(|e| e.to_string())?;
+    let cache_count = db
+        .count_table_rows("primer_cache")
+        .map_err(|e| e.to_string())?;
+
+    db.begin_read_snapshot().map_err(|e| e.to_string())?;
+    let admitted = primer(&db, false)?;
+    assert!(!admitted.cache_hit);
+    assert_eq!(ids(&admitted), BTreeSet::from([CONTROL]));
+    db.commit_read_snapshot().map_err(|e| e.to_string())?;
+
+    assert_eq!(
+        db.list_memories(WORKSPACE, None, true)
+            .map_err(|e| e.to_string())?,
+        memories
+    );
+    assert_eq!(
+        db.list_feedback_quarantine(WORKSPACE, None)
+            .map_err(|e| e.to_string())?,
+        reviews
+    );
+    assert_eq!(
+        db.count_table_rows("primer_cache")
+            .map_err(|e| e.to_string())?,
+        cache_count
+    );
+    Ok(())
+}
+
+#[test]
+fn primer_unavailable_review_authority_never_serves_a_warm_cache() -> TestResult {
+    let db = fixture()?;
+    assert_eq!(ids(&primer(&db, true)?), BTreeSet::from([CONTROL, SEALED]));
+    assert!(primer(&db, true)?.cache_hit);
+    let cache_count = db
+        .count_table_rows("primer_cache")
+        .map_err(|e| e.to_string())?;
+    db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO PRIVATE_PRIMER_REVIEW_AUTHORITY")
+        .map_err(|e| e.to_string())?;
+    let error = primer(&db, true).expect_err("review admission must precede cached content");
+    assert!(error.contains("Could not verify primer review authority"));
+    for private in [
+        CONTROL,
+        "reviewed deployment evidence",
+        "PRIVATE_PRIMER",
+        "feedback_quarantine",
+    ] {
+        assert!(!error.contains(private));
+    }
+    assert_eq!(
+        db.count_table_rows("primer_cache")
+            .map_err(|e| e.to_string())?,
+        cache_count
+    );
+    Ok(())
+}
+
+#[test]
+fn primer_review_holds_apply_before_local_global_precedence_and_cache() -> TestResult {
+    use crate::core::global_store::{GlobalStorePaths, open_or_create_global_store};
+    let local = fixture()?;
+    seal(&local, SEALED)?;
+    let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = root.path().canonicalize().map_err(|e| e.to_string())?;
+    let paths = GlobalStorePaths::from_root(&path.join("global"));
+    let (global, workspace) = open_or_create_global_store(&paths)?;
+    let global_id = "mem_00000000000000000000000058";
+    global
+        .insert_memory(
+            global_id,
+            &input(&workspace, "Always retain reviewed deployment evidence."),
+        )
+        .map_err(|e| e.to_string())?;
+    let run = || {
+        run_primer_with_global_lane(&local, WORKSPACE, &settings(), false, true, Some(&paths))
+            .map_err(|e| e.to_string())
+    };
+    assert_eq!(ids(&run()?), BTreeSet::from([CONTROL]));
+    assert!(run()?.cache_hit);
+    let generation = local
+        .get_workspace_generation(WORKSPACE)
+        .map_err(|e| e.to_string())?;
+
+    hold(&local, 75, WORKSPACE, "memory", CONTROL)?;
+    let fallback = run()?;
+    assert!(!fallback.cache_hit);
+    assert_eq!(ids(&fallback), BTreeSet::from([global_id]));
+    assert!(run()?.cache_hit);
+    hold(&global, 76, &workspace, "memory", global_id)?;
+    let withheld = run()?;
+    assert!(!withheld.cache_hit);
+    assert!(ids(&withheld).is_empty());
+    assert!(run()?.cache_hit);
+    resolve_hold(&global, 76, "rejected")?;
+    assert_eq!(ids(&run()?), BTreeSet::from([global_id]));
+    resolve_hold(&local, 75, "released")?;
+    assert_eq!(ids(&run()?), BTreeSet::from([CONTROL]));
+    assert_eq!(
+        local
+            .get_workspace_generation(WORKSPACE)
+            .map_err(|e| e.to_string())?,
+        generation
+    );
+    Ok(())
 }
 
 #[test]

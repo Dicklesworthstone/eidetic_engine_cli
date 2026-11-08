@@ -10,8 +10,8 @@
 //! missing — never recomputed inline (latency contract). Output is
 //! byte-identical for identical `(workspace_id, db_generation, config_hash,
 //! budget, format)` keys, which is also the `primer_cache` cache key. The
-//! internal config key also binds the observed graph, global-lane and seal
-//! state and the currently applicable memory identities: changes to those
+//! internal config key also binds the observed graph, global-lane, seal and
+//! review state and the currently applicable memory identities: changes to those
 //! inputs need not advance the workspace generation. Orchestration samples
 //! one reference time for validity admission; pure assembly still uses only
 //! stored timestamps and ids. Time passing without a validity transition
@@ -756,6 +756,8 @@ fn run_primer_with_global_lane_at(
     let (closed_seals, seal_authority_hash) = primer_seal_admission(connection, workspace_id)?;
     let (applicable_memories, validity_state_hash) =
         primer_validity_admission(connection, workspace_id, reference_time)?;
+    let (held_memories, review_authority_hash) =
+        primer_review_admission(connection, workspace_id, &applicable_memories)?;
     // Graph refresh/status writes do not advance the workspace generation.
     // Read the selected snapshot once, before a cache lookup, so the identity
     // and the scores used below describe the same observation. In particular,
@@ -788,11 +790,11 @@ fn run_primer_with_global_lane_at(
             global_store_lane_hash(&global_rows, global_lane_degraded.as_ref())
         )
     };
-    // Seal-only writes do not advance workspace generations. Bind admission
-    // before any cache lookup, and version the key so pre-admission cached
-    // responses cannot reappear when all seals have subsequently been revealed.
+    // Seal and review-only writes do not advance workspace generations. Bind
+    // admission before cache lookup, and version the key so pre-admission cached
+    // responses cannot reappear after every seal or review hold is resolved.
     let cache_config_hash = format!(
-        "{cache_config_hash}+seals:{seal_authority_hash}+graph:{centrality_state_hash}+validity:{validity_state_hash}"
+        "{cache_config_hash}+seals:{seal_authority_hash}+graph:{centrality_state_hash}+validity:{validity_state_hash}+review:{review_authority_hash}"
     );
 
     if !refresh
@@ -819,6 +821,7 @@ fn run_primer_with_global_lane_at(
     let mut candidates = Vec::with_capacity(memories.len());
     for memory in &memories {
         if closed_seals.contains(&memory.id)
+            || held_memories.contains(&memory.id)
             || !applicable_memories.contains(&memory.id)
             // Recheck the hydrated row at the same instant. Without a
             // caller-owned snapshot, a concurrent validity edit must not
@@ -971,6 +974,37 @@ fn primer_seal_admission(
         hash.update(b"\0");
     }
     Ok((closed, hash.finalize().to_hex().to_string()))
+}
+
+/// Current review holds apply even when a cached primer predates the feedback.
+/// Bind exact workspace-owned memory identities before cache lookup and before
+/// local/global precedence. The shared reader checks only pending memory holds
+/// and reuses any caller-owned snapshot without releasing it.
+fn primer_review_admission(
+    connection: &DbConnection,
+    workspace_id: &str,
+    applicable_memories: &BTreeSet<String>,
+) -> crate::db::Result<(BTreeSet<String>, String)> {
+    let candidate_ids = applicable_memories
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let held = crate::core::memory_lifecycle::pending_memory_review_ids(
+        connection,
+        workspace_id,
+        &candidate_ids,
+    )
+    .map_err(|_| crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Could not verify primer review authority; cached and fresh content were withheld"
+            .to_owned(),
+    })?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.primer.review_admission.v1\0");
+    for id in &held {
+        hash_primer_cache_field(&mut hash, id.as_bytes());
+    }
+    Ok((held, hash.finalize().to_hex().to_string()))
 }
 
 #[cfg(test)]
