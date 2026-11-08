@@ -2125,8 +2125,8 @@ run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
 # median of three; wall clock including interpreter startup, which is what this
 # stage actually costs verify.sh. The two arms added that day cost nothing
 # measurable -- the self-test median did not move off 60ms -- so arm count is
-# not what this budget is sensitive to. Both rows declare the manifest's 1s floor for
-# sub-second checks, so the pair is nowhere near its declared budget. The arm
+# not what this budget is sensitive to. Both rows declare the manifest's 1s
+# floor for sub-second checks, so the pair is nowhere near its budget. The arm
 # count is stated HERE only -- verify-budget.toml carries the timings alone, so
 # a new arm does not oblige an edit in two files that can then disagree.
 run_stage "Lexical Analyzer Revision Contract" "python3 scripts/check-lexical-analyzer-revision.py --self-test"

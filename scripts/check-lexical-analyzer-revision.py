@@ -107,10 +107,25 @@ def strip_rust_comments(source: str) -> str:
     for a line number to rot) has both a brace and double quotes inside the
     literal.
 
-    Raw IDENTIFIERS are the exception, and that is why arm26/arm27 exist: those
+    Raw IDENTIFIERS are the exception, and the reason arm26/arm27 exist: those
     files carry ZERO of them (measured 2026-11-08), so live code cannot cover
-    that branch and the argument above does not reach it. Plain strings keep
-    arm11/arm12 for the over-stripping direction.
+    that branch and the argument above does not reach it. `r#type` is a name,
+    not a literal, and the `source[j] == '"'` guard below is what makes it fall
+    through instead of opening a raw string.
+
+    What that guard protects is ANSWERABILITY, not a false pass -- measured, not
+    assumed, because an earlier version of this comment claimed the dangerous
+    direction and was wrong. Remove it and the scan treats `r#type` as a raw
+    string hunting a `"#` terminator. With no `"#` after it the stripper raises
+    and the gate stops answering at all; that is what arm26 catches. With a `"#`
+    downstream it finds one and appends the whole span VERBATIM, so the text
+    survives and the verdict stays 0 -- the span is merely reclassified as a
+    literal and comments inside it stop being stripped, whose only consequence
+    is a false RED if such a comment is later edited. Both directions are
+    fail-safe, so the guard earns its place by keeping the gate usable once any
+    of these files grows its first raw identifier, not by averting a silent
+    pass. Plain strings keep arm11/arm12 for the over-stripping direction, which
+    is the genuinely dangerous one.
 
     Do not try to re-measure those populations with a regex over the source, and
     do not assume the error has a direction. Substring false positives INFLATE:
@@ -119,10 +134,7 @@ def strip_rust_comments(source: str) -> str:
     Counting matching LINES rather than occurrences DEFLATES, because one line
     can carry several literals. An earlier draft of this comment quoted such
     numbers; they were wrong in both directions at once, which is why no
-    population figure appears here now. Raw IDENTIFIERS (`r#type`) are the one form
-    that must NOT be consumed as a raw string; the `source[j] == '"'` guard is
-    what makes them fall through, and removing it would swallow the file from
-    there to the next quote.
+    population figure appears here now.
     """
     out: list[str] = []
     i = 0
@@ -696,10 +708,14 @@ def self_test() -> int:
     # gate strips carry ZERO of them (measured 2026-11-08) -- so the argument
     # that live code exercises every stripper branch, which holds for raw, byte
     # and char literals, does not reach this one. A synthetic arm is its only
-    # cover. Consuming `r#ident` as a raw string would scan for a `"#`
-    # terminator and swallow the analysis after it: silently where some later
-    # `"#` exists, as a refusal where none does. Both land as this baseline
-    # failing.
+    # cover.
+    #
+    # This arm defends ANSWERABILITY. Measured by deleting the guard: with no
+    # `"#` after the identifier the stripper raises and the gate cannot answer,
+    # which is the case below. The other direction -- a `"#` downstream -- keeps
+    # the verdict at 0 because the span is appended verbatim, so this arm does
+    # not cover it and does not need to: its only cost is a false RED on a later
+    # comment edit inside that span. See strip_rust_comments' docstring.
     raw_ident_maintenance = mutate(
         SYNTH_MAINTENANCE,
         "    index.tokenizers().register(",
