@@ -13161,6 +13161,7 @@ pub fn unrelated_context() -> u64 {{
                 &runtime_profile,
                 true,
                 &search_report,
+                "blake3:test-calibration-input",
             )
         };
 
@@ -13180,6 +13181,142 @@ pub fn unrelated_context() -> u64 {{
             "the cache key must bind the floor value as well as its presence",
         );
         assert_eq!(explicit_positive, feature_hash(&options));
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn pack_l2_identity_tracks_feedback_outside_retrieved_candidates() -> TestResult {
+        let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        options.memory_scope = MemoryScope::Workspace;
+        options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        // This target is deliberately outside the retrieval pool. A derived
+        // card found later during assembly must still bind the complete ledger.
+        let target_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x52_0902)).to_string();
+        let event_id = "fb_52000000000000000000000902";
+        connection
+            .insert_feedback_event(
+                event_id,
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "evidence".to_owned(),
+                    target_id: target_id.clone(),
+                    signal: "neutral".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let search_options = SearchOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: None,
+            query: options.query.clone(),
+            limit: 8,
+            speed: options.speed,
+            explain: true,
+            as_of: options.as_of,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: options.source_mode,
+            strict_source_mode: false,
+            memory_scope: options.memory_scope,
+            strict_scope: false,
+        };
+        let capture = || -> Result<(String, String, String), String> {
+            let reader =
+                DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+            let run = crate::core::search::run_context_search_with_preloaded_memories(
+                &search_options,
+                &reader,
+                None,
+                &crate::runtime::determinism::Deterministic::from_seed(0),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            let identity = run
+                .calibration_input_identity
+                .ok_or("canonical retrieval must carry its complete feedback proof")?;
+            assert!(run.report.results.iter().any(|hit| hit.doc_id == memory_id));
+            assert!(run.report.results.iter().all(|hit| hit.doc_id != target_id));
+            let handoff = crate::core::search::run_pack_search(&search_options)
+                .map_err(|error| error.to_string())?;
+            let validated = handoff
+                .validate_snapshot(&search_options, &reader)
+                .ok_or("fresh handoff must validate")?;
+            assert_eq!(validated.calibration_input_identity, identity);
+            let feature_hash = super::context_pack_l2_feature_flags_hash(
+                &options,
+                &options.filters,
+                &run.report.runtime_profile,
+                true,
+                &run.report,
+                &identity,
+            );
+            let mut candidates = blake3::Hasher::new();
+            super::hash_pack_quality_candidates(&mut candidates, &run.report.results);
+            Ok((
+                identity,
+                feature_hash,
+                candidates.finalize().to_hex().to_string(),
+            ))
+        };
+        let generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?;
+        let append_fingerprint = connection
+            .feedback_events_fingerprint(&workspace_id)
+            .map_err(|error| error.to_string())?;
+        let mut before = capture()?;
+        assert_eq!(
+            before,
+            capture()?,
+            "unchanged feedback has a stable identity"
+        );
+        for signal in ["harmful", "helpful"] {
+            connection
+                .execute_raw(&format!(
+                    "UPDATE feedback_events SET signal = '{signal}' WHERE id = '{event_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                connection
+                    .get_workspace_generation(&workspace_id)
+                    .map_err(|error| error.to_string())?,
+                generation,
+            );
+            assert_eq!(
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .map_err(|error| error.to_string())?,
+                append_fingerprint,
+            );
+            let after = capture()?;
+            assert_eq!(
+                before.2, after.2,
+                "retrieved IDs and quality scores are unchanged"
+            );
+            assert_ne!(
+                before.0, after.0,
+                "same-count feedback edits invalidate the proof"
+            );
+            assert_ne!(
+                before.1, after.1,
+                "L2 must reassemble cards discovered after retrieval"
+            );
+            before = after;
+        }
+        Ok(())
     }
 
     #[test]

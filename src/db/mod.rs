@@ -24077,34 +24077,102 @@ impl DbConnection {
         memory_ids: &[&str],
         reference_time: DateTime<Utc>,
     ) -> Result<BTreeMap<String, u32>> {
+        self.source_harmful_feedback_counts_at(
+            workspace_id,
+            "memories",
+            "memory",
+            memory_ids,
+            reference_time,
+        )
+    }
+
+    /// Count accepted harmful feedback under native evidence identity. This
+    /// proves source ownership, not retrieval or disclosure admission; callers
+    /// must admit the evidence independently before using its ranking signal.
+    /// The event-time and borrowed-snapshot contract matches the memory reader.
+    pub fn evidence_harmful_feedback_counts_at(
+        &self,
+        workspace_id: &str,
+        evidence_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>> {
+        self.source_harmful_feedback_counts_at(
+            workspace_id,
+            "evidence_spans",
+            "evidence",
+            evidence_ids,
+            reference_time,
+        )
+    }
+
+    /// Bind request-local accepted-event rows to their actual evidence owner
+    /// without loading transcript bodies again. Missing and foreign identities
+    /// are absent, never inferred from indexed metadata or a colliding memory.
+    pub(crate) fn evidence_feedback_target_ids(
+        &self,
+        workspace_id: &str,
+        evidence_ids: &[&str],
+    ) -> Result<BTreeSet<String>> {
+        let mut owned = BTreeSet::new();
+        for chunk in evidence_ids.chunks(800) {
+            let placeholders = (2..=chunk.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id FROM evidence_spans WHERE workspace_id = ?1 AND id IN ({placeholders}) ORDER BY id"
+            );
+            let params = std::iter::once(Value::Text(workspace_id.to_owned()))
+                .chain(chunk.iter().map(|id| Value::Text((*id).to_owned())))
+                .collect::<Vec<_>>();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                owned.insert(required_text(&row, 0, DbOperation::Query, "evidence_id")?.to_owned());
+            }
+        }
+        Ok(owned)
+    }
+
+    // Only the two fixed native-source wrappers above provide SQL identifiers.
+    fn source_harmful_feedback_counts_at(
+        &self,
+        workspace_id: &str,
+        source_table: &str,
+        target_type: &str,
+        source_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>> {
         const BATCH_SIZE: usize = 800;
-        let memory_ids = memory_ids
+        let source_ids = source_ids
             .iter()
             .copied()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let mut counts = BTreeMap::new();
-        for chunk in memory_ids.chunks(BATCH_SIZE) {
-            let placeholders = (2..=chunk.len() + 1)
+        for chunk in source_ids.chunks(BATCH_SIZE) {
+            let placeholders = (3..=chunk.len() + 2)
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
                 "SELECT m.id, f.created_at, COUNT(f.id) \
-                 FROM memories m LEFT JOIN feedback_events f \
-                   ON f.target_type = 'memory' AND f.target_id = m.id \
+                 FROM {source_table} m LEFT JOIN feedback_events f \
+                   ON f.target_type = ?2 AND f.target_id = m.id \
                   AND f.workspace_id = m.workspace_id \
                   AND f.signal IN ('negative', 'harmful', 'contradiction', 'inaccurate') \
                  WHERE m.workspace_id = ?1 AND m.id IN ({placeholders}) \
                  GROUP BY m.id, f.created_at ORDER BY m.id, f.created_at"
             );
-            let params = std::iter::once(Value::Text(workspace_id.to_owned()))
-                .chain(chunk.iter().map(|id| Value::Text((*id).to_owned())))
-                .collect::<Vec<_>>();
+            let params = [
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(target_type.to_owned()),
+            ]
+            .into_iter()
+            .chain(chunk.iter().map(|id| Value::Text((*id).to_owned())))
+            .collect::<Vec<_>>();
             let rows = self.query_for(DbOperation::Query, &sql, &params)?;
             for row in rows {
-                let id = required_text(&row, 0, DbOperation::Query, "memory_id")?;
+                let id = required_text(&row, 0, DbOperation::Query, "target_id")?;
                 let count = required_u32(&row, 2, DbOperation::Query, "harmful_count")?;
                 let total = counts.entry(id.to_owned()).or_insert(0_u32);
                 if count == 0 {
@@ -24128,11 +24196,12 @@ impl DbConnection {
                 }
             }
         }
-        if counts.len() != memory_ids.len() {
+        if counts.len() != source_ids.len() {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Query,
-                message: "harmful feedback requires memories owned by the addressed workspace"
-                    .to_owned(),
+                message: format!(
+                    "harmful feedback requires {target_type} targets owned by the addressed workspace"
+                ),
             });
         }
         Ok(counts)
@@ -61366,6 +61435,294 @@ UPDATE memories
             &after.get(&ids[0]),
             &Some(&0),
             "unaffected memory still has observed zero",
+        )?;
+        reader.begin_read_snapshot()?;
+        reader.rollback_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_harmful_feedback_counts_preserve_native_identity_and_exact_time() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OTHER: &str = "wsp_11234567890123456789012345";
+        const SESSION: &str = "sess_01J04CTK4MDPAZAM9V47SNMMDX";
+        const OTHER_SESSION: &str = "sess_01J04CTK4MDPAZAM9V47SNMMDY";
+        const EVIDENCE: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        const ZERO: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        const FOREIGN: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        const MEMORY: &str = "mem_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            OTHER,
+            &CreateWorkspaceInput {
+                path: "/tmp/evidence-feedback-other".to_owned(),
+                name: None,
+            },
+        )?;
+        connection.insert_session(SESSION, &session_input("feedback-native-session"))?;
+        let mut foreign_session = session_input("feedback-foreign-session");
+        foreign_session.workspace_id = OTHER.to_owned();
+        connection.insert_session(OTHER_SESSION, &foreign_session)?;
+        connection
+            .insert_evidence_span(EVIDENCE, &evidence_span_input(SESSION, "feedback-main", 1))?;
+        connection.insert_evidence_span(ZERO, &evidence_span_input(SESSION, "feedback-zero", 4))?;
+        let mut foreign = evidence_span_input(OTHER_SESSION, "feedback-foreign", 1);
+        foreign.workspace_id = OTHER.to_owned();
+        connection.insert_evidence_span(FOREIGN, &foreign)?;
+        connection.insert_memory(
+            MEMORY,
+            &simhash_test_memory_input(WORKSPACE, "Source parity"),
+        )?;
+        for (number, signal, timestamp) in [
+            (0, "negative", "2026-09-28T00:00:00Z"),
+            (1, "harmful", "2026-09-28T02:00:00+02:00"),
+            (2, "contradiction", "2026-09-28T12:00:00.123456789Z"),
+            (3, "inaccurate", "2026-09-28T12:00:00.123456789Z"),
+            (4, "negative", "2026-09-28T12:00:00.123456789Z"),
+            (5, "harmful", "2026-09-28T12:00:00.123456790Z"),
+            (6, "inaccurate", "2026-09-28T11:00:00-02:00"),
+            (7, "negative", "2026-09-28T13:00:00+02:00"),
+            (8, "positive", "unrelated positive timestamp"),
+            (9, "stale", "2026-09-28T00:00:00Z"),
+        ] {
+            for (offset, target_type, target_id) in
+                [(0, "evidence", EVIDENCE), (100, "memory", MEMORY)]
+            {
+                let mut event = harmful_feedback_test_event(
+                    number + offset,
+                    WORKSPACE,
+                    target_type,
+                    target_id,
+                    signal,
+                    timestamp,
+                );
+                if number == 0 {
+                    event.weight = 0.0;
+                    event.applied_at = Some("2026-10-01T00:00:00Z".to_owned());
+                }
+                connection.insert_feedback_event_for_recovery(&event)?;
+            }
+        }
+        for (number, workspace, target_type) in [
+            (20, OTHER, "evidence"),
+            (21, WORKSPACE, "memory"),
+            (22, WORKSPACE, "rule"),
+        ] {
+            connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+                number,
+                workspace,
+                target_type,
+                EVIDENCE,
+                "negative",
+                "2026-09-28T00:00:00Z",
+            ))?;
+        }
+        connection.insert_feedback_quarantine(
+            "fq_01234567890123456789012345",
+            &super::CreateFeedbackQuarantineInput {
+                workspace_id: WORKSPACE.to_owned(),
+                source_id: "test:evidence-unaccepted".to_owned(),
+                target_type: "evidence".to_owned(),
+                target_id: ZERO.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "human_explicit".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-09-28T00:00:00Z".to_owned(),
+                reason: "pending review".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "b".repeat(64)),
+            },
+        )?;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .with_timezone(&chrono::Utc);
+        let before = connection.list_feedback_events(WORKSPACE)?;
+        let generation = connection.get_workspace_generation(WORKSPACE)?;
+        let counts = connection.evidence_harmful_feedback_counts_at(
+            WORKSPACE,
+            &[ZERO, EVIDENCE, EVIDENCE],
+            reference,
+        )?;
+        ensure_equal(&counts.len(), &2, "duplicate native requests collapse")?;
+        ensure_equal(
+            &counts.get(EVIDENCE),
+            &Some(&6),
+            "only accepted native harmful events at the exact instant count",
+        )?;
+        ensure_equal(
+            &counts.get(ZERO),
+            &Some(&0),
+            "pending evidence quarantine is not accepted harm",
+        )?;
+        let memory =
+            connection.memory_harmful_feedback_counts_at(WORKSPACE, &[MEMORY], reference)?;
+        ensure_equal(
+            &memory.get(MEMORY),
+            &counts.get(EVIDENCE),
+            "memory and evidence use identical event-time semantics",
+        )?;
+        ensure_equal(
+            &connection.list_feedback_events(WORKSPACE)?,
+            &before,
+            "counting never applies or rewrites feedback",
+        )?;
+        ensure_equal(
+            &connection.get_workspace_generation(WORKSPACE)?,
+            &generation,
+            "counting never mutates source generation",
+        )?;
+        let owned = connection.evidence_feedback_target_ids(
+            WORKSPACE,
+            &[EVIDENCE, FOREIGN, "ev_missing", ZERO, EVIDENCE],
+        )?;
+        ensure_equal(
+            &owned.len(),
+            &2,
+            "ownership excludes foreign and missing sources",
+        )?;
+        ensure(
+            owned.contains(EVIDENCE) && owned.contains(ZERO),
+            "ownership comes from native evidence rows",
+        )?;
+        for requested in [vec![EVIDENCE, FOREIGN], vec![EVIDENCE, "ev_missing"]] {
+            ensure(
+                connection
+                    .evidence_harmful_feedback_counts_at(WORKSPACE, &requested, reference)
+                    .is_err(),
+                "missing or foreign evidence is not an observed zero",
+            )?;
+        }
+        ensure(
+            connection
+                .evidence_harmful_feedback_counts_at(WORKSPACE, &[], reference)?
+                .is_empty(),
+            "empty requests have no observations",
+        )?;
+        connection.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+            30,
+            WORKSPACE,
+            "evidence",
+            EVIDENCE,
+            "harmful",
+            "invalid-timestamp",
+        ))?;
+        ensure(
+            connection
+                .evidence_harmful_feedback_counts_at(WORKSPACE, &[EVIDENCE], reference)
+                .is_err(),
+            "malformed accepted harmful timestamps cannot disappear from evidence scores",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_feedback_ownership_batches_borrow_the_callers_read_snapshot() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const SESSION: &str = "sess_01J04CTK4MDPAZAM9V47SNMMDX";
+        const EVIDENCE: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        const ZERO: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        const LATE: &str = "ev_01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        let root = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database = root.path().join("evidence-feedback.db");
+        let writer = DbConnection::open_file(&database)?;
+        writer.migrate()?;
+        setup_workspace(&writer)?;
+        writer.insert_session(SESSION, &session_input("feedback-snapshot-session"))?;
+        writer.insert_evidence_span(EVIDENCE, &evidence_span_input(SESSION, "snapshot-main", 1))?;
+        writer.insert_evidence_span(ZERO, &evidence_span_input(SESSION, "snapshot-zero", 4))?;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .with_timezone(&chrono::Utc);
+        // Only two real sources are needed to exercise the second ownership
+        // query: the first full batch contains missing canonical identities.
+        let mut requested = (0..800_u128)
+            .map(|number| {
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(10_000 + number))
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        requested.extend([EVIDENCE.to_owned(), ZERO.to_owned(), EVIDENCE.to_owned()]);
+        let refs = requested.iter().map(String::as_str).collect::<Vec<_>>();
+        let reader = DbConnection::open_file_read_only(&database)?;
+        reader.begin_read_snapshot()?;
+        let owned = reader.evidence_feedback_target_ids(WORKSPACE, &refs)?;
+        ensure_equal(
+            &owned.len(),
+            &2,
+            "later ownership batches retain native matches and deduplicate IDs",
+        )?;
+        ensure(
+            owned.contains(EVIDENCE) && owned.contains(ZERO),
+            "missing candidates never become owned sources",
+        )?;
+        let initial =
+            reader.evidence_harmful_feedback_counts_at(WORKSPACE, &[EVIDENCE, ZERO], reference)?;
+        ensure(
+            initial.values().all(|count| *count == 0),
+            "empty accepted ledger supplies observed zeroes",
+        )?;
+        writer.insert_evidence_span(LATE, &evidence_span_input(SESSION, "snapshot-late", 7))?;
+        for (number, target) in [(0, EVIDENCE), (1, LATE)] {
+            writer.insert_feedback_event_for_recovery(&harmful_feedback_test_event(
+                number,
+                WORKSPACE,
+                "evidence",
+                target,
+                "harmful",
+                "2026-09-28T12:00:00.123456789Z",
+            ))?;
+        }
+        ensure_equal(
+            &reader.evidence_harmful_feedback_counts_at(WORKSPACE, &[EVIDENCE, ZERO], reference)?,
+            &initial,
+            "late accepted events stay outside the borrowed snapshot",
+        )?;
+        let pinned = reader.evidence_feedback_target_ids(WORKSPACE, &[EVIDENCE, LATE])?;
+        ensure_equal(
+            &pinned.len(),
+            &1,
+            "late source membership stays outside the borrowed snapshot",
+        )?;
+        ensure(
+            pinned.contains(EVIDENCE),
+            "the original source remains owned",
+        )?;
+        ensure(
+            reader.begin_read_snapshot().is_err(),
+            "neither helper ends the caller's transaction",
+        )?;
+        reader.rollback_read_snapshot()?;
+        let fresh = reader.evidence_harmful_feedback_counts_at(
+            WORKSPACE,
+            &[EVIDENCE, ZERO, LATE],
+            reference,
+        )?;
+        ensure_equal(
+            &fresh.get(EVIDENCE),
+            &Some(&1),
+            "fresh views observe accepted native feedback",
+        )?;
+        ensure_equal(
+            &fresh.get(LATE),
+            &Some(&1),
+            "fresh views observe both the new source and its feedback",
+        )?;
+        ensure_equal(
+            &fresh.get(ZERO),
+            &Some(&0),
+            "unaffected evidence retains observed zero",
+        )?;
+        ensure_equal(
+            &reader
+                .evidence_feedback_target_ids(WORKSPACE, &[EVIDENCE, LATE])?
+                .len(),
+            &2,
+            "fresh ownership sees the committed source",
         )?;
         reader.begin_read_snapshot()?;
         reader.rollback_read_snapshot()?;

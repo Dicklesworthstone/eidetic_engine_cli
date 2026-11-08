@@ -3250,6 +3250,7 @@ async fn run_context_pack_attempt(
     let search_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
+    let mut search_calibration_identity = None;
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
         search_preloaded_memories = handoff.revalidate_with_feedback(
             &search_options,
@@ -3257,6 +3258,9 @@ async fn run_context_pack_attempt(
             validated_handoff_feedback.as_ref(),
         );
         request.quality_scoring_policy = Some(handoff.quality_scoring_policy.clone());
+        search_calibration_identity = validated_handoff_feedback
+            .as_ref()
+            .map(|snapshot| snapshot.calibration_input_identity.clone());
         if let Some(connection) = &context_write_connection {
             handoff.record_audit(&search_options, connection);
         }
@@ -3283,6 +3287,7 @@ async fn run_context_pack_attempt(
         {
             Ok(context_search) => {
                 request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
+                search_calibration_identity = context_search.calibration_input_identity;
                 search_preloaded_memories = context_search.preloaded_memories;
                 trace.record_search_subspans(context_search.performance);
                 context_search.report
@@ -3343,6 +3348,8 @@ async fn run_context_pack_attempt(
             &mut search_preloaded_memories,
         )?;
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        // This fallback does not carry the complete calibration/feedback proof.
+        search_calibration_identity = None;
         let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
             &search_options,
@@ -3515,6 +3522,7 @@ async fn run_context_pack_attempt(
             output_redaction_enabled,
             prepared_embed_backend,
             &search_report,
+            search_calibration_identity.as_deref(),
             &mut degraded,
         );
         if let Some(context) = &l2_context
@@ -8132,6 +8140,7 @@ fn context_pack_l2_prepare(
     output_redaction_enabled: bool,
     embed_backend: EmbedBackend,
     search_report: &SearchReport,
+    calibration_input_identity: Option<&str>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackL2Context> {
     if let Some(reason) = context_pack_l2_bypass_reason(options, filters) {
@@ -8142,6 +8151,10 @@ fn context_pack_l2_prepare(
         );
         return None;
     }
+    let Some(calibration_input_identity) = calibration_input_identity else {
+        tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_bypassed", reason = "feedback_identity_unavailable");
+        return None;
+    };
     // File-backed evidence and live code anchors are checked during assembly,
     // independently of database generations. Do not replay their freshness
     // until those external inputs have a bounded cache identity as well.
@@ -8251,6 +8264,7 @@ fn context_pack_l2_prepare(
             runtime_profile,
             output_redaction_enabled,
             search_report,
+            calibration_input_identity,
         ),
         personalization_generation,
     };
@@ -8887,11 +8901,20 @@ fn context_pack_l2_feature_flags_hash(
     runtime_profile: &RuntimeProfileReport,
     output_redaction_enabled: bool,
     search_report: &SearchReport,
+    calibration_input_identity: &str,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     // Feedback can change ranking without changing the memory row. Bind the
     // actually scored candidate pool before reusing assembly.
     hash_pack_quality_candidates(&mut hasher, &search_report.results);
+    // Incident cards can be discovered only during assembly. Their feedback
+    // can change without altering the retrieved hits or workspace generation.
+    // Reuse the complete ledger proof already consumed by this retrieval.
+    hash_labeled_bytes(
+        &mut hasher,
+        "calibration_input_identity",
+        calibration_input_identity.as_bytes(),
+    );
     // Packs produced before the authority guard must never bypass it via L2.
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
     // Cached source-memory hydration predating native rule filters and
@@ -16203,12 +16226,50 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     if let Some(probe) = why_not {
         probe.observe_evidence(&candidates, OmissionCause::ScoreFloor);
     }
+    let scoring = if candidates.iter().any(|candidate| !candidate.incident_card) {
+        match crate::core::search::resolved_search_scoring_config(workspace_path) {
+            Ok(config)
+                if request
+                    .quality_scoring_policy
+                    .as_deref()
+                    .is_none_or(|policy| policy == config.policy_hash()) =>
+            {
+                Some(config)
+            }
+            _ => {
+                push_degradation(
+                    degraded,
+                    "search_quality_policy_changed",
+                    ContextResponseSeverity::Low,
+                    "The retrieval quality policy changed or became unavailable before incident-card expansion; original candidates were retained without replacement by newly scored cards.",
+                    None,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let feedback_reference_time = request
+        .reference_time
+        .or_else(|| {
+            search_report.results.iter().find_map(|hit| {
+                hit.ranking_components_json()?
+                    .get("referenceTime")?
+                    .as_str()
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+            })
+        })
+        .unwrap_or_else(Utc::now);
     let (mut candidates, verified_card_sources) = prefer_incident_cards_with_exclusions(
         connection,
         &workspace_ids,
         filters,
         &request.query,
         exclusions,
+        scoring,
+        feedback_reference_time,
         candidates,
         degraded,
     );
@@ -16577,6 +16638,8 @@ fn prefer_incident_cards(
         filters,
         query,
         exclusions.as_ref(),
+        Some(crate::search::scoring::SearchScoringConfig::default()),
+        Utc::now(),
         candidates,
         degraded,
     )
@@ -16588,6 +16651,8 @@ fn prefer_incident_cards_with_exclusions(
     filters: &crate::models::QueryFilters,
     query: &str,
     exclusions: Option<&QueryExclusions>,
+    scoring: Option<crate::search::scoring::SearchScoringConfig>,
+    feedback_reference_time: DateTime<Utc>,
     candidates: Vec<DirectEvidencePackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (
@@ -16745,6 +16810,67 @@ fn prefer_incident_cards_with_exclusions(
     }
     cards.retain(|card| !refused.contains(&card.id));
 
+    // Search already scored direct card hits under their own native identity.
+    // A card discovered through a source turn still needs its own feedback;
+    // borrowing that turn's score must not erase the card's harmful outcomes.
+    let direct_card_relevance = candidates
+        .iter()
+        .filter(|candidate| candidate.incident_card)
+        .map(|candidate| {
+            (
+                candidate.item.evidence_id.as_str(),
+                candidate.item.relevance.into_inner(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut feedback_ids = BTreeMap::<&str, Vec<&str>>::new();
+    for card in &cards {
+        feedback_ids
+            .entry(card.workspace_id.as_str())
+            .or_default()
+            .push(card.id.as_str());
+    }
+    let mut card_harmful_counts = BTreeMap::new();
+    for (workspace, ids) in feedback_ids {
+        match connection.evidence_harmful_feedback_counts_at(
+            workspace,
+            &ids,
+            feedback_reference_time,
+        ) {
+            Ok(counts) => card_harmful_counts.extend(counts),
+            Err(_) => push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                "Incident-card feedback could not be observed; eligible source turns were retained instead of being suppressed by a replacement card.",
+                Some("ee doctor --json".to_owned()),
+            ),
+        }
+    }
+    let card_relevance = cards
+        .iter()
+        .filter_map(|card| {
+            let scoring = scoring?;
+            let count = card_harmful_counts.get(&card.id)?;
+            let mut signals = crate::search::scoring::SearchScoringSignals::new(
+                1.0,
+                crate::search::scoring::RetrievalMaturity::Semantic,
+            );
+            signals.harmful_count = *count;
+            let penalty =
+                crate::search::scoring::SearchScoreComponents::from_signals(signals, scoring)
+                    .harmful_penalty;
+            Some((
+                card.id.clone(),
+                (
+                    penalty,
+                    direct_card_relevance.get(card.id.as_str()).copied(),
+                ),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    drop(direct_card_relevance);
+
     cards.sort_by(|left, right| {
         (left.end_line - left.start_line)
             .cmp(&(right.end_line - right.start_line))
@@ -16797,6 +16923,18 @@ fn prefer_incident_cards_with_exclusions(
             preferred.push(candidate);
             continue;
         };
+        let Some((penalty, direct_relevance)) = card_relevance.get(&card.id) else {
+            preferred.push(candidate);
+            continue;
+        };
+        let replacement_relevance =
+            direct_relevance.unwrap_or_else(|| candidate.item.relevance.into_inner() * *penalty);
+        if *penalty < 1.0 && replacement_relevance < candidate.item.relevance.into_inner() {
+            // A lower-ranked harmful card cannot hide an eligible source
+            // before the shared floor, result limit, or budget can select it.
+            preferred.push(candidate);
+            continue;
+        }
         if seen.contains(&card.id) {
             continue;
         }
@@ -16805,7 +16943,7 @@ fn prefer_incident_cards_with_exclusions(
         }
         match direct_evidence_pack_candidate(
             card.clone(),
-            candidate.item.relevance.into_inner(),
+            replacement_relevance,
             &candidate.source,
             query,
             Some(&candidate.item.evidence_id),

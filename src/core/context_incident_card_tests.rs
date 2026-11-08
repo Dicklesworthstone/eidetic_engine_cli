@@ -198,6 +198,282 @@ impl Fixture {
         direct_evidence_pack_candidate(span, relevance, "lexical", "widget serialize", None)
             .unwrap()
     }
+
+    fn harmful(&self, evidence_id: &str, number: u128, created_at: &str) {
+        self.db
+            .insert_feedback_event_for_recovery(&crate::db::StoredFeedbackEvent {
+                id: format!("fb_{number:026}"),
+                workspace_id: self.workspace_id.clone(),
+                target_type: "evidence".to_owned(),
+                target_id: evidence_id.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "human_explicit".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+                applied_at: None,
+                created_at: created_at.to_owned(),
+            })
+            .unwrap();
+    }
+}
+
+fn scored_report(hits: &[(&str, f32)], reference: DateTime<Utc>) -> SearchReport {
+    SearchReport {
+        index_freshness: None,
+        status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
+        query: "widget serialize".to_owned(),
+        requested_limit: u32::try_from(hits.len()).unwrap(),
+        results: hits.iter().map(|(id, relevance)| SearchHit {
+            doc_id: (*id).to_owned(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(json!({
+                "_ee_quality_scoring": {
+                    "schema": crate::search::scoring::SEARCH_SCORING_POLICY_V1,
+                    "rankingBound": 2.0,
+                    "referenceTime": reference.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                    "components": { "finalScore": relevance * 2.0 }
+                }
+            })),
+            explanation: None,
+        }).collect(),
+        elapsed_ms: 0.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            crate::core::profile::OperatingProfile::Workstation,
+            "incident_feedback_fixture",
+        ),
+        rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
+        relevance_floor_applied: Some(0.0),
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::LexicalOnly,
+        source_mode_applied: SearchSourceMode::LexicalOnly,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Workspace,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Workspace, false, None, 0),
+    }
+}
+
+#[test]
+fn harmful_incident_cards_cannot_suppress_better_scored_source_turns() {
+    let fixture = Fixture::new();
+    let (repair, card) = fixture.incident(
+        0x59_0801,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    fixture.harmful(&card, 0x59_0801, "2026-01-01T00:00:00Z");
+    let mut request = ContextRequest::from_query("widget serialize").unwrap();
+    request.max_results = Some(1);
+    for direct_score in [None, Some(0.81)] {
+        let mut candidates = Vec::new();
+        if let Some(score) = direct_score {
+            candidates.push(fixture.candidate(&card, score));
+        }
+        candidates.push(fixture.candidate(&repair, 0.9));
+        let mut degraded = Vec::new();
+        let (preferred, _) = prefer_incident_cards(
+            &fixture.db,
+            std::slice::from_ref(&fixture.workspace_id),
+            &crate::models::QueryFilters::default(),
+            "widget serialize",
+            candidates,
+            &mut degraded,
+        );
+        assert!(
+            preferred
+                .iter()
+                .any(|candidate| candidate.item.evidence_id == repair)
+        );
+        assert_eq!(
+            preferred
+                .iter()
+                .filter(|candidate| candidate.incident_card)
+                .count(),
+            usize::from(direct_score.is_some())
+        );
+        let mut draft = crate::pack::assemble_draft(
+            &request.query,
+            request.budget,
+            Vec::<PackCandidate>::new(),
+        )
+        .unwrap();
+        append_ranked_native_pack_items(
+            Vec::new(),
+            preferred,
+            &request,
+            Some(0.85),
+            &mut draft,
+            &mut degraded,
+        );
+        assert_eq!(draft.evidence_items.len(), 1);
+        assert_eq!(draft.evidence_items[0].evidence_id, repair);
+        assert_eq!(draft.evidence_items[0].relevance.into_inner(), 0.9);
+    }
+
+    // This card's score already includes its own penalty. Applying it again
+    // would put 0.85 * 0.9 below the 0.8 source and change the selected item.
+    let (preferred, _) = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "widget serialize",
+        vec![
+            fixture.candidate(&card, 0.85),
+            fixture.candidate(&repair, 0.8),
+        ],
+        &mut Vec::new(),
+    );
+    assert_eq!(preferred.len(), 1);
+    assert_eq!(preferred[0].item.evidence_id, card);
+    assert_eq!(preferred[0].item.relevance.into_inner(), 0.85);
+}
+
+#[test]
+fn incident_card_discovery_keeps_source_penalty_and_never_guesses_unavailable_feedback() {
+    let fixture = Fixture::new();
+    let (repair, card) = fixture.incident(
+        0x59_0802,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    for number in 0..8 {
+        fixture.harmful(&repair, 0x59_0820 + number, "2026-01-01T00:00:00Z");
+    }
+    let source = fixture.candidate(&repair, 0.2);
+    let mut degraded = Vec::new();
+    let (preferred, _) = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "widget serialize",
+        vec![source.clone()],
+        &mut degraded,
+    );
+    assert!(degraded.is_empty());
+    assert_eq!(preferred.len(), 1);
+    assert_eq!(preferred[0].item.evidence_id, card);
+    assert_eq!(preferred[0].item.relevance.into_inner(), 0.2);
+
+    fixture
+        .db
+        .execute_raw("ALTER TABLE feedback_events RENAME TO unavailable_feedback_events")
+        .unwrap();
+    let (preferred, _) = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "widget serialize",
+        vec![source.clone()],
+        &mut degraded,
+    );
+    assert_eq!(preferred.len(), 1);
+    assert_eq!(preferred[0].item, source.item);
+    assert!(degraded.iter().any(|entry| {
+        entry.code == "context_evidence_hit_unhydrated"
+            && entry.message.contains("feedback could not be observed")
+    }));
+}
+
+#[test]
+fn incident_card_expansion_reuses_exact_cutoff_and_retains_sources_on_policy_changes() {
+    let fixture = Fixture::new();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join(".ee")).unwrap();
+    let config_path = root.join(".ee/config.toml");
+    std::fs::write(
+        &config_path,
+        "[scoring]\nharmful_penalty_per_hit = 0.1\nharmful_penalty_floor = 0.2\n",
+    )
+    .unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE workspaces SET path = '{}' WHERE id = '{}'",
+            root.display(),
+            fixture.workspace_id
+        ))
+        .unwrap();
+    let (repair, card) = fixture.incident(
+        0x59_0803,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    fixture.harmful(&card, 0x59_0803, "2026-09-28T12:00:00.123456789Z");
+    let search = scored_report(&[(repair.as_str(), 0.9)], reference);
+    let mut request = ContextRequest::from_query("widget serialize").unwrap();
+    request.quality_scoring_policy = Some(
+        crate::core::search::resolved_search_scoring_config(&root)
+            .unwrap()
+            .policy_hash(),
+    );
+    // No explicit --as-of: expansion must still use the lossless scorer time.
+    assert!(request.reference_time.is_none());
+    for (created_at, expected) in [
+        ("2026-09-28T12:00:00.123456789Z", &repair),
+        ("2026-09-28T12:00:00.123456790Z", &card),
+    ] {
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE feedback_events SET created_at = '{created_at}'"
+            ))
+            .unwrap();
+        let mut degraded = Vec::new();
+        let candidates = collect_direct_evidence_pack_candidates(
+            &fixture.db,
+            &root,
+            &search,
+            &request,
+            &crate::models::QueryFilters::default(),
+            Some(0.8),
+            &mut degraded,
+        )
+        .unwrap();
+        assert!(degraded.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(&candidates[0].item.evidence_id, expected);
+        assert_eq!(candidates[0].item.relevance.into_inner(), 0.9);
+    }
+    for config in [
+        "[scoring]\nharmful_penalty_per_hit = 0.2\nharmful_penalty_floor = 0.2\n",
+        "[scoring]\nharmful_penalty_per_hit = 'unreadable'\n",
+    ] {
+        std::fs::write(&config_path, config).unwrap();
+        let mut degraded = Vec::new();
+        let candidates = collect_direct_evidence_pack_candidates(
+            &fixture.db,
+            &root,
+            &search,
+            &request,
+            &crate::models::QueryFilters::default(),
+            Some(0.8),
+            &mut degraded,
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].item.evidence_id, repair);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "search_quality_policy_changed")
+        );
+    }
 }
 
 #[test]

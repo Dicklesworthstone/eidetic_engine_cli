@@ -118,14 +118,18 @@ impl Fixture {
     }
 
     fn harmful(&self, id: &str, number: u128) {
+        self.feedback("memory", id, number, "harmful");
+    }
+
+    fn feedback(&self, target_type: &str, id: &str, number: u128, signal: &str) {
         self.db
             .insert_feedback_event(
                 &format!("fb_{number:026}"),
                 &CreateFeedbackEventInput {
                     workspace_id: self.workspace.clone(),
-                    target_type: "memory".to_owned(),
+                    target_type: target_type.to_owned(),
                     target_id: id.to_owned(),
-                    signal: "harmful".to_owned(),
+                    signal: signal.to_owned(),
                     weight: 1.0,
                     source_type: "outcome_observed".to_owned(),
                     source_id: None,
@@ -135,6 +139,53 @@ impl Fixture {
                 },
             )
             .unwrap();
+    }
+
+    fn evidence(&self, number: u128, content: &str) -> String {
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        self.db
+            .insert_session(
+                &session,
+                &crate::db::CreateSessionInput {
+                    workspace_id: self.workspace.clone(),
+                    cass_session_id: format!("quality-evidence-session-{number}"),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 1,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        self.db
+            .insert_evidence_span(
+                &id,
+                &crate::db::CreateEvidenceSpanInput {
+                    workspace_id: self.workspace.clone(),
+                    session_id: session,
+                    memory_id: None,
+                    producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("quality-evidence-span-{number}"),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: content.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .unwrap();
+        id
     }
 
     fn search(&self) -> SearchReport {
@@ -834,6 +885,118 @@ fn native_rule_maturity_and_negative_counters_affect_real_search() {
 }
 
 #[test]
+fn evidence_outcomes_change_search_pack_and_handoff_ranking_without_rewriting_relevance() {
+    let fixture = Fixture::new();
+    let first = fixture.evidence(0x901, BODY);
+    let second = fixture.evidence(0x902, BODY);
+    fixture.feedback("evidence", &first, 0x901, "neutral");
+    let _embedder = fixture.publish_index();
+    let reference = Utc::now() + chrono::Duration::minutes(1);
+    let mut options = fixture.options();
+    options.as_of = Some(reference);
+    let mut pack_options = native_handoff_pack_options(&fixture, reference);
+    pack_options.max_results = Some(1);
+    pack_options.relevance_floor = Some(0.0);
+    pack_options.output_options.cache_json_response = true;
+    let mut previous: Option<PackSearchHandoff> = None;
+    let mut raw_relevance = None;
+    for signal in ["neutral", "harmful", "helpful"] {
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE feedback_events SET signal = '{signal}' WHERE target_type = 'evidence'"
+            ))
+            .unwrap();
+        if let Some(old) = previous.take() {
+            assert!(!old.snapshot_matches(&options, &fixture.db));
+        }
+        let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+        let report = run_search_with_read_connection(&options, &reader).unwrap();
+        assert_eq!(report.results.len(), 2);
+        let expected = if signal == "harmful" { &second } else { &first };
+        assert_eq!(&report.results[0].doc_id, expected);
+        for hit in &report.results {
+            let scoring = hit.ranking_components_json().unwrap();
+            assert_eq!(scoring["entityType"], "evidence");
+            assert_eq!(scoring["observedSignals"]["harmfulPenalty"], true);
+            assert_eq!(
+                scoring["inputs"]["harmfulCount"],
+                usize::from(signal == "harmful" && hit.doc_id == first)
+            );
+            for unobserved in ["recency", "confidence", "utility", "maturity", "scopeMatch"] {
+                assert_eq!(scoring["observedSignals"][unobserved], false);
+            }
+            if let Some(raw) = raw_relevance {
+                assert_eq!(hit.relevance_score(), raw);
+            } else {
+                raw_relevance = Some(hit.relevance_score());
+            }
+        }
+        let first_hit = report
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == first)
+            .unwrap();
+        let second_hit = report
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == second)
+            .unwrap();
+        assert_eq!(first_hit.score, second_hit.score);
+        assert_eq!(first_hit.lexical_score, second_hit.lexical_score);
+        assert_eq!(first_hit.relevance_score(), second_hit.relevance_score());
+        if signal == "harmful" {
+            assert!(first_hit.ranking_relevance_score() < second_hit.ranking_relevance_score());
+        } else {
+            assert_eq!(
+                first_hit.ranking_relevance_score(),
+                second_hit.ranking_relevance_score()
+            );
+        }
+        let mut limited = options.clone();
+        limited.limit = 1;
+        let mut handoff = run_pack_search(&limited).unwrap();
+        assert_eq!(handoff.report.results.len(), 1);
+        assert_eq!(&handoff.report.results[0].doc_id, expected);
+        handoff.revalidate(&limited, &reader);
+        assert_eq!(&handoff.report.results[0].doc_id, expected);
+        assert_eq!(
+            run_diag_search(&limited).unwrap().final_report.results[0].doc_id,
+            *expected,
+        );
+        let canonical = crate::core::context::run_context_pack(&pack_options).unwrap();
+        assert_eq!(canonical.data.pack.evidence_items.len(), 1);
+        assert_eq!(&canonical.data.pack.evidence_items[0].evidence_id, expected);
+        assert_eq!(canonical.data.pack.evidence_items[0].content, BODY);
+        assert_eq!(
+            canonical.data.pack.evidence_items[0].relevance.into_inner(),
+            report.results[0].ranking_relevance_score(),
+        );
+        let provider = |search_options: &SearchOptions, _: bool| {
+            run_pack_search(search_options)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))
+        };
+        let remote = crate::core::context::run_context_pack_with_search_provider(
+            &pack_options,
+            "pack",
+            &provider,
+        )
+        .unwrap();
+        assert_eq!(remote.response.data.pack, canonical.data.pack);
+        assert!(
+            !remote
+                .response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "daemon_search_fallback")
+        );
+        previous = Some(run_pack_search(&options).unwrap());
+    }
+    assert_eq!(fixture.db.count_table_rows("pack_records").unwrap(), 0);
+}
+
+#[test]
 fn published_search_and_diagnostics_overretrieve_before_quality_top_one() {
     let fixture = Fixture::new();
     let now = Utc::now() - chrono::Duration::seconds(1);
@@ -897,6 +1060,241 @@ fn unavailable_feedback_is_neutral_and_never_claims_observed_zero_harm() {
             .iter()
             .any(|entry| entry.code == "search_quality_signals_unavailable")
     );
+}
+
+#[test]
+fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unknown_signals() {
+    let fixture = Fixture::new();
+    let evidence = fixture.evidence(0x911, BODY);
+    let zero = fixture.evidence(0x912, BODY);
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    fixture.feedback("evidence", &evidence, 0x911, "harmful");
+    fixture
+        .db
+        .execute_raw("UPDATE feedback_events SET created_at = '2026-09-28T12:00:00.123456789Z'")
+        .unwrap();
+    // A different native target type cannot lend evidence an outcome, even
+    // with an identical target string and a malformed matching timestamp.
+    fixture.feedback("memory", &evidence, 0x912, "harmful");
+    fixture.db.execute_raw(
+        "UPDATE feedback_events SET created_at = 'invalid-other-target-time' WHERE target_type = 'memory'",
+    ).unwrap();
+    let hits = [&evidence, &zero]
+        .into_iter()
+        .map(|id| SearchHit {
+            doc_id: id.clone(),
+            score: 0.8,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.8),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        })
+        .collect();
+    let mut hits = apply_live_evidence_visibility(
+        &fixture.options(),
+        hits,
+        &mut Vec::new(),
+        Some(&fixture.db),
+    );
+    assert_eq!(hits.len(), 2);
+    let missing = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x913)).to_string();
+    let mut unowned = hits[0].clone();
+    unowned.doc_id = missing.clone();
+    hits.push(unowned);
+
+    let reader =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    reader.begin_read_snapshot().unwrap();
+    let (_, feedback) = search_score_calibration_with_feedback(
+        &fixture.root,
+        fixture.options().database_path.as_deref(),
+        Some(&reader),
+    );
+    let feedback = feedback.unwrap();
+    let mut sql_hits = hits.clone();
+    let mut sql_degraded = Vec::new();
+    apply_quality_scoring(
+        &fixture.options(),
+        &mut sql_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        &mut sql_degraded,
+    );
+    let mut reused_hits = hits.clone();
+    let mut reused_degraded = Vec::new();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut reused_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&feedback),
+        &mut reused_degraded,
+    );
+    assert_eq!(
+        serde_json::to_value(&sql_hits).unwrap(),
+        serde_json::to_value(&reused_hits).unwrap()
+    );
+    assert!(sql_degraded.is_empty());
+    assert!(reused_degraded.is_empty());
+    for (id, expected) in [(&evidence, Some(1)), (&zero, Some(0)), (&missing, None)] {
+        let scoring = reused_hits
+            .iter()
+            .find(|hit| &hit.doc_id == id)
+            .unwrap()
+            .ranking_components_json()
+            .unwrap();
+        assert_eq!(
+            scoring["inputs"]["harmfulCount"],
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(
+            scoring["observedSignals"]["harmfulPenalty"],
+            expected.is_some()
+        );
+        assert_eq!(
+            DateTime::parse_from_rfc3339(scoring["referenceTime"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&Utc),
+            reference,
+            "card expansion must receive the exact same accepted-outcome cutoff",
+        );
+    }
+    let foreign = SearchFeedbackSnapshot {
+        connection: &reader,
+        workspace_id: "wsp_other".to_owned(),
+        events: Vec::new(),
+    };
+    let mut foreign_hits = hits.clone();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut foreign_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&foreign),
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        serde_json::to_value(&foreign_hits).unwrap(),
+        serde_json::to_value(&sql_hits).unwrap()
+    );
+    drop(foreign);
+
+    fixture
+        .db
+        .execute_raw("UPDATE feedback_events SET signal = 'neutral' WHERE target_type = 'evidence'")
+        .unwrap();
+    let mut pinned_hits = hits.clone();
+    apply_quality_scoring(
+        &fixture.options(),
+        &mut pinned_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        serde_json::to_value(&pinned_hits).unwrap(),
+        serde_json::to_value(&sql_hits).unwrap()
+    );
+    let fresh =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    let mut fresh_hits = hits.clone();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut fresh_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&fresh),
+        None,
+        None,
+        Some(&feedback),
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        fresh_hits
+            .iter()
+            .find(|hit| hit.doc_id == evidence)
+            .unwrap()
+            .ranking_components_json()
+            .unwrap()["inputs"]["harmfulCount"],
+        0
+    );
+    drop(feedback);
+    reader.rollback_read_snapshot().unwrap();
+
+    fixture.db.execute_raw("UPDATE feedback_events SET signal = 'harmful', created_at = 'invalid-evidence-time' WHERE target_type = 'evidence'").unwrap();
+    reader.begin_read_snapshot().unwrap();
+    let (_, feedback) = search_score_calibration_with_feedback(
+        &fixture.root,
+        fixture.options().database_path.as_deref(),
+        Some(&reader),
+    );
+    let feedback = feedback.unwrap();
+    let mut unknown_hits = hits.clone();
+    let mut unknown_degraded = Vec::new();
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut unknown_hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        Some(&feedback),
+        &mut unknown_degraded,
+    );
+    let mut unavailable_sql = hits;
+    let mut unavailable_degraded = Vec::new();
+    apply_quality_scoring(
+        &fixture.options(),
+        &mut unavailable_sql,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&reader),
+        None,
+        None,
+        &mut unavailable_degraded,
+    );
+    assert_eq!(
+        serde_json::to_value(&unknown_hits).unwrap(),
+        serde_json::to_value(&unavailable_sql).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&unknown_degraded).unwrap(),
+        serde_json::to_value(&unavailable_degraded).unwrap()
+    );
+    let scoring = unknown_hits
+        .iter()
+        .find(|hit| hit.doc_id == evidence)
+        .unwrap()
+        .ranking_components_json()
+        .unwrap();
+    assert!(scoring["inputs"]["harmfulCount"].is_null());
+    assert_eq!(scoring["observedSignals"]["harmfulPenalty"], false);
+    assert_eq!(scoring["components"]["harmfulPenalty"], 1.0);
+    assert!(
+        unknown_degraded
+            .iter()
+            .any(|entry| entry.code == "search_quality_signals_unavailable")
+    );
+    drop(feedback);
+    reader.rollback_read_snapshot().unwrap();
 }
 
 #[test]

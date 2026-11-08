@@ -1952,6 +1952,7 @@ impl PackSearchHandoff {
             return None;
         }
         Some(ValidatedPackSearchSnapshot {
+            calibration_input_identity: identity.clone(),
             calibration,
             feedback: feedback?,
         })
@@ -2396,6 +2397,8 @@ impl SearchPerformanceTrace {
 pub struct ContextSearchReport {
     pub report: SearchReport,
     pub quality_scoring_policy: String,
+    /// Complete accepted feedback and calibration consumed by this source view.
+    pub(crate) calibration_input_identity: Option<String>,
     pub preloaded_memories: BTreeMap<String, StoredMemory>,
     pub performance: SearchPerformanceTrace,
 }
@@ -4834,6 +4837,7 @@ pub(crate) struct SearchFeedbackSnapshot<'a> {
 /// The exact calibration and ledger accepted for a pack handoff. Keeping both
 /// avoids a second ledger read after native source metadata is rehydrated.
 pub(crate) struct ValidatedPackSearchSnapshot<'a> {
+    pub(crate) calibration_input_identity: String,
     calibration: SearchScoreCalibration,
     feedback: SearchFeedbackSnapshot<'a>,
 }
@@ -4844,13 +4848,30 @@ impl SearchFeedbackSnapshot<'_> {
         source_owned_ids: &[&str],
         reference_time: DateTime<Utc>,
     ) -> Result<BTreeMap<String, u32>, ()> {
+        self.harmful_counts_for_target_at("memory", source_owned_ids, reference_time)
+    }
+
+    fn evidence_harmful_counts_at(
+        &self,
+        source_owned_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>, ()> {
+        self.harmful_counts_for_target_at("evidence", source_owned_ids, reference_time)
+    }
+
+    fn harmful_counts_for_target_at(
+        &self,
+        target_type: &str,
+        source_owned_ids: &[&str],
+        reference_time: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, u32>, ()> {
         let mut counts: BTreeMap<String, u32> = source_owned_ids
             .iter()
             .map(|id| ((*id).to_owned(), 0))
             .collect();
         for event in &self.events {
             if event.workspace_id != self.workspace_id
-                || event.target_type != "memory"
+                || event.target_type != target_type
                 || !matches!(
                     event.signal.as_str(),
                     "negative" | "harmful" | "contradiction" | "inaccurate"
@@ -9212,6 +9233,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
     Ok(ContextSearchReport {
         report: run.report,
         quality_scoring_policy: run.quality_scoring_policy,
+        calibration_input_identity: run.pack_calibration_identity,
         preloaded_memories,
         performance: run.performance,
     })
@@ -13647,6 +13669,44 @@ pub(crate) fn quality_scoring_candidate_limit(limit: u32, speed: SpeedMode) -> u
         .max(limit)
 }
 
+fn evidence_feedback_counts_for_scoring(
+    hits: &[SearchHit],
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    read_connection: Option<&DbConnection>,
+    feedback_snapshot: Option<&SearchFeedbackSnapshot<'_>>,
+) -> Result<BTreeMap<String, u32>, ()> {
+    let evidence_ids = hits
+        .iter()
+        .filter(|hit| {
+            EvidenceId::from_str(&hit.doc_id).is_ok_and(|id| id.to_string() == hit.doc_id)
+        })
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if evidence_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let connection = read_connection.ok_or(())?;
+    // The preceding admission pass owns source/body/proof validation. Bind
+    // this separate signal to actual source ownership, never indexed metadata.
+    // This lightweight read does not hydrate the transcript a second time.
+    let owned = connection
+        .evidence_feedback_target_ids(workspace_id, &evidence_ids)
+        .map_err(|_| ())?;
+    let owned_refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    if let Some(feedback) = feedback_snapshot.filter(|feedback| {
+        std::ptr::eq(feedback.connection, connection) && feedback.workspace_id == workspace_id
+    }) {
+        feedback.evidence_harmful_counts_at(&owned_refs, reference_time)
+    } else {
+        connection
+            .evidence_harmful_feedback_counts_at(workspace_id, &owned_refs, reference_time)
+            .map_err(|_| ())
+    }
+}
+
 /// Apply domain policy only after live source, seal, scope and mesh admission.
 /// A missing observation is null plus a neutral term, never an observed zero
 /// harmful count or perfect confidence. Optional graph/affinity terms are not
@@ -13746,6 +13806,19 @@ fn apply_quality_scoring_with_feedback(
     } else {
         unavailable = true;
         None
+    };
+    let evidence_harmful_counts = match evidence_feedback_counts_for_scoring(
+        hits,
+        &workspace_id,
+        reference_time,
+        read_connection,
+        feedback_snapshot,
+    ) {
+        Ok(counts) => Some(counts),
+        Err(()) => {
+            unavailable = true;
+            None
+        }
     };
     let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
     let policy = config.policy_hash();
@@ -13870,6 +13943,11 @@ fn apply_quality_scoring_with_feedback(
                                 == Some(workspace_id.as_str()))
                 });
             }
+        } else if EvidenceId::from_str(&hit.doc_id).is_ok_and(|id| id.to_string() == hit.doc_id) {
+            entity_type = "evidence";
+            harmful_count = evidence_harmful_counts
+                .as_ref()
+                .and_then(|counts| counts.get(&hit.doc_id).copied());
         } else {
             entity_type = "other";
         }
@@ -13892,7 +13970,7 @@ fn apply_quality_scoring_with_feedback(
             "policyHash": policy,
             "entityType": entity_type,
             "rankingBound": ranking_bound,
-            "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
             "components": components,
             "observedSignals": {
                 "recency": age_days.is_some(), "confidence": confidence.is_some(),

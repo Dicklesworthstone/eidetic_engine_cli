@@ -196,6 +196,9 @@ impl SearchScoringConfig {
             hasher.update(name.as_bytes());
             hasher.update(&value.to_bits().to_le_bytes());
         }
+        // Native evidence now observes its own accepted harmful outcomes.
+        // Old search handoffs and pack caches must not reuse neutral signals.
+        hasher.update(b"native_evidence_feedback_v1");
         format!("blake3:{}", hasher.finalize().to_hex())
     }
 }
@@ -1682,6 +1685,13 @@ mod tests {
         legacy.update(&(name.len() as u64).to_le_bytes());
         legacy.update(name.as_bytes());
         legacy.update(&config.anchor_match_cap().to_bits().to_le_bytes());
+        let evidence_unobserved_hash = format!("blake3:{}", legacy.finalize().to_hex());
+        assert_ne!(
+            config.policy_hash(),
+            evidence_unobserved_hash,
+            "packs and handoffs without native evidence feedback must not be reused"
+        );
+        legacy.update(b"native_evidence_feedback_v1");
         let expected_hash = format!("blake3:{}", legacy.finalize().to_hex());
         assert_eq!(config.policy_hash(), expected_hash);
     }
