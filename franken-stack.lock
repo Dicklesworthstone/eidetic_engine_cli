@@ -53,11 +53,11 @@
 # BOTH sides of the comparison held still: no commit touched this file's seven
 # data rows or Cargo.lock between them, and all 12 selected versions are
 # identical across the two revisions. The regex was right here only because
-# `[workspace.package]` happens to precede
-# `[workspace.dependencies]` in that root. Also note 33 of the 537 names in
-# Cargo.lock carry MORE THAN ONE version, so a name -> version map is safe only
-# because each of these 12 appears exactly once -- check that before extending
-# this check to another package.
+# `[workspace.package]` happens to precede `[workspace.dependencies]` in that
+# root. Also note that 33 of the 537 distinct names in Cargo.lock carry MORE
+# THAN ONE version (576 package entries against 537 names), so a name ->
+# version map is safe only because each of these 12 appears exactly once --
+# check that before extending this check to another package.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	99ae86cdf8c71c53cec1df5760766038eca20375
 franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
