@@ -194,9 +194,20 @@ def extract_fn(source: str, name: str, path_label: str) -> str:
     false pass, reached by fixing the red it printed.
     """
     cleaned = strip_rust_comments(source)
-    match = _fn_decl(name).search(cleaned)
-    if match is None:
+    matches = list(_fn_decl(name).finditer(cleaned))
+    if not matches:
         raise CannotAnswer(f"{path_label}: no `fn {name}` found")
+    if len(matches) > 1:
+        # Taking the first of several is the same silent-wrong-region failure as
+        # the two defects above, one layer out: a cfg-gated or test-module
+        # namesake added ABOVE the live analyzer would be fingerprinted in its
+        # place, and the gate would pass while watching the wrong code. There is
+        # exactly one of each today, so this is loud rather than restrictive.
+        raise CannotAnswer(
+            f"{path_label}: {len(matches)} declarations of `fn {name}`; this gate "
+            "pins one region and cannot tell which one analysis flows through"
+        )
+    match = matches[0]
     open_brace = cleaned.find("{", match.end())
     if open_brace == -1:
         raise CannotAnswer(f"{path_label}: `fn {name}` has no body")
@@ -235,10 +246,15 @@ def read_const_value(source: str) -> str:
     a stale comment reds a healthy tree, and a comment carrying the CORRECT
     fingerprint greens a stale constant.
     """
-    match = CONST_DECL.search(strip_rust_comments(source))
-    if match is None:
+    matches = list(CONST_DECL.finditer(strip_rust_comments(source)))
+    if not matches:
         raise CannotAnswer(f"{CONST_FILE.name}: no `{CONST_NAME}` string constant found")
-    return match.group("value")
+    if len(matches) > 1:
+        raise CannotAnswer(
+            f"{CONST_FILE.name}: {len(matches)} live declarations of {CONST_NAME}; "
+            "the one the corpus revision hashes is not determinable from text"
+        )
+    return matches[0].group("value")
 
 
 def corpus_revision_references_const(source: str) -> bool:
@@ -587,6 +603,29 @@ def self_test() -> int:
     check(
         "arm23 control: both regions extract non-trivially from the real tree",
         real_ok,
+    )
+
+    # Ambiguity must be loud. Before these guards both arms returned 0 -- a PASS
+    # on a tree where the gate could not tell which declaration analysis flows
+    # through, which is the silent-wrong-region class one layer out.
+    duplicate_fn = (
+        baseline_analyzer
+        + "\nfn configure_lexical_analyzer(index: TantivyIndex) "
+        "-> SearchResult<TantivyIndex> {\n    Ok(index)\n}\n"
+    )
+    check(
+        "arm24 two declarations of the analyzer fn is cannot-answer, not a pass",
+        rc(duplicate_fn, baseline_maintenance) == 3,
+    )
+    duplicate_const = baseline_analyzer.replace(
+        "pub(crate) const",
+        f'pub(crate) const {CONST_NAME}: &str = '
+        f'"ee.lexical_analyzer.other.v1+fp0000000000";\npub(crate) const',
+        1,
+    )
+    check(
+        "arm25 two live declarations of the constant is cannot-answer, not a pass",
+        rc(duplicate_const, baseline_maintenance) == 3,
     )
 
     passed = sum(1 for _, ok in arms if ok)

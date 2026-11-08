@@ -2121,11 +2121,12 @@ run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
 # tempdir, so none of them can observe a reuse bug -- they assert the analyzer is
 # correct today, not that changed analysis forces a rebuild. Python because
 # cargo does not run on the Mac dev host at all, which is where that blind spot
-# is total. MEASURED 2026-11-07: lint 126ms, self-test 58ms (23 arms), each the
+# is total. MEASURED 2026-11-07: lint 143ms, self-test 61ms (25 arms), each the
 # median of three, re-measured after the region locator moved to whole-file
-# comment stripping -- that change costs nothing readable at this resolution.
-# Both rows
-# declare the manifest's 1s floor for sub-second checks.
+# comment stripping and gained its ambiguity guards. Wall clock including
+# interpreter startup, which is what this stage actually costs verify.sh. Both
+# rows declare the manifest's 1s floor for sub-second checks, so the pair is
+# nowhere near its declared budget.
 run_stage "Lexical Analyzer Revision Contract" "python3 scripts/check-lexical-analyzer-revision.py --self-test"
 run_stage "Lexical Analyzer Revision Lint" "python3 scripts/check-lexical-analyzer-revision.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
