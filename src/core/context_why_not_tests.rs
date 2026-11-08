@@ -699,9 +699,7 @@ fn why_not_query_exclusions_have_authoritative_filter_reasons_before_candidate_a
                     .ok_or("missing filter hints")?;
                 assert_eq!(hints.len(), 1);
                 assert_eq!(hints[0]["kind"], "excluded_by_filter");
-                let action = hints[0]["action"]
-                    .as_str()
-                    .ok_or("missing filter action")?;
+                let action = hints[0]["action"].as_str().ok_or("missing filter action")?;
                 assert!(action.contains("filters"));
                 assert!(!action.contains("candidate-pool"));
                 assert!(!report.to_string().contains(&body));

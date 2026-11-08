@@ -3732,6 +3732,16 @@ enum DeltaStageError {
     Refused(String),
 }
 
+impl From<IndexRebuildError> for DeltaStageError {
+    fn from(error: IndexRebuildError) -> Self {
+        if matches!(error, IndexRebuildError::Cancelled(_)) {
+            Self::Cancelled(error)
+        } else {
+            Self::Refused(error.to_string())
+        }
+    }
+}
+
 async fn stage_delta_generation(
     publish_lock: &IndexPublishLockOwner<'_>,
     index_dir: &Path,
@@ -3768,7 +3778,29 @@ async fn stage_planned_index_delta(
     digests: delta::DocDigests,
     document_counts: IndexDocumentCounts,
 ) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
+    stage_planned_index_delta_with_capacity(
+        publish_lock,
+        index_dir,
+        stack,
+        applied,
+        digests,
+        document_counts,
+        storage::filesystem_capacity,
+    )
+    .await
+}
+
+async fn stage_planned_index_delta_with_capacity(
+    publish_lock: &IndexPublishLockOwner<'_>,
+    index_dir: &Path,
+    stack: &EmbedderStack,
+    applied: delta::Delta,
+    digests: delta::DocDigests,
+    document_counts: IndexDocumentCounts,
+    mut probe: impl FnMut(&Path) -> Result<storage::Capacity, IndexRebuildError>,
+) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
     let cx = publish_lock.cx;
+    publish_lock.checkpoint().map_err(DeltaStageError::from)?;
     // Digest metadata alone cannot prove that the native vector tiers belong
     // to this producer. In particular, older empty generations omitted their
     // producer revision; appending into them kept that empty header forever.
@@ -3776,12 +3808,29 @@ async fn stage_planned_index_delta(
     // generations, as well as any actual fast/quality producer drift.
     verify_index_vector_producers(index_dir, &stack_descriptors(stack))
         .map_err(DeltaStageError::Refused)?;
+    // Count the immutable full manifest once, then reuse that byte count at
+    // each capacity boundary instead of serializing the corpus again.
+    let measured = storage::serialized_bytes(&digests);
+    publish_lock.checkpoint().map_err(DeltaStageError::from)?;
+    let digest_bytes = measured.map_err(DeltaStageError::from)?;
+    storage::admit_delta(cx, index_dir, stack, &applied, digest_bytes, &mut probe)
+        .map_err(DeltaStageError::from)?;
     let producer = delta::embedder_identity(stack);
-    let staging = UnpublishedIndexStage::create(index_dir)
-        .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
+    let staging = UnpublishedIndexStage::create(index_dir).map_err(DeltaStageError::from)?;
     let staged = async {
         delta::copy_generation(index_dir, staging.path())?;
         publish_lock.checkpoint()?;
+        // Reflinks consume little space, but a filesystem may require full
+        // independent byte copies. Reprice the delta against what remains
+        // after that copy before either backend starts allocating new data.
+        storage::admit_delta(
+            cx,
+            staging.path(),
+            stack,
+            &applied,
+            digest_bytes,
+            &mut probe,
+        )?;
         delta::apply(cx, staging.path(), stack, &applied)
             .await
             .map_err(|fallback| {
@@ -3803,20 +3852,16 @@ async fn stage_planned_index_delta(
                 "embedding producer changed while staging an index delta".to_owned(),
             ));
         }
+        storage::admit_manifest(cx, staging.path(), digest_bytes, &mut probe)?;
         digests.write(staging.path())?;
         sync_index_generation(staging.path(), || publish_lock.checkpoint())?;
+        storage::confirm_reserve(cx, staging.path(), &mut probe)?;
         Ok::<(), IndexRebuildError>(())
     }
     .await;
     match staged {
         Ok(()) => Ok((staging, applied)),
-        Err(error) => {
-            if matches!(error, IndexRebuildError::Cancelled(_)) {
-                Err(DeltaStageError::Cancelled(error))
-            } else {
-                Err(DeltaStageError::Refused(error.to_string()))
-            }
-        }
+        Err(error) => Err(DeltaStageError::from(error)),
     }
 }
 

@@ -66,7 +66,31 @@ impl StagingCopier {
         source_path: &Path,
         target: &Path,
         clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
+        checkpoint: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.copy_with_checkpoint_and_capacity(
+            source_path,
+            target,
+            clone,
+            checkpoint,
+            |target, bytes| {
+                super::super::storage::admit_copy(
+                    target,
+                    bytes,
+                    super::super::storage::filesystem_capacity,
+                )
+                .map_err(|error| io::Error::other(error.to_string()))
+            },
+        )
+    }
+
+    fn copy_with_checkpoint_and_capacity(
+        &mut self,
+        source_path: &Path,
+        target: &Path,
+        clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
         mut checkpoint: impl FnMut() -> io::Result<()>,
+        admit_copy: impl FnOnce(&Path, u64) -> io::Result<()>,
     ) -> io::Result<()> {
         let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
         require_regular(&before)?;
@@ -108,6 +132,11 @@ impl StagingCopier {
                 }
             }
         };
+        // Both strategies allocate an inode and need remaining metadata space.
+        // A reflink has not allocated its source's full logical payload length.
+        checked_io(&mut checkpoint, || {
+            admit_copy(target, if cloned { 0 } else { length })
+        })?;
         if !cloned {
             // A refused clone may have touched our exclusively created inode.
             // Never reopen/truncate a target supplied by somebody else.
@@ -464,6 +493,143 @@ mod tests {
         })?;
         assert_eq!(fs::read(&target)?, b"the whole source");
         assert_eq!(copier.stats().copied_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn byte_copy_capacity_loss_stops_a_partial_generation_and_preserves_live_readers() -> TestResult
+    {
+        use crate::core::index::storage::{Capacity, admit_copy};
+        use frankensearch::VectorIndex;
+
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let source = parent.join("live.idx");
+        let mut builder = VectorIndex::create(&source, "copy-capacity-control", 4)?;
+        builder.write_record("kept", &[1.0, 0.0, 0.0, 0.0])?;
+        builder.finish()?;
+        let before = fs::read(&source)?;
+        let reader = VectorIndex::open_read_only(&source)?;
+        let original_hits = reader.search_top_k(&[1.0, 0.0, 0.0, 0.0], 10, None)?;
+        assert_eq!(original_hits.len(), 1);
+        let mut copier = StagingCopier::default();
+        let mut capacity_checks = 0;
+        let first = parent.join("first-copy.idx");
+        copier.copy_with_checkpoint_and_capacity(
+            &source,
+            &first,
+            |_, _| unavailable(),
+            || Ok(()),
+            |target, bytes| {
+                capacity_checks += 1;
+                assert_eq!(bytes, before.len() as u64);
+                admit_copy(target, bytes, |_| {
+                    Ok(Capacity {
+                        available_bytes: u64::MAX,
+                        available_inodes: Some(1000),
+                    })
+                })
+                .map_err(|error| io::Error::other(error.to_string()))
+            },
+        )?;
+        assert_eq!(fs::read(&first)?, before);
+        let second = parent.join("second-copy.idx");
+        let error = copier
+            .copy_with_checkpoint_and_capacity(
+                &source,
+                &second,
+                |_, _| panic!("the known unavailable clone must not be retried"),
+                || Ok(()),
+                |target, bytes| {
+                    capacity_checks += 1;
+                    assert_eq!(bytes, before.len() as u64);
+                    admit_copy(target, bytes, |_| {
+                        Ok(Capacity {
+                            available_bytes: 0,
+                            available_inodes: Some(1000),
+                        })
+                    })
+                    .map_err(|error| io::Error::other(error.to_string()))
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("index_storage_bytes_insufficient")
+        );
+        assert_eq!(capacity_checks, 2);
+        assert_eq!(
+            fs::metadata(&second)?.len(),
+            0,
+            "no payload may follow refusal"
+        );
+        assert_eq!(copier.stats().copied_files, 1);
+        assert_eq!(copier.stats().copied_bytes, before.len() as u64);
+        assert_eq!(fs::read(&source)?, before);
+        assert_eq!(
+            reader.search_top_k(&[1.0, 0.0, 0.0, 0.0], 10, None)?,
+            original_hits
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clone_capacity_checks_charge_zero_payload_but_still_require_inodes() -> TestResult {
+        use crate::core::index::storage::{Capacity, admit_copy};
+
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let source = parent.join("source");
+        fs::write(&source, b"unchanged source")?;
+        for available_inodes in [1000, 0] {
+            let target = parent.join(format!("clone-{available_inodes}"));
+            let mut copier = StagingCopier::default();
+            let mut checks = 0;
+            let copied = copier.copy_with_checkpoint_and_capacity(
+                &source,
+                &target,
+                |source, target| {
+                    // Inject a completed independent clone, so this arm does
+                    // not depend on the host filesystem supporting reflinks.
+                    let mut destination = create_destination(target)?;
+                    io::copy(&mut source.try_clone()?, &mut destination)?;
+                    Ok(CloneAttempt::Cloned(destination))
+                },
+                || Ok(()),
+                |target, bytes| {
+                    checks += 1;
+                    assert_eq!(bytes, 0, "cloned logical bytes are not copied allocation");
+                    admit_copy(target, bytes, |_| {
+                        Ok(Capacity {
+                            available_bytes: u64::MAX,
+                            available_inodes: Some(available_inodes),
+                        })
+                    })
+                    .map_err(|error| io::Error::other(error.to_string()))
+                },
+            );
+            assert_eq!(checks, 1);
+            assert_eq!(copier.stats().copied_files, 0);
+            if available_inodes == 0 {
+                assert!(
+                    copied
+                        .unwrap_err()
+                        .to_string()
+                        .contains("index_storage_inodes_insufficient")
+                );
+                assert_eq!(copier.stats().cloned_files, 0);
+            } else {
+                copied?;
+                assert_eq!(copier.stats().cloned_files, 1);
+                assert_eq!(
+                    copier.stats().cloned_bytes,
+                    b"unchanged source".len() as u64
+                );
+                assert_eq!(fs::read(&target)?, b"unchanged source");
+            }
+            assert_eq!(fs::read(&source)?, b"unchanged source");
+        }
         Ok(())
     }
 

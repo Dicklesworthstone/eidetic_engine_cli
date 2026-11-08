@@ -8,17 +8,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use super::super::storage;
 use crate::search::IndexableDocument;
 
 use frankensearch::lexical_tantivy::tantivy_crate::{
-    Index, IndexWriter, TantivyDocument, Term,
+    Index, IndexReader, IndexWriter, TantivyDocument, Term,
     index::SegmentId,
     indexer::NoMergePolicy,
     tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
 };
 
 use super::{
-    IncrementalFallback, IncrementalFallbackReason, LEXICAL_INDEX_SUBDIR, batch,
+    IncrementalFallback, IncrementalFallbackReason, IndexRebuildError, LEXICAL_INDEX_SUBDIR, batch,
     ensure_index_path_has_no_symlinks, incremental_fallback, metadata::document_payload_bytes,
 };
 
@@ -261,6 +262,14 @@ fn delete_with_checkpoint(
         .get_field("id")
         .map_err(|error| failure("delete ID field", error))?;
     checkpoint()?;
+    let bytes = selected_segment_bytes(&index, staging_dir, &segments, &mut checkpoint)?;
+    let admission = storage::admit_lexical_rewrite(
+        &staging_dir.join(LEXICAL_INDEX_SUBDIR),
+        bytes,
+        storage::filesystem_capacity,
+    );
+    checkpoint()?;
+    admission.map_err(|error| failure("delete storage admission", error))?;
     let mut writer = maintenance_writer(&index)?;
     let deleted = (|| {
         checkpoint()?;
@@ -320,7 +329,163 @@ pub(super) fn compact_if_needed(
 fn compact_with_checkpoint(
     staging_dir: &Path,
     max_segments: usize,
+    checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<Compaction, IncrementalFallback> {
+    compact_with_checkpoint_and_capacity(
+        staging_dir,
+        max_segments,
+        checkpoint,
+        storage::filesystem_capacity,
+    )
+}
+
+/// Segment metadata may list optional files that do not exist. Charge each
+/// existing selected file once, without counting unrelated retired files or
+/// large base segments that the native merge is expressly leaving untouched.
+fn selected_segment_bytes(
+    index: &Index,
+    staging_dir: &Path,
+    selected: &[SegmentId],
+    checkpoint: &mut impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<u64, IncrementalFallback> {
+    let selected = selected.iter().copied().collect::<BTreeSet<_>>();
+    let mut found = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for meta in index
+        .searchable_segment_metas()
+        .map_err(|error| failure("storage inventory", error))?
+    {
+        checkpoint()?;
+        if selected.contains(&meta.id()) {
+            found.insert(meta.id());
+            files.extend(meta.list_files());
+        }
+    }
+    if found != selected {
+        return Err(failure("storage inventory", "selected segment disappeared"));
+    }
+    let directory = staging_dir.join(LEXICAL_INDEX_SUBDIR);
+    let mut bytes = 0_u64;
+    for file in files {
+        checkpoint()?;
+        if file
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(failure("storage inventory", "invalid segment filename"));
+        }
+        let path = directory.join(file);
+        bytes = add_storage_bytes(bytes, optional_file_bytes(&path, checkpoint)?)?;
+    }
+    Ok(bytes)
+}
+
+fn add_storage_bytes(left: u64, right: u64) -> Result<u64, IncrementalFallback> {
+    left.checked_add(right)
+        .ok_or_else(|| failure("storage inventory", "allocation size overflow"))
+}
+
+fn optional_file_bytes(
+    path: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<u64, IncrementalFallback> {
+    checkpoint()?;
+    let measured = (|| {
+        ensure_index_path_has_no_symlinks(path, "measure lexical rewrite allocation")
+            .map_err(|_| failure("storage inventory", "cannot inspect lexical file"))?;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.is_symlink() => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            _ => Err(failure("storage inventory", "cannot inspect lexical file")),
+        }
+    })();
+    checkpoint()?;
+    measured
+}
+
+/// The ordinary adapter retains Tantivy's automatic merge policy and rewrites
+/// its complete ordinal sidecar on commit. Price both before opening that
+/// writer; unlike explicit selective compaction, any active segment can merge.
+pub(super) fn admit_upserts(
+    cx: &asupersync::Cx,
+    staging_dir: &Path,
+    documents: &[IndexableDocument],
+) -> Result<(), IncrementalFallback> {
+    admit_upserts_with_capacity(
+        staging_dir,
+        documents,
+        || batch::checkpoint(cx, "lexical"),
+        storage::filesystem_capacity,
+    )
+}
+
+fn admit_upserts_with_capacity(
+    staging_dir: &Path,
+    documents: &[IndexableDocument],
     mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+    probe: impl FnOnce(&Path) -> Result<storage::Capacity, IndexRebuildError>,
+) -> Result<(), IncrementalFallback> {
+    checkpoint()?;
+    if documents.is_empty() {
+        return Ok(());
+    }
+    let index = open_staged(staging_dir, &mut checkpoint)?;
+    let (segments, _) = inventory(&index)?;
+    let mut bytes = selected_segment_bytes(&index, staging_dir, &segments, &mut checkpoint)?;
+    let directory = staging_dir.join(LEXICAL_INDEX_SUBDIR);
+    bytes = add_storage_bytes(
+        bytes,
+        optional_file_bytes(&directory.join("ord_table.json"), &mut checkpoint)?,
+    )?;
+    // A missing, corrupt, or stale-short sidecar is padded on adapter open.
+    // Read native column maxima without allocating that corpus-sized table.
+    let reader: IndexReader = index
+        .reader_builder()
+        .try_into()
+        .map_err(|error| failure("ordinal storage inventory", error))?;
+    let searcher = reader.searcher();
+    let mut max_ordinal: Option<u64> = None;
+    for segment in searcher.segment_readers() {
+        checkpoint()?;
+        if let Ok(column) = segment.fast_fields().u64("ord")
+            && column.num_docs() > 0
+        {
+            max_ordinal =
+                Some(max_ordinal.map_or(column.max_value(), |old| old.max(column.max_value())));
+        }
+    }
+    let padding = match max_ordinal {
+        Some(ordinal) => ordinal
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(3))
+            .and_then(|bytes| bytes.checked_add(1))
+            .ok_or_else(|| failure("ordinal storage inventory", "allocation size overflow"))?,
+        None => 2,
+    };
+    bytes = add_storage_bytes(bytes, padding)?;
+    for document in documents {
+        checkpoint()?;
+        bytes = add_storage_bytes(
+            bytes,
+            u64::try_from(document_payload_bytes(document))
+                .map_err(|_| failure("upsert storage inventory", "allocation size overflow"))?,
+        )?;
+        // Count exact JSON escapes and a separator for every new ordinal ID.
+        let id_bytes = storage::serialized_bytes(&document.id)
+            .map_err(|error| failure("ordinal storage inventory", error))?;
+        bytes = add_storage_bytes(bytes, add_storage_bytes(id_bytes, 1)?)?;
+    }
+    checkpoint()?;
+    let admission = storage::admit_lexical_rewrite(&directory, bytes, probe);
+    checkpoint()?;
+    admission.map_err(|error| failure("upsert storage admission", error))
+}
+
+fn compact_with_checkpoint_and_capacity(
+    staging_dir: &Path,
+    max_segments: usize,
+    mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+    probe: impl FnOnce(&Path) -> Result<storage::Capacity, IndexRebuildError>,
 ) -> Result<Compaction, IncrementalFallback> {
     let index = open_staged(staging_dir, &mut checkpoint)?;
     let before = segment_states(&index)?;
@@ -335,6 +500,17 @@ fn compact_with_checkpoint(
             documents,
         });
     }
+    let selected_bytes = selected_segment_bytes(&index, staging_dir, &selected, &mut checkpoint)?;
+    checkpoint()?;
+    let admission = storage::admit_lexical_rewrite(
+        &staging_dir.join(LEXICAL_INDEX_SUBDIR),
+        selected_bytes,
+        probe,
+    );
+    // A probe can fail at the same time as cancellation; preserve the same
+    // terminal interruption ordering as the surrounding staged publisher.
+    checkpoint()?;
+    admission.map_err(|error| failure("storage admission", error))?;
     let mut writer = maintenance_writer(&index)?;
     // Every exit joins the native workers. A cancelled merge must not leave a
     // writer racing staging cleanup or fallback. Native IO is not preemptible.

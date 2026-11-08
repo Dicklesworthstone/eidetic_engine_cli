@@ -131,6 +131,23 @@ impl Delta {
         self.upserts.len().saturating_add(self.removals.len())
     }
 
+    /// Mirror apply's identity-bound decision before pricing native compaction.
+    /// Metadata-only upserts reuse vectors; removals and changed inputs may
+    /// rewrite each complete main tier even when the source delta is tiny.
+    pub(super) fn requires_vector_rewrite(
+        &self,
+        stack: &EmbedderStack,
+    ) -> Result<bool, IncrementalFallback> {
+        let identity = embedder_identity(stack).ok_or_else(|| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                "delta storage admission requires complete validated embedding identities",
+            )
+        })?;
+        let upserts = self.vector_upserts(&identity)?;
+        Ok(!upserts.is_empty() || !self.removals.is_empty())
+    }
+
     /// Recheck the plan's commitments at use, before either tier is mutated.
     /// Public upsert/removal lists may have changed after planning; a changed
     /// body, changed ID, or remove-then-upsert must receive a new vector.
@@ -626,15 +643,6 @@ pub(super) async fn apply(
         "selected identity-bound delta embedding inputs"
     );
 
-    // Maintenance belongs to the tier that needs it. Withdraw source IDs
-    // before merging so compaction does not copy documents being removed.
-    // Both operations finish and join their private writers before tier upserts.
-    #[cfg(feature = "lexical-bm25")]
-    {
-        lexical_maintenance::delete_documents(cx, staging_dir, &delta.removals)?;
-        lexical_maintenance::compact_if_needed(cx, staging_dir, MAX_LEXICAL_SEGMENTS)?;
-    }
-
     // A metadata-only change must not acquire vector writer locks or touch
     // vector bytes. The staging caller still validates every tier's counts
     // and compatibility before flushing and publishing the generation.
@@ -678,10 +686,17 @@ pub(super) async fn apply(
 
     #[cfg(feature = "lexical-bm25")]
     {
+        // Finish the already-admitted vector allocations before lexical
+        // writers measure the remaining capacity. Withdraw lexical IDs before
+        // merging, so compaction never copies documents being removed. Every
+        // writer still belongs exclusively to this unpublished staging copy.
+        lexical_maintenance::delete_documents(cx, staging_dir, &delta.removals)?;
+        lexical_maintenance::compact_if_needed(cx, staging_dir, MAX_LEXICAL_SEGMENTS)?;
         batch::checkpoint(cx, "lexical")?;
         // Removals already committed before maintenance. A deletion-only or
         // empty delta needs neither another writer nor an empty commit here.
         if !delta.upserts.is_empty() {
+            lexical_maintenance::admit_upserts(cx, staging_dir, &delta.upserts)?;
             let lexical = super::open_lexical_index(staging_dir)?;
             for documents in lexical_maintenance::upsert_batches(&delta.upserts) {
                 batch::checkpoint(cx, "lexical")?;

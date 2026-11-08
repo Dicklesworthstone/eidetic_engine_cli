@@ -1,7 +1,7 @@
 //! Selective compaction preserves untouched native segments and source generations.
 
 use super::*;
-use crate::search::LexicalRead;
+use crate::search::{LexicalRead, LexicalWrite};
 use std::time::Duration;
 
 type TestResult<T = ()> = Result<T, String>;
@@ -269,8 +269,79 @@ fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generat
                 .map_err(|error| error.to_string())?;
         let expected = ids(&cx, &pinned).await?;
         assert_eq!(expected.len(), 100);
-        let report = compact_with_checkpoint(&staged, 4, || batch::checkpoint(&cx, "lexical"))
-            .map_err(|error| error.detail)?;
+        let staged_native = Index::open_in_dir(staged.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        let states = segment_states(&staged_native).map_err(|error| error.detail)?;
+        let selected = compaction_candidates(&states, 4);
+        let selected_bytes =
+            selected_segment_bytes(&staged_native, &staged, &selected, &mut || Ok(()))
+                .map_err(|error| error.detail)?;
+        let all_bytes = selected_segment_bytes(
+            &staged_native,
+            &staged,
+            &states.keys().copied().collect::<Vec<_>>(),
+            &mut || Ok(()),
+        )
+        .map_err(|error| error.detail)?;
+        assert!(selected_bytes > 0 && selected_bytes < all_bytes);
+        let required = 4 * selected_bytes + 80 * 1024 * 1024;
+        let before_refusal = file_inventory(&staged)?;
+        for failure in 0..3 {
+            let result = compact_with_checkpoint_and_capacity(
+                &staged,
+                4,
+                || batch::checkpoint(&cx, "lexical"),
+                |_| match failure {
+                    0 => Ok(storage::Capacity {
+                        available_bytes: required - 1,
+                        available_inodes: Some(128),
+                    }),
+                    1 => Ok(storage::Capacity {
+                        available_bytes: required,
+                        available_inodes: Some(127),
+                    }),
+                    _ => Err(IndexRebuildError::Index("capacity probe failed".to_owned())),
+                },
+            );
+            assert!(result.unwrap_err().detail.contains("storage admission"));
+            assert_eq!(file_inventory(&staged)?, before_refusal);
+            assert_eq!(ids(&cx, &pinned).await?, expected);
+        }
+        let interrupted = std::cell::Cell::new(false);
+        let cancelled = compact_with_checkpoint_and_capacity(
+            &staged,
+            4,
+            || {
+                if interrupted.get() {
+                    Err(failure("test", "cancel storage probe"))
+                } else {
+                    batch::checkpoint(&cx, "lexical")
+                }
+            },
+            |_| {
+                interrupted.set(true);
+                Err(IndexRebuildError::Index("capacity probe failed".to_owned()))
+            },
+        );
+        assert!(
+            cancelled
+                .unwrap_err()
+                .detail
+                .contains("cancel storage probe")
+        );
+        assert_eq!(file_inventory(&staged)?, before_refusal);
+        let report = compact_with_checkpoint_and_capacity(
+            &staged,
+            4,
+            || batch::checkpoint(&cx, "lexical"),
+            |_| {
+                Ok(storage::Capacity {
+                    available_bytes: required,
+                    available_inodes: Some(128),
+                })
+            },
+        )
+        .map_err(|error| error.detail)?;
         assert_eq!(
             report,
             Compaction {
@@ -307,7 +378,13 @@ fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generat
             expected,
             "pinned reader remains valid"
         );
-        let again = compact_with_checkpoint(&staged, 4, || Ok(())).map_err(|error| error.detail)?;
+        let again = compact_with_checkpoint_and_capacity(
+            &staged,
+            4,
+            || Ok(()),
+            |_| panic!("an unfragmented tier must not reserve merge space"),
+        )
+        .map_err(|error| error.detail)?;
         assert_eq!(again.segments_before, again.segments_after);
         assert_eq!(file_inventory(&staged)?, retained);
         Ok(())
@@ -341,4 +418,134 @@ fn cancellation_after_a_partial_merge_still_joins_and_releases_the_writer() -> T
         .wait_merging_threads()
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[test]
+fn ordinary_upsert_admission_covers_native_merges_and_short_ordinal_sidecars() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        let _temp = temp;
+        let live = root.join("live");
+        let staged = root.join("staged");
+        let _native = unequal_segments(&live)?;
+        // Native fast fields contain ordinals 0..99. The shipping adapter must
+        // pad this valid but stale-short table before appending another ID.
+        std::fs::write(live.join(LEXICAL_INDEX_SUBDIR).join("ord_table.json"), "[]")
+            .map_err(|error| error.to_string())?;
+        let original = file_inventory(&live)?;
+        std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+        super::super::copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+        let pinned =
+            crate::search::open_lexical_index_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+                .map_err(|error| error.to_string())?;
+        let expected = ids(&cx, &pinned).await?;
+        assert_eq!(expected.len(), 100);
+        let native = Index::open_in_dir(staged.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        let (segments, _) = inventory(&native).map_err(|error| error.detail)?;
+        let segment_bytes = selected_segment_bytes(&native, &staged, &segments, &mut || Ok(()))
+            .map_err(|error| error.detail)?;
+        let documents = [IndexableDocument::new(
+            "mem_selective_099",
+            "quartzmarker refreshedmarker lexical evidence",
+        )];
+        let payload_bytes = document_payload_bytes(&documents[0]) as u64;
+        let id_bytes = serde_json::to_vec(&documents[0].id)
+            .map_err(|error| error.to_string())?
+            .len() as u64
+            + 1;
+        let without_padding = 4 * (segment_bytes + 2 + payload_bytes + id_bytes) + 80 * 1024 * 1024;
+        let required = without_padding + 4 * (3 * 100 + 1);
+        let before = file_inventory(&staged)?;
+        for failure in 0..4 {
+            let refused = admit_upserts_with_capacity(
+                &staged,
+                &documents,
+                || batch::checkpoint(&cx, "lexical"),
+                |_| match failure {
+                    0 => Ok(storage::Capacity {
+                        available_bytes: without_padding,
+                        available_inodes: Some(128),
+                    }),
+                    1 => Ok(storage::Capacity {
+                        available_bytes: required - 1,
+                        available_inodes: Some(128),
+                    }),
+                    2 => Ok(storage::Capacity {
+                        available_bytes: required,
+                        available_inodes: Some(127),
+                    }),
+                    _ => Err(IndexRebuildError::Index("capacity probe failed".to_owned())),
+                },
+            );
+            assert!(
+                refused
+                    .unwrap_err()
+                    .detail
+                    .contains("upsert storage admission")
+            );
+            assert_eq!(file_inventory(&staged)?, before);
+            assert_eq!(file_inventory(&live)?, original);
+            assert_eq!(ids(&cx, &pinned).await?, expected);
+        }
+        let interrupted = std::cell::Cell::new(false);
+        let cancelled = admit_upserts_with_capacity(
+            &staged,
+            &documents,
+            || {
+                if interrupted.get() {
+                    Err(failure("test", "cancel upsert storage probe"))
+                } else {
+                    batch::checkpoint(&cx, "lexical")
+                }
+            },
+            |_| {
+                interrupted.set(true);
+                Err(IndexRebuildError::Index("capacity probe failed".to_owned()))
+            },
+        );
+        assert!(
+            cancelled
+                .unwrap_err()
+                .detail
+                .contains("cancel upsert storage probe")
+        );
+        assert_eq!(file_inventory(&staged)?, before);
+        admit_upserts_with_capacity(
+            &staged,
+            &documents,
+            || batch::checkpoint(&cx, "lexical"),
+            |_| {
+                Ok(storage::Capacity {
+                    available_bytes: required,
+                    available_inodes: Some(128),
+                })
+            },
+        )
+        .map_err(|error| error.detail)?;
+        let writer = crate::search::open_lexical_index(&staged.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        writer
+            .index_documents(&cx, &documents)
+            .await
+            .map_err(|error| error.to_string())?;
+        writer
+            .commit(&cx)
+            .await
+            .map_err(|error| error.to_string())?;
+        let hits = writer
+            .search(&cx, "refreshedmarker", 8)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id.as_str(), "mem_selective_099");
+        assert_eq!(ids(&cx, &writer).await?, expected);
+        assert_eq!(file_inventory(&live)?, original);
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
 }
