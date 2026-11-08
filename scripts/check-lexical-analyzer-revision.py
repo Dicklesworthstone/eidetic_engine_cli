@@ -96,16 +96,21 @@ def strip_rust_comments(source: str) -> str:
     a string literal must therefore survive, and self-test arms assert that
     direction explicitly rather than only asserting that comments are removed.
 
-    Only the plain-string form has a synthetic arm (arm11/arm12), and that is a
-    measured decision rather than a gap: the three files this gate strips are
-    full of the other forms, so every branch below runs against real code on
-    every invocation, and a regression in any of them moves the computed
-    fingerprint off the pinned constant and reds the lint. That is louder than a
-    synthetic arm and cannot be skipped. One hand-verified example, worth citing
-    because it exercises the nastiest branch: the `br#"..."#` byte RAW string
-    holding `ee.index.rebuild_request.v99` in src/core/index.rs (around :15084;
-    grep the schema name, since that file is edited often enough for a line
-    number to rot) has both a brace and double quotes inside the literal.
+    Which forms need a synthetic arm was decided by measuring the three files
+    this gate strips, not by taste. They are full of raw, byte and char
+    literals, so those branches run against real code on every invocation and a
+    regression in them moves the computed fingerprint off the pinned constant
+    and reds the lint -- louder than an arm and impossible to skip. One
+    hand-verified example exercising the nastiest of them: the `br#"..."#` byte
+    RAW string holding `ee.index.rebuild_request.v99` in src/core/index.rs
+    (around :15084; grep the schema name, since that file is edited often enough
+    for a line number to rot) has both a brace and double quotes inside the
+    literal.
+
+    Raw IDENTIFIERS are the exception, and that is why arm26/arm27 exist: those
+    files carry ZERO of them (measured 2026-11-08), so live code cannot cover
+    that branch and the argument above does not reach it. Plain strings keep
+    arm11/arm12 for the over-stripping direction.
 
     Do not try to re-measure those populations with a regex over the source, and
     do not assume the error has a direction. Substring false positives INFLATE:
@@ -686,8 +691,48 @@ def self_test() -> int:
         rc(duplicate_const, baseline_maintenance) == 3,
     )
 
+    # Raw-identifier control, and the one literal form that genuinely needs an
+    # arm. `r#type` is an IDENTIFIER, not a raw string, and the three files this
+    # gate strips carry ZERO of them (measured 2026-11-08) -- so the argument
+    # that live code exercises every stripper branch, which holds for raw, byte
+    # and char literals, does not reach this one. A synthetic arm is its only
+    # cover. Consuming `r#ident` as a raw string would scan for a `"#`
+    # terminator and swallow the analysis after it: silently where some later
+    # `"#` exists, as a refusal where none does. Both land as this baseline
+    # failing.
+    raw_ident_maintenance = mutate(
+        SYNTH_MAINTENANCE,
+        "    index.tokenizers().register(",
+        '    let r#type = "owned";\n    index.tokenizers().register(',
+        "arm26 raw identifier",
+    )
+    # _synth strips, so a regression here raises BEFORE any arm is evaluated.
+    # Measured by deleting the guard: the run died with an uncaught
+    # `CannotAnswer: unterminated raw string literal` and never printed an arm
+    # count, so the remaining arms were skipped too. Catch it and let the arm
+    # carry the verdict, the way arm23 does for the real tree.
+    try:
+        raw_ident_analyzer, raw_ident_base = _synth(maintenance=raw_ident_maintenance)
+        raw_ident_built = True
+    except CannotAnswer as exc:
+        raw_ident_built = False
+        print(f"     (arm26 could not build its sources: {exc})")
     check(
-        "arm26 control: no pass-expecting arm's mutation was a silent no-op"
+        "arm26 a raw identifier is not mistaken for a raw string literal",
+        raw_ident_built and rc(raw_ident_analyzer, raw_ident_base) == 0,
+    )
+    check(
+        "arm27 with a raw identifier present a real body change is still caught",
+        raw_ident_built
+        and rc(
+            raw_ident_analyzer,
+            raw_ident_base.replace("Language::English", "Language::German"),
+        )
+        == 1,
+    )
+
+    check(
+        "arm28 control: no pass-expecting arm's mutation was a silent no-op"
         + (f" (vacuous: {', '.join(no_op_mutations)})" if no_op_mutations else ""),
         not no_op_mutations,
     )

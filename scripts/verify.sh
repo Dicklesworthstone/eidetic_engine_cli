@@ -2121,9 +2121,11 @@ run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
 # tempdir, so none of them can observe a reuse bug -- they assert the analyzer is
 # correct today, not that changed analysis forces a rebuild. Python because
 # cargo does not run on the Mac dev host at all, which is where that blind spot
-# is total. MEASURED 2026-11-07: lint 144ms, self-test 60ms (26 arms), each the
+# is total. MEASURED 2026-11-08: lint 160ms, self-test 60ms (28 arms), each the
 # median of three; wall clock including interpreter startup, which is what this
-# stage actually costs verify.sh. Both rows declare the manifest's 1s floor for
+# stage actually costs verify.sh. The two arms added that day cost nothing
+# measurable -- the self-test median did not move off 60ms -- so arm count is
+# not what this budget is sensitive to. Both rows declare the manifest's 1s floor for
 # sub-second checks, so the pair is nowhere near its declared budget. The arm
 # count is stated HERE only -- verify-budget.toml carries the timings alone, so
 # a new arm does not oblige an edit in two files that can then disagree.
