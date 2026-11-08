@@ -13,12 +13,14 @@ use crate::core::curate::{
     ClusterCoherenceCluster, ClusterCoherenceInput, is_peer_evidence_source_ref,
     silhouette_agglomerative_clusters,
 };
-use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
+use crate::core::outcome::{
+    OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, record_learning_outcome,
+};
 use crate::core::query_miss_cluster::KNOWLEDGE_GAP_MIN_CLUSTER_MISSES;
 use crate::db::{
-    CreateAuditInput, CreateCurationCandidateInput, CreateLearningObservationInput, DbConnection,
-    StoredAuditEntry, StoredCurationCandidate, StoredFeedbackEvent, StoredLearningObservation,
-    StoredMemory, audit_actions,
+    CreateAuditInput, CreateCurationCandidateInput, CreateFeedbackEventInput,
+    CreateLearningObservationInput, DbConnection, StoredAuditEntry, StoredCurationCandidate,
+    StoredFeedbackEvent, StoredLearningObservation, StoredMemory, audit_actions,
 };
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
@@ -1677,6 +1679,8 @@ impl LearnObserveReport {
         let mut output = String::new();
         if self.dry_run {
             output.push_str("DRY RUN: Would attach learning observation\n\n");
+        } else if self.status == "feedback_quarantined" {
+            output.push_str("Learning observation held for feedback review\n\n");
         } else {
             output.push_str("Attached learning observation\n\n");
         }
@@ -1893,6 +1897,8 @@ impl LearnCloseReport {
         let mut output = String::new();
         if self.dry_run {
             output.push_str("DRY RUN: Would close learning experiment\n\n");
+        } else if self.status == "feedback_quarantined" {
+            output.push_str("Learning experiment closure held for feedback review\n\n");
         } else {
             output.push_str("Closed learning experiment\n\n");
         }
@@ -2052,7 +2058,7 @@ pub fn observe_experiment(
     let observed_at = options.observed_at.as_deref().map_or_else(
         || Ok(generated_at.clone()),
         |value| {
-            require_text(
+            require_learning_timestamp(
                 "observed at",
                 value,
                 "ee learn observe --observed-at 2026-01-01T00:00:00Z",
@@ -2128,7 +2134,7 @@ pub fn observe_experiment(
         options.workspace_id.as_deref(),
     )?;
     let evidence_json = observation.data_json().to_string();
-    let feedback = record_outcome(&OutcomeRecordOptions {
+    let feedback = record_learning_outcome(&OutcomeRecordOptions {
         database_path: &database_path,
         target_type: "candidate".to_string(),
         target_id: experiment_id,
@@ -2148,28 +2154,11 @@ pub fn observe_experiment(
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         prompt_injection_guard: true,
     })?;
-    persist_learning_observation(
-        &database_path,
-        &workspace_id,
-        &LearningObservationLedgerInput {
-            observation_kind: "experiment_observe",
-            source_type: "feedback_event",
-            source_id: feedback
-                .event_id
-                .clone()
-                .or_else(|| feedback.source_id.clone()),
-            target_type: "candidate",
-            target_id: &observation.experiment_id,
-            topic: Some(normalize_topic(&observation.experiment_id)),
-            signal: observation_signal_to_feedback(options.signal),
-            evidence_json: Some(observation.data_json().to_string()),
-            observed_at: &observation.observed_at,
-        },
-    )?;
-    let status = if feedback.status.as_str() == "already_recorded" {
-        "already_recorded"
-    } else {
-        "observed"
+    let status = match feedback.status {
+        OutcomeRecordStatus::Recorded => "observed",
+        OutcomeRecordStatus::AlreadyRecorded => "already_recorded",
+        OutcomeRecordStatus::Quarantined => "feedback_quarantined",
+        OutcomeRecordStatus::DryRun => "dry_run",
     };
 
     Ok(LearnObserveReport {
@@ -2198,7 +2187,7 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
     let closed_at = options.closed_at.as_deref().map_or_else(
         || Ok(generated_at.clone()),
         |value| {
-            require_text(
+            require_learning_timestamp(
                 "closed at",
                 value,
                 "ee learn close --closed-at 2026-01-01T00:00:00Z",
@@ -2275,7 +2264,7 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         options.workspace_id.as_deref(),
     )?;
     let evidence_json = outcome.data_json().to_string();
-    let feedback = record_outcome(&OutcomeRecordOptions {
+    let feedback = record_learning_outcome(&OutcomeRecordOptions {
         database_path: &database_path,
         target_type: "candidate".to_string(),
         target_id: experiment_id,
@@ -2295,28 +2284,11 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         prompt_injection_guard: true,
     })?;
-    persist_learning_observation(
-        &database_path,
-        &workspace_id,
-        &LearningObservationLedgerInput {
-            observation_kind: "experiment_close",
-            source_type: "feedback_event",
-            source_id: feedback
-                .event_id
-                .clone()
-                .or_else(|| feedback.source_id.clone()),
-            target_type: "candidate",
-            target_id: &outcome.experiment_id,
-            topic: Some(normalize_topic(&outcome.experiment_id)),
-            signal: outcome_status_to_feedback(options.status),
-            evidence_json: Some(outcome.data_json().to_string()),
-            observed_at: &outcome.closed_at,
-        },
-    )?;
-    let status = if feedback.status.as_str() == "already_recorded" {
-        "already_recorded"
-    } else {
-        "closed"
+    let status = match feedback.status {
+        OutcomeRecordStatus::Recorded => "closed",
+        OutcomeRecordStatus::AlreadyRecorded => "already_recorded",
+        OutcomeRecordStatus::Quarantined => "feedback_quarantined",
+        OutcomeRecordStatus::DryRun => "dry_run",
     };
     let downstream_effects = downstream_effects_for_outcome(&outcome, false, Some(&feedback));
 
@@ -2395,6 +2367,19 @@ fn generate_learning_record_id(prefix: &str) -> String {
     format!("{}_{}", prefix, uuid::Uuid::now_v7().simple())
 }
 
+fn require_learning_timestamp(
+    field: &str,
+    value: &str,
+    repair: &str,
+) -> Result<String, DomainError> {
+    let value = require_text(field, value, repair)?;
+    DateTime::parse_from_rfc3339(&value).map_err(|_| DomainError::Usage {
+        message: format!("{field} must be an RFC3339 timestamp with an explicit offset"),
+        repair: Some(repair.to_owned()),
+    })?;
+    Ok(value)
+}
+
 fn observation_signal_to_feedback(signal: LearningObservationSignal) -> &'static str {
     match signal {
         LearningObservationSignal::Positive => "positive",
@@ -2418,8 +2403,12 @@ fn downstream_effects_for_outcome(
     dry_run: bool,
     feedback: Option<&OutcomeRecordReport>,
 ) -> LearnOutcomeDownstreamEffects {
+    let quarantined =
+        feedback.is_some_and(|report| report.status == OutcomeRecordStatus::Quarantined);
     let mutation_mode = if dry_run {
         "dry_run_projection"
+    } else if quarantined {
+        "feedback_quarantined_no_mutation"
     } else if feedback.is_some_and(|report| report.status.as_str() == "already_recorded") {
         "already_recorded_no_new_mutation"
     } else {
@@ -2429,7 +2418,7 @@ fn downstream_effects_for_outcome(
         .and_then(|report| report.source_id.clone())
         .unwrap_or_else(|| outcome.outcome_id.clone());
 
-    LearnOutcomeDownstreamEffects {
+    let mut effects = LearnOutcomeDownstreamEffects {
         schema: LEARN_DOWNSTREAM_EFFECTS_SCHEMA_V1,
         mutation_mode: mutation_mode.to_string(),
         economy_score: economy_score_effect_for_outcome(outcome),
@@ -2437,14 +2426,43 @@ fn downstream_effects_for_outcome(
         tripwire_false_alarm: tripwire_false_alarm_effect_for_outcome(outcome),
         situation_confidence: situation_confidence_effect_for_outcome(outcome),
         audit: LearnOutcomeDownstreamAudit {
-            durable_feedback_recorded: !dry_run && feedback.is_some(),
+            durable_feedback_recorded: !dry_run
+                && feedback.is_some_and(|report| {
+                    matches!(
+                        report.status,
+                        OutcomeRecordStatus::Recorded | OutcomeRecordStatus::AlreadyRecorded
+                    )
+                }),
             source_type: "outcome_observed".to_string(),
             source_id,
-            feedback_event_id: feedback.and_then(|report| report.event_id.clone()),
+            feedback_event_id: feedback
+                .filter(|_| !quarantined)
+                .and_then(|report| report.event_id.clone()),
             audit_id: feedback.and_then(|report| report.audit_id.clone()),
             silent_mutation: false,
         },
+    };
+    if quarantined {
+        let pending = "pending_feedback_review";
+        effects.economy_score.utility_delta = 0.0;
+        effects.economy_score.confidence_delta = 0.0;
+        effects.economy_score.priority_delta = 0;
+        effects.economy_score.priority_multiplier = 1.0;
+        effects.economy_score.scoring_note =
+            "Feedback is quarantined; downstream learning is deferred until review.".to_owned();
+        effects.procedure_drift.drift_signal = pending.to_owned();
+        effects.procedure_drift.drift_score_delta = 0.0;
+        effects.procedure_drift.requires_revalidation = false;
+        effects.procedure_drift.action = pending.to_owned();
+        effects.tripwire_false_alarm.false_alarm_cost_delta = 0;
+        effects.tripwire_false_alarm.confidence_delta = 0.0;
+        effects.tripwire_false_alarm.action = pending.to_owned();
+        effects.tripwire_false_alarm.scoring_note = effects.economy_score.scoring_note.clone();
+        effects.situation_confidence.confidence_delta = 0.0;
+        effects.situation_confidence.confidence_direction = "unchanged".to_owned();
+        effects.situation_confidence.action = pending.to_owned();
     }
+    effects
 }
 
 fn economy_score_effect_for_outcome(outcome: &ExperimentOutcome) -> LearnOutcomeEconomyScoreEffect {
@@ -3966,6 +3984,8 @@ fn load_learning_snapshot_with_boundary(
             message: format!("Failed to list learning observations: {error}"),
             repair: Some("ee learn observe --help".to_string()),
         })?;
+    let learning_observations =
+        admit_learning_observation_rows(learning_observations, &feedback_events);
     let curation_candidates = connection
         .list_curation_candidates(&workspace_id, None, None, None)
         .map_err(|error| DomainError::Storage {
@@ -3988,6 +4008,59 @@ fn load_learning_snapshot_with_boundary(
         learning_observations,
         curation_candidates,
     })
+}
+
+fn admit_learning_observation_rows(
+    rows: Vec<StoredLearningObservation>,
+    feedback_events: &[StoredFeedbackEvent],
+) -> Vec<StoredLearningObservation> {
+    let accepted = feedback_events
+        .iter()
+        .map(|event| (event.id.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    rows.into_iter()
+        .filter(|row| {
+            if !matches!(
+                row.observation_kind.as_str(),
+                "experiment_observe" | "experiment_close"
+            ) {
+                return true;
+            }
+            // Older writers also inserted these rows for quarantined outcomes.
+            // Retain that history, but count learning only when the same snapshot
+            // proves its complete accepted feedback identity and measurement.
+            let Some(event) = row.source_id.as_deref().and_then(|id| accepted.get(id)) else {
+                return false;
+            };
+            let input = CreateFeedbackEventInput {
+                workspace_id: event.workspace_id.clone(),
+                target_type: event.target_type.clone(),
+                target_id: event.target_id.clone(),
+                signal: event.signal.clone(),
+                weight: event.weight,
+                source_type: event.source_type.clone(),
+                source_id: event.source_id.clone(),
+                reason: event.reason.clone(),
+                evidence_json: event.evidence_json.clone(),
+                session_id: event.session_id.clone(),
+            };
+            let Ok(Some((id, expected))) = learning_observation_for_feedback(&input, &event.id)
+            else {
+                return false;
+            };
+            row.id == id
+                && row.workspace_id == expected.workspace_id
+                && row.observation_kind == expected.observation_kind
+                && row.source_type == expected.source_type
+                && row.source_id == expected.source_id
+                && row.target_type == expected.target_type
+                && row.target_id == expected.target_id
+                && row.topic == expected.topic
+                && row.signal == expected.signal
+                && row.evidence_json == expected.evidence_json
+                && row.observed_at == expected.observed_at
+        })
+        .collect()
 }
 
 // Both report reads and proposal writes call this with their transaction held.
@@ -4070,42 +4143,92 @@ impl Drop for LearningReadSnapshot<'_> {
     }
 }
 
-fn persist_learning_observation(
-    database_path: &Path,
-    workspace_id: &str,
-    input: &LearningObservationLedgerInput<'_>,
-) -> Result<(), DomainError> {
-    let connection =
-        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    let observation_id = stable_learning_observation_id(input);
-    connection
-        .insert_learning_observation(
-            &observation_id,
-            &CreateLearningObservationInput {
-                workspace_id: workspace_id.to_string(),
-                observation_kind: input.observation_kind.to_string(),
-                source_type: input.source_type.to_string(),
-                source_id: input.source_id.clone(),
-                target_type: input.target_type.to_string(),
-                target_id: input.target_id.to_string(),
-                topic: input.topic.clone(),
-                signal: input.signal.to_string(),
-                evidence_json: input.evidence_json.clone(),
-                observed_at: input.observed_at.to_string(),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to insert learning observation: {error}"),
-            repair: Some("ee learn summary --json".to_string()),
-        })?;
-    connection.close().map_err(|error| DomainError::Storage {
-        message: format!("Failed to close database: {error}"),
-        repair: Some("ee doctor".to_string()),
-    })?;
-    Ok(())
+/// Recover the mandatory sidecar from the exact accepted or quarantined event.
+/// All authority-bearing identity and signal fields must agree with the event;
+/// an unrelated outcome payload never creates a learning observation.
+pub(crate) fn learning_observation_for_feedback(
+    feedback: &CreateFeedbackEventInput,
+    event_id: &str,
+) -> crate::db::Result<Option<(String, CreateLearningObservationInput)>> {
+    let invalid = || crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Execute,
+        message: "typed learning evidence does not match its feedback event".to_owned(),
+    };
+    let Some(evidence_json) = feedback.evidence_json.as_deref() else {
+        return Ok(None);
+    };
+    let evidence: serde_json::Value = serde_json::from_str(evidence_json).map_err(|_| invalid())?;
+    let (observation_kind, source_type, source_field, time_field, signal_field) =
+        match evidence.get("schema").and_then(serde_json::Value::as_str) {
+            Some(crate::models::LEARNING_OBSERVATION_SCHEMA_V1) => (
+                "experiment_observe",
+                "automated_check",
+                "observationId",
+                "observedAt",
+                "signal",
+            ),
+            Some(crate::models::EXPERIMENT_OUTCOME_SCHEMA_V1) => (
+                "experiment_close",
+                "outcome_observed",
+                "outcomeId",
+                "closedAt",
+                "status",
+            ),
+            _ => return Ok(None),
+        };
+    // Generic feedback may cite a learning document as evidence. Only the
+    // experiment envelope creates an observation; a citation must remain
+    // releasable without acquiring this additional interpretation.
+    if feedback.target_type != "candidate" || feedback.source_type != source_type {
+        return Ok(None);
+    }
+    let text = |field: &str| {
+        evidence
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(invalid)
+    };
+    let source_id = text(source_field)?;
+    let observed_at = text(time_field)?;
+    let signal = if observation_kind == "experiment_observe" {
+        observation_signal_to_feedback(text(signal_field)?.parse().map_err(|_| invalid())?)
+    } else {
+        outcome_status_to_feedback(text(signal_field)?.parse().map_err(|_| invalid())?)
+    };
+    if feedback.target_id != text("experimentId")?
+        || feedback.source_id.as_deref() != Some(source_id)
+        || feedback.signal != signal
+        || DateTime::parse_from_rfc3339(observed_at).is_err()
+    {
+        return Err(invalid());
+    }
+    let input = LearningObservationLedgerInput {
+        observation_kind,
+        source_type: "feedback_event",
+        source_id: Some(event_id.to_owned()),
+        target_type: &feedback.target_type,
+        target_id: &feedback.target_id,
+        topic: Some(normalize_topic(&feedback.target_id)),
+        signal: &feedback.signal,
+        evidence_json: feedback.evidence_json.clone(),
+        observed_at,
+    };
+    Ok(Some((
+        stable_learning_observation_id(&input),
+        CreateLearningObservationInput {
+            workspace_id: feedback.workspace_id.clone(),
+            observation_kind: input.observation_kind.to_owned(),
+            source_type: input.source_type.to_owned(),
+            source_id: input.source_id,
+            target_type: input.target_type.to_owned(),
+            target_id: input.target_id.to_owned(),
+            topic: input.topic,
+            signal: input.signal.to_owned(),
+            evidence_json: input.evidence_json,
+            observed_at: input.observed_at.to_owned(),
+        },
+    )))
 }
 
 fn stable_learning_observation_id(input: &LearningObservationLedgerInput<'_>) -> String {
@@ -4432,6 +4555,84 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
         Ok((dir, database, workspace_id))
+    }
+
+    fn atomic_learning_options(
+        workspace: &Path,
+        database: &Path,
+    ) -> (LearnObserveOptions, LearnCloseOptions) {
+        (
+            LearnObserveOptions {
+                workspace: workspace.to_path_buf(),
+                database_path: Some(database.to_path_buf()),
+                workspace_id: None,
+                experiment_id: "exp_atomic_learning".to_owned(),
+                observation_id: Some("lobs_atomic_learning".to_owned()),
+                observed_at: Some("2026-01-01T01:00:00.000000001+01:00".to_owned()),
+                observer: Some("learning-test".to_owned()),
+                signal: LearningObservationSignal::Positive,
+                measurement_name: "verification".to_owned(),
+                measurement_value: Some(1.0),
+                evidence_ids: vec!["ev_learning_measurement".to_owned()],
+                note: Some("Recorded verification result.".to_owned()),
+                redaction_status: None,
+                session_id: None,
+                event_id: Some("fb_00000000000000000000000801".to_owned()),
+                actor: Some("learning-test".to_owned()),
+                dry_run: false,
+            },
+            LearnCloseOptions {
+                workspace: workspace.to_path_buf(),
+                database_path: Some(database.to_path_buf()),
+                workspace_id: None,
+                experiment_id: "exp_atomic_learning".to_owned(),
+                outcome_id: Some("lout_atomic_learning".to_owned()),
+                closed_at: Some("2026-01-02T01:00:00.000000001+01:00".to_owned()),
+                status: ExperimentOutcomeStatus::Confirmed,
+                decision_impact: "Retain the verified evidence for review.".to_owned(),
+                confidence_delta: 0.2,
+                priority_delta: -2,
+                promoted_artifact_ids: vec!["mem_review".to_owned()],
+                demoted_artifact_ids: vec![
+                    "proc_review".to_owned(),
+                    "tw_review".to_owned(),
+                    "sit_review".to_owned(),
+                ],
+                safety_notes: Vec::new(),
+                audit_ids: Vec::new(),
+                session_id: None,
+                event_id: Some("fb_00000000000000000000000802".to_owned()),
+                actor: Some("learning-test".to_owned()),
+                dry_run: false,
+            },
+        )
+    }
+
+    fn seed_learning_feedback_burst(
+        db: &DbConnection,
+        workspace_id: &str,
+        source_type: &str,
+        source_id: &str,
+    ) -> TestResult {
+        for index in 0..crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR {
+            db.insert_feedback_event(
+                &format!("fb_{:026}", 900 + index),
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.to_owned(),
+                    target_type: "candidate".to_owned(),
+                    target_id: "exp_prior_feedback".to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: source_type.to_owned(),
+                    source_id: Some(source_id.to_owned()),
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn ensure_threshold(actual: f32, expected: f32, context: &str) -> TestResult {
@@ -6331,6 +6532,699 @@ mod tests {
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].observation_kind, "experiment_observe");
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn experiment_observation_failure_rolls_back_feedback_and_audit_and_retries_once() -> TestResult
+    {
+        for closing in [false, true] {
+            let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-atomic")?;
+            let (observe, close) = atomic_learning_options(dir.path(), &database);
+            let run = || {
+                if closing {
+                    close_experiment(&close).map(|report| report.data_json())
+                } else {
+                    observe_experiment(&observe).map(|report| report.data_json())
+                }
+            };
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let audits_before = db
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?;
+            db.execute_raw("CREATE TRIGGER reject_experiment_observation BEFORE INSERT ON learning_observations BEGIN SELECT RAISE(ABORT, 'mandatory observation rejected'); END")
+                .map_err(|error| error.to_string())?;
+            let error =
+                run().expect_err("a mandatory observation failure must reject the whole write");
+            assert!(error.message().contains("mandatory observation rejected"));
+            assert!(
+                db.list_feedback_events(&workspace_id)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                audits_before
+            );
+            db.execute_raw("DROP TRIGGER reject_experiment_observation")
+                .map_err(|error| error.to_string())?;
+
+            let recorded = run().map_err(|error| error.message())?;
+            assert_eq!(
+                recorded["status"],
+                if closing { "closed" } else { "observed" }
+            );
+            let events = db
+                .list_feedback_events(&workspace_id)
+                .map_err(|error| error.to_string())?;
+            let observations = db
+                .list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            let audits = db
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(events.len(), 1);
+            assert_eq!(observations.len(), 1);
+            assert_eq!(
+                observations[0].source_id.as_deref(),
+                Some(events[0].id.as_str())
+            );
+            assert_eq!(observations[0].evidence_json, events[0].evidence_json);
+            assert_eq!(
+                observations[0].observed_at,
+                if closing {
+                    close.closed_at.as_deref().unwrap()
+                } else {
+                    observe.observed_at.as_deref().unwrap()
+                }
+            );
+            assert_eq!(
+                run().map_err(|error| error.message())?["status"],
+                "already_recorded"
+            );
+            assert_eq!(
+                db.list_feedback_events(&workspace_id)
+                    .map_err(|error| error.to_string())?,
+                events
+            );
+            assert_eq!(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                observations
+            );
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                audits
+            );
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_learn_replay_repairs_legacy_partial_feedback_without_reinterpreting_it() -> TestResult
+    {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-replay-repair")?;
+        let (observe, _) = atomic_learning_options(dir.path(), &database);
+        let preview = observe_experiment(&LearnObserveOptions {
+            dry_run: true,
+            ..observe.clone()
+        })
+        .map_err(|error| error.message())?;
+        let event_id = observe.event_id.as_deref().unwrap();
+        // This is the durable state left by the old two-transaction path after
+        // its accepted feedback committed but the observation write failed.
+        crate::core::outcome::record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "candidate".to_owned(),
+            target_id: observe.experiment_id.clone(),
+            workspace_id: Some(workspace_id.clone()),
+            signal: "positive".to_owned(),
+            weight: None,
+            source_type: "automated_check".to_owned(),
+            source_id: observe.observation_id.clone(),
+            reason: observe.note.clone(),
+            evidence_json: Some(preview.observation.data_json().to_string()),
+            session_id: None,
+            event_id: observe.event_id.clone(),
+            actor: observe.actor.clone(),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds:
+                crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let event = db
+            .get_feedback_event(event_id)
+            .map_err(|error| error.to_string())?;
+        let audits = db
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            db.list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        let changed = LearnObserveOptions {
+            note: Some("Different measurement interpretation.".to_owned()),
+            ..observe.clone()
+        };
+        assert!(
+            observe_experiment(&changed).is_err(),
+            "an event ID is not permission to attach new learning"
+        );
+        assert!(
+            db.list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert_eq!(
+            observe_experiment(&observe)
+                .map_err(|error| error.message())?
+                .status,
+            "already_recorded"
+        );
+        let observations = db
+            .list_learning_observations(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].source_id.as_deref(), Some(event_id));
+        assert_eq!(
+            db.get_feedback_event(event_id)
+                .map_err(|error| error.to_string())?,
+            event
+        );
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?,
+            audits
+        );
+
+        // The old INSERT OR IGNORE hid a conflicting observation. Exact replay
+        // must refuse it, preserve it for review, and leave feedback unchanged.
+        db.execute_raw("UPDATE learning_observations SET signal = 'negative'")
+            .map_err(|error| error.to_string())?;
+        let conflicting = db
+            .list_learning_observations(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(observe_experiment(&observe).is_err());
+        assert_eq!(
+            db.list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?,
+            conflicting
+        );
+        assert_eq!(
+            db.get_feedback_event(event_id)
+                .map_err(|error| error.to_string())?,
+            event
+        );
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?,
+            audits
+        );
+        db.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn quarantined_learning_waits_for_atomic_release_and_preserves_measurement_time() -> TestResult
+    {
+        use crate::core::outcome::{OutcomeQuarantineReviewOptions, review_feedback_quarantine};
+
+        for closing in [false, true] {
+            let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-quarantine")?;
+            let (mut observe, mut close) = atomic_learning_options(dir.path(), &database);
+            observe.signal = LearningObservationSignal::Safety;
+            close.status = ExperimentOutcomeStatus::Unsafe;
+            let source_id = if closing {
+                close.outcome_id.as_deref().unwrap()
+            } else {
+                observe.observation_id.as_deref().unwrap()
+            };
+            let source_type = if closing {
+                "outcome_observed"
+            } else {
+                "automated_check"
+            };
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_learning_feedback_burst(&db, &workspace_id, source_type, source_id)?;
+            let feedback = if closing {
+                let report = close_experiment(&close).map_err(|error| error.message())?;
+                assert_eq!(report.status, "feedback_quarantined");
+                assert!(
+                    !report
+                        .human_summary()
+                        .starts_with("Closed learning experiment")
+                );
+                assert_eq!(
+                    report.downstream_effects.mutation_mode,
+                    "feedback_quarantined_no_mutation"
+                );
+                assert!(!report.downstream_effects.audit.durable_feedback_recorded);
+                assert!(report.downstream_effects.audit.feedback_event_id.is_none());
+                assert_eq!(report.downstream_effects.economy_score.utility_delta, 0.0);
+                assert_eq!(
+                    report.downstream_effects.procedure_drift.drift_score_delta,
+                    0.0
+                );
+                assert_eq!(
+                    report
+                        .downstream_effects
+                        .tripwire_false_alarm
+                        .false_alarm_cost_delta,
+                    0
+                );
+                assert_eq!(
+                    report
+                        .downstream_effects
+                        .situation_confidence
+                        .confidence_delta,
+                    0.0
+                );
+                report.feedback.unwrap()
+            } else {
+                let report = observe_experiment(&observe).map_err(|error| error.message())?;
+                assert_eq!(report.status, "feedback_quarantined");
+                assert!(
+                    !report
+                        .human_summary()
+                        .starts_with("Attached learning observation")
+                );
+                report.feedback.unwrap()
+            };
+            assert_eq!(feedback.status, OutcomeRecordStatus::Quarantined);
+            let event_id = feedback.event_id.as_deref().unwrap();
+            let quarantine_id = feedback
+                .quarantine
+                .as_ref()
+                .and_then(|quarantine| quarantine.id.as_deref())
+                .unwrap();
+            assert!(
+                db.get_feedback_event(event_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+            assert!(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            let pending = db
+                .get_feedback_quarantine(quarantine_id)
+                .map_err(|error| error.to_string())?;
+            let audit_count = db
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len();
+            let retry = if closing {
+                close_experiment(&close).map(|report| report.status)
+            } else {
+                observe_experiment(&observe).map(|report| report.status)
+            }
+            .map_err(|error| error.message())?;
+            assert_eq!(retry, "feedback_quarantined");
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                audit_count
+            );
+            let review = OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id,
+                reject: false,
+                actor: Some("learning-reviewer"),
+                dry_run: false,
+            };
+            db.execute_raw("CREATE TRIGGER reject_released_observation BEFORE INSERT ON learning_observations BEGIN SELECT RAISE(ABORT, 'released observation rejected'); END").map_err(|error| error.to_string())?;
+            assert!(review_feedback_quarantine(&review).is_err());
+            assert_eq!(
+                db.get_feedback_quarantine(quarantine_id)
+                    .map_err(|error| error.to_string())?,
+                pending
+            );
+            assert!(
+                db.get_feedback_event(event_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                audit_count
+            );
+            db.execute_raw("DROP TRIGGER reject_released_observation")
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                review_feedback_quarantine(&review)
+                    .map_err(|error| error.message())?
+                    .status,
+                "released"
+            );
+            let observations = db
+                .list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].source_id.as_deref(), Some(event_id));
+            assert_eq!(
+                observations[0].observed_at,
+                if closing {
+                    close.closed_at.as_deref().unwrap()
+                } else {
+                    observe.observed_at.as_deref().unwrap()
+                }
+            );
+            assert_eq!(
+                observations[0].evidence_json,
+                pending.as_ref().unwrap().evidence_json
+            );
+            assert_eq!(observations[0].workspace_id, workspace_id);
+            assert_eq!(observations[0].target_id, "exp_atomic_learning");
+            assert_eq!(observations[0].signal, "harmful");
+            assert_eq!(
+                review_feedback_quarantine(&review)
+                    .map_err(|error| error.message())?
+                    .status,
+                "already_reviewed"
+            );
+            let retry = if closing {
+                close_experiment(&close).map(|report| report.status)
+            } else {
+                observe_experiment(&observe).map(|report| report.status)
+            }
+            .map_err(|error| error.message())?;
+            assert_eq!(retry, "already_recorded");
+            assert_eq!(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                observations
+            );
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_timestamps_and_quarantined_payload_identity_are_validated() -> TestResult {
+        let (mut observe, mut close) = atomic_learning_options(
+            Path::new("/unopened-learning-workspace"),
+            Path::new("/unopened-learning-workspace/.ee/ee.db"),
+        );
+        for timestamp in [
+            "not-an-instant",
+            "2026-01-01T00:00:00",
+            "2026-02-30T00:00:00Z",
+        ] {
+            observe.observed_at = Some(timestamp.to_owned());
+            close.closed_at = Some(timestamp.to_owned());
+            assert!(matches!(
+                observe_experiment(&observe),
+                Err(DomainError::Usage { .. })
+            ));
+            assert!(matches!(
+                close_experiment(&close),
+                Err(DomainError::Usage { .. })
+            ));
+        }
+        let payload = LearningObservation::new(
+            "lobs_exact",
+            "exp_exact",
+            "2026-01-01T00:00:00.000000001Z",
+            "reviewer",
+            "verification",
+        )
+        .with_signal(LearningObservationSignal::Safety);
+        let input = CreateFeedbackEventInput {
+            workspace_id: "wsp_current".to_owned(),
+            target_type: "candidate".to_owned(),
+            target_id: "exp_exact".to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "automated_check".to_owned(),
+            source_id: Some("lobs_exact".to_owned()),
+            reason: None,
+            evidence_json: Some(payload.data_json().to_string()),
+            session_id: None,
+        };
+        for field in [
+            "target_kind",
+            "target_id",
+            "source_kind",
+            "source_id",
+            "signal",
+        ] {
+            let mut mismatched = input.clone();
+            match field {
+                "target_kind" => mismatched.target_type = "memory".to_owned(),
+                "target_id" => mismatched.target_id = "exp_other".to_owned(),
+                "source_kind" => mismatched.source_type = "human_explicit".to_owned(),
+                "source_id" => mismatched.source_id = Some("lobs_other".to_owned()),
+                _ => mismatched.signal = "positive".to_owned(),
+            }
+            let result = learning_observation_for_feedback(&mismatched, "fb_exact");
+            if matches!(field, "target_kind" | "source_kind") {
+                assert!(
+                    result.map_err(|error| error.to_string())?.is_none(),
+                    "a generic {field} envelope does not acquire learning"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "mismatched {field} cannot acquire a learning row"
+                );
+            }
+        }
+        let (_, row) = learning_observation_for_feedback(&input, "fb_exact")
+            .map_err(|error| error.to_string())?
+            .unwrap();
+        assert_eq!(row.workspace_id, input.workspace_id);
+        assert_eq!(row.observed_at, payload.observed_at);
+        assert_eq!(row.source_id.as_deref(), Some("fb_exact"));
+        let unrelated = CreateFeedbackEventInput {
+            evidence_json: Some("{\"schema\":\"ee.other.v1\"}".to_owned()),
+            ..input
+        };
+        assert!(
+            learning_observation_for_feedback(&unrelated, "fb_exact")
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generic_quarantine_release_can_cite_learning_evidence_without_admitting_an_observation()
+    -> TestResult {
+        use crate::core::outcome::{
+            OutcomeQuarantineReviewOptions, record_outcome, review_feedback_quarantine,
+        };
+
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-generic-release")?;
+        let (observe, _) = atomic_learning_options(dir.path(), &database);
+        let preview = observe_experiment(&LearnObserveOptions {
+            dry_run: true,
+            ..observe.clone()
+        })
+        .map_err(|error| error.message())?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_learning_feedback_burst(&db, &workspace_id, "human_explicit", "human-review")?;
+        let report = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "candidate".to_owned(),
+            target_id: "exp_cited_document".to_owned(),
+            workspace_id: Some(workspace_id.clone()),
+            signal: "harmful".to_owned(),
+            weight: None,
+            source_type: "human_explicit".to_owned(),
+            source_id: Some("human-review".to_owned()),
+            reason: Some("Cites a separate learning document.".to_owned()),
+            evidence_json: Some(preview.observation.data_json().to_string()),
+            session_id: None,
+            event_id: observe.event_id.clone(),
+            actor: None,
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds:
+                crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(report.status, OutcomeRecordStatus::Quarantined);
+        let quarantine_id = report
+            .quarantine
+            .as_ref()
+            .and_then(|quarantine| quarantine.id.as_deref())
+            .unwrap();
+        assert_eq!(
+            review_feedback_quarantine(&OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id,
+                reject: false,
+                actor: Some("reviewer"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?
+            .status,
+            "released"
+        );
+        assert!(
+            db.get_feedback_event(observe.event_id.as_deref().unwrap())
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        assert!(
+            db.list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        db.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn legacy_quarantined_learning_is_withheld_until_accepted_in_the_same_snapshot() -> TestResult {
+        use crate::core::outcome::{OutcomeQuarantineReviewOptions, review_feedback_quarantine};
+
+        for rejected in [false, true] {
+            let (dir, database, workspace_id) =
+                seed_learning_workspace("ee-learn-legacy-admission")?;
+            let (mut observe, _) = atomic_learning_options(dir.path(), &database);
+            observe.signal = LearningObservationSignal::Safety;
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_learning_feedback_burst(
+                &db,
+                &workspace_id,
+                "automated_check",
+                observe.observation_id.as_deref().unwrap(),
+            )?;
+            let report = observe_experiment(&observe).map_err(|error| error.message())?;
+            let feedback = report.feedback.as_ref().unwrap();
+            assert_eq!(feedback.status, OutcomeRecordStatus::Quarantined);
+            let event_id = feedback.event_id.as_deref().unwrap();
+            let quarantine_id = feedback
+                .quarantine
+                .as_ref()
+                .and_then(|quarantine| quarantine.id.as_deref())
+                .unwrap();
+            let pending = db
+                .get_feedback_quarantine(quarantine_id)
+                .map_err(|error| error.to_string())?
+                .unwrap();
+            let input = CreateFeedbackEventInput {
+                workspace_id: pending.workspace_id.clone(),
+                target_type: pending.target_type.clone(),
+                target_id: pending.target_id.clone(),
+                signal: pending.signal.clone(),
+                weight: pending.weight,
+                source_type: pending.source_type.clone(),
+                source_id: Some(pending.source_id.clone()),
+                reason: pending.event_reason.clone(),
+                evidence_json: pending.evidence_json.clone(),
+                session_id: pending.session_id.clone(),
+            };
+            let (observation_id, observation) = learning_observation_for_feedback(&input, event_id)
+                .map_err(|error| error.to_string())?
+                .unwrap();
+            // Reproduce the old unconditional post-quarantine insert. Retain it
+            // as evidence; only reader admission changes, never historical rows.
+            db.insert_learning_observation(&observation_id, &observation)
+                .map_err(|error| error.to_string())?;
+            db.insert_learning_observation(
+                "lobs_unmatched_history",
+                &CreateLearningObservationInput {
+                    source_id: Some("fb_00000000000000000000000999".to_owned()),
+                    ..observation.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            db.insert_learning_observation(
+                "lobs_other_ledger_kind",
+                &CreateLearningObservationInput {
+                    observation_kind: "cass_import".to_owned(),
+                    source_type: "import".to_owned(),
+                    source_id: Some("import_history".to_owned()),
+                    observed_at: "2025-01-01T00:00:00Z".to_owned(),
+                    ..observation.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            db.execute_raw("UPDATE feedback_events SET created_at = '2025-01-01T00:00:00Z'")
+                .map_err(|error| error.to_string())?;
+            let persisted = db
+                .list_learning_observations(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            let before = load_learning_snapshot(dir.path()).map_err(|error| error.message())?;
+            assert_eq!(before.learning_observations.len(), 1);
+            assert_eq!(
+                before.learning_observations[0].observation_kind,
+                "cass_import"
+            );
+            let summary_options = LearnSummaryOptions {
+                workspace: dir.path().to_path_buf(),
+                period: "all".to_owned(),
+                since: Some("2026-01-01T00:00:00Z".to_owned()),
+                detailed: false,
+            };
+            assert_eq!(
+                show_summary(&summary_options)
+                    .map_err(|error| error.message())?
+                    .summary
+                    .observations_recorded,
+                0
+            );
+            let review = OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id,
+                reject: rejected,
+                actor: Some("reviewer"),
+                dry_run: false,
+            };
+            let pinned = load_learning_snapshot_with_boundary(dir.path(), || {
+                review_feedback_quarantine(&review)?;
+                Ok(())
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(
+                pinned.learning_observations.len(),
+                1,
+                "a later release cannot enter the held snapshot"
+            );
+            let current = load_learning_snapshot(dir.path()).map_err(|error| error.message())?;
+            assert_eq!(
+                current.learning_observations.len(),
+                if rejected { 1 } else { 2 }
+            );
+            assert_eq!(
+                show_summary(&summary_options)
+                    .map_err(|error| error.message())?
+                    .summary
+                    .observations_recorded,
+                if rejected { 0 } else { 1 }
+            );
+            assert_eq!(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                persisted
+            );
+            if rejected {
+                assert!(observe_experiment(&observe).is_err());
+                assert!(
+                    db.get_feedback_event(event_id)
+                        .map_err(|error| error.to_string())?
+                        .is_none()
+                );
+            } else {
+                assert_eq!(
+                    observe_experiment(&observe)
+                        .map_err(|error| error.message())?
+                        .status,
+                    "already_recorded"
+                );
+                db.execute_raw("UPDATE learning_observations SET observed_at = '2026-01-01T00:00:00.000000002Z' WHERE observation_kind = 'experiment_observe'").map_err(|error| error.to_string())?;
+                let altered =
+                    load_learning_snapshot(dir.path()).map_err(|error| error.message())?;
+                assert_eq!(
+                    altered.learning_observations.len(),
+                    1,
+                    "an accepted event does not authorize a changed measurement time"
+                );
+            }
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     #[test]

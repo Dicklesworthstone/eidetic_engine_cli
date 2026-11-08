@@ -925,7 +925,15 @@ pub fn record_outcome(
     options: &OutcomeRecordOptions<'_>,
 ) -> Result<OutcomeRecordReport, DomainError> {
     let mut id_source = OutcomeIdSource::Ambient;
-    record_outcome_inner(options, &mut id_source)
+    record_outcome_inner(options, &mut id_source, false)
+}
+
+/// Commit an experiment's accepted feedback and mandatory learning observation
+/// together. Quarantine retains the typed evidence without admitting learning.
+pub(crate) fn record_learning_outcome(
+    options: &OutcomeRecordOptions<'_>,
+) -> Result<OutcomeRecordReport, DomainError> {
+    record_outcome_inner(options, &mut OutcomeIdSource::Ambient, true)
 }
 
 pub fn record_outcome_seeded(
@@ -933,7 +941,7 @@ pub fn record_outcome_seeded(
     determinism: &mut Deterministic<Seed>,
 ) -> Result<OutcomeRecordReport, DomainError> {
     let mut id_source = OutcomeIdSource::Seeded(determinism);
-    record_outcome_inner(options, &mut id_source)
+    record_outcome_inner(options, &mut id_source, false)
 }
 
 enum OutcomeIdSource<'a> {
@@ -1001,6 +1009,7 @@ fn outcome_write_intake_workspace_path(database_path: &Path) -> &Path {
 fn record_outcome_inner(
     options: &OutcomeRecordOptions<'_>,
     id_source: &mut OutcomeIdSource<'_>,
+    require_learning_observation: bool,
 ) -> Result<OutcomeRecordReport, DomainError> {
     trace_sprt_quarantine("input", 0, &[]);
 
@@ -1145,6 +1154,21 @@ fn record_outcome_inner(
                 repair: Some("ee outcome <target-id> --signal helpful".to_string()),
             });
         };
+        let learning_observation = if require_learning_observation {
+            Some(
+                crate::core::learn::learning_observation_for_feedback(&feedback_input, &event_id)
+                    .map_err(|error| DomainError::Usage {
+                        message: format!("Invalid learning feedback evidence: {error}"),
+                        repair: Some("Review the learn observe or learn close payload.".to_owned()),
+                    })?
+                    .ok_or_else(|| DomainError::Usage {
+                        message: "Learning feedback requires a matching typed experiment observation or outcome.".to_owned(),
+                        repair: Some("Use ee learn observe or ee learn close.".to_owned()),
+                    })?,
+            )
+        } else {
+            None
+        };
         let existing = existing_feedback_outcome(&connection, &event_id, &feedback_input)?;
         #[cfg(test)]
         observe_outcome_admission_for_test(
@@ -1158,6 +1182,32 @@ fn record_outcome_inner(
                     (OutcomeRecordStatus::Quarantined, Some(summary))
                 }
             };
+            if status == OutcomeRecordStatus::AlreadyRecorded
+                && let Some((observation_id, observation)) = learning_observation.as_ref()
+            {
+                // Exact feedback equality was proved above under the owner
+                // fence. Repair a legacy partial write without learning twice.
+                let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
+                    workspace_id: target.workspace_id.clone(),
+                    memory_id: target_id.clone(),
+                    outcome_type: signal.clone(),
+                    details: feedback_input.reason.clone(),
+                };
+                crate::core::write_owner::run_one_shot_write_intake(
+                    outcome_write_intake_workspace_path(options.database_path),
+                    &write_operation,
+                    || {
+                        connection
+                            .with_transaction(|| {
+                                connection.insert_learning_observation_exact(observation_id, observation)
+                            })
+                            .map_err(|error| DomainError::Storage {
+                                message: format!("Failed to restore learning observation: {error}"),
+                                repair: Some("Inspect ee learn summary --json before retrying the exact observation.".to_owned()),
+                            })
+                    },
+                )?;
+            }
             let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
             trace_sprt_quarantine("response", 0, &[]);
             return Ok(OutcomeRecordReport {
@@ -1403,6 +1453,10 @@ fn record_outcome_inner(
                                 options.agent_name.as_deref(),
                                 options.actor.as_deref(),
                             )?;
+                        }
+                        if let Some((observation_id, observation)) = learning_observation.as_ref() {
+                            connection
+                                .insert_learning_observation_exact(observation_id, observation)?;
                         }
                         Ok((audit_id, confidence))
                     })
@@ -2854,6 +2908,16 @@ fn release_feedback_quarantine_audited(
 ) -> Result<QuarantineReviewSummary<'static>, DomainError> {
     let audit_id = generate_audit_id();
     let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
+    let learning_observation = crate::core::learn::learning_observation_for_feedback(
+        feedback_input,
+        event_id,
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to recover quarantined learning evidence: {error}"),
+        repair: Some(
+            "Inspect the preserved evidence before releasing this quarantine row.".to_owned(),
+        ),
+    })?;
     connection
         .with_transaction(|| {
             // The caller's pending row may predate a competing review. Claim
@@ -2875,6 +2939,9 @@ fn release_feedback_quarantine_audited(
                 &mut OutcomeIdSource::Ambient,
             )?;
             apply_procedure_outcome_in_txn(connection, feedback_input, event_id, actor)?;
+            if let Some((observation_id, observation)) = learning_observation.as_ref() {
+                connection.insert_learning_observation_exact(observation_id, observation)?;
+            }
             connection.attach_released_feedback_quarantine_event_in_txn(&row.id, event_id)?;
             connection.insert_audit(
                 &audit_id,

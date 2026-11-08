@@ -23398,6 +23398,58 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Insert mandatory learning evidence in the caller's transaction. A replay
+    /// must preserve the complete observation, not merely collide with its ID
+    /// or its feedback-event uniqueness key.
+    pub(crate) fn insert_learning_observation_exact(
+        &self,
+        id: &str,
+        input: &CreateLearningObservationInput,
+    ) -> Result<bool> {
+        if self.insert_learning_observation(id, input)? {
+            return Ok(true);
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, observation_kind, source_type, source_id, target_type, target_id, topic, signal, evidence_json, observed_at, created_at FROM learning_observations WHERE id = ?1 OR (workspace_id = ?2 AND observation_kind = ?3 AND source_type = ?4 AND source_id IS ?5 AND target_type = ?6 AND target_id = ?7)",
+            &[
+                Value::Text(id.to_owned()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.observation_kind.clone()),
+                Value::Text(input.source_type.clone()),
+                input.source_id.clone().map_or(Value::Null, Value::Text),
+                Value::Text(input.target_type.clone()),
+                Value::Text(input.target_id.clone()),
+            ],
+        )?;
+        let existing = rows
+            .first()
+            .map(stored_learning_observation_from_row)
+            .transpose()?;
+        if rows.len() == 1
+            && existing.is_some_and(|row| {
+                row.id == id
+                    && row.workspace_id == input.workspace_id
+                    && row.observation_kind == input.observation_kind
+                    && row.source_type == input.source_type
+                    && row.source_id == input.source_id
+                    && row.target_type == input.target_type
+                    && row.target_id == input.target_id
+                    && row.topic == input.topic
+                    && row.signal == input.signal
+                    && row.evidence_json == input.evidence_json
+                    && row.observed_at == input.observed_at
+            })
+        {
+            return Ok(false);
+        }
+        Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "learning observation replay conflicts with its stored identity or content"
+                .to_owned(),
+        })
+    }
+
     /// Restore exact ledger state without deduplication or regenerating timestamps.
     pub fn insert_learning_observation_for_recovery(
         &self,
