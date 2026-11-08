@@ -470,6 +470,7 @@ impl WhyNotSelectionProbe {
         preloaded: &BTreeMap<String, StoredMemory>,
     ) -> Result<(), ContextPackError> {
         let id = self.target.id_string();
+        let query_exclusions = QueryExclusions::from_query(&request.query);
         self.with_state(|state| {
             state.retrieved = search.results.iter().any(|hit| hit.doc_id == id);
         });
@@ -519,6 +520,9 @@ impl WhyNotSelectionProbe {
                             &memory.trust_class,
                             posture_for_trust_class(&memory.trust_class),
                         )
+                        || query_exclusions
+                            .as_ref()
+                            .is_some_and(|exclusions| exclusions.matches(&memory.content))
                     {
                         Some(OmissionCause::Filter)
                     } else if !filters.temporal.is_empty()
@@ -639,7 +643,11 @@ impl WhyNotSelectionProbe {
                     self.reject(OmissionCause::Scope);
                 } else if !row.is_direct_pack_admitted(&row.span.workspace_id) {
                     self.reject(OmissionCause::EvidenceAdmission);
-                } else if !direct_evidence_matches_filters(&row.span, filters) {
+                } else if !direct_evidence_matches_filters(&row.span, filters)
+                    || query_exclusions
+                        .as_ref()
+                        .is_some_and(|exclusions| exclusions.matches(&row.span.reader_text()))
+                {
                     self.reject(OmissionCause::Filter);
                 } else if let Some(candidate) = direct_evidence_pack_candidate(
                     row.span,

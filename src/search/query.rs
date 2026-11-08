@@ -468,11 +468,149 @@ pub fn lexical_engine_query(query: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Query exclusions for admitted source text added after retrieval.
+///
+/// Context expansion can introduce rows the searcher never saw. Use its public
+/// parser and the same command-option normalization as retrieval, then mirror
+/// Frankensearch 0.7.1's private negation matcher: NFC plus Unicode lowercase,
+/// word boundaries for word-like terms, and literal matching for phrases and
+/// punctuation-bearing terms. This is a source-text gate, not another scorer.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryExclusions {
+    terms: Vec<(String, bool)>,
+    phrases: Vec<String>,
+}
+
+impl QueryExclusions {
+    /// Parse and normalize once per request. Ordinary queries need no gate.
+    #[must_use]
+    pub(crate) fn from_query(query: &str) -> Option<Self> {
+        use frankensearch::core::canonicalize::{Canonicalizer, DefaultCanonicalizer};
+
+        let query = lexical_engine_query(query);
+        let canonical = DefaultCanonicalizer::default().canonicalize_query(&query);
+        let parsed = frankensearch::core::ParsedQuery::parse(&canonical);
+        if !parsed.has_negations() {
+            return None;
+        }
+        Some(Self {
+            terms: parsed
+                .negative_terms
+                .into_iter()
+                .map(|term| {
+                    let term = normalize_exclusion_text(&term);
+                    let word_like = term.chars().all(exclusion_word_char);
+                    (term, word_like)
+                })
+                .collect(),
+            phrases: parsed
+                .negative_phrases
+                .into_iter()
+                .map(|phrase| normalize_exclusion_text(&phrase))
+                .collect(),
+        })
+    }
+
+    /// Whether the complete reader-visible body matches any excluded clause.
+    #[must_use]
+    pub(crate) fn matches(&self, content: &str) -> bool {
+        let text = normalize_exclusion_text(content);
+        self.terms.iter().any(|(term, word_like)| {
+            !term.is_empty()
+                && if *word_like {
+                    text.match_indices(term.as_str()).any(|(start, _)| {
+                        let end = start + term.len();
+                        text[..start]
+                            .chars()
+                            .next_back()
+                            .is_none_or(|ch| !exclusion_word_char(ch))
+                            && text[end..]
+                                .chars()
+                                .next()
+                                .is_none_or(|ch| !exclusion_word_char(ch))
+                    })
+                } else {
+                    text.contains(term)
+                }
+        }) || self
+            .phrases
+            .iter()
+            .any(|phrase| !phrase.is_empty() && text.contains(phrase))
+    }
+}
+
+fn normalize_exclusion_text(value: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    if value.is_ascii() {
+        value.to_ascii_lowercase()
+    } else {
+        value.nfc().collect::<String>().to_lowercase()
+    }
+}
+
+fn exclusion_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SearchQueryClause, lexical_engine_query, parse_search_query, query_anchor_match_context,
+        QueryExclusions, SearchQueryClause, lexical_engine_query, parse_search_query,
+        query_anchor_match_context,
     };
+
+    #[test]
+    fn source_exclusions_keep_search_term_and_phrase_semantics() {
+        let filter = QueryExclusions::from_query(
+            r#"release -legacy NOT "quick publish" -"skip checks" -old/api"#,
+        )
+        .expect("query has exclusions");
+        for text in [
+            "Use the LEGACY deployment.",
+            "legacy2 is different, but legacy is excluded",
+            "Choose quick publishing",
+            "Skip Checks before deploying",
+            "See /old/api/v1 for the procedure",
+        ] {
+            assert!(filter.matches(text), "expected exclusion: {text}");
+        }
+        for text in [
+            "legacy2 legacy_api nonlegacy legacyé",
+            "Use the release workflow.",
+            "quick\npublish and skip  checks",
+            "old / api",
+        ] {
+            assert!(!filter.matches(text), "unexpected exclusion: {text}");
+        }
+    }
+
+    #[test]
+    fn source_exclusions_normalize_unicode_without_stemming_or_truncating() {
+        let filter =
+            QueryExclusions::from_query("release -café -deprecated").expect("query has exclusions");
+        assert!(filter.matches("A CAFE\u{301} migration"));
+        assert!(!filter.matches("cafétéria deprecation"));
+        let body = format!("{} deprecated", "Current release procedure. ".repeat(200));
+        assert!(filter.matches(&body));
+        assert!(!filter.matches(""));
+    }
+
+    #[test]
+    fn source_exclusions_preserve_command_options_and_escaped_literals() {
+        for query in [
+            "cargo fmt --check --no-verify -p -j8 -rf",
+            r"release \-legacy",
+            "release -",
+            "ordinary release task",
+        ] {
+            assert!(QueryExclusions::from_query(query).is_none(), "{query}");
+        }
+        let filter = QueryExclusions::from_query("cargo --check -legacy")
+            .expect("long single-dash word remains an exclusion");
+        assert!(!filter.matches("cargo check"));
+        assert!(filter.matches("legacy cargo check"));
+    }
 
     #[test]
     fn search_query_parser_normalizes_terms_phrases_and_exclusions() {

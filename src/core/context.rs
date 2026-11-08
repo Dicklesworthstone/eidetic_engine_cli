@@ -122,6 +122,7 @@ use crate::pack::{
 use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
+use crate::search::query::QueryExclusions;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 #[path = "context_turn.rs"]
@@ -2936,6 +2937,7 @@ async fn run_context_pack_attempt(
     } = context_request_from_options_with_runtime_profile(options, &runtime_profile)?;
     control.check()?;
     trace.record_elapsed("requestValidate", request_start);
+    let query_exclusions = QueryExclusions::from_query(&request.query);
 
     let effective_filters = context_effective_filters(options);
 
@@ -3779,6 +3781,22 @@ async fn run_context_pack_attempt(
             .filtered_count
             .saturating_add(scope_stats.candidates_excluded_by_scope);
     }
+    // Every memory fan-in carries its complete admitted source body here.
+    // Apply query semantics before cross-store quotas, LOD, and result limits
+    // can spend space on material that retrieval deliberately excluded.
+    let query_filter_input_count = candidates.len();
+    let mut policy_omissions = filter_candidates_by_query_exclusions(
+        query_exclusions.as_ref(),
+        &mut candidates,
+        &mut degraded,
+    );
+    if !policy_omissions.is_empty() {
+        trace.filter_input_count = trace.filter_input_count.max(query_filter_input_count);
+        trace.filtered_count = trace.filtered_count.saturating_add(policy_omissions.len());
+    }
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+    }
     let global_fan_in_filtered = apply_global_store_pack_policy(
         &mut candidates,
         &global_store_memory_ids,
@@ -3863,12 +3881,15 @@ async fn run_context_pack_attempt(
     // Run after every memory fan-in, including graph, focus, and global lanes.
     // Stored trust and redaction opt-outs cannot authorize prompt overrides.
     let instruction_filter_input_count = candidates.len();
-    let mut policy_omissions =
+    let instruction_omissions =
         filter_candidates_by_instruction_authority(&mut candidates, &mut degraded);
-    if !policy_omissions.is_empty() {
+    if !instruction_omissions.is_empty() {
         trace.filter_input_count = trace.filter_input_count.max(instruction_filter_input_count);
     }
-    trace.filtered_count = trace.filtered_count.saturating_add(policy_omissions.len());
+    trace.filtered_count = trace
+        .filtered_count
+        .saturating_add(instruction_omissions.len());
+    policy_omissions.extend(instruction_omissions);
     if options.require_fresh_sentinels {
         let reference_time =
             context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
@@ -3979,14 +4000,16 @@ async fn run_context_pack_attempt(
         &search_report,
         &request,
         &effective_filters,
+        query_exclusions.as_ref(),
         options.relevance_floor,
         &mut degraded,
         control.why_not,
     )?;
-    let mut rule_candidates = direct_rule_pack_candidates(
+    let mut rule_candidates = direct_rule_pack_candidates_with_exclusions(
         direct_rule_hits,
         &request,
         &effective_filters,
+        query_exclusions.as_ref(),
         output_redaction_enabled,
         &mut degraded,
     );
@@ -4197,11 +4220,12 @@ async fn run_context_pack_attempt(
             control.why_not,
         );
         if turn::permitted(options.pagination.as_ref(), options.relevance_floor) {
-            turn::complete_selected_turns(
+            turn::complete_selected_turns_with_exclusions(
                 read_connection,
                 &options.workspace_path,
                 &request,
                 &effective_filters,
+                query_exclusions.as_ref(),
                 &considered_evidence,
                 &relevance_excluded_evidence,
                 &mut draft,
@@ -8885,6 +8909,9 @@ fn context_pack_l2_feature_flags_hash(
     // Reassemble older packs under full-body lexical admission and consistent
     // per-source heuristics that preserve lexical evidence for the task's subject.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v4");
+    // Older packs can reintroduce excluded text through graph/focus fan-in,
+    // incident-card replacement, or conversational completion.
+    hash_labeled_bytes(&mut hasher, "pack_query_exclusion_policy", b"v1");
     // Reassemble adjacency-only packs so verified command-tool interludes can
     // supply the opposite native message under the current admission policy.
     hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v2");
@@ -13657,6 +13684,51 @@ fn global_store_search_memory_ids(
         .collect()
 }
 
+/// Candidate content is the complete hydrated source body, before output
+/// redaction or LOD. Matching it never substitutes a colliding local body for
+/// a global or cross-shard candidate and never authorizes a missing source.
+fn filter_candidates_by_query_exclusions(
+    exclusions: Option<&QueryExclusions>,
+    candidates: &mut Vec<PackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<PackOmission> {
+    let Some(exclusions) = exclusions else {
+        return Vec::new();
+    };
+    let mut omitted = Vec::new();
+    candidates.retain(|candidate| {
+        if !exclusions.matches(&candidate.content) {
+            return true;
+        }
+        omitted.push(PackOmission {
+            memory_id: candidate.memory_id,
+            estimated_tokens: candidate.estimated_tokens,
+            relevance: candidate.relevance,
+            utility: candidate.utility,
+            attempt_family_multiplicity: candidate.attempt_family_multiplicity.clone(),
+            reason: PackOmissionReason::ExcludedByFilter,
+            rejected_at: PackRejectionStage::CandidateFilter,
+            feasible: false,
+            could_fit_with_budget: None,
+        });
+        false
+    });
+    omitted.sort_by_key(|omission| omission.memory_id);
+    if !omitted.is_empty() {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} candidate memories excluded by query term or phrase exclusions after source hydration.",
+                omitted.len(),
+            ),
+            None,
+        );
+    }
+    omitted
+}
+
 fn filter_candidates_by_instruction_authority(
     candidates: &mut Vec<PackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -15154,6 +15226,25 @@ fn direct_rule_pack_candidates(
     output_redaction_enabled: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<crate::pack::PackRuleItem> {
+    let exclusions = QueryExclusions::from_query(&request.query);
+    direct_rule_pack_candidates_with_exclusions(
+        hits,
+        request,
+        filters,
+        exclusions.as_ref(),
+        output_redaction_enabled,
+        degraded,
+    )
+}
+
+fn direct_rule_pack_candidates_with_exclusions(
+    hits: Vec<(SearchHit, RuleIndexProjection)>,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    exclusions: Option<&QueryExclusions>,
+    output_redaction_enabled: bool,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<crate::pack::PackRuleItem> {
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     let mut filtered_count = 0_usize;
@@ -15187,6 +15278,7 @@ fn direct_rule_pack_candidates(
         ) || !filters.matches_tags(projection.tags())
             || !temporal_record_matches(&rule.created_at, &rule.updated_at, &filters.temporal)
             || !redaction_allow_categories(&rule.content, &filters.redaction)
+            || exclusions.is_some_and(|exclusions| exclusions.matches(&rule.content))
         {
             filtered_count = filtered_count.saturating_add(1);
             continue;
@@ -15963,12 +16055,14 @@ fn collect_direct_evidence_pack_candidates(
     relevance_floor: Option<f32>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
+    let exclusions = QueryExclusions::from_query(&request.query);
     collect_direct_evidence_pack_candidates_with_probe(
         connection,
         workspace_path,
         search_report,
         request,
         filters,
+        exclusions.as_ref(),
         relevance_floor,
         degraded,
         None,
@@ -15981,6 +16075,7 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     search_report: &crate::core::search::SearchReport,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
+    exclusions: Option<&QueryExclusions>,
     relevance_floor: Option<f32>,
     degraded: &mut Vec<ContextResponseDegradation>,
     why_not: Option<&why_not::WhyNotSelectionProbe>,
@@ -16078,6 +16173,10 @@ fn collect_direct_evidence_pack_candidates_with_probe(
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
+        if exclusions.is_some_and(|exclusions| exclusions.matches(&candidate.item.content)) {
+            filtered_count = filtered_count.saturating_add(1);
+            continue;
+        }
         candidates.push(candidate);
     }
     if let Some(probe) = why_not {
@@ -16104,11 +16203,12 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     if let Some(probe) = why_not {
         probe.observe_evidence(&candidates, OmissionCause::ScoreFloor);
     }
-    let (mut candidates, verified_card_sources) = prefer_incident_cards(
+    let (mut candidates, verified_card_sources) = prefer_incident_cards_with_exclusions(
         connection,
         &workspace_ids,
         filters,
         &request.query,
+        exclusions,
         candidates,
         degraded,
     );
@@ -16458,11 +16558,36 @@ fn direct_evidence_pack_candidate(
 /// stage proved, keyed by card ID. Read-only explanations must reuse it rather
 /// than re-deriving membership, which is why it leaves with the candidates:
 /// only this call holds the `CardChecks` the proof consumed.
+#[cfg(test)]
 fn prefer_incident_cards(
     connection: &DbConnection,
     workspace_ids: &[String],
     filters: &crate::models::QueryFilters,
     query: &str,
+    candidates: Vec<DirectEvidencePackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> (
+    Vec<DirectEvidencePackCandidate>,
+    BTreeMap<String, BTreeSet<String>>,
+) {
+    let exclusions = QueryExclusions::from_query(query);
+    prefer_incident_cards_with_exclusions(
+        connection,
+        workspace_ids,
+        filters,
+        query,
+        exclusions.as_ref(),
+        candidates,
+        degraded,
+    )
+}
+
+fn prefer_incident_cards_with_exclusions(
+    connection: &DbConnection,
+    workspace_ids: &[String],
+    filters: &crate::models::QueryFilters,
+    query: &str,
+    exclusions: Option<&QueryExclusions>,
     candidates: Vec<DirectEvidencePackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (
@@ -16502,6 +16627,24 @@ fn prefer_incident_cards(
             }
         }
     };
+    // A card can contain excluded text that its retrieved source turn does
+    // not. Reject the replacement before it can suppress that eligible turn.
+    if let Some(exclusions) = exclusions {
+        let before = cards.len();
+        cards.retain(|card| !exclusions.matches(&card.reader_text()));
+        let excluded = before.saturating_sub(cards.len());
+        if excluded > 0 {
+            push_degradation(
+                degraded,
+                "context_filtered_results",
+                ContextResponseSeverity::Low,
+                format!(
+                    "{excluded} derived incident cards excluded by query term or phrase exclusions; eligible source turns remain candidates."
+                ),
+                None,
+            );
+        }
+    }
 
     let direct_ids = candidates
         .iter()

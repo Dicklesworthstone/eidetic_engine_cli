@@ -555,6 +555,55 @@ fn redaction_categories_describe_the_selected_rule_body() {
 }
 
 #[test]
+fn native_rule_query_exclusions_use_full_live_text_before_output_redaction() {
+    let f = Fixture::new();
+    let long_body = format!(
+        "{} Use the legacy publication route.",
+        "Prepare the release and verify its checksums. ".repeat(100),
+    );
+    let excluded = f.add(0x71, |_| {}, |rule| rule.content = long_body.clone());
+    let secret_body = concat!("Prepare release with api", "_key=sk_test_123 only locally.");
+    let private = f.add(0x72, |_| {}, |rule| rule.content = secret_body.to_owned());
+    let allowed = f.add(
+        0x73,
+        |_| {},
+        |rule| rule.content = "Prepare release checksums with legacyguard.".to_owned(),
+    );
+    let resolved = f.resolve(
+        &[&excluded.rule, &private.rule, &allowed.rule],
+        &QueryFilters::default(),
+    );
+    assert_eq!(resolved.candidates.len(), 3);
+    assert!(
+        resolved
+            .candidates
+            .iter()
+            .any(|item| { item.rule_id == private.rule && !item.content.contains("sk_test_123") })
+    );
+    let request = ContextRequest::from_query("prepare release -legacy -sk_test_123").unwrap();
+    for output_redaction_enabled in [false, true] {
+        let mut degraded = Vec::new();
+        let candidates = direct_rule_pack_candidates(
+            resolved.hits.clone(),
+            &request,
+            &QueryFilters::default(),
+            output_redaction_enabled,
+            &mut degraded,
+        );
+        assert_eq!(sources(&candidates), BTreeSet::from([allowed.rule.clone()]));
+        assert_eq!(
+            candidates[0].content,
+            "Prepare release checksums with legacyguard."
+        );
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results" && entry.message.starts_with("2 ")
+        }));
+    }
+    assert_eq!(f.projection(&excluded).rule().content, long_body);
+    assert_eq!(f.projection(&private).rule().content, secret_body);
+}
+
+#[test]
 fn path_scoped_and_retired_rules_cannot_hydrate_an_unscoped_pack() {
     let f = Fixture::new();
     std::fs::create_dir(f.workspace.join("src")).unwrap();

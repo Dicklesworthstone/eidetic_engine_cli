@@ -1000,6 +1000,139 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
+    fn query_exclusions_gate_graph_and_focus_before_result_limits() -> TestResult {
+        let (mut options, workspace_id, seed, _guard) = daemon_pack_retrieval_fixture()?;
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let graph_denied = MemoryId::from_uuid(uuid::Uuid::from_u128(0x47_1001)).to_string();
+        let focus_denied = MemoryId::from_uuid(uuid::Uuid::from_u128(0x47_1002)).to_string();
+        let graph_allowed = MemoryId::from_uuid(uuid::Uuid::from_u128(0x47_1003)).to_string();
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        for (id, content) in [
+            (
+                &graph_denied,
+                format!(
+                    "{} legacy publication route.",
+                    "Quasar release checksums. ".repeat(100)
+                ),
+            ),
+            (
+                &focus_denied,
+                format!(
+                    "{} legacy deployment route.",
+                    "Quasar release validation. ".repeat(100)
+                ),
+            ),
+            (
+                &graph_allowed,
+                "Verify quasar release checksums with the legacyguard utility.".to_owned(),
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        content,
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.8,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        provenance_uri: Some("manual://query-exclusion-fan-in".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for (link, target) in [
+            ("link_000000000000000000471001", &graph_denied),
+            ("link_000000000000000000471003", &graph_allowed),
+        ] {
+            connection
+                .insert_memory_link(
+                    link,
+                    &crate::db::CreateMemoryLinkInput {
+                        src_memory_id: seed.clone(),
+                        dst_memory_id: target.clone(),
+                        relation: crate::db::MemoryLinkRelation::Supports,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: true,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: crate::db::MemoryLinkSource::Agent,
+                        created_by: None,
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        drop(connection);
+        crate::core::focus::set_focus(&crate::core::focus::FocusSetOptions {
+            workspace_path: options.workspace_path.clone(),
+            memory_ids: vec![focus_denied.clone()],
+            focal_memory_id: Some(focus_denied.clone()),
+            pinned_memory_ids: vec![focus_denied.clone()],
+            capacity: 1,
+            reason: "Preserve the release procedure.".to_owned(),
+            provenance: vec!["query exclusion regression".to_owned()],
+            scope: Default::default(),
+        })
+        .map_err(|error| error.message())?;
+
+        options.query = "quasar release checksums -legacy".to_owned();
+        options.filters.graph.enabled = true;
+        options.filters.graph.seed_memories = vec![seed.clone()];
+        options.max_tokens = Some(4096);
+        options.max_results = Some(2);
+        options.relevance_floor = Some(0.0);
+        options.memory_scope = MemoryScope::Workspace;
+        options.strict_scope = true;
+        options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+        let run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+            .map_err(|error| error.to_string())?;
+        let pack = &run.response.data.pack;
+        assert_eq!(
+            pack.items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([seed, graph_allowed]),
+            "excluded expansions must not consume the two available result slots",
+        );
+        assert!(
+            pack.items
+                .iter()
+                .any(|item| item.content.contains("legacyguard"))
+        );
+        assert_eq!(
+            pack.omitted
+                .iter()
+                .filter(
+                    |omission| omission.reason == crate::pack::PackOmissionReason::ExcludedByFilter
+                )
+                .map(|omission| omission.memory_id.to_string())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([graph_denied, focus_denied]),
+        );
+        assert_eq!(pack.selection_audit.selected_count, 2);
+        assert_eq!(pack.selection_audit.omitted_count, 2);
+        assert_eq!(pack.selection_audit.candidate_count, 4);
+        assert!(pack.omitted.iter().all(|omission| {
+            omission.rejected_at == crate::pack::PackRejectionStage::CandidateFilter
+                && !omission.feasible
+                && omission.could_fit_with_budget.is_none()
+        }));
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
     fn persisted_pack_measures_the_writer_open_reused_after_retrieval() -> TestResult {
         for via_handoff in [false, true] {
             let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;

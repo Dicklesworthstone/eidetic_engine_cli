@@ -333,11 +333,37 @@ fn admitted_companion(
 
 /// Complete unambiguous user/assistant turns across bounded, complete tool
 /// interludes, under ordinary evidence snapshot, admission and filter rules.
+#[cfg(test)]
 pub(super) fn complete_selected_turns(
     connection: &DbConnection,
     workspace_path: &Path,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
+    considered_evidence: &BTreeSet<String>,
+    relevance_excluded_evidence: &BTreeSet<String>,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let exclusions = QueryExclusions::from_query(&request.query);
+    complete_selected_turns_with_exclusions(
+        connection,
+        workspace_path,
+        request,
+        filters,
+        exclusions.as_ref(),
+        considered_evidence,
+        relevance_excluded_evidence,
+        draft,
+        degraded,
+    );
+}
+
+pub(super) fn complete_selected_turns_with_exclusions(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    exclusions: Option<&QueryExclusions>,
     considered_evidence: &BTreeSet<String>,
     relevance_excluded_evidence: &BTreeSet<String>,
     draft: &mut PackDraft,
@@ -392,6 +418,7 @@ pub(super) fn complete_selected_turns(
     let mut additions = Vec::new();
     let mut hydrated_bytes = 0_usize;
     let mut unavailable_sources = false;
+    let mut excluded_by_query = BTreeSet::new();
     for (session_id, anchors) in sessions {
         let session = match connection.get_session(session_id) {
             Ok(Some(session)) if workspaces.contains(&session.workspace_id) => session,
@@ -431,7 +458,13 @@ pub(super) fn complete_selected_turns(
                 filters,
                 &selected_memories,
             ) {
-                Ok(Some(item)) => additions.push((anchor.rank, anchor.evidence_id.clone(), item)),
+                Ok(Some(item)) => {
+                    if exclusions.is_some_and(|exclusions| exclusions.matches(&item.content)) {
+                        excluded_by_query.insert(item.evidence_id);
+                    } else {
+                        additions.push((anchor.rank, anchor.evidence_id.clone(), item));
+                    }
+                }
                 Ok(None) => {}
                 Err(_) => unavailable_sources = true,
             }
@@ -471,6 +504,18 @@ pub(super) fn complete_selected_turns(
         draft.selection_audit.selected_count = draft.selected_item_count();
         draft.selection_audit.budget_used = draft.used_tokens;
         draft.hash = None;
+    }
+    if !excluded_by_query.is_empty() {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} conversational companion candidates excluded by query term or phrase exclusions.",
+                excluded_by_query.len(),
+            ),
+            None,
+        );
     }
     if unavailable_sources {
         push_degradation(
@@ -829,6 +874,104 @@ mod tests {
                 .iter()
                 .map(|item| item.estimated_tokens)
                 .sum::<u32>(),
+        );
+    }
+
+    #[test]
+    fn query_excluded_companions_leave_room_for_allowed_turns() {
+        let fixture = Fixture::new();
+        let (_, first_user, first_answer) = fixture.pair(1200);
+        let (_, second_user, second_answer) = fixture.pair(1300);
+        let (_, third_user, third_answer) = fixture.pair(1400);
+        let long_answer = format!(
+            "{} This is the legacy route.",
+            "Select the release profile for optimized output. ".repeat(100),
+        );
+        for (id, body) in [
+            (&first_answer, long_answer.as_str()),
+            (
+                &second_answer,
+                "Select debug symbols for diagnostic output.",
+            ),
+            (&third_answer, "Select legacyguard for diagnostic output."),
+        ] {
+            fixture.replace_excerpt(
+                id,
+                json!({"type": "assistant", "message": {"role": "assistant", "content": body}}),
+            );
+        }
+        let mut unrestricted = ContextRequest::from_query("emberstone").unwrap();
+        unrestricted.budget = TokenBudget::new(4096).unwrap();
+        unrestricted.max_results = Some(4);
+        let mut control = fixture.draft(&[&first_user, &second_user, &third_user], &unrestricted);
+        fixture.complete(&unrestricted, &mut control);
+        assert_eq!(control.evidence_items.len(), 4);
+        assert!(
+            control
+                .evidence_items
+                .iter()
+                .any(|item| item.evidence_id == first_answer)
+        );
+
+        let mut request =
+            ContextRequest::from_query("emberstone -legacy -\"debug symbols\"").unwrap();
+        request.budget = unrestricted.budget;
+        request.max_results = unrestricted.max_results;
+        let mut draft = fixture.draft(&[&first_user, &second_user, &third_user], &request);
+        let original = draft.evidence_items.clone();
+        let considered = BTreeSet::from([first_user, second_user, third_user]);
+        let mut degraded = Vec::new();
+        complete_selected_turns(
+            &fixture.db,
+            Path::new(WORKSPACE_PATH),
+            &request,
+            &crate::models::QueryFilters::default(),
+            &considered,
+            &BTreeSet::new(),
+            &mut draft,
+            &mut degraded,
+        );
+        assert_eq!(draft.evidence_items.len(), 4);
+        assert_eq!(&draft.evidence_items[..3], original.as_slice());
+        assert_eq!(draft.evidence_items[3].evidence_id, third_answer);
+        assert_eq!(
+            draft.evidence_items[3].content,
+            "assistant: Select legacyguard for diagnostic output."
+        );
+        assert!(
+            draft.evidence_items.iter().all(|item| {
+                item.evidence_id != first_answer && item.evidence_id != second_answer
+            })
+        );
+        assert_eq!(draft.selection_audit.selected_count, 4);
+        assert_eq!(draft.selection_audit.candidate_count, 4);
+        assert_eq!(draft.selection_audit.omitted_count, 0);
+        assert_eq!(draft.selection_audit.budget_used, draft.used_tokens);
+        assert_eq!(
+            draft.used_tokens,
+            draft
+                .evidence_items
+                .iter()
+                .map(|item| item.estimated_tokens)
+                .sum::<u32>(),
+        );
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results"
+                && entry.message.starts_with("2 conversational companion")
+        }));
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry.code == "context_evidence_hit_unhydrated")
+        );
+        assert!(
+            fixture
+                .db
+                .get_evidence_span(&first_answer)
+                .unwrap()
+                .unwrap()
+                .reader_text()
+                .ends_with(&long_answer)
         );
     }
 

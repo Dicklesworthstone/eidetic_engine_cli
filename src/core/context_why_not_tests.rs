@@ -601,6 +601,118 @@ fn why_not_foreign_native_targets_retain_only_identity_and_scope_reason() -> Tes
 }
 
 #[test]
+fn why_not_query_exclusions_have_authoritative_filter_reasons_before_candidate_admission()
+-> TestResult {
+    let fixture = Fixture::new()?;
+    let body = format!(
+        "{} The legacy route remains unsupported.",
+        "Quasar release checksum verification passed. ".repeat(100),
+    );
+    let memory = MemoryId::from_uuid(uuid::Uuid::from_u128(0x801));
+    fixture.db.insert_memory(
+        &memory.to_string(),
+        &CreateMemoryInput {
+            workspace_id: fixture.workspace_id.clone(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: body.clone(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.8,
+            provenance_uri: Some("manual://query-exclusion-explanation".to_owned()),
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        },
+    )?;
+    let evidence = fixture.evidence(0x802, &body)?;
+    let counts = fixture.counts()?;
+    for (target, memory_v1) in [
+        (PackEntityRef::Memory(memory), true),
+        (PackEntityRef::Memory(memory), false),
+        (PackEntityRef::EvidenceSpan(evidence), false),
+    ] {
+        for retrieved in [false, true] {
+            for (query, excluded) in [
+                ("quasar release -legacy", true),
+                ("quasar release -legacyguard", false),
+            ] {
+                let mut options = fixture.options.clone();
+                options.query = query.to_owned();
+                options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
+                let request = context_request_from_options(&options)?;
+                let mut search = missing_index_search_report(
+                    query,
+                    20,
+                    runtime_profile_for_workspace(&options.workspace_path),
+                );
+                if retrieved {
+                    let mut hit = admission_probe_hit(target.id_string());
+                    hit.metadata =
+                        Some(serde_json::json!({"content": "Quasar release checksums."}));
+                    search.results.push(hit);
+                }
+                let probe = WhyNotSelectionProbe::new(target);
+                probe.initialize(
+                    &fixture.db,
+                    &options,
+                    &request,
+                    &options.filters,
+                    &search,
+                    &BTreeMap::new(),
+                )?;
+                // Retrieval may have withheld this row entirely, or live
+                // hydration can remove it before the first candidate observation.
+                probe.observe_memories(&[], OmissionCause::Filter);
+                probe.observe_evidence(&[], OmissionCause::Filter);
+                let observation = probe.into_observation();
+                assert_eq!(observation.retrieved, retrieved);
+                assert!(!observation.reached_candidates);
+                if !excluded {
+                    assert!(observation.cause.is_none());
+                    continue;
+                }
+                assert!(matches!(observation.cause, Some(OmissionCause::Filter)));
+                let draft =
+                    crate::pack::assemble_draft(&request.query, request.budget, Vec::new())?;
+                let response = ContextResponse::new(request, draft, Vec::new())?;
+                let report = if memory_v1 {
+                    serde_json::to_value(memory_report(&options, response, observation)?)?
+                } else {
+                    serde_json::to_value(entity_report(target, &response, observation))?
+                };
+                assert_eq!(report["primaryReason"], "excluded_by_filter");
+                assert_eq!(report["reasonSource"], "authoritative");
+                assert_eq!(report["retrievalStageReached"], "candidate_filter");
+                assert!(
+                    report["reasonCodes"]
+                        .as_array()
+                        .ok_or("missing filter reason codes")?
+                        .iter()
+                        .any(|code| code == "context_filtered_results")
+                );
+                let hints = report["counterfactualHints"]
+                    .as_array()
+                    .ok_or("missing filter hints")?;
+                assert_eq!(hints.len(), 1);
+                assert_eq!(hints[0]["kind"], "excluded_by_filter");
+                let action = hints[0]["action"]
+                    .as_str()
+                    .ok_or("missing filter action")?;
+                assert!(action.contains("filters"));
+                assert!(!action.contains("candidate-pool"));
+                assert!(!report.to_string().contains(&body));
+            }
+        }
+    }
+    assert_eq!(fixture.counts()?, counts);
+    Ok(())
+}
+
+#[test]
 fn why_not_missing_global_memories_keep_canonical_cross_workspace_admission() -> TestResult {
     let fixture = Fixture::new()?;
     let foreign = tempfile::tempdir()?;

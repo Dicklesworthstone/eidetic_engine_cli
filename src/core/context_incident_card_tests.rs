@@ -983,6 +983,141 @@ fn hydrated_evidence_admission_preserves_subjects_domains_and_explicit_floors() 
 }
 
 #[test]
+fn query_exclusions_hydrate_full_evidence_and_leave_allowed_card_sources_available() {
+    let fixture = Fixture::new();
+    let (repair, card) = fixture.incident(
+        0x59_0701,
+        "Quasar release builds after implementing Serialize for Widget.",
+    );
+    let mut baseline_degraded = Vec::new();
+    let (baseline, _) = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "quasar release",
+        vec![fixture.candidate(&repair, 0.9)],
+        &mut baseline_degraded,
+    );
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(baseline[0].item.evidence_id, card);
+    assert!(baseline[0].item.content.contains("E0277"));
+
+    let session = fixture.session(0x59_0702);
+    let long_body = format!(
+        "{} Use the legacy publication route.",
+        "Quasar release checksums are verified. ".repeat(100),
+    );
+    let excluded = fixture.excerpt(&session, 1, "message", Some("assistant"), &long_body);
+    let allowed = fixture.excerpt(
+        &session,
+        2,
+        "message",
+        Some("assistant"),
+        "Quasar release checksums are verified with legacyguard.",
+    );
+    let missing = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x59_0703)).to_string();
+    let query = "quasar release -legacy -E0277";
+    let search = SearchReport {
+        index_freshness: None,
+        status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
+        query: query.to_owned(),
+        requested_limit: 5,
+        results: [&excluded, &card, &repair, &allowed, &missing]
+            .into_iter()
+            .map(|id| SearchHit {
+                doc_id: id.clone(),
+                score: 0.9,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.9),
+                rerank_score: None,
+                // Search previews deliberately omit the excluded terms.
+                metadata: Some(json!({"content": "Quasar release checksums are verified."})),
+                explanation: None,
+            })
+            .collect(),
+        elapsed_ms: 0.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            crate::core::profile::OperatingProfile::Workstation,
+            "query_exclusion_fixture",
+        ),
+        rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
+        relevance_floor_applied: Some(0.0),
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::LexicalOnly,
+        source_mode_applied: SearchSourceMode::LexicalOnly,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Workspace,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Workspace, false, None, 0),
+    };
+    let mut request = ContextRequest::from_query(query).unwrap();
+    request.max_results = Some(2);
+    let mut degraded = Vec::new();
+    let candidates = collect_direct_evidence_pack_candidates(
+        &fixture.db,
+        Path::new("/tmp/incident-card-pack"),
+        &search,
+        &request,
+        &crate::models::QueryFilters::default(),
+        Some(0.0),
+        &mut degraded,
+    )
+    .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.item.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![repair.as_str(), allowed.as_str()],
+        "an excluded replacement card must not suppress its allowed source turn",
+    );
+    let mut draft =
+        crate::pack::assemble_draft(query, request.budget, Vec::<PackCandidate>::new()).unwrap();
+    append_ranked_native_pack_items(
+        Vec::new(),
+        candidates,
+        &request,
+        Some(0.0),
+        &mut draft,
+        &mut degraded,
+    );
+    assert_eq!(draft.evidence_items.len(), 2);
+    assert!(draft.evidence_items.iter().all(|item| {
+        !QueryExclusions::from_query(query)
+            .unwrap()
+            .matches(&item.content)
+    }));
+    assert_eq!(draft.selection_audit.selected_count, 2);
+    assert!(
+        degraded
+            .iter()
+            .any(|entry| entry.code == "context_evidence_hit_unhydrated")
+    );
+    assert!(degraded.iter().any(|entry| {
+        entry.code == "context_filtered_results" && entry.message.contains("derived incident cards")
+    }));
+    assert_eq!(
+        fixture
+            .db
+            .get_evidence_span(&excluded)
+            .unwrap()
+            .unwrap()
+            .reader_text(),
+        long_body
+    );
+    assert!(fixture.db.get_evidence_span(&card).unwrap().is_some());
+}
+
+#[test]
 fn identical_projected_evidence_is_packed_once_without_merging_distinct_facts() {
     let fixture = Fixture::new();
     let mut ids = Vec::new();
