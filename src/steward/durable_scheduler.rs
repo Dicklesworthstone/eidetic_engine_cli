@@ -179,8 +179,12 @@ fn index_jobs_need_processing(workspace: &Path) -> Result<bool, String> {
     let Some(workspace) = workspace else {
         return Ok(false);
     };
+    // The processor retries failed/cancelled rows in place and recovers
+    // abandoned running work under its publication-ownership checks. Keep
+    // this read-only probe aligned with that intake policy: a failed-only
+    // queue must be revisited after the publication obstruction is repaired.
     connection.query(
-        "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'cancelled') LIMIT 1",
+        "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'cancelled', 'failed') LIMIT 1",
         &[sqlmodel_core::Value::Text(workspace.id)],
     ).map(|jobs| !jobs.is_empty())
         .map_err(|error| format!("Inspect pending background index jobs: {error}"))
