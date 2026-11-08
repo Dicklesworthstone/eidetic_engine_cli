@@ -280,13 +280,19 @@ def evaluate(
     # Print the denominators. A zero-length region and a region with no analysis
     # change read identically in the verdict, so the sizes are what let a reader
     # tell "inspected and unchanged" from "never inspected".
-    lines.append(
-        f"[lexical-analyzer-revision] regions: {ANALYZER_FN} "
-        f"{len(normalize(analyzer_region))} normalized chars, "
-        f"{MAINTENANCE_FN} {len(normalize(maintenance_region))} normalized chars"
+    analyzer_size = len(normalize(analyzer_region))
+    maintenance_size = len(normalize(maintenance_region))
+    sizes = (
+        f"{ANALYZER_FN} {analyzer_size} normalized chars, "
+        f"{MAINTENANCE_FN} {maintenance_size} normalized chars"
     )
-    if not normalize(analyzer_region) or not normalize(maintenance_region):
-        raise CannotAnswer("an analyzer region normalized to nothing")
+    lines.append(f"[lexical-analyzer-revision] regions: {sizes}")
+    if not analyzer_size or not maintenance_size:
+        # The sizes belong in the MESSAGE, not only in `lines`. Raising discards
+        # `lines`, so the comment above was true of the happy path and false of
+        # the one case it was written for -- a reader of this failure would have
+        # been told a region was empty without being told which.
+        raise CannotAnswer(f"an analyzer region normalized to nothing: {sizes}")
 
     expected = fingerprint([analyzer_region, maintenance_region])
     lines.append(f"[lexical-analyzer-revision] {CONST_NAME} = {value!r}")
@@ -411,6 +417,20 @@ def self_test() -> int:
         except CannotAnswer:
             return 3
 
+    # Every arm below that EXPECTS A PASS is built by substring replacement, so a
+    # drifted anchor turns it into a no-op and the arm passes having tested
+    # nothing -- a vacuous green, invisible because the expected verdict is the
+    # one an unmutated source already gives. ("is caught" arms are safe: a no-op
+    # there reds loudly.) Route those through mutate() and assert at the end that
+    # none was a no-op.
+    no_op_mutations: list[str] = []
+
+    def mutate(source: str, old: str, new: str, label: str) -> str:
+        out = source.replace(old, new)
+        if out == source:
+            no_op_mutations.append(label)
+        return out
+
     baseline_analyzer, baseline_maintenance = _synth()
 
     check(
@@ -450,32 +470,44 @@ def self_test() -> int:
     )
 
     # Insensitivity, the other direction. These must NOT churn the fingerprint.
-    comment_only = baseline_maintenance.replace(
+    comment_only = mutate(
+        baseline_maintenance,
         "    index.tokenizers().register(",
         "    // freshly reworded explanation\n    index.tokenizers().register(",
+        "arm07 line comment",
     )
     check(
         "arm07 a line-comment edit does not churn the fingerprint",
         rc(baseline_analyzer, comment_only) == 0,
     )
 
-    block_comment = baseline_maintenance.replace(
-        "    Ok(writer)", "    /* a block comment\n       over two lines */\n    Ok(writer)"
+    block_comment = mutate(
+        baseline_maintenance,
+        "    Ok(writer)",
+        "    /* a block comment\n       over two lines */\n    Ok(writer)",
+        "arm08 block comment",
     )
     check(
         "arm08 a block-comment edit does not churn the fingerprint",
         rc(baseline_analyzer, block_comment) == 0,
     )
 
-    reindented = baseline_maintenance.replace("            .filter(LowerCaser)", "        .filter(LowerCaser)")
+    reindented = mutate(
+        baseline_maintenance,
+        "            .filter(LowerCaser)",
+        "        .filter(LowerCaser)",
+        "arm09 reindentation",
+    )
     check(
         "arm09 reindentation does not churn the fingerprint",
         rc(baseline_analyzer, reindented) == 0,
     )
 
-    doc_comment = baseline_analyzer.replace(
+    doc_comment = mutate(
+        baseline_analyzer,
         "/// Doc comment that must not participate in the fingerprint.",
         "/// Completely rewritten documentation.",
+        "arm10 doc comment",
     )
     check(
         "arm10 a doc-comment rewrite does not churn the fingerprint",
@@ -541,10 +573,12 @@ def self_test() -> int:
     # eyes. Both were silent-false-pass shaped, and neither synthetic arm above
     # could see them, because both live in the step BEFORE the fingerprint: the
     # located region and the read constant.
-    brace_in_signature_comment = baseline_analyzer.replace(
+    brace_in_signature_comment = mutate(
+        baseline_analyzer,
         "fn configure_lexical_analyzer(index: TantivyIndex) -> SearchResult<TantivyIndex> {",
         "fn configure_lexical_analyzer(index: TantivyIndex) "
         "/* registers {content,title} */ -> SearchResult<TantivyIndex> {",
+        "arm19 brace in signature comment",
     )
     check(
         "arm19 a brace inside a signature comment does not derail the region",
@@ -561,11 +595,12 @@ def self_test() -> int:
         == 1,
     )
 
-    commented_out_decl = baseline_analyzer.replace(
+    commented_out_decl = mutate(
+        baseline_analyzer,
         "pub(crate) const",
         f'// pub(crate) const {CONST_NAME}: &str = '
         f'"ee.lexical_analyzer.OLD.v0+fp0000000000";\npub(crate) const',
-        1,
+        "arm21 commented-out declaration",
     )
     check(
         "arm21 a commented-out stale declaration does not red a healthy tree",
@@ -626,6 +661,12 @@ def self_test() -> int:
     check(
         "arm25 two live declarations of the constant is cannot-answer, not a pass",
         rc(duplicate_const, baseline_maintenance) == 3,
+    )
+
+    check(
+        "arm26 control: no pass-expecting arm's mutation was a silent no-op"
+        + (f" (vacuous: {', '.join(no_op_mutations)})" if no_op_mutations else ""),
+        not no_op_mutations,
     )
 
     passed = sum(1 for _, ok in arms if ok)

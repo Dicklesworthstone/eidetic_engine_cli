@@ -570,13 +570,14 @@ regression_factor = 1.5
 # the analyzer source it describes, so changed text analysis cannot silently
 # reuse indexes built under the old analysis.
 #
-# MEASURED, as this file requires rather than estimated: lint 143ms, self-test
-# 61ms (25 arms), each the median of three consecutive runs, wall clock including
+# MEASURED, as this file requires rather than estimated: lint 144ms, self-test
+# 60ms, each the median of three consecutive runs, wall clock including
 # interpreter startup. Both declare the 1s floor this manifest uses for
 # sub-second checks, so the pair costs 2s. Re-measured 2026-11-07 after the gate
-# gained comment-stripped region location and its ambiguity guards; the earlier
-# 130/60 reading was taken against the 19-arm version, and scripts/verify.sh
-# carries the same figures so the two cannot drift apart unnoticed.
+# gained comment-stripped region location, ambiguity guards and a vacuous-arm
+# control; the earlier 130/60 reading was taken against an older version. The
+# self-test's arm COUNT is deliberately not repeated here -- scripts/verify.sh
+# states it next to the stage, and a figure kept in two files drifts in one.
 #
 # Arithmetic at the time of adding, since the ceiling is the thing that decides
 # whether a stage may exist at all: the non-benchmark total stood at 602 of 608
