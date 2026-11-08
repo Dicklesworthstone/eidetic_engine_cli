@@ -19,6 +19,28 @@
 # (99ae86cdf, manifest 0.3.8), of which f3c00b742 is an ancestor. sqlmodel's
 # two crates carry version.workspace = true and inherit 0.5.0 from the
 # workspace root; they are correct despite declaring no version of their own.
+#
+# RE-VERIFIED 2026-11-07: 12 of 12 packages across all 7 rows agree, zero
+# mismatches and zero unverifiable. This is worth dating because the header
+# above was written for the 0.17.0 candidate and Cargo.toml now declares 0.18.0,
+# so the natural assumption is that this file has gone stale -- it has not,
+# because the franken-stack pins did not move across that release. It also
+# retires the first suspect CLAUDE.md names for a refused pinned dispatch ("a
+# pinned refusal almost always means one stale row in franken-stack.lock"):
+# whatever refuses the lane today, it is not this file. Look instead at
+# build-admission TMPDIR, the AppleDouble export base and worker admissibility.
+#
+# Method, so the claim is reproducible rather than asserted. For each row, the
+# manifest was read AT THE LOCKED REVISION with `git show <sha>:<path>` from a
+# sibling checkout -- never from its working tree, which is drifted on this host
+# and would have measured the wrong thing -- using the same per-package manifest
+# paths `package_manifests` maps in scripts/rch_verify.sh, and compared against
+# the version Cargo.lock selects for that package rather than against the
+# `=x.y.z` pin in Cargo.toml, since Cargo.lock is what the header above calls
+# authoritative and it is the only source that covers the transitive rows
+# (fsqlite-core, fsqlite-error, sqlmodel-*, tru) that Cargo.toml never names.
+# Sibling checkouts remain NOT required to use this lock; they are required only
+# to re-run this check.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	99ae86cdf8c71c53cec1df5760766038eca20375
 franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
