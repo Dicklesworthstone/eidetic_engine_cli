@@ -450,6 +450,26 @@ pub struct SwarmBriefSourceFreshness {
     pub observed_at: Option<String>,
     pub age_seconds: Option<u64>,
     pub stale_after_seconds: Option<u64>,
+    /// The RAW freshness vocabulary. Value domain, exhaustively:
+    /// **`"current" | "unknown" | "stale"`**.
+    ///
+    /// **It is NOT `"fresh"`.** That is the NORMALISED vocabulary of
+    /// [`crate::core::swarm_next_action::SwarmSourceAuthorityFreshness::freshness_state`]
+    /// (`"fresh" | "stale" | "unknown"`), and the two are bridged in exactly one
+    /// place -- `swarm_next_action.rs::source_authority_freshness_from_provenance`.
+    /// Comparing this field against `"fresh"` is a branch that can never be
+    /// taken, and because this is a `&'static str` the compiler cannot say so.
+    ///
+    /// That is not hypothetical: `actionable_queue_evidence_from_brief_fallback`
+    /// shipped `source.freshness.state == "fresh"` and was dead for as long as it
+    /// existed, so a healthy Beads source fell through to `stale_fallback`, which
+    /// requests external state and withholds `authoritative` (bd-6zxuu).
+    ///
+    /// Four more string freshness vocabularies exist in this tree; they are
+    /// enumerated in `scripts/check-freshness-vocabulary.py`, which derives this
+    /// field's domain from the code below and refuses any comparison against a
+    /// value nothing produces. Add a value here and the gate learns it; there is
+    /// no list to keep in sync.
     pub state: &'static str,
 }
 

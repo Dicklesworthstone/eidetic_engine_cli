@@ -1122,6 +1122,22 @@ pub struct SwarmSourceAuthorityFreshness {
     pub captured_at: Option<String>,
     pub age_ms: Option<u64>,
     pub stale_after_ms: Option<u64>,
+    /// The NORMALISED freshness vocabulary: **`"fresh" | "stale" | "unknown"`**,
+    /// produced only by [`source_authority_freshness_from_provenance`], which is
+    /// the single bridge from the raw vocabularies.
+    ///
+    /// **`"current"` belongs to the RAW vocabulary, not to this field** -- see
+    /// [`crate::core::swarm_brief::SwarmBriefSourceFreshness::state`]
+    /// (`"current" | "unknown" | "stale"`). The bridge maps `"current"` here to
+    /// `"fresh"`; mixing the two in a comparison is bd-6zxuu's defect.
+    ///
+    /// **The field NAME is not a type.** `freshness_state` is also the name of a
+    /// field on `recall.rs`'s memory-anchor types, which carry the RAW
+    /// vocabulary, and of a `work_packet_source_status` parameter that is handed
+    /// a value read off `SwarmBriefSourceFreshness::state`. So a value reaching
+    /// something spelled `freshness_state` is NOT evidence it is normalised.
+    /// This is why `scripts/check-freshness-vocabulary.py` gates only the
+    /// unambiguous `.freshness.state` access path and documents the rest here.
     pub freshness_state: &'static str,
 }
 
@@ -1715,7 +1731,23 @@ pub struct SwarmWorkPacketVerificationCommand {
 pub struct SwarmWorkPacketSourceProvenance {
     pub source: String,
     pub collector: &'static str,
+    /// A THIRD vocabulary, overlapping both freshness ones without matching
+    /// either: **`"fresh" | "stale" | "degraded" | "unavailable" | "skipped"`**.
+    /// Produced only by [`work_packet_source_status`], which is also the only
+    /// place the raw `"ready" | "degraded" | "unavailable" | "skipped" |
+    /// "not_configured"` source-status spelling is read.
     pub status: &'static str,
+    /// Carries the RAW vocabulary -- **`"current" | "unknown" | "stale"`** --
+    /// because its one producer (`work_packet_source_provenance`) copies
+    /// [`crate::core::swarm_brief::SwarmBriefSourceFreshness::state`] straight in.
+    ///
+    /// So the `Some("current" | "fresh")` arm of
+    /// [`source_authority_freshness_from_provenance`] never sees `"fresh"` from
+    /// this tree. That alternative is deliberate tolerance, not bd-6zxuu's
+    /// defect: both spellings map to the same output, so the dead alternative
+    /// changes no behaviour, whereas bd-6zxuu's dead guard silently rerouted a
+    /// healthy source. Keep it -- `"fresh"` is the spelling a caller is most
+    /// likely to reach for -- and do not read its deadness as a bug to fix.
     pub freshness: Option<String>,
     pub digest: Option<String>,
     pub redaction: &'static str,
