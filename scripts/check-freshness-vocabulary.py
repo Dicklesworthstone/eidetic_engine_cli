@@ -94,8 +94,11 @@ comparison in the tree today is on one line.
   2  usage / internal error
   3  CANNOT ANSWER -- the scope assumptions no longer hold. Never a pass.
 
-Run `--self-test` for 20 arms, several of which are controls on this script's
-own comment stripper, because over-stripping would be a silent false PASS.
+`--self-test` drives every verdict path and prints its own arm count rather
+than naming one here, since a hardcoded count is one more thing to go stale.
+Several arms are controls on this file's own lexer, because over-blanking
+would be a silent false PASS; four of them were each OBSERVED failing against
+the broken version of the code they guard.
 """
 
 from __future__ import annotations
@@ -131,9 +134,11 @@ class CannotAnswer(Exception):
 # COMMENTS. Direction matters. Leaving a comment in produces a FALSE RED, which
 # is loud and gets looked at. Blanking real code produces a FALSE PASS, which is
 # silent and is the failure this whole file exists to prevent. The real tree
-# exercises both directions for free: swarm_next_action.rs:12429 holds
-# `freshness.state == "stale"` inside a comment while :2107 holds a live
-# comparison, so the self-test grades this scanner against both.
+# exercises both directions for free: `swarm_next_action.rs` happens to hold
+# `freshness.state == "stale"` inside a comment AND a live comparison, so the
+# self-test grades this scanner against both. It locates them by content, never
+# by line number -- an earlier draft named the lines here and in the arms, and
+# an edit to that same file silently turned the negative arm into a no-op.
 #
 # STRING INTERIORS. Preserving a string literal verbatim -- which is what a
 # comment stripper must do -- then searching the result finds `.freshness.state`
@@ -186,10 +191,24 @@ def _unescape(raw: str) -> str:
 
 # Jump straight to the next construct that can change lexer state instead of
 # walking every character in Python. A per-character scan of the 97 relevant
-# files cost 9.1 s, nearly all of it in `src/db/mod.rs` and the other very
-# large modules; this form is the same grammar driven by one compiled
+# files cost 9.1 s; this form is the same grammar driven by one compiled
 # alternation. Ordered longest-first so `r#"` and `//` win over `"` and `/`.
-_TOKEN = re.compile(r'(?<![A-Za-z0-9_])r(#*)"|//|/\*|"|\'')
+#
+# The `[bc]?` is load-bearing. Rust's byte-raw literal is `br"..."`, and a
+# lookbehind that only guards a bare `r` rejects the raw branch because `r`
+# follows `b` -- so `br#"..."#` lexed as an ORDINARY string starting at the
+# quote, which mis-terminates on any `\"` inside and can blank real code.
+# Measured 2026-11-09: 78 real `br"..."` literals in src/, five of them in
+# files this gate lexes. (Zero `cr"`, but the prefix costs nothing and Rust
+# has the form.) `b"..."` and `c"..."` are not raw and need no branch: the
+# plain `"` alternative handles them, and the prefix letter stays as code.
+#
+# NOTE on measuring this yourself: grepping `br#*"` reports ~177 hits and most
+# are the CONTENTS of the ordinary string "br" (the beads CLI name), where `br`
+# sits just before the closing quote. Require a token boundary before the
+# prefix -- not an identifier character and not a quote -- or the count is
+# your own instrument talking.
+_TOKEN = re.compile(r'(?<![A-Za-z0-9_])[bc]?r(#*)"|//|/\*|"|\'')
 _STRING_BODY = re.compile(r'(?:[^"\\]|\\.)*"', re.DOTALL)
 _NOT_NEWLINE = re.compile(r"[^\n]")
 
@@ -224,7 +243,11 @@ def lex(text: str) -> tuple[str, list[str]]:
         token = match.group(0)
         start = match.start()
 
-        if token.startswith("r"):  # raw string, with match.group(1) hashes
+        # group(1) is the hash run, and it exists ONLY on the raw alternative --
+        # `""` for `r"`, None for a plain `"`. Testing `token.startswith("r")`
+        # was wrong the moment the `[bc]?` prefix was allowed, since the token
+        # can now start with `b`.
+        if match.group(1) is not None:
             terminator = '"' + "#" * len(match.group(1))
             close = text.find(terminator, match.end())
             if close == -1:
@@ -745,9 +768,14 @@ def _write(root: pathlib.Path, rel: str, body: str) -> None:
     path.write_text(body)
 
 
+_ARMS_RUN = [0]
+
+
 def _arm(label: str, root: pathlib.Path, want: int, expect: str | None = None) -> bool:
     import contextlib
     import io
+
+    _ARMS_RUN[0] += 1
 
     buffer = io.StringIO()
     try:
@@ -815,6 +843,7 @@ def self_test() -> int:
             (live, True, "every in-tree LIVE comparison is graded"),
         ):
             # An empty anchor set means the arm proved nothing.
+            _ARMS_RUN[0] += 1
             ok = bool(found) and all((n in graded_lines) == want_graded for n in found)
             print(f"  {'ok  ' if ok else 'FAIL'} {why:62} (lines {found or 'NONE FOUND'})")
             if not ok:
@@ -922,6 +951,39 @@ def self_test() -> int:
             "a dead comparison inside a RAW string is NOT a finding",
             fixture("c5", 'fn f() -> &str { r#"s.freshness.state == "fresh""# }\n'),
             EXIT_OK,
+        )
+        # `br"` defeats a lookbehind that guards only a bare `r`, so the literal
+        # lexes as an ordinary string, mis-terminates on the inner `\"`, and can
+        # blank real code. Five of the files this gate lexes contain one.
+        failures += not _arm(
+            "a dead comparison inside a BYTE-raw string is NOT a finding",
+            fixture("c5b", 'fn f() -> &[u8] { br#"s.freshness.state == "fresh""# }\n'),
+            EXIT_OK,
+        )
+        failures += not _arm(
+            "a byte-raw literal does not swallow the code after it",
+            fixture(
+                "c5c",
+                'fn u() -> &[u8] { br#"a "quoted" tail"# }\n'
+                'fn f(s: &Snap) -> bool { s.freshness.state == "fresh" }\n',
+            ),
+            EXIT_RED,
+        )
+        # THE arm that actually catches the `br"` bug. The two above pass even
+        # with the broken lexer: mis-lexing a byte-raw string with an EVEN
+        # number of inner quotes happens to re-synchronise. An ODD number does
+        # not -- the bogus "string" state runs past the closing `"#` and
+        # swallows the next line, masking the dead comparison and producing a
+        # SILENT exit 0. Observed failing (0 instead of 1) against the
+        # pre-`[bc]?` lexer.
+        failures += not _arm(
+            "an ODD inner quote in a byte-raw literal still cannot mask code",
+            fixture(
+                "c5d",
+                'fn u() -> &[u8] { br#"has one " quote"# }\n'
+                'fn f(s: &Snap) -> bool { s.freshness.state == "fresh" }\n',
+            ),
+            EXIT_RED,
         )
         # The direction that matters: the stripper must not eat live code.
         failures += not _arm(
@@ -1047,9 +1109,9 @@ def self_test() -> int:
 
     print()
     if failures:
-        print(f"*** {failures} SELF-TEST ARM(S) FAILED ***")
+        print(f"*** {failures} of {_ARMS_RUN[0]} SELF-TEST ARM(S) FAILED ***")
         return EXIT_RED
-    print("self-test: all arms passed.")
+    print(f"self-test: all {_ARMS_RUN[0]} arms passed.")
     return EXIT_OK
 
 
