@@ -4692,7 +4692,6 @@ fn memory_documents_with_anchors_with_cx(
     memories: &[crate::db::StoredMemory],
 ) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
     let mut documents = Vec::with_capacity(memories.len());
-    let read_only = db.mode() == crate::db::DatabaseOpenMode::ReadOnly;
     let mut metadata_queries = 0;
     for chunk in memories.chunks(crate::db::MEMORY_INDEX_METADATA_BATCH_SIZE) {
         if let Some(cx) = request {
@@ -4707,11 +4706,10 @@ fn memory_documents_with_anchors_with_cx(
                 admitted.push(memory);
             }
         }
-        let ids = admitted
-            .iter()
-            .map(|memory| memory.id.as_str())
-            .collect::<Vec<_>>();
-        let metadata = db.memory_index_metadata_in_current_snapshot(&ids);
+        // Share one source-validated extraction between search metadata and
+        // reverse-index maintenance. Preparation consumes its authority inside
+        // this snapshot; a read-only connection never backfills source tables.
+        let metadata = db.prepare_memory_index_metadata_in_current_snapshot(&admitted, request);
         if let Some(cx) = request {
             index_checkpoint(cx)?;
         }
@@ -4722,20 +4720,15 @@ fn memory_documents_with_anchors_with_cx(
                 index_checkpoint(cx)?;
             }
             let crate::db::MemoryIndexMetadata {
-                mut anchors,
+                anchors,
                 typed_fields_json,
-            } = metadata.by_memory_id.remove(&memory.id).unwrap_or_default();
-            // Batched metadata merges missing content-derived anchors with
-            // durable bindings while preserving surviving capture metadata.
-            // Keep the empty fallback for older metadata providers; read-only
-            // fallback never writes source tables.
-            if anchors.is_empty() {
-                if read_only {
-                    anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);
-                } else if db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)? > 0 {
-                    anchors = db.list_memory_anchors(&memory.id)?;
-                }
-            }
+            } = metadata
+                .by_memory_id
+                .remove(&memory.id)
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Prepared index metadata is missing its source memory.".to_owned(),
+                })?;
             documents.push(memory_to_document_with_context_anchors_and_typed_fields(
                 memory,
                 None,
@@ -4743,12 +4736,6 @@ fn memory_documents_with_anchors_with_cx(
                 &anchors,
                 typed_fields_json.as_deref(),
             ));
-        }
-        // ADR 0064: rebuild the reverse index too, including stale removals and
-        // originating-workspace generations, using bounded set writes rather
-        // than a generation lookup/delete/insert round trip for every memory.
-        if !read_only {
-            db.refresh_memory_anchor_index_for_memories(&admitted)?;
         }
     }
     tracing::debug!(
@@ -19710,8 +19697,10 @@ mod tests {
         let memories = connection
             .list_memories_for_retrieval_with_global("wsp_anchorbackfill000000000000", None, false)
             .map_err(|error| error.to_string())?;
-        let documents = memory_documents_with_anchors(&connection, &memories)
-            .map_err(|error| error.to_string())?;
+        let documents = source_snapshot::capture(&connection, || {
+            memory_documents_with_anchors(&connection, &memories)
+        })
+        .map_err(|error| error.to_string())?;
         ensure(documents.len() == 1, "one indexable document expected")?;
 
         let anchors = connection

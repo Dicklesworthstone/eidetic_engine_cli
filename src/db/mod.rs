@@ -26071,6 +26071,15 @@ pub(crate) struct MemoryIndexMetadataBatch {
     pub query_count: usize,
 }
 
+/// Request-local reverse-index material prepared from a validated source row.
+/// It is consumed before the owning snapshot ends and never becomes a cache.
+struct PreparedMemoryAnchorIndex<'a> {
+    workspace_id: &'a str,
+    memory_id: &'a str,
+    surfaces: Vec<ExtractedAnchorSurface>,
+    missing_anchors: Vec<CreateMemoryAnchorInput>,
+}
+
 /// Attempt-family multiplicity sidecar on a memory row
 /// (bd-multiplicity-aware-trust-p0u7g): the stable family identity a finding
 /// was selected from and the declared number of sibling attempts.
@@ -27280,35 +27289,13 @@ impl DbConnection {
         self.refresh_memory_anchor_index_batch(&[(workspace_id, memory_id, content)])
     }
 
-    /// Refresh derived reverse-index rows without one generation query and
-    /// delete statement per memory. The caller owns the source transaction;
-    /// globally scoped memories retain their originating workspace generation.
-    pub(crate) fn refresh_memory_anchor_index_for_memories(
-        &self,
-        memories: &[&StoredMemory],
-    ) -> Result<u64> {
-        let sources = memories
-            .iter()
-            .map(|memory| {
-                (
-                    memory.workspace_id.as_str(),
-                    memory.id.as_str(),
-                    memory.content.as_str(),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.refresh_memory_anchor_index_batch(&sources)
-    }
-
     fn refresh_memory_anchor_index_batch(&self, sources: &[(&str, &str, &str)]) -> Result<u64> {
-        // Ten parameters per row stay below the conservative SQLite bind limit.
-        const INSERT_BATCH_SIZE: usize = 64;
-        let mut generations = BTreeMap::new();
         let mut written = 0_u64;
-        let now = Utc::now().to_rfc3339();
+        let request = asupersync::Cx::current();
         let has_sources =
             self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
         for chunk in sources.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
             let mut bindings = if has_sources {
                 self.code_anchor_sources_for_memories(
                     &chunk.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
@@ -27362,29 +27349,15 @@ impl DbConnection {
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            self.execute_for(
-                DbOperation::Execute,
-                &format!("DELETE FROM memory_anchor_index WHERE memory_id IN ({placeholders})"),
-                &parameters,
-            )?;
-            let mut rows = Vec::with_capacity(INSERT_BATCH_SIZE);
-            let mut missing_anchors = Vec::with_capacity(INSERT_BATCH_SIZE);
+            let mut prepared = Vec::with_capacity(chunk.len());
             for &(workspace_id, memory_id, content) in chunk {
+                checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
                 // A low-level caller may refresh a historical derived view.
                 // Only the actual source in this workspace can authorize new
                 // canonical identities; caller-supplied text cannot do so.
                 let canonical_source = live_sources
                     .get(memory_id)
                     .is_some_and(|(owner, body)| owner == workspace_id && body == content);
-                let generation = if let Some(generation) = generations.get(workspace_id) {
-                    *generation
-                } else {
-                    let generation =
-                        i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
-                            .unwrap_or(i64::MAX);
-                    generations.insert(workspace_id, generation);
-                    generation
-                };
                 let mut surfaces = extract_memory_anchor_surfaces(
                     memory_id,
                     content,
@@ -27415,7 +27388,8 @@ impl DbConnection {
                         surface,
                     );
                 }
-                for mut surface in surfaces.into_values() {
+                let mut missing_anchors = Vec::new();
+                for surface in surfaces.values_mut() {
                     let key = (
                         memory_id.to_owned(),
                         surface.anchor.anchor_kind,
@@ -27425,21 +27399,86 @@ impl DbConnection {
                         surface.anchor.freshness_state = existing.freshness_state;
                     } else if canonical_source {
                         missing_anchors.push(surface.anchor.clone());
-                        if missing_anchors.len() == INSERT_BATCH_SIZE {
-                            self.insert_missing_memory_anchor_batch(&missing_anchors)?;
-                            missing_anchors.clear();
-                        }
                     }
+                }
+                prepared.push(PreparedMemoryAnchorIndex {
+                    workspace_id,
+                    memory_id,
+                    surfaces: surfaces.into_values().collect(),
+                    missing_anchors,
+                });
+            }
+            written = written.saturating_add(
+                self.replace_prepared_memory_anchor_index(&prepared, request.as_ref())?,
+            );
+        }
+        Ok(written)
+    }
+
+    /// Write already-prepared projections without reading bodies, bindings or
+    /// canonical anchors again. Only preparation may authorize missing source
+    /// anchors; this writer receives no raw caller text to reinterpret.
+    fn replace_prepared_memory_anchor_index(
+        &self,
+        prepared: &[PreparedMemoryAnchorIndex<'_>],
+        request: Option<&asupersync::Cx>,
+    ) -> Result<u64> {
+        // Ten parameters per row stay below the conservative SQLite bind limit.
+        const INSERT_BATCH_SIZE: usize = 64;
+        let mut generations = BTreeMap::new();
+        let mut written = 0_u64;
+        let now = Utc::now().to_rfc3339();
+        for chunk in prepared.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            checkpoint_retry_cx(DbOperation::Execute, request)?;
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .map(|projection| Value::Text(projection.memory_id.to_owned()))
+                .collect::<Vec<_>>();
+            self.execute_for(
+                DbOperation::Execute,
+                &format!("DELETE FROM memory_anchor_index WHERE memory_id IN ({placeholders})"),
+                &parameters,
+            )?;
+            let mut rows = Vec::with_capacity(INSERT_BATCH_SIZE);
+            let mut missing_anchors = Vec::with_capacity(INSERT_BATCH_SIZE);
+            for projection in chunk {
+                checkpoint_retry_cx(DbOperation::Execute, request)?;
+                let generation = if let Some(generation) = generations.get(projection.workspace_id)
+                {
+                    *generation
+                } else {
+                    let generation = i64::try_from(
+                        self.get_workspace_generation(projection.workspace_id)?
+                            .unwrap_or(0),
+                    )
+                    .unwrap_or(i64::MAX);
+                    generations.insert(projection.workspace_id, generation);
+                    generation
+                };
+                for anchor in &projection.missing_anchors {
+                    checkpoint_retry_cx(DbOperation::Execute, request)?;
+                    missing_anchors.push(anchor.clone());
+                    if missing_anchors.len() == INSERT_BATCH_SIZE {
+                        self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+                        missing_anchors.clear();
+                    }
+                }
+                for surface in &projection.surfaces {
+                    checkpoint_retry_cx(DbOperation::Execute, request)?;
                     let (normalized_path, symbol) = match surface.anchor.anchor_kind {
-                        MemoryAnchorKind::Path => (Some(surface.normalized_value), None),
-                        MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value)),
+                        MemoryAnchorKind::Path => (Some(surface.normalized_value.clone()), None),
+                        MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value.clone())),
                         _ => continue,
                     };
                     rows.push([
-                        Value::Text(workspace_id.to_owned()),
-                        Value::Text(memory_id.to_owned()),
+                        Value::Text(projection.workspace_id.to_owned()),
+                        Value::Text(projection.memory_id.to_owned()),
                         Value::Text(surface.anchor.anchor_kind.as_str().to_owned()),
-                        Value::Text(surface.anchor.anchor_value_hash),
+                        Value::Text(surface.anchor.anchor_value_hash.clone()),
                         normalized_path.map_or(Value::Null, Value::Text),
                         symbol.map_or(Value::Null, Value::Text),
                         Value::Text(surface.anchor.freshness_state.as_str().to_owned()),
@@ -27847,6 +27886,42 @@ impl DbConnection {
         &self,
         memory_ids: &[&str],
     ) -> Result<MemoryIndexMetadataBatch> {
+        let request = asupersync::Cx::current();
+        self.prepare_memory_index_metadata(memory_ids, None, request.as_ref())
+    }
+
+    /// Prepare search metadata and the reverse index from one source read and
+    /// extraction. The caller holds the source snapshot (a writer transaction
+    /// for publication). Validate each supplied row against that snapshot
+    /// before its body can authorize canonical anchors; prepared authority is
+    /// consumed here, never returned for reuse after a write or snapshot change.
+    /// Read-only source connections project exactly the same union without
+    /// backfilling either anchor table.
+    pub(crate) fn prepare_memory_index_metadata_in_current_snapshot(
+        &self,
+        memories: &[&StoredMemory],
+        request: Option<&asupersync::Cx>,
+    ) -> Result<MemoryIndexMetadataBatch> {
+        let sources = memories
+            .iter()
+            .map(|memory| (memory.id.as_str(), *memory))
+            .collect::<BTreeMap<_, _>>();
+        if sources.len() != memories.len() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "Index memory source contains duplicate identities.".to_owned(),
+            });
+        }
+        let ids = sources.keys().copied().collect::<Vec<_>>();
+        self.prepare_memory_index_metadata(&ids, Some(&sources), request)
+    }
+
+    fn prepare_memory_index_metadata(
+        &self,
+        memory_ids: &[&str],
+        projection_sources: Option<&BTreeMap<&str, &StoredMemory>>,
+        request: Option<&asupersync::Cx>,
+    ) -> Result<MemoryIndexMetadataBatch> {
         let memory_ids = memory_ids
             .iter()
             .copied()
@@ -27857,10 +27932,14 @@ impl DbConnection {
         if memory_ids.is_empty() {
             return Ok(batch);
         }
+        checkpoint_retry_cx(DbOperation::Query, request)?;
+        let refresh_reverse_index =
+            projection_sources.is_some() && self.mode() != DatabaseOpenMode::ReadOnly;
         let has_sources =
             self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
         batch.query_count += 1;
         for chunk in memory_ids.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            checkpoint_retry_cx(DbOperation::Query, request)?;
             let placeholders = (1..=chunk.len())
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
@@ -27872,30 +27951,61 @@ impl DbConnection {
             let rows = self.query_for(
                 DbOperation::Query,
                 &format!(
-                    "SELECT id, typed_fields_json, content FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
+                    "SELECT id, typed_fields_json, content, workspace_id FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
                 ),
                 &parameters,
             )?;
             batch.query_count += 1;
             let mut extracted = BTreeMap::new();
-            for row in &rows {
-                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_owned();
+            for row in rows {
+                checkpoint_retry_cx(DbOperation::Query, request)?;
+                let memory_id = required_text(&row, 0, DbOperation::Query, "id")?.to_owned();
+                let content = required_text(&row, 2, DbOperation::Query, "content")?;
+                if let Some(sources) = projection_sources {
+                    let workspace = required_text(&row, 3, DbOperation::Query, "workspace_id")?;
+                    if sources.get(memory_id.as_str()).is_none_or(|memory| {
+                        memory.workspace_id != workspace || memory.content != content
+                    }) {
+                        return Err(DbError::MalformedRow {
+                            operation: DbOperation::Query,
+                            message: "Index memory source differs from its current snapshot."
+                                .to_owned(),
+                        });
+                    }
+                }
                 extracted.insert(
                     memory_id.clone(),
-                    extract_precision_memory_anchors(
+                    extract_memory_anchor_surfaces(
                         &memory_id,
-                        required_text(row, 2, DbOperation::Query, "content")?,
+                        content,
                         MemoryAnchorSource::IndexRebuild,
                         Some("index_rebuild"),
-                    ),
+                    )
+                    .into_iter()
+                    .map(|surface| {
+                        (
+                            (
+                                surface.anchor.anchor_kind,
+                                surface.anchor.anchor_value_hash.clone(),
+                            ),
+                            surface,
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>(),
                 );
                 batch.by_memory_id.insert(
                     memory_id,
                     MemoryIndexMetadata {
                         anchors: Vec::new(),
-                        typed_fields_json: optional_text(row, 1)?.map(str::to_owned),
+                        typed_fields_json: optional_text(&row, 1)?.map(str::to_owned),
                     },
                 );
+            }
+            if projection_sources.is_some() && extracted.len() != chunk.len() {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Index memory source is missing from its current snapshot.".to_owned(),
+                });
             }
             let rows = self.query_for(
                 DbOperation::Query,
@@ -27905,8 +28015,17 @@ impl DbConnection {
                 &parameters,
             )?;
             batch.query_count += 1;
+            let mut canonical_freshness = BTreeMap::<String, BTreeMap<_, _>>::new();
             for row in &rows {
+                checkpoint_retry_cx(DbOperation::Query, request)?;
                 let anchor = stored_memory_anchor_from_row(row)?;
+                canonical_freshness
+                    .entry(anchor.memory_id.clone())
+                    .or_default()
+                    .insert(
+                        (anchor.anchor_kind, anchor.anchor_value_hash.clone()),
+                        anchor.freshness_state,
+                    );
                 batch
                     .by_memory_id
                     .entry(anchor.memory_id.clone())
@@ -27918,8 +28037,20 @@ impl DbConnection {
                 let bindings = self.code_anchor_sources_for_memories(chunk)?;
                 batch.query_count += 1;
                 for (memory_id, sources) in bindings {
-                    let metadata = batch.by_memory_id.entry(memory_id).or_default();
+                    checkpoint_retry_cx(DbOperation::Query, request)?;
+                    let metadata = batch.by_memory_id.entry(memory_id.clone()).or_default();
+                    let surfaces = extracted.entry(memory_id).or_default();
                     for (surface, created_at, canonical) in sources {
+                        // Durable bindings win over inline extraction in the
+                        // reverse index too. Keep their normalized values in
+                        // this bounded request-local projection only.
+                        surfaces.insert(
+                            (
+                                surface.anchor.anchor_kind,
+                                surface.anchor.anchor_value_hash.clone(),
+                            ),
+                            surface.clone(),
+                        );
                         if canonical {
                             continue;
                         }
@@ -27941,30 +28072,40 @@ impl DbConnection {
                     }
                 }
             }
-            // A surviving config anchor or manual binding must not suppress
-            // missing text-derived anchors. Search documents are built before
-            // the reverse-index refresh; project the same union here so the
-            // first rebuild (and read-only fallback) already sees every source.
-            for (memory_id, anchors) in extracted {
-                let metadata = batch.by_memory_id.entry(memory_id).or_default();
+            // Preserve canonical capture metadata and merge missing bindings
+            // with text-derived anchors. The same extraction now feeds both
+            // search metadata and the writable reverse-index projection.
+            let mut prepared = Vec::with_capacity(chunk.len());
+            for (memory_id, mut surfaces) in extracted {
+                checkpoint_retry_cx(DbOperation::Query, request)?;
+                let canonical = canonical_freshness.remove(&memory_id).unwrap_or_default();
+                let metadata = batch.by_memory_id.entry(memory_id.clone()).or_default();
                 let mut identities = metadata
                     .anchors
                     .iter()
                     .map(|anchor| (anchor.anchor_kind, anchor.anchor_value_hash.clone()))
                     .collect::<BTreeSet<_>>();
-                for anchor in anchors {
+                let mut missing_anchors = Vec::new();
+                for (identity, surface) in &mut surfaces {
+                    checkpoint_retry_cx(DbOperation::Query, request)?;
+                    if let Some(freshness) = canonical.get(identity) {
+                        surface.anchor.freshness_state = *freshness;
+                    } else if refresh_reverse_index {
+                        missing_anchors.push(surface.anchor.clone());
+                    }
+                    let anchor = &surface.anchor;
                     if !identities.insert((anchor.anchor_kind, anchor.anchor_value_hash.clone())) {
                         continue;
                     }
                     metadata.anchors.push(StoredMemoryAnchor {
-                        memory_id: anchor.memory_id,
+                        memory_id: anchor.memory_id.clone(),
                         anchor_kind: anchor.anchor_kind,
-                        anchor_value_hash: anchor.anchor_value_hash,
-                        redacted_anchor_value: anchor.redacted_anchor_value,
+                        anchor_value_hash: anchor.anchor_value_hash.clone(),
+                        redacted_anchor_value: anchor.redacted_anchor_value.clone(),
                         confidence: anchor.confidence,
                         source: anchor.source,
-                        provenance: anchor.provenance,
-                        captured_span_hash: anchor.captured_span_hash,
+                        provenance: anchor.provenance.clone(),
+                        captured_span_hash: anchor.captured_span_hash.clone(),
                         freshness_state: anchor.freshness_state,
                         generation: anchor.generation,
                         // Inferred metadata is not a new capture timestamp.
@@ -27978,7 +28119,21 @@ impl DbConnection {
                         .cmp(right.anchor_kind.as_str())
                         .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
                 });
+                if let Some(sources) = projection_sources
+                    && self.mode() != DatabaseOpenMode::ReadOnly
+                    && let Some(memory) = sources.get(memory_id.as_str())
+                {
+                    prepared.push(PreparedMemoryAnchorIndex {
+                        workspace_id: &memory.workspace_id,
+                        memory_id: &memory.id,
+                        surfaces: surfaces.into_values().collect(),
+                        missing_anchors,
+                    });
+                }
             }
+            // No source/sidecar re-query or second extraction: preparation and
+            // persistence remain inside the caller's original source snapshot.
+            self.replace_prepared_memory_anchor_index(&prepared, request)?;
         }
         Ok(batch)
     }
@@ -44414,7 +44569,10 @@ mod code_anchor_recovery_tests {
     const BODY: &str = "Original guidance. ee-anchor:path:src/inline.rs ee-anchor:symbol:Inline::run ee-anchor:config_key:search.limit";
 
     fn fixture() -> (DbConnection, StoredMemory) {
-        let db = DbConnection::open_memory().unwrap();
+        fixture_on(DbConnection::open_memory().unwrap())
+    }
+
+    fn fixture_on(db: DbConnection) -> (DbConnection, StoredMemory) {
         db.migrate().unwrap();
         db.insert_workspace(
             WORKSPACE,
@@ -44474,8 +44632,279 @@ mod code_anchor_recovery_tests {
     }
 
     fn restore(db: &DbConnection, memory: &StoredMemory) {
-        db.with_transaction(|| db.refresh_memory_anchor_index_for_memories(&[memory]))
+        db.with_transaction(|| {
+            db.refresh_memory_anchor_index_for_memory(
+                &memory.workspace_id,
+                &memory.id,
+                &memory.content,
+            )
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn prepared_index_metadata_shares_reads_and_preserves_capture_authority() {
+        let (db, memory) = fixture();
+        let overlapping = CreateMemoryAnchorInput::from_stored_code_surface(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            "src/inline.rs",
+            MemoryAnchorSource::Explicit,
+            "memory.anchors",
+        )
+        .unwrap();
+        db.with_transaction(|| {
+            db.attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &[overlapping])
+        })
+        .unwrap();
+        let mut stale = CreateMemoryAnchorInput::from_raw(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            "src/inline.rs",
+            0.73,
+            MemoryAnchorSource::Remember,
+            "manual://original-capture",
+            999,
+        )
+        .unwrap();
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        db.upsert_memory_anchors(&[stale]).unwrap();
+        db.execute_raw("DELETE FROM memory_anchors WHERE anchor_kind = 'symbol';")
             .unwrap();
+        // A historical derived projection must be removed without authorizing
+        // its caller-supplied text as a new canonical source.
+        db.with_transaction(|| {
+            db.refresh_memory_anchor_index_for_memory(
+                WORKSPACE,
+                MEMORY,
+                "ee-anchor:path:src/withdrawn.rs",
+            )
+        })
+        .unwrap();
+        let surviving = db.list_memory_anchors(MEMORY).unwrap();
+        let expected = db
+            .memory_index_metadata_in_current_snapshot(&[MEMORY])
+            .unwrap();
+        let (prepared, queries) = capture_query_sql_for_test(|| {
+            db.with_transaction(|| {
+                db.prepare_memory_index_metadata_in_current_snapshot(&[&memory], None)
+            })
+        });
+        let prepared = prepared.unwrap();
+        assert_eq!(
+            prepared.by_memory_id[MEMORY].anchors, expected.by_memory_id[MEMORY].anchors,
+            "shared preparation must preserve the independent read-only projection"
+        );
+        assert_eq!(
+            prepared.by_memory_id[MEMORY].typed_fields_json,
+            expected.by_memory_id[MEMORY].typed_fields_json
+        );
+        for needle in [
+            "SELECT id, typed_fields_json, content, workspace_id FROM memories",
+            "FROM memory_anchors WHERE memory_id IN (",
+            "FROM memory_code_anchor_sources s LEFT JOIN",
+        ] {
+            assert_eq!(
+                queries.iter().filter(|sql| sql.contains(needle)).count(),
+                1,
+                "publication must read each source/sidecar page once: {needle}"
+            );
+        }
+        let restored = db.list_memory_anchors(MEMORY).unwrap();
+        assert_eq!(restored.len(), 5);
+        assert!(surviving.iter().all(|anchor| restored.contains(anchor)));
+        let current = db
+            .query_anchor_index_path_candidates(WORKSPACE, Some(&["src/inline.rs".to_owned()]), 10)
+            .unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            current[0].freshness_state,
+            MemoryAnchorFreshnessState::Stale
+        );
+        let removed = db
+            .query_anchor_index_path_candidates(
+                WORKSPACE,
+                Some(&["src/withdrawn.rs".to_owned()]),
+                10,
+            )
+            .unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn prepared_index_metadata_pages_sources_and_rolls_back_a_late_mismatch() {
+        let (db, _) = fixture();
+        let ids = (0..=MEMORY_INDEX_METADATA_BATCH_SIZE)
+            .map(|number| format!("mem_{number:026}"))
+            .collect::<Vec<_>>();
+        db.with_transaction(|| {
+            for id in &ids {
+                db.insert_memory_revision(
+                    id,
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: WORKSPACE.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: if id == &ids[0] {
+                            "Ordinary prose without any extracted anchors.".to_owned()
+                        } else {
+                            "Advice for ee-anchor:path:src/shared.rs".to_owned()
+                        },
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.6,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        db.with_transaction(|| {
+            db.refresh_memory_anchor_index_for_memory(
+                WORKSPACE,
+                &ids[0],
+                "ee-anchor:path:src/removed.rs",
+            )
+        })
+        .unwrap();
+        let memories = db
+            .get_memories_batch(&ids.iter().map(String::as_str).collect::<Vec<_>>())
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+        let mut stale = memories.clone();
+        stale.last_mut().unwrap().content = "PRIVATE_UNCOMMITTED_BODY".to_owned();
+        let error = db
+            .with_transaction(|| {
+                db.prepare_memory_index_metadata_in_current_snapshot(
+                    &stale.iter().collect::<Vec<_>>(),
+                    None,
+                )
+            })
+            .unwrap_err();
+        assert!(!error.to_string().contains("PRIVATE_UNCOMMITTED_BODY"));
+        let rows = db
+            .query(
+                "SELECT COUNT(*) FROM memory_anchors WHERE memory_id != ?1",
+                &[Value::Text(MEMORY.to_owned())],
+            )
+            .unwrap();
+        assert_eq!(
+            required_i64(&rows[0], 0, DbOperation::Query, "count").unwrap(),
+            0,
+            "a bad later page must roll back earlier canonical repairs"
+        );
+        let (prepared, queries) = capture_query_sql_for_test(|| {
+            db.with_transaction(|| {
+                db.prepare_memory_index_metadata_in_current_snapshot(
+                    &memories.iter().collect::<Vec<_>>(),
+                    None,
+                )
+            })
+        });
+        assert_eq!(prepared.unwrap().by_memory_id.len(), memories.len());
+        for needle in [
+            "SELECT id, typed_fields_json, content, workspace_id FROM memories",
+            "FROM memory_anchors WHERE memory_id IN (",
+            "FROM memory_code_anchor_sources s LEFT JOIN",
+        ] {
+            assert_eq!(
+                queries.iter().filter(|sql| sql.contains(needle)).count(),
+                2,
+                "129 memories require two bounded source/sidecar reads: {needle}"
+            );
+        }
+        for memory in &memories {
+            let anchors = db.list_memory_anchors(&memory.id).unwrap();
+            if memory.id == ids[0] {
+                assert!(anchors.is_empty(), "plain prose must remain anchorless");
+            } else {
+                assert_eq!(anchors.len(), 1);
+                assert_eq!(anchors[0].anchor_kind, MemoryAnchorKind::Path);
+            }
+        }
+        assert!(
+            db.query_anchor_index_path_candidates(
+                WORKSPACE,
+                Some(&["src/removed.rs".to_owned()]),
+                10,
+            )
+            .unwrap()
+            .is_empty(),
+            "an empty current projection must remove a stale reverse-index row"
+        );
+    }
+
+    #[test]
+    fn prepared_index_metadata_rejects_wrong_source_identity_without_mutation() {
+        let (db, memory) = fixture();
+        let before = db.list_memory_anchors(MEMORY).unwrap();
+        let mut wrong_owner = memory.clone();
+        wrong_owner.workspace_id = "wsp_00000000000000000000000852".to_owned();
+        let mut missing = memory.clone();
+        missing.id = "mem_00000000000000000000000852".to_owned();
+        for sources in [vec![&wrong_owner], vec![&missing], vec![&memory, &memory]] {
+            assert!(
+                db.with_transaction(|| {
+                    db.prepare_memory_index_metadata_in_current_snapshot(&sources, None)
+                })
+                .is_err()
+            );
+            assert_eq!(db.list_memory_anchors(MEMORY).unwrap(), before);
+            assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+        }
+    }
+
+    #[test]
+    fn prepared_read_only_metadata_borrows_snapshot_without_repairing_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("source.db");
+        let (db, memory) = fixture_on(DbConnection::open_file(&database).unwrap());
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        let generation = db.get_workspace_generation(WORKSPACE).unwrap();
+        let reader = DbConnection::open_file_read_only(&database).unwrap();
+        reader.begin_read_snapshot().unwrap();
+        let prepared = reader
+            .prepare_memory_index_metadata_in_current_snapshot(&[&memory], None)
+            .unwrap();
+        assert_eq!(prepared.by_memory_id[MEMORY].anchors.len(), 5);
+        assert!(reader.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert_eq!(
+            reader.get_workspace_generation(WORKSPACE).unwrap(),
+            generation
+        );
+        assert!(
+            reader.begin_read_snapshot().is_err(),
+            "projection must not finish its caller's snapshot"
+        );
+        reader.commit_read_snapshot().unwrap();
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn cancelled_index_metadata_preparation_does_not_read_or_repair() {
+        let (db, memory) = fixture();
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(asupersync::CancelReason::user("stop source preparation"));
+        let (prepared, queries) = capture_query_sql_for_test(|| {
+            db.prepare_memory_index_metadata_in_current_snapshot(&[&memory], Some(&cx))
+        });
+        assert!(prepared.is_err());
+        assert!(queries.is_empty(), "cancel before any source hydration");
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use super::{DbConnection, IndexRebuildError};
 use crate::db::DatabaseOpenMode;
+#[cfg(test)]
 use crate::models::{MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors};
 
 #[cfg(feature = "lexical-bm25")]
@@ -712,7 +713,8 @@ impl Drop for ReadSnapshot<'_> {
     }
 }
 
-pub(super) fn projected_anchors(memory_id: &str, content: &str) -> Vec<StoredMemoryAnchor> {
+#[cfg(test)]
+fn projected_anchors(memory_id: &str, content: &str) -> Vec<StoredMemoryAnchor> {
     let mut anchors: Vec<_> = extract_precision_memory_anchors(
         memory_id,
         content,
