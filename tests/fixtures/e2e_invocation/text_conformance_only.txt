@@ -1,0 +1,64 @@
+# e2e scripts whose ONLY coverage reads their SOURCE and asserts on its TEXT.
+#
+# Graded by scripts/check-e2e-execution-coverage.py (bd-e2d1q). Format:
+#
+#     <script> | <covering test> | <what execution coverage is absent>
+#
+# THIS IS NOT AN IGNORE-LIST, and the distinction is mechanical rather than
+# aspirational. Every entry is RE-EARNED on each run, the same way
+# retired.txt is re-earned by scripts/e2e_invocation_audit.sh:
+#
+#   * the script must still be executed by NOTHING. The moment anything runs
+#     it, this line is RED and must be deleted -- so the file can only shrink.
+#   * the covering test must EXIST and must really reference the script. A
+#     line naming a test that was renamed away is RED, not silently ignored.
+#   * the script must not also sit in orphan_baseline.txt (un-referenced) or
+#     retired.txt (covered elsewhere); either would contradict this claim.
+#   * the third field must be non-empty. An entry that does not say what is
+#     unproven is doing the opposite of its job.
+#
+# WHY THE CLASS IS WORTH TRACKING AT ALL. A source-conformance test is a real
+# job -- a text scan is the right tool for a cross-cutting logging contract,
+# and eight of these enforce the J1 contract across the graph suite. The defect
+# is that it OCCUPIES THE SLOT a runner would occupy and reports green either
+# way, while `e2e_invocation_audit.sh` counts the script wired because it IS
+# referenced. A reader who greps the name finds `tests/..._e2e_contract.rs`
+# and reasonably concludes it is covered.
+#
+# TWENTY, NOT EIGHTEEN. bd-e2d1q enumerated 18 and measured its population as
+# "e2e scripts reachable ONLY from tests/**". That filter excluded two scripts
+# on the strength of references that execute nothing:
+#
+#   auto_enroll_perf_gate.sh   scripts/bench.sh:1403 prints its name in an
+#                              `echo ... >&2` message, plus one README line.
+#                              It sits in the SAME five-entry const array as
+#                              four scripts the bead does list.
+#   host_calibration.sh        named in src/core/profile.rs and
+#                              src/core/budget_delta_recommender.rs as a
+#                              repair-hint STRING (`repair: Some("rch exec --
+#                              scripts/...")`), and in docs/degraded_codes.md
+#                              as prose.
+#
+# Both exclusions are the mention-versus-invocation error the bead is about,
+# committed by the bead's own population filter. Re-measured 2026-11-09.
+
+scripts/e2e_incremental_index.sh | tests/contracts/index_intake_schema.rs | intake schema text asserted; the incremental index path is never driven
+scripts/e2e_overhaul/auto_enroll_documentation_set.sh | tests/contracts/auto_enroll_verify_gate_coverage.rs | listed in PENDING_SRR6_46_SCRIPTS as pending wiring; no runner
+scripts/e2e_overhaul/auto_enroll_idle_24h.sh | tests/contracts/auto_enroll_verify_gate_coverage.rs | listed as pending wiring; the 24h idle path is never exercised
+scripts/e2e_overhaul/auto_enroll_perf_gate.sh | tests/auto_enroll_perf_baseline.rs | reads the script and asserts it still states that Cargo/Rust runs via RCH; the perf gate itself never runs
+scripts/e2e_overhaul/auto_enrollment_safety_snapshot.sh | tests/contracts/auto_enroll_verify_gate_coverage.rs | listed as pending wiring; the safety snapshot is never taken
+scripts/e2e_overhaul/doctor_undo_replay.sh | tests/contracts/doctor_undo_replay_e2e.rs | shebang, strict mode and absence of destructive shortcuts asserted from source; the undo/replay behaviour is never run
+scripts/e2e_overhaul/flight_recorder.sh | tests/contracts/flight_recorder_e2e.rs | shebang, strict mode and documented env overrides asserted from source; the recorder is never started
+scripts/e2e_overhaul/g1_ppr.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. Executed on a 2026-10-20 dispatch at 7 passed / 4 failed; those four are unexplained and no committed root runs it
+scripts/e2e_overhaul/g2_pack_dna.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. Green on the 2026-10-20 dispatch (6/0) after its graph flag was enabled; no committed root runs it
+scripts/e2e_overhaul/g3_causal.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. Green on the 2026-10-20 dispatch (19/0) after its graph flag was enabled; no committed root runs it
+scripts/e2e_overhaul/g6_proximity.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. 26 passed / 8 failed on the 2026-10-20 dispatch; the 8 are bd-k3m0t (hotspots ignores its seeded pair and limit)
+scripts/e2e_overhaul/g7_revision_impact.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. Green on the 2026-10-20 dispatch (11/0) after its graph flag was enabled; no committed root runs it
+scripts/e2e_overhaul/g8_skyline.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. 12 passed / 1 failed on the 2026-10-20 dispatch; the one is unexplained
+scripts/e2e_overhaul/g9_load_bearing.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. 30/30 green on the 2026-10-20 dispatch -- the positive control for the whole family -- but still no committed root runs it
+scripts/e2e_overhaul/g10_hits.sh | tests/e2e_graph_logging_scripts.rs | J1 logging contract only. 44 passed / 23 failed on the 2026-10-20 dispatch; 16 are bd-maisx (no hits block in `ee why`) and 7 bd-ol177 (hub/authority do not differentiate)
+scripts/e2e_overhaul/host_calibration.sh | tests/contracts/host_calibration_freshness_contract.rs | the test asserts the script's text carries EE_TEST_LOG_PATH and its event fields; despite its name it never runs the script, so neither the calibration nor the no-destructive-cleanup claim is executed
+scripts/e2e_overhaul/pack_cache_l2.sh | tests/l2_pack_cache_perf_gate.rs | runtime-contract text asserted; the L2 cache perf gate is never measured
+scripts/e2e_overhaul/peer_discovery_policy.sh | tests/contracts/auto_enroll_verify_gate_coverage.rs | listed as pending wiring; the discovery policy is never evaluated
+scripts/e2e_overhaul/qos_lanes.sh | tests/contracts/qos_lanes_e2e_contract.rs | each assertion is a `not found in {DRIVER_PATH}` text check; no lane is ever driven
+scripts/e2e_overhaul/zstd_pack_dictionary.sh | tests/l2_pack_cache_perf_gate.rs | dictionary-contract text asserted; no pack is ever compressed with the dictionary
