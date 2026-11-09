@@ -418,6 +418,23 @@ fn doc_sections_are_sorted_by_fixture_code() -> TestResult {
     Ok(())
 }
 
+/// `--check-full`, NOT `--check`, and the distinction is the point.
+///
+/// `--check` is now a fingerprint comparison: the generator records a hash of
+/// its inputs and of its own body in the doc's last two lines, and the check
+/// compares those. That is sound — body matches means the file is what was
+/// generated, inputs match means regenerating reproduces it, and the generator
+/// is itself a hashed input — and it took the check from 85.67s to 0.25s, which
+/// is what let it become a verify.sh stage at all
+/// (bd-degraded-codes-doc-stale-no-local-gate-i4tv6).
+///
+/// But this test's name claims a BYTE comparison, and a fingerprint is not one.
+/// Pointing it at `--check-full` keeps the claim true and keeps the two arms
+/// INDEPENDENT: verify.sh gets the cheap hash on every run, this shard gets the
+/// real rendering, and a defect in the fingerprint scheme is caught by an
+/// instrument that does not use it. It is also 13s cheaper than before — the
+/// old `--check` was the byte diff, at 85.67s against `--check-full`'s 71.62s,
+/// because the red path used to render the document twice.
 #[test]
 fn generated_doc_is_byte_identical_to_builder_output() -> TestResult {
     let script = repo_root()
@@ -425,10 +442,10 @@ fn generated_doc_is_byte_identical_to_builder_output() -> TestResult {
         .join("build_degraded_codes_doc.sh");
     let output = Command::new("bash")
         .arg(&script)
-        .arg("--check")
+        .arg("--check-full")
         .current_dir(repo_root())
         .output()
-        .map_err(|error| format!("run {} --check: {error}", script.display()))?;
+        .map_err(|error| format!("run {} --check-full: {error}", script.display()))?;
     if !output.status.success() {
         return Err(format!(
             "generated degraded-code catalog drifted from its builder:\nstdout:\n{}\nstderr:\n{}",

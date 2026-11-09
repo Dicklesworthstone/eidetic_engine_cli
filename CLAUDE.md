@@ -185,6 +185,39 @@ them execute nothing.
 before a commit that touches toolchain pins, migrations, pinned definitions or
 bead hygiene.
 
+**THAT HEADROOM FIGURE IS STALE, AND SO IS THE ONE IN THE MANIFEST — MEASURE IT
+YOURSELF.** Three numbers were on record and none matched: 6 s here (602/608),
+10 s in `scripts/verify-budget.toml`'s own header (598/608, measured
+2026-10-28), and the truth. The ceiling is enforced by
+`verify_budget_manifest_has_p50_and_regression_factor_for_every_stage` in
+`tests/verification_drift_guard.rs`, which is dispatch-only, so nobody here can
+read it off a gate. Replaying its arithmetic at HEAD on 2026-11-08 gave
+**604/608, i.e. 4 s** — and 605/608 after the stage below. The conclusion above
+survives either way (41 s does not fit in 3), but a stage that *would* fit gets
+refused by a reader who trusts the wrong number. Two details that decide it:
+`budget_stage_p50` parses `Option<u64>`, so a fractional p50 reads as ABSENT
+and panics the guard — sub-second stages declare `1`; and the unmeasured
+allowance is full at 24/24, so a new stage cannot be added unmeasured.
+
+**AND NOTE WHAT ADDING A STAGE DOES TO THE ENUMERATION ABOVE.**
+`run_stage "Degraded Codes Doc Fingerprint"
+"./scripts/build_degraded_codes_doc.sh --check"` was added 2026-11-08
+(bd-degraded-codes-doc-stale-no-local-gate-i4tv6). It runs here in 0.25 s with
+no toolchain — and it matches NEITHER alternative of the documented grep,
+because it is not `python3` and carries no `--self-test`. So it joins the
+category this section is about the moment it lands. Run it alongside the grep's
+output:
+
+```bash
+./scripts/build_degraded_codes_doc.sh --check        # 0.25s, the verify.sh stage
+./scripts/build_degraded_codes_doc.sh --self-test    # 6.6s, 18 arms, NOT a stage
+```
+
+Re-measured 2026-11-08: the grep now matches **35** stages, not the 31 recorded
+above, which is the file's own warning about re-running the grep playing out.
+All 35 plus the ten extras plus the five ci-static-only gates were green at
+that commit — 50 for 50.
+
 Two of the eight are excluded deliberately: `checkout-franken-stack.sh` is
 setup rather than a gate, and `release_binary_probe.sh` needs a release binary.
 Note that the probe LOOKS like a local-cargo hazard and is not — its

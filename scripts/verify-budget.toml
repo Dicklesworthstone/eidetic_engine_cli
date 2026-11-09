@@ -566,6 +566,39 @@ name = "Exit Code Docs Lint"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+# bd-degraded-codes-doc-stale-no-local-gate-i4tv6, added 2026-11-08.
+#
+# HEADROOM RE-MEASURED BEFORE ADDING THIS, and it was neither of the two
+# numbers on record. This file's header paragraph says 10s (598/608, measured
+# 2026-10-28) and CLAUDE.md says 6s (602/608); replaying the Rust guard's own
+# arithmetic at HEAD on 2026-11-08 gives a non-benchmark total of 604/608, so
+# the real headroom was 4s. This row takes it to 605/608, leaving 3s. The
+# unmeasured ratchet was and remains full at 24/24, so this row HAD to carry a
+# measurement -- which is the right constraint and is why the number below is
+# the median of five timed runs rather than an estimate.
+#
+# WHY IT FITS AT ALL. The stage is
+# `./scripts/build_degraded_codes_doc.sh --check`, and until today that arm
+# regenerated the whole 524 KB docs/degraded_codes.md from 615 fixtures purely
+# to diff it: 85.67s, of which only 2.31s was CPU, because the cost is ~5000 jq
+# process spawns. The generator now writes a fingerprint of its inputs and of
+# its own body into the doc, so the check compares two hashes. Measured five
+# runs: 0.22, 0.23, 0.22, 0.26, 0.35 -- median 0.25s. Declares the 1s floor
+# this file uses for sub-second checks rather than rounding down to 0.
+#
+# The gate it replaces locally is a Rust test behind a #[path] shard, reachable
+# only through a full `--test integration_a_d` dispatch. The doc went stale
+# twice in one day on 2026-11-05 with nothing able to see it.
+#
+# The generator's 18-arm --self-test is NOT a stage: measured 6.6s against 3s
+# of headroom, so it stays a hand-run tool. Recording that here because the
+# absence of a Contract row beside this Lint row looks like an oversight
+# against the pattern two rows above, and it is a measurement instead.
+[[stage]]
+name = "Degraded Codes Doc Fingerprint"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 # bd-b5j51, added 2026-11-07. Pins LEXICAL_ANALYZER_REVISION to a fingerprint of
 # the analyzer source it describes, so changed text analysis cannot silently
 # reuse indexes built under the old analysis.

@@ -2109,6 +2109,32 @@ run_stage "Degraded Code Classification Contract" "python3 scripts/check-degrade
 # docs <-> registry <-> enum chain is checkable here.
 run_stage "Exit Code Docs Contract" "python3 scripts/check-exit-code-docs.py --self-test"
 run_stage "Exit Code Docs Lint" "python3 scripts/check-exit-code-docs.py"
+# bd-degraded-codes-doc-stale-no-local-gate-i4tv6 -- the "sibling
+# docs/degraded_codes.md drift" the comment above names, now wired. That doc is
+# generated from 615 fixtures and went stale TWICE on 2026-11-05, hours apart,
+# and the only enforcing gate was a Rust test behind a #[path] shard: reaching
+# it costs a full `--test integration_a_d` dispatch, which no rail on the
+# maintainer's host can perform.
+#
+# This could not be a stage until today because `--check` regenerated the whole
+# 524 KB document in order to diff it: MEASURED 85.67s, of which 2.31s was CPU
+# -- the cost is ~5000 jq spawns, not work. The generator now records a
+# fingerprint of its inputs and of its own body in the doc's last two lines, so
+# `--check` compares two hashes instead. MEASURED 2026-11-08, five runs:
+# 0.22-0.35s, median 0.25s. It declares the manifest's 1s floor for sub-second
+# checks, taking the non-benchmark total 604 -> 605 of 608.
+#
+# The fast arm is SOUND rather than approximate: body matches => the file is
+# what was generated, inputs match => regenerating now reproduces it, and the
+# generator is itself one of the hashed inputs. Both arms were run against the
+# real doc at this commit and agree. `--check-full` keeps the byte diff for
+# when you distrust the scheme.
+#
+# ITS 18-ARM SELF-TEST IS DELIBERATELY NOT A STAGE. Measured 6.6s against 3s of
+# remaining headroom, so the arithmetic forbids it the same way it forbids the
+# five ci-static-only gates CLAUDE.md lists. Run it by hand when touching the
+# generator: ./scripts/build_degraded_codes_doc.sh --self-test
+run_stage "Degraded Codes Doc Fingerprint" "./scripts/build_degraded_codes_doc.sh --check"
 # bd-b5j51. Index reuse is gated by expected_index_corpus_revision(), and
 # LEXICAL_ANALYZER_REVISION participates in that hash so a generation built
 # under different text analysis is rebuilt rather than reused. That constant had
