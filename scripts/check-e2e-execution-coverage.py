@@ -202,6 +202,16 @@ EXCLUDED_SOURCE_RES = (
     re.compile(r"scripts/audit-[^/]*\.py\Z"),
     re.compile(r"\.gitignore\Z"),
     re.compile(r"\.gitattributes\Z"),
+    # HOSTED ACTIONS ARE DISABLED REPO-WIDE (bd-actions-disabled-repo-wide-33mfm),
+    # so a workflow naming a script does not run it -- it is a mention with a
+    # YAML shape. Counting it would reproduce the exact hole CLAUDE.md
+    # documents: .github/workflows/ci-static.yml invokes 21 scripts and eight
+    # of them appear nowhere in verify.sh, so they execute NOWHERE while
+    # looking wired. Measured 2026-11-09: ZERO e2e scripts draw their only
+    # executing root from .github/, so this exclusion changes no verdict today
+    # and exists to keep a future one honest. Excluding can only move a script
+    # from EXEC to a finding, which is the loud direction.
+    re.compile(r"\.github/.*"),
 )
 
 
@@ -559,6 +569,25 @@ def evaluate(root: pathlib.Path) -> dict:
             "population would make every check below vacuously green"
         )
 
+    # A needle is a BASENAME, so two population entries sharing one would be
+    # indistinguishable and every reference would be credited to both. There
+    # are no collisions today (measured 2026-11-09), and
+    # e2e_invocation_audit.sh names this as precisely the near-miss it exists
+    # to catch -- "scripts/e2e_overhaul/tiered_recall.sh sitting next to a
+    # registered tiered_recall_e2e.sh" -- so it refuses rather than guesses.
+    collisions: dict[str, list[str]] = {}
+    for script in pop:
+        collisions.setdefault(script.rsplit("/", 1)[-1], []).append(script)
+    clashing = {base: paths for base, paths in collisions.items() if len(paths) > 1}
+    if clashing:
+        detail = "; ".join(
+            f"{base}: {' and '.join(paths)}" for base, paths in sorted(clashing.items())
+        )
+        raise CannotAnswer(
+            "two e2e scripts share a basename, which this gate matches on, so "
+            f"a reference cannot be attributed to one of them -- {detail}"
+        )
+
     needles = {script: needle_for(script) for script in pop}
     # One cheap pass decides which files are worth lexing at all. It carries
     # the same identifier lookarounds as `needle_for`, and that is a measured
@@ -783,6 +812,12 @@ def run(root: pathlib.Path, verbose: bool = True) -> int:
 # --------------------------------------------------------------------------
 
 _ARMS = [0]
+# A separate counter from _ARMS. Naming fixture directories after the arm count
+# is only unique while every `_fixture` call is followed by exactly one `_arm`,
+# and a second fixture built before the next arm would silently REUSE the
+# previous directory -- leaving its files in place and grading a fixture nobody
+# wrote. No such pair exists below; this removes the ordering requirement.
+_FIXTURES = [0]
 
 
 def _write(root: pathlib.Path, rel: str, body: str) -> None:
@@ -792,8 +827,9 @@ def _write(root: pathlib.Path, rel: str, body: str) -> None:
 
 
 def _fixture(tmp: pathlib.Path, files: dict[str, str]) -> pathlib.Path:
-    root = tmp / f"case{_ARMS[0]}"
-    root.mkdir(parents=True, exist_ok=True)
+    _FIXTURES[0] += 1
+    root = tmp / f"case{_FIXTURES[0]}"
+    root.mkdir(parents=True)
     _write(root, "Cargo.toml", "[package]\nname = \"fixture\"\n")
     for rel, body in files.items():
         _write(root, rel, body)
@@ -1346,6 +1382,38 @@ def self_test() -> int:
             "no shell execution anywhere means that predicate is BLIND (exit 3)",
             root,
             EXIT_CANNOT,
+        )
+
+        # Two scripts sharing a basename cannot be told apart by a needle.
+        root = case(
+            {
+                "scripts/e2e_sample.sh": SCRIPT,
+                "scripts/e2e_overhaul/e2e_sample.sh": SCRIPT,
+                "tests/reader.rs": READER,
+            }
+        )
+        failed += not _arm(
+            "a basename collision is CANNOT ANSWER, not a double credit",
+            root,
+            EXIT_CANNOT,
+        )
+
+        # A .github workflow cannot execute anything while Actions is off.
+        root = case(
+            {
+                "scripts/e2e_sample.sh": SCRIPT,
+                "tests/reader.rs": READER,
+                ".github/workflows/ci.yml": (
+                    "jobs:\n  x:\n    steps:\n"
+                    "      - run: ./scripts/e2e_sample.sh\n"
+                ),
+                REGISTRY_REL: DECL,
+            }
+        )
+        failed += not _arm(
+            "a .github workflow is not an executing root (Actions is off)",
+            root,
+            EXIT_OK,
         )
 
         # An empty population cannot be graded.
