@@ -110,6 +110,18 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+
+# The Rust lexer lives in scripts/lib/rust_lex.py so that this gate and
+# check-e2e-execution-coverage.py share ONE definition. It was inline here
+# until 2026-11-09, and the argument for moving it is this file's own history:
+# a byte-raw-string bug shipped here on 2026-11-08 and was fixed the next day,
+# and a second gate holding a copy would have silently kept the bug. The arms
+# that prove the lexer stay in THIS file's --self-test, because a module under
+# scripts/lib/ is imported and never executed, so arms placed there would run
+# nowhere.
+from rust_lex import SENTINEL_RE, lex  # noqa: E402  (path insert precedes it)
+
 CARRIER_TYPE = "SwarmBriefSourceFreshness"
 CARRIER_FIELD = "state"
 OWNER_FIELD = "freshness"
@@ -127,191 +139,25 @@ class CannotAnswer(Exception):
 
 
 # --------------------------------------------------------------------------
-# Lexing: blank comments, and reduce every literal to an ATOM
+# Lexing -- see scripts/lib/rust_lex.py, imported above
 # --------------------------------------------------------------------------
-# Two separate hazards, and the first draft of this file got both wrong.
+# Two hazards, and the first draft of this file got both wrong. They are
+# documented at the definition; what matters HERE is that this gate's arms are
+# what prove them, so they must keep running.
 #
 # COMMENTS. Direction matters. Leaving a comment in produces a FALSE RED, which
 # is loud and gets looked at. Blanking real code produces a FALSE PASS, which is
 # silent and is the failure this whole file exists to prevent. The real tree
 # exercises both directions for free: `swarm_next_action.rs` happens to hold
 # `freshness.state == "stale"` inside a comment AND a live comparison, so the
-# self-test grades this scanner against both. It locates them by content, never
+# self-test grades the scanner against both. It locates them by content, never
 # by line number -- an earlier draft named the lines here and in the arms, and
 # an edit to that same file silently turned the negative arm into a no-op.
 #
 # STRING INTERIORS. Preserving a string literal verbatim -- which is what a
 # comment stripper must do -- then searching the result finds `.freshness.state`
 # written INSIDE a string and grades it as code. That is a false positive, and
-# a `r#"..."#` one even produced a false RED. So a literal is replaced by a
-# SENTINEL, `\x00<index>\x00`, with its value kept in a side table. Code that
-# mentions the access path inside a string vanishes with the rest of the
-# literal, while the literals the comparisons are checked against are still
-# recoverable by index.
-#
-# Both replacements preserve newline COUNT, so every reported line number is
-# the real one.
-
-SENTINEL_RE = re.compile(r"\x00(\d+)\x00")
-CHAR_ATOM = "\x01"
-
-_ESCAPES = {
-    "n": "\n",
-    "t": "\t",
-    "r": "\r",
-    "0": "\0",
-    "\\": "\\",
-    '"': '"',
-    "'": "'",
-}
-
-
-def _unescape(raw: str) -> str:
-    """Enough of Rust's escape grammar for the short ASCII literals this gate
-    compares. `\\u{..}` and byte escapes are left verbatim: they cannot name a
-    freshness state, and mangling them would be worse than showing them."""
-    out: list[str] = []
-    i = 0
-    while i < len(raw):
-        if raw[i] == "\\" and i + 1 < len(raw):
-            nxt = raw[i + 1]
-            if nxt in _ESCAPES:
-                out.append(_ESCAPES[nxt])
-                i += 2
-                continue
-            if nxt == "\n":  # Rust line continuation
-                i += 2
-                while i < len(raw) and raw[i] in " \t":
-                    i += 1
-                continue
-        out.append(raw[i])
-        i += 1
-    return "".join(out)
-
-
-# Jump straight to the next construct that can change lexer state instead of
-# walking every character in Python. A per-character scan of the 97 relevant
-# files cost 9.1 s; this form is the same grammar driven by one compiled
-# alternation. Ordered longest-first so `r#"` and `//` win over `"` and `/`.
-#
-# The `[bc]?` is load-bearing. Rust's byte-raw literal is `br"..."`, and a
-# lookbehind that only guards a bare `r` rejects the raw branch because `r`
-# follows `b` -- so `br#"..."#` lexed as an ORDINARY string starting at the
-# quote, which mis-terminates on any `\"` inside and can blank real code.
-# Measured 2026-11-09: 78 real `br"..."` literals in src/, five of them in
-# files this gate lexes. (Zero `cr"`, but the prefix costs nothing and Rust
-# has the form.) `b"..."` and `c"..."` are not raw and need no branch: the
-# plain `"` alternative handles them, and the prefix letter stays as code.
-#
-# NOTE on measuring this yourself: grepping `br#*"` reports ~177 hits and most
-# are the CONTENTS of the ordinary string "br" (the beads CLI name), where `br`
-# sits just before the closing quote. Require a token boundary before the
-# prefix -- not an identifier character and not a quote -- or the count is
-# your own instrument talking.
-_TOKEN = re.compile(r'(?<![A-Za-z0-9_])[bc]?r(#*)"|//|/\*|"|\'')
-_STRING_BODY = re.compile(r'(?:[^"\\]|\\.)*"', re.DOTALL)
-_NOT_NEWLINE = re.compile(r"[^\n]")
-
-
-def _blank(segment: str) -> str:
-    """Same length, same newlines, no content -- so line numbers survive and
-    two identifiers either side of a comment never merge."""
-    return _NOT_NEWLINE.sub(" ", segment)
-
-
-def lex(text: str) -> tuple[str, list[str]]:
-    """Returns (masked text, literal values indexed by sentinel)."""
-    out: list[str] = []
-    values: list[str] = []
-    i = 0
-    n = len(text)
-
-    def atom(value: str, span: str) -> None:
-        # NOTE: `value` arrives already unescaped where that applies. Do NOT
-        # unescape here -- a raw string's backslashes are literal, and
-        # unescaping `r"a\nb"` would silently corrupt it.
-        out.append(f"\x00{len(values)}\x00")
-        values.append(value)
-        out.append("\n" * span.count("\n"))
-
-    while i < n:
-        match = _TOKEN.search(text, i)
-        if match is None:
-            out.append(text[i:])
-            break
-        out.append(text[i : match.start()])
-        token = match.group(0)
-        start = match.start()
-
-        # group(1) is the hash run, and it exists ONLY on the raw alternative --
-        # `""` for `r"`, None for a plain `"`. Testing `token.startswith("r")`
-        # was wrong the moment the `[bc]?` prefix was allowed, since the token
-        # can now start with `b`.
-        if match.group(1) is not None:
-            terminator = '"' + "#" * len(match.group(1))
-            close = text.find(terminator, match.end())
-            if close == -1:
-                atom(text[match.end() :], text[start:])
-                i = n
-            else:
-                atom(text[match.end() : close], text[start : close + len(terminator)])
-                i = close + len(terminator)
-            continue
-
-        if token == '"':
-            body = _STRING_BODY.match(text, match.end())
-            end = body.end() if body else n
-            inner = text[match.end() : end - 1] if body else text[match.end() :]
-            # `_unescape` over all 187k literals in the relevant files cost
-            # 0.9 s, and the overwhelming majority hold no backslash at all.
-            atom(_unescape(inner) if "\\" in inner else inner, text[start:end])
-            i = end
-            continue
-
-        if token == "'":
-            # A char literal, or a lifetime (`'static`). Only a char literal
-            # closes with `'`; a lifetime is left as code so `&'static str`
-            # survives for the struct parser.
-            if start + 1 < n and text[start + 1] == "\\":
-                close = text.find("'", start + 2)
-                if close != -1:
-                    out.append(CHAR_ATOM)
-                    i = close + 1
-                    continue
-            elif start + 2 < n and text[start + 2] == "'":
-                out.append(CHAR_ATOM)
-                i = start + 3
-                continue
-            out.append("'")
-            i = start + 1
-            continue
-
-        if token == "//":
-            end = text.find("\n", start)
-            end = n if end == -1 else end
-            out.append(_blank(text[start:end]))
-            i = end
-            continue
-
-        # token == "/*": block comments NEST in Rust.
-        depth = 1
-        scan = match.end()
-        while depth > 0 and scan < n:
-            opened = text.find("/*", scan)
-            closed = text.find("*/", scan)
-            if closed == -1:
-                scan = n
-                break
-            if opened != -1 and opened < closed:
-                depth += 1
-                scan = opened + 2
-            else:
-                depth -= 1
-                scan = closed + 2
-        out.append(_blank(text[start:scan]))
-        i = scan
-    return "".join(out), values
-
+# a `r#"..."#` one even produced a false RED. Hence the sentinel masking.
 
 # --------------------------------------------------------------------------
 # Struct parsing -- one parser serves both the ambiguity probe and the domain
