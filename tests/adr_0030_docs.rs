@@ -63,8 +63,20 @@ fn adr_0030_has_required_sections() -> TestResult {
 /// `tests/suites/integration_a_d.rs`, a 773-test shard nobody dispatches to
 /// check a string. bd-2cdum closed four days into that window having
 /// "verified separately that my regeneration broke no hash citation (nothing
-/// references the old hash)" — the old hash was referenced twice, here as a
-/// Rust literal and in the ADR as prose, and the arm was already red.
+/// references the old hash)". It was referenced in SIX tracked files, and the
+/// arm was already red when that was written.
+///
+/// BUT ONLY THIS ONE WAS RED, AND THE OTHER FIVE MUST NOT BE "FIXED". A census
+/// on 2026-11-08 found `decided_on` cited here, in the ADR as prose, in
+/// `src/runtime/README.md` as prose, in `src/runtime/determinism.rs` as the
+/// `pub const RANDOMNESS_INVENTORY_ROWS_CONTENT_HASH`, in
+/// `tests/determinism_capability_token_unit.rs` asserting that const, and in
+/// `tests/snapshots/determinism_token_doctest_output.snap` snapshotting it.
+/// Those five are a closed, self-consistent triangle that never reads the
+/// inventory — the const's own doc comment calls it "the N4.1 inventory hash
+/// that drove the first deterministic-token design", i.e. a dated record. This
+/// arm was the only citation in the tree that compared the hash against the
+/// LIVE artifact, which is why it was the only one that could rot.
 ///
 /// DO NOT "FIX" THIS BY UPDATING THE ADR TO THE CURRENT HASH. bd-2cdum's close
 /// settled what this artifact is: a timestamped snapshot cited by hash, not a
@@ -77,7 +89,16 @@ fn adr_0030_has_required_sections() -> TestResult {
 /// What this arm CANNOT check is whether `decided_on` was ever really this
 /// file's hash, because `include_str!` sees one revision and the answer lives
 /// in git history. `scripts/check-adr-evidence-citations.py` checks that,
-/// which is also why it can run where this test cannot.
+/// which is also why it can run where this test cannot. It sweeps every
+/// tracked file, so it covers all six sites above and prints the revision and
+/// date each cited hash belongs to.
+///
+/// KEEP THE SECOND ASSERTION EVEN IF IT LOOKS REDUNDANT.
+/// `tests/randomness_inventory_schema_unit.rs` already checks that field
+/// properly, by parsing. This one exists so `INVENTORY` stays used: it is the
+/// only other reference to that const, and an unused const is a `dead_code`
+/// warning, which the lint gate's `-D warnings` promotes to an error. Deleting
+/// it turns a tidy-up into a red build.
 #[test]
 fn adr_0030_cites_randomness_inventory_hash() -> TestResult {
     let decided_on = "blake3-ish:51a8854727a5768008ba8269596e8666cc9ffdd88e8ac3f13101ad36434a3bfc";
