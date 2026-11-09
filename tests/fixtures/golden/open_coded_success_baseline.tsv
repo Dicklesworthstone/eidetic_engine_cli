@@ -63,7 +63,7 @@
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 592 rows (function + missing-set), 868 incomplete assertions.
+# CURRENT: 587 rows (test functions), 862 sites (assertions).
 
 advanced_e2e::assert_causal_success [stdout+stderr]	1
 advanced_e2e::assert_lab_report_common [stdout+stderr]	1
@@ -501,10 +501,6 @@ north_star_context_e2e::seed_onboarding_memories [code+stdout+stderr]	1
 north_star_context_e2e::seed_release_memories [code+stdout+stderr]	1
 pack_baseline_ledger_unit::initialized_connection [code+stdout]	1
 pack_budget_too_small_test::assert_success [stdout+stderr]	1
-pack_quality_contracts::pack_quality_artifact_paths_are_reported [code+stdout]	1
-pack_quality_contracts::pack_quality_from_outcomes_reports_feedback_loop_metrics [code+stdout]	1
-pack_quality_contracts::pack_quality_lexical_only_branch_is_reported [code+stdout]	1
-pack_quality_contracts::pack_quality_report_has_stable_field_names [code+stdout]	1
 perf_budget_conformance::budget_check_empty_profile_returns_error [stdout+stderr]	1
 perf_budget_conformance::budget_check_missing_report_returns_error [stdout+stderr]	1
 plan_drift_gate::run_script_with_args [stdout]	1

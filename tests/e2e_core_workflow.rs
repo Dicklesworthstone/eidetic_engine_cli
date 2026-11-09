@@ -306,8 +306,9 @@ fn stopword_filter_lexical_search_preserves_inflections_and_rejects_unrelated_qu
         ensure(
             output.status.success(),
             format!(
-                "{label} failed ({}); retained at {}\nstdout: {}\nstderr: {}",
+                "{label} failed ({}, code {:?}); retained at {}\nstdout: {}\nstderr: {}",
                 output.status,
+                output.status.code(),
                 root.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
@@ -426,8 +427,9 @@ fn release_advice_survives_inflection_and_pack_admission(with_model: bool) -> Te
         ensure(
             output.status.success(),
             format!(
-                "{label} failed ({}); retained at {}\nstdout: {}\nstderr: {}",
+                "{label} failed ({}, code {:?}); retained at {}\nstdout: {}\nstderr: {}",
                 output.status,
+                output.status.code(),
                 root.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),

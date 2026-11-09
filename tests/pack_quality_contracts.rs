@@ -137,8 +137,9 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
 
     if !output.status.success() {
         return Err(format!(
-            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            "eval run --pack-quality failed (status {}, code {:?}):\nstdout:\n{}\nstderr:\n{}",
             output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
@@ -224,8 +225,9 @@ fn pack_quality_report_arrays_are_deterministically_sorted() -> TestResult {
     for (label, output) in [("first", &output1), ("second", &output2)] {
         if !output.status.success() {
             return Err(format!(
-                "{label} evaluation failed before deterministic comparison (status {}):\nstdout:\n{}\nstderr:\n{}",
+                "{label} evaluation failed before deterministic comparison (status {}, code {:?}):\nstdout:\n{}\nstderr:\n{}",
                 output.status,
+                output.status.code(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             ));
@@ -268,8 +270,9 @@ fn pack_quality_lexical_only_branch_is_reported() -> TestResult {
 
     if !output.status.success() {
         return Err(format!(
-            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            "eval run --pack-quality failed (status {}, code {:?}):\nstdout:\n{}\nstderr:\n{}",
             output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
@@ -315,8 +318,9 @@ fn pack_quality_artifact_paths_are_reported() -> TestResult {
 
     if !output.status.success() {
         return Err(format!(
-            "eval run --pack-quality failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            "eval run --pack-quality failed (status {}, code {:?}):\nstdout:\n{}\nstderr:\n{}",
             output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
@@ -476,8 +480,9 @@ fn pack_quality_from_outcomes_reports_feedback_loop_metrics() -> TestResult {
 
     if !output.status.success() {
         return Err(format!(
-            "eval run --pack-quality --from-outcomes failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            "eval run --pack-quality --from-outcomes failed (status {}, code {:?}):\nstdout:\n{}\nstderr:\n{}",
             output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));

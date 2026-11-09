@@ -477,7 +477,9 @@ fn config_explain_data(command: &mut Command) -> Result<Value, String> {
     ensure(
         output.status.success(),
         format!(
-            "config explain failed: stdout={} stderr={}",
+            "config explain failed ({}, code {:?}): stdout={} stderr={}",
+            output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),

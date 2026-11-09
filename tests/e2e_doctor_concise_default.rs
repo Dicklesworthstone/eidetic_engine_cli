@@ -394,7 +394,12 @@ fn doctor_only_filters_real_findings_and_preserves_workspace_health() -> TestRes
     ensure(
         baseline.status.success(),
         "unfiltered doctor executes",
-        json!({"exit": baseline.status.code()}),
+        json!({
+            "exit": baseline.status.code(),
+            "status": baseline.status.to_string(),
+            "stdout": String::from_utf8_lossy(&baseline.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&baseline.stderr).to_string(),
+        }),
     )?;
     let baseline = parse_json("unfiltered", &baseline)?;
     let full_checks = baseline["data"]["checks"]
@@ -436,7 +441,13 @@ fn doctor_only_filters_real_findings_and_preserves_workspace_health() -> TestRes
         ensure(
             output.status.success() && output.stderr.is_empty(),
             "filtered doctor executes cleanly",
-            json!({"case": label, "exit": output.status.code()}),
+            json!({
+                "case": label,
+                "exit": output.status.code(),
+                "status": output.status.to_string(),
+                "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            }),
         )?;
         let value = parse_json(label, &output)?;
         let checks = value["data"]["checks"]
@@ -518,7 +529,13 @@ fn doctor_only_filters_real_findings_and_preserves_workspace_health() -> TestRes
         ensure(
             output.status.success(),
             "filtered output format executes",
-            json!({"format": format, "exit": output.status.code()}),
+            json!({
+                "format": format,
+                "exit": output.status.code(),
+                "status": output.status.to_string(),
+                "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            }),
         )?;
         let text = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
         if format == "toon" {
