@@ -1,16 +1,16 @@
 {
   "note": "Known fleet-identifier debt, as a DOWN-ONLY ratchet. Read by scripts/check-fleet-identifier-census.py, which mirrors tests/fleet_identifier_guard.rs on a rail that runs without a toolchain. This file records COUNTS AND PATHS ONLY and must never contain an identifier value. A carrying file that is not listed here fails the check (exit 1); a listed file over its ceiling fails (exit 1); a listed file that reaches ZERO also fails, with exit 3, so the entry gets deleted and the ratchet can only tighten.",
   "bead": "bd-42puv",
-  "observed_at": "2026-10-27",
-  "observed_by": "scripts/check-fleet-identifier-census.py at 24530c773",
-  "total_carrying_lines": 1159,
+  "observed_at": "2026-11-08",
+  "observed_by": "scripts/check-fleet-identifier-census.py at 0687d7293. Its word-boundary predicate changed at 6d6756a99, where a backslash escape became a boundary so that a JSON-escaped line break no longer hides the token after it. That change can only ADD matches, and re-measuring the three historical revisions below with the new predicate reproduces 1149, 1150 and 1159 unchanged -- so the two instruments agree everywhere except on the single line the fix was written to catch.",
+  "total_carrying_lines": 1161,
   "files": [
     {
       "path": ".beads/issues.jsonl",
-      "ceiling": 1200,
-      "observed": 1159,
+      "ceiling": 1161,
+      "observed": 1161,
       "reason": "The tracker export is generated from .beads/beads.db, so scrubbing the JSONL is undone by the next `br sync` flush. The identifiers live in SQLite across 90 issue descriptions and 1088 comments, which makes the repair ~1178 `br` writes against a live multi-agent tracker -- an operator-scheduled, quiesced migration, not a text pass. Tracked as the tracker half of bd-42puv.",
-      "ceiling_rationale": "A ceiling with headroom, not an equality, because this file is regenerated on every flush and its count moves with ordinary tracker churn: measured 1149 on 2026-10-14, 1150 on 2026-10-19 and 1159 on 2026-10-27, so roughly +10 per fortnight as beads are filed. 1200 is about five weeks of that drift. It is loose enough not to fire on churn and tight enough to catch a bulk re-introduction, which is the failure this entry is actually guarding against. The entry that matters for new disclosures is the ABSENCE of any other path from this list -- that arm has no headroom at all."
+      "ceiling_rationale": "AN EQUALITY, since 2026-11-08. It was 1200 before that, and the headroom was justified like this: the file is regenerated on every flush and its count 'moves with ordinary tracker churn: measured 1149 on 2026-10-14, 1150 on 2026-10-19 and 1159 on 2026-10-27, so roughly +10 per fortnight as beads are filed ... loose enough not to fire on churn', with the claim that the arm which matters for a new disclosure is the ABSENCE of any other path from this list, 'that arm has no headroom at all'. THAT PREMISE WAS MEASURED AGAINST ITS OWN THREE DATA POINTS AND IS FALSE. Replaying this check over the JSONL at the commits behind those numbers reproduces 1149, 1150 and 1159 exactly, and classifying every increment by bead id gives 12 of 12 that are NEW DISCLOSURES -- a bead row that carried no identifier before and does now -- with ZERO rows ever ceasing to carry. Over the same window 87 bead rows were added and three flushes regenerated the file, changing no existing row's status: regeneration and churn move the ROW count, not this one. So the +10 a fortnight was never drift to be tolerated, it was the rule being broken about ten times a fortnight. Ten of the twelve predate this entry, but two landed after it and the gate reported OK for both: one on 2026-10-29 in a bead-close comment, and one in a comment written by the agent that took this measurement. Both arrived through the same channel -- verification evidence quoted into a bead naming the worker it ran on -- and that channel is not the arm with no headroom, because every `br` write lands in THIS file and in no other. An equality is safe precisely because the count does not move on churn, and it means the next disclosure fails here with exit 1 inside the commit that introduces it, since this check is in the scripts/check-*.py family CLAUDE.md tells agents to run before committing. WHEN IT FIRES, replace the value with a placeholder; do not raise this number. It only goes down, and bd-42puv's scrub is what moves it."
     }
   ],
   "cleared": [
