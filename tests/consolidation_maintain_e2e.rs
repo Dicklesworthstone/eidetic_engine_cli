@@ -4,7 +4,7 @@
 //! duplicate fixture -> steward `consolidation_pass` (dry-run proof, budget
 //! cancellation, real run, dedupe determinism) -> `ee curate validate/apply`
 //! (absorb: lineage link, tombstoned duplicate, preserved survivor, audit
-//! chain) -> workflow-emitted `index_coalesce` (no manual rebuild) -> truthful
+//! chain) -> automatic publication of the workflow's index job -> truthful
 //! generation and per-kind counts -> deduplicated search/pack -> `ee why`
 //! provenance -> idempotent re-runs. No mocks: every assertion reads a real
 //! database, index, or CLI response envelope.
@@ -926,18 +926,18 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         ),
     )?;
 
-    // --- Index truth: stale is reported honestly, then the workflow-emitted
-    // job (and only that job) restores a truthful generation.
-    let stale = index_truth(&ws, "index_status_stale_after_apply")?;
+    // Apply publishes its own durable job. Inspect the persisted generation
+    // before any search or maintenance command can repair it incidentally.
+    let published = index_truth(&ws, "index_status_published_after_apply")?;
     ws.check(
-        "apply_reports_honest_staleness",
-        match (stale.db_generation, stale.index_generation) {
-            (Some(db), Some(index)) => db > index,
-            _ => false,
-        } && stale.health == "stale",
+        "apply_publishes_truthful_index",
+        published.db_generation.is_some()
+            && published.db_generation == published.index_generation
+            && published.memory_documents == Some(3)
+            && published.health == "ready",
         &format!(
-            "apply must leave an honestly stale index until the workflow job runs: db={:?} index={:?} health={}",
-            stale.db_generation, stale.index_generation, stale.health
+            "apply must publish the duplicate removal before returning: db={:?} index={:?} memories={:?} health={}",
+            published.db_generation, published.index_generation, published.memory_documents, published.health
         ),
     )?;
     ws.run_json(
@@ -952,13 +952,15 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     )?;
     let truthful = index_truth(&ws, "index_status_truthful")?;
     ws.check(
-        "workflow_job_restores_truthful_index",
+        "completed_workflow_job_preserves_truthful_index",
         truthful.db_generation.is_some()
             && truthful.db_generation == truthful.index_generation
+            && truthful.db_generation == published.db_generation
+            && truthful.index_generation == published.index_generation
             && truthful.memory_documents == Some(3)
             && truthful.health == "ready",
         &format!(
-            "index_coalesce must publish a truthful generation with the duplicate dropped: db={:?} index={:?} memories={:?} health={}",
+            "index_coalesce must preserve the already-published generation with the duplicate dropped: db={:?} index={:?} memories={:?} health={}",
             truthful.db_generation,
             truthful.index_generation,
             truthful.memory_documents,

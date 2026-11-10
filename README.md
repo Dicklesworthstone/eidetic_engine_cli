@@ -1490,6 +1490,15 @@ and [`docs/agent-ux/team.md`](docs/agent-ux/team.md).
 | `ee playbook import --source <file> [--apply]` | Dry-run or apply a portable playbook import through audited rule writes |
 | `ee rule add` / `list` / `show <id>` / `mark <id>` / `protect <id>` / `update <id>` | Direct rule management. A candidate or validated rule enters `ee pack` even with no source memory: it is packed as advisory guidance under its own rule id (`entityKind: "rule"`, section `procedural_rules`, provenance `ee://rule/<id>`), and `ee outcome --pack <id> --item <n>` on that item records feedback against the rule |
 
+Applying a curation candidate commits its memory changes and durable indexing
+work in the same transaction. Content replacements, confidence and trust changes,
+tombstones, consolidation, and memory-level promotions all enter the existing
+index publication path. Apply attempts publication before returning. If that
+attempt cannot finish, `curate_apply_index_publish_failed` reports the committed
+change and pending repair; the reviewed change is not discarded. Repeating
+`ee curate apply <id>` retries the same durable job without applying the memory
+change again or creating duplicate rules, procedures, or apply audit entries.
+
 Outcome signal vocabulary:
 
 | Signal | Use |

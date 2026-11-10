@@ -21,7 +21,7 @@ use serde::{Serialize, Serializer};
 use crate::config::env_registry::{EnvVar, read};
 use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::core::index::{DEFAULT_INDEX_SUBDIR, process_index_job_for_connection};
+use crate::core::index::process_index_job_for_connection;
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
@@ -6726,6 +6726,38 @@ fn apply_curation_candidate_with_recipe(
     if !options.dry_run
         && decision.application.errors.is_empty()
         && (persisted || decision.application.status == "already_applied")
+    {
+        // These IDs belong to the apply operation, not the memory's original
+        // capture. Replaying an applied candidate repairs its publication
+        // without creating another mutation, audit entry, or index job.
+        for job_id in [
+            generate_curation_memory_search_index_job_id(&candidate_id),
+            generate_consolidate_search_index_job_id(&candidate_id),
+        ] {
+            match connection.get_search_index_job(&job_id) {
+                Ok(Some(_)) => degraded.extend(reconcile_curation_index_job(
+                    &connection,
+                    &prepared.workspace_id,
+                    &prepared.workspace_path,
+                    &job_id,
+                    "curated memory",
+                )),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(candidate_id, %error, "cannot inspect curation memory index job");
+                    degraded.push(curate_apply_index_publish_failed(
+                        &job_id,
+                        "status_unavailable",
+                        "curated memory",
+                    ));
+                }
+            }
+        }
+    }
+
+    if !options.dry_run
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
         && crate::core::conflict_proposal::is_merge_candidate(&stored)
         && let Some(memory_id) = decision.application.created_memory_id.as_deref()
         && let Some(failure) = reconcile_curation_index_job(
@@ -6957,7 +6989,11 @@ fn reconcile_curation_index_job(
         }
     }
 
-    let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+    let index_dir = crate::config::workspace::resolve_store_index_dir(
+        workspace_path,
+        Some(Path::new(connection.path())),
+        None,
+    );
     // Attempt this candidate's durable publication once. The workspace drain
     // re-arms failed peer jobs between cycles, which can loop indefinitely on
     // a persistent failure when curation has no enclosing command deadline.
@@ -6997,16 +7033,25 @@ fn curate_apply_index_publish_failed(
     outcome: &str,
     subject: &str,
 ) -> CurateCandidatesDegradation {
-    let entity = if matches!(subject, "create-derived memory" | "reviewed global memory") {
+    let entity = if matches!(
+        subject,
+        "create-derived memory" | "reviewed global memory" | "curated memory"
+    ) {
         "memory"
     } else {
         "rule"
+    };
+    let visibility = if subject == "curated memory" {
+        "Search may retain stale memory content or omit the updated memory until the durable job is retried."
+            .to_owned()
+    } else {
+        format!("Search may omit the new {entity} until the durable job is retried.")
     };
     CurateCandidatesDegradation {
         code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
         severity: "medium".to_owned(),
         message: format!(
-            "The {subject} was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new {entity} until the durable job is retried."
+            "The {subject} was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). {visibility}"
         ),
         repair: "ee job run index_coalesce --workspace . --json".to_owned(),
     }
@@ -14581,6 +14626,13 @@ fn generate_memory_search_index_job_id(memory_id: &str) -> String {
     format!("sidx_{}", &hash[..26])
 }
 
+fn generate_curation_memory_search_index_job_id(candidate_id: &str) -> String {
+    let hash = blake3::hash(format!("curation_memory|{candidate_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("sidx_{}", &hash[..26])
+}
+
 /// Deterministic index-job id for a consolidate-absorb apply, keyed by the
 /// candidate id so it can never collide with the remember-time job that was
 /// already minted for the target memory itself.
@@ -15571,21 +15623,22 @@ fn persist_candidate_application_inner(
             })?;
         created_procedure_id = Some(procedure_create.procedure_id.clone());
     }
-    if let Some((previous_level, new_level)) = applied_level_change(
+    let level_change = applied_level_change(
         decision.target_before.as_ref(),
         decision.target_after.as_ref(),
-    ) {
+    );
+    if let Some((previous_level, new_level)) = &level_change {
         let evidence_refs =
             level_transition_evidence_refs(stored, &created_rule_id, &created_procedure_id);
         let (reason, event, automatic) =
-            curate_level_transition_metadata(&stored.candidate_type, &previous_level, &new_level);
-        let _ = connection
+            curate_level_transition_metadata(&stored.candidate_type, previous_level, new_level);
+        let transition = connection
             .apply_memory_level_transition_in_current_transaction(
                 target_memory_id,
                 &ApplyMemoryLevelTransitionInput {
                     workspace_id: workspace_id.to_owned(),
                     expected_level: Some(previous_level.clone()),
-                    level: new_level,
+                    level: new_level.clone(),
                     updated_at: applied_at.to_owned(),
                     actor: Some(applied_by.to_owned()),
                     reason,
@@ -15601,7 +15654,38 @@ fn persist_candidate_application_inner(
                 ),
                 repair: Some("ee memory history <memory-id> --json".to_owned()),
             })?;
+        if transition.is_none() {
+            return Err(DomainError::Usage {
+                message:
+                    "Target memory changed before its curation level transition; apply rolled back."
+                        .to_owned(),
+                repair: Some(format!("ee curate show {} --json", stored.id)),
+            });
+        }
     }
+    let memory_index_job_id = if (memory_changed || level_change.is_some())
+        && crate::core::global_promotion::merge_index_job_id(stored).is_none()
+    {
+        let job_id = generate_curation_memory_search_index_job_id(&stored.id);
+        connection
+            .insert_search_index_job(
+                &job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(target_memory_id.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to queue curated memory indexing: {error}"),
+                repair: Some("ee curate apply <candidate-id> --json".to_owned()),
+            })?;
+        Some(job_id)
+    } else {
+        None
+    };
     if !memory_changed
         && created_rule_id.is_none()
         && created_procedure_id.is_none()
@@ -15645,6 +15729,9 @@ fn persist_candidate_application_inner(
         "createdRecipeId": recipe.map(|recipe| recipe.id.as_str()),
         "changes": &decision.application.changes,
     });
+    if let Some(job_id) = memory_index_job_id {
+        details["memoryIndexJobId"] = serde_json::Value::String(job_id);
+    }
     if let Some(link_id) = applied_link_id.as_deref() {
         details["appliedLinkId"] = serde_json::Value::String(link_id.to_owned());
     }
@@ -23974,6 +24061,269 @@ mod tests {
     }
 
     #[test]
+    fn apply_memory_curation_publishes_updates_and_retries_the_original_job() -> TestResult {
+        for (kind, publication_blocked) in [
+            ("supersede", true),
+            ("tombstone", true),
+            ("promote", false),
+            ("rule", false),
+            ("procedure", false),
+        ] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+            let workspace = tempdir.path();
+            fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let database = workspace.join("ee.db");
+            let workspace_id = test_workspace_id(workspace);
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_7A0)).to_string();
+            let candidate_id = curate_id(0x6_7A1);
+            let proposed_content = "Tangerine compass deployment: verify the signed artifact.";
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                kind,
+                Some("approved"),
+                matches!(kind, "supersede" | "rule" | "procedure").then_some(proposed_content),
+            )?;
+            if matches!(kind, "promote" | "rule" | "procedure") {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET level = 'episodic' WHERE id = '{memory_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            let initial =
+                crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                    workspace_path: workspace.to_path_buf(),
+                    database_path: Some(database.clone()),
+                    index_dir: None,
+                    dry_run: false,
+                })
+                .map_err(|error| error.to_string())?;
+            assert!(initial.errors.is_empty(), "{initial:?}");
+            assert_eq!(initial.memories_indexed, 1);
+            let mut options = super::CurateApplyOptions {
+                workspace_path: workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("memory-publication-test"),
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            };
+            let before = fs::read(&database).map_err(|error| error.to_string())?;
+            let preview = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(preview.application.status, "would_apply", "{preview:?}");
+            assert_eq!(
+                fs::read(&database).map_err(|error| error.to_string())?,
+                before
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty(),
+                "preview must not enqueue publication"
+            );
+
+            let index_path = workspace.join(".ee/index");
+            if publication_blocked {
+                fs::rename(&index_path, workspace.join(".ee/preserved-index"))
+                    .map_err(|error| error.to_string())?;
+                fs::write(&index_path, b"publication blocker")
+                    .map_err(|error| error.to_string())?;
+            }
+            options.dry_run = false;
+            let applied = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(applied.application.status, "applied", "{applied:?}");
+            assert!(applied.durable_mutation);
+            assert_eq!(
+                applied
+                    .degraded
+                    .iter()
+                    .any(|entry| { entry.code == super::CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE }),
+                publication_blocked,
+                "{applied:?}"
+            );
+            let job_id = super::generate_curation_memory_search_index_job_id(&candidate_id);
+            let job = connection
+                .get_search_index_job(&job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("memory mutation must enqueue its own durable job")?;
+            assert_eq!(job.document_source.as_deref(), Some("memory"));
+            assert_eq!(job.document_id.as_deref(), Some(memory_id.as_str()));
+            assert_eq!(job.status == "completed", !publication_blocked);
+            let jobs_before_retry = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs_before_retry.len(), if kind == "rule" { 2 } else { 1 });
+            if publication_blocked {
+                fs::rename(&index_path, workspace.join(".ee/preserved-index-blocker"))
+                    .map_err(|error| error.to_string())?;
+                fs::rename(workspace.join(".ee/preserved-index"), &index_path)
+                    .map_err(|error| error.to_string())?;
+            }
+
+            let replay = apply_curation_candidate(&options).map_err(|error| error.message())?;
+            assert_eq!(replay.application.status, "already_applied");
+            assert!(!replay.durable_mutation);
+            assert!(replay.degraded.is_empty(), "{replay:?}");
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs.len(), jobs_before_retry.len());
+            assert!(jobs.iter().all(|job| job.status == "completed"));
+            assert!(jobs.iter().any(|job| job.id == job_id));
+            assert_eq!(
+                connection
+                    .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                1,
+                "publication retry must not reapply the candidate"
+            );
+            let status = get_index_status(&IndexStatusOptions {
+                workspace_path: workspace.to_path_buf(),
+                database_path: Some(database.clone()),
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+            assert_eq!(status.health, IndexHealth::Ready, "{status:?}");
+            assert!(status.db_generation.is_some());
+            assert_eq!(status.db_generation, status.index_generation);
+            assert_eq!(
+                status
+                    .index_document_counts
+                    .as_ref()
+                    .map(|counts| counts.memories),
+                Some(u32::from(kind != "tombstone")),
+            );
+            // Index readiness above must hold before search can use its
+            // current-snapshot fallback to hide missing publication.
+            let search = run_search_with_filters(
+                &SearchOptions {
+                    workspace_path: workspace.to_path_buf(),
+                    database_path: Some(database.clone()),
+                    index_dir: None,
+                    query: if kind == "supersede" {
+                        "tangerine compass".to_owned()
+                    } else {
+                        "cargo fmt".to_owned()
+                    },
+                    limit: 10,
+                    speed: SpeedMode::Instant,
+                    explain: false,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: None,
+                    dedup_mode: SearchDedupMode::DocId,
+                    source_mode: SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    memory_scope: MemoryScope::Workspace,
+                    strict_scope: false,
+                },
+                None,
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                search.results.iter().any(|hit| hit.doc_id == memory_id),
+                kind != "tombstone",
+                "{kind}: changed memory visibility must match the committed mutation"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn apply_memory_curation_rolls_back_when_index_work_cannot_be_persisted() -> TestResult {
+        for kind in ["supersede", "tombstone", "rule"] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+            let workspace = tempdir.path();
+            let database = workspace.join("ee.db");
+            let workspace_id = test_workspace_id(workspace);
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_7B0)).to_string();
+            let candidate_id = curate_id(0x6_7B1);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                kind,
+                Some("approved"),
+                (kind != "tombstone").then_some("Verify the tangerine release signature."),
+            )?;
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET level = 'episodic' WHERE id = '{memory_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(
+                    "CREATE TRIGGER reject_curated_memory_index BEFORE INSERT ON search_index_jobs
+                     WHEN NEW.document_source = 'memory'
+                     BEGIN SELECT RAISE(ABORT, 'curation index queue unavailable'); END",
+                )
+                .map_err(|error| error.to_string())?;
+            let applied = apply_curation_candidate(&super::CurateApplyOptions {
+                workspace_path: workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("memory-publication-test"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            });
+            let error = applied.expect_err("missing durable publication must abort apply");
+            assert!(
+                error
+                    .message()
+                    .contains("Failed to queue curated memory indexing"),
+                "{kind}: {}",
+                error.message()
+            );
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?,
+                before
+            );
+            assert_eq!(
+                connection
+                    .get_curation_candidate(&workspace_id, &candidate_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("candidate missing")?
+                    .status,
+                "approved"
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_updates_memory_and_writes_audit() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -29231,6 +29581,8 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "consolidation index job missing".to_owned())?;
         assert_eq!(job.document_id.as_deref(), Some(target_memory_id.as_str()));
+        assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Completed));
+        assert!(report.degraded.is_empty(), "{:?}", report.degraded);
 
         let apply_audits = connection
             .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
