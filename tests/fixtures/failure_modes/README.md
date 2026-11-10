@@ -30,6 +30,7 @@ in the same commit, keeping the catalog complete by construction.
 | `search_index_stale` | search, context | medium | bd-17c65.2.1 (B1) |
 | `read_fence_generation_unavailable` | pack, search, why | high | bd-1n0np.8.13 (R) |
 | `read_fence_stale_derived_asset` | pack, search, why | high | bd-1n0np.8.13 (R) |
+| `snapshot_unavailable` | pack, context, search, why | high | bd-1n0np.8.13 (R) |
 | `search_index_large_gap` | search, context | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | import cass | medium | bd-index-auto-freshness-m5kwf (I) |
 | `evidence_live_admission_filtered` | search, diag search | warning | bd-4frzq (P0) |

@@ -4,8 +4,8 @@
 //! These exercise the model across a deterministic grid of generations, fences,
 //! and strictness rather than single points, locking the load-bearing
 //! invariants: Eventual never fails closed, Latest fails iff an asset lags under
-//! strict, Coherent iff no asset lags, max_lag is exact, Snapshot is always a
-//! pinned info, output is deterministic, and asset rows are sorted.
+//! strict, Coherent iff no asset lags, max_lag is exact, unavailable Snapshot
+//! requests fail closed, output is deterministic, and asset rows are sorted.
 
 use ee::core::read_fence::{
     ConsistencySeverity, ConsistencyVerdict, ReadFence, evaluate_consistency,
@@ -118,7 +118,7 @@ fn assets_behind_reports_exact_max_lag_and_sorted_names() {
 }
 
 #[test]
-fn snapshot_is_always_pinned_info_regardless_of_lag() {
+fn snapshot_never_claims_replay_from_generation_numbers_alone() {
     for (db_generation, assets) in cases() {
         for strict in [false, true] {
             let block = evaluate_consistency(
@@ -129,11 +129,13 @@ fn snapshot_is_always_pinned_info_regardless_of_lag() {
             );
             assert_eq!(
                 block.verdict,
-                ConsistencyVerdict::PinnedSnapshot { generation: 3 }
+                ConsistencyVerdict::SnapshotUnavailable {
+                    requested_generation: 3
+                }
             );
-            assert_eq!(block.severity, ConsistencySeverity::Info);
-            assert!(!block.strict_failed);
-            assert!(block.repair.is_none());
+            assert_eq!(block.severity, ConsistencySeverity::High);
+            assert!(block.strict_failed);
+            assert!(block.repair.is_some());
             assert_eq!(block.mode, "snapshot");
         }
     }

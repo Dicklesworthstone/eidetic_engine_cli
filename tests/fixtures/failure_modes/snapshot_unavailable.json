@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "snapshot_unavailable",
+  "introduced_by": { "bead": "bd-1n0np.8.13", "epic_letter": "R" },
+  "surfaces": ["pack", "context", "search", "why"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A snapshot read fence requests a historical workspace generation, but historical database and asset selection is unavailable. Refuse retrieval even without strict mode and even when the requested number matches the current generation.",
+    "setup_commands": [
+      "# No setup is required; snapshot replay is unavailable for initialized and missing stores."
+    ],
+    "invocation": "ee pack 'prepare release' --workspace . --read-fence snapshot:7 --json"
+  },
+  "expected_emission": {
+    "code": "snapshot_unavailable",
+    "severity": "high",
+    "message_contains": ["refused to serve rows", "requested workspace generation 7 cannot be replayed"],
+    "repair_contains": "--read-fence latest --strict-read-fence",
+    "repair_string": "Historical workspace replay is unavailable. If current state is acceptable, retry with --read-fence latest --strict-read-fence; otherwise restore the required workspace snapshot before querying."
+  }
+}

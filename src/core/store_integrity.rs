@@ -111,6 +111,8 @@ pub struct StoreIntegrityReadFenceReport {
     pub workspace_generation: u64,
     pub asset_generations: Vec<StoreIntegrityAssetGeneration>,
     pub stale_assets: Vec<StoreIntegrityStaleAsset>,
+    /// The requested snapshot generation. This identifies the request, not a
+    /// completed replay; `verdict` states whether it could be honored.
     pub snapshot_generation: Option<u64>,
     pub repair: Option<String>,
 }
@@ -196,7 +198,10 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
     let generations_unobservable = options.generation_source == GenerationSource::Unavailable
         || (options.generation_source == GenerationSource::Mixed
             && consistency.asset_generations.is_empty());
-    if generations_unobservable {
+    // A snapshot cannot be replayed even if its generation happens to equal
+    // the current store. Preserve that refusal when generation observation also
+    // fails; lenient mode must never turn it back into an admitted live read.
+    if generations_unobservable && !matches!(options.read_fence, ReadFence::Snapshot(_)) {
         // An incomplete observation cannot prove coherence or a pinned replay.
         // Keep the observed values and their provenance, but make the nested
         // verdict agree with the admission decision used by every read surface.
@@ -251,7 +256,9 @@ impl StoreIntegrityReadFenceReport {
                     .collect(),
                 None,
             ),
-            ConsistencyVerdict::PinnedSnapshot { generation } => (Vec::new(), Some(*generation)),
+            ConsistencyVerdict::SnapshotUnavailable {
+                requested_generation,
+            } => (Vec::new(), Some(*requested_generation)),
         };
 
         Self {
@@ -283,11 +290,7 @@ mod tests {
 
     #[test]
     fn unavailable_generations_never_claim_coherence_or_a_pinned_snapshot() {
-        for read_fence in [
-            ReadFence::Eventual,
-            ReadFence::Latest,
-            ReadFence::Snapshot(7),
-        ] {
+        for read_fence in [ReadFence::Eventual, ReadFence::Latest] {
             for strict in [false, true] {
                 for asset_generations in [Vec::new(), vec![("search_index".to_owned(), 7)]] {
                     let report = run_store_integrity_report(StoreIntegrityOptions {
@@ -323,6 +326,43 @@ mod tests {
                         report.read_fence.severity,
                         if strict { "high" } else { "warning" }
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_requests_remain_blocked_regardless_of_generation_provenance() {
+        for generation_source in [
+            GenerationSource::Observed,
+            GenerationSource::Supplied,
+            GenerationSource::Mixed,
+            GenerationSource::Unavailable,
+        ] {
+            for strict_read_fence in [false, true] {
+                for asset_generations in [Vec::new(), vec![("search_index".to_owned(), 7)]] {
+                    let report = run_store_integrity_report(StoreIntegrityOptions {
+                        read_fence: ReadFence::Snapshot(7),
+                        db_generation: 7,
+                        asset_generations,
+                        strict_read_fence,
+                        generation_source,
+                        write_stream_config: WriteStreamStatsConfig::new(0, 1_000, 3),
+                        write_observations: Vec::new(),
+                        quarantine_config: WriteImmuneQuarantineConfig::default(),
+                    });
+                    assert_eq!(report.status, StoreIntegrityStatus::Blocked);
+                    assert_eq!(report.read_fence.verdict, "snapshot_unavailable");
+                    assert_eq!(report.read_fence.severity, "high");
+                    assert!(report.read_fence.strict_failed);
+                    assert_eq!(report.read_fence.snapshot_generation, Some(7));
+                    assert_eq!(report.read_fence.generation_source, generation_source);
+                    assert_eq!(
+                        report.read_fence.repair.as_deref(),
+                        Some(crate::core::read_fence::READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR)
+                    );
+                    let json = serde_json::to_value(&report).unwrap();
+                    assert_eq!(json["readFence"]["snapshotGeneration"], 7);
                 }
             }
         }

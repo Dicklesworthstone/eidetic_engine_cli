@@ -130,6 +130,88 @@ fn strict_pack_refuses_unobservable_store_before_output_or_streaming() {
     }
 }
 
+#[test]
+fn snapshot_read_fence_refuses_every_retrieval_surface_without_strict_opt_in() {
+    for strict in [false, true] {
+        for (command, target) in [
+            ("search", "release"),
+            ("pack", "release"),
+            ("context", "release"),
+            ("why", "mem_00000000000000000000000001"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut argv = vec![
+                "ee",
+                "--json",
+                "--workspace",
+                temp.path().to_str().unwrap(),
+                command,
+                target,
+                "--read-fence",
+                "snapshot:7",
+            ];
+            if strict {
+                argv.push("--strict-read-fence");
+            }
+            let mut output = Vec::new();
+            let mut errors = Vec::new();
+            let exit = run(
+                argv.into_iter().map(OsString::from),
+                &mut output,
+                &mut errors,
+            );
+            assert!(errors.is_empty(), "{}", String::from_utf8_lossy(&errors));
+            let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(exit, ProcessExitCode::UnsatisfiedDegradedMode, "{command}");
+            assert_eq!(output["success"], false);
+            let reported_command = if command == "context" {
+                PACK_COMMAND
+            } else {
+                command
+            };
+            assert_eq!(output["data"]["command"], reported_command);
+            assert_eq!(output["degraded"][0]["code"], "snapshot_unavailable");
+            assert_eq!(
+                output["data"]["readFence"]["verdict"],
+                "snapshot_unavailable"
+            );
+            assert_eq!(output["data"]["readFence"]["strictFailed"], true);
+            assert_eq!(output["data"]["readFence"]["snapshotGeneration"], 7);
+            assert!(output["data"].get("pack").is_none());
+            assert!(output["data"].get("results").is_none());
+            assert!(!temp.path().join(".ee").exists());
+        }
+    }
+}
+
+#[test]
+fn snapshot_pack_refuses_before_output_files_or_stream_frames() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().to_str().unwrap();
+    let output_path = temp.path().join("absent-parent/pack.json");
+    for suffix in [
+        vec!["--output", output_path.to_str().unwrap()],
+        vec!["--stream"],
+    ] {
+        let mut argv = vec![
+            "ee",
+            "--json",
+            "--workspace",
+            workspace,
+            "pack",
+            "release",
+            "--read-fence",
+            "snapshot:7",
+        ];
+        argv.extend(suffix);
+        let (exit, output) = execute_fenced_pack(argv);
+        assert_fence_refusal(exit, &output, "snapshot_unavailable");
+        assert_eq!(output["data"]["readFence"]["snapshotGeneration"], 7);
+        assert!(!output_path.exists());
+        assert!(!temp.path().join(".ee").exists());
+    }
+}
+
 fn write_fence_generations(
     options: &IndexStatusOptions,
     database_generation: Option<u64>,
@@ -273,6 +355,38 @@ fn canonical_pack_fence_observes_explicit_database_and_index_paths() {
 }
 
 #[test]
+fn current_store_generations_do_not_substitute_for_a_requested_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let options = IndexStatusOptions {
+        workspace_path: temp.path().canonicalize().unwrap(),
+        database_path: None,
+        index_dir: None,
+    };
+    write_fence_generations(&options, Some(7), Some(7));
+    for strict in [false, true] {
+        for generation in [6, 7, 8] {
+            let mut output = Vec::new();
+            let exit = read_fence_preflight(
+                || options.clone(),
+                PACK_COMMAND,
+                crate::core::read_fence::ReadFence::Snapshot(generation),
+                strict,
+                &mut output,
+            )
+            .unwrap();
+            let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_fence_refusal(exit, &output, "snapshot_unavailable");
+            assert_eq!(output["data"]["readFence"]["workspaceGeneration"], 7);
+            assert_eq!(output["data"]["readFence"]["generationSource"], "observed");
+            assert_eq!(
+                output["data"]["readFence"]["snapshotGeneration"],
+                generation
+            );
+        }
+    }
+}
+
+#[test]
 fn pack_query_file_fence_uses_the_document_workspace_unless_cli_overrides_it() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().canonicalize().unwrap();
@@ -311,6 +425,38 @@ fn pack_query_file_fence_uses_the_document_workspace_unless_cli_overrides_it() {
         let (exit, output) = execute_fenced_pack(argv);
         assert_fence_refusal(exit, &output, "read_fence_generation_unavailable");
         assert!(!override_workspace.path().join(".ee").exists());
+    }
+}
+
+#[test]
+fn snapshot_query_file_builds_refuse_in_both_cli_forms() {
+    let temp = tempfile::tempdir().unwrap();
+    let query_file = temp.path().join("task.eeq.json");
+    std::fs::write(
+        &query_file,
+        serde_json::json!({
+            "version": "ee.query.v1",
+            "workspace": temp.path(),
+            "query": {"text": "prepare release"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for build in [false, true] {
+        let mut argv = vec!["ee", "--json", "pack"];
+        if build {
+            argv.push("build");
+        }
+        argv.extend([
+            "--query-file",
+            query_file.to_str().unwrap(),
+            "--read-fence",
+            "snapshot:7",
+        ]);
+        let (exit, output) = execute_fenced_pack(argv);
+        assert_fence_refusal(exit, &output, "snapshot_unavailable");
+        assert_eq!(output["data"]["readFence"]["snapshotGeneration"], 7);
+        assert!(!temp.path().join(".ee").exists());
     }
 }
 

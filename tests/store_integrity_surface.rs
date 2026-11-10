@@ -176,6 +176,35 @@ fn store_integrity_json_surface_is_enveloped_and_byte_stable() {
     );
 }
 
+#[test]
+fn unavailable_snapshot_json_identifies_the_request_without_attesting_replay() {
+    for strict_read_fence in [false, true] {
+        let report = run_store_integrity_report(StoreIntegrityOptions {
+            read_fence: ReadFence::Snapshot(7),
+            db_generation: 7,
+            asset_generations: vec![("search".to_owned(), 7)],
+            strict_read_fence,
+            generation_source: GenerationSource::Observed,
+            write_stream_config: WriteStreamStatsConfig::new(0, 1_000, 0),
+            write_observations: Vec::new(),
+            quarantine_config: quarantine_config(),
+        });
+        let envelope: Value = serde_json::from_str(&render_store_integrity_json(&report))
+            .expect("snapshot refusal JSON envelope");
+        let fence = &envelope["data"]["readFence"];
+        assert_eq!(envelope["data"]["status"], "blocked");
+        assert_eq!(fence["schema"], "ee.store_integrity.read_fence.v1");
+        assert_eq!(fence["verdict"], "snapshot_unavailable");
+        assert_eq!(fence["snapshotGeneration"], 7);
+        assert_eq!(fence["strictFailed"], true);
+        assert_eq!(fence["severity"], "high");
+        assert_eq!(
+            fence["repair"],
+            ee::core::read_fence::READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR
+        );
+    }
+}
+
 /// bd-1n0np.8.13: a store that could not be observed must not report health.
 ///
 /// With no observable asset generations the fence finds nothing behind and

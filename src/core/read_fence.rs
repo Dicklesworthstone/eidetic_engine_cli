@@ -9,7 +9,9 @@
 //! Design (per bead notes): `Eventual` is the fast default — lag is reported,
 //! never enforced — so the common path is not slowed. `Latest` is the opt-in
 //! high-stakes mode that fails (in strict) when any derived asset trails the DB.
-//! `Snapshot(n)` replays a pinned generation. The emitted [`ConsistencyBlock`]
+//! `Snapshot(n)` requests a pinned generation. Historical database and derived
+//! asset selection is not implemented, so this mode fails closed rather than
+//! claiming that the current store is a replay. The emitted [`ConsistencyBlock`]
 //! is intentionally cleanly-additive and stable-ordered so wiring it onto
 //! responses is a single coordinated golden update (the threading + emission is
 //! the follow-on; this module is pure and golden-free).
@@ -26,6 +28,9 @@ pub const READ_FENCE_CACHE_REPAIR: &str = "ee pack \"<task>\" --workspace . --js
 /// Fallback repair when the stale asset name is not recognized by this model.
 pub const READ_FENCE_GENERIC_REPAIR: &str =
     "Inspect stale derived asset generations before retrying.";
+/// An explicit alternative for callers that can use current state instead of
+/// the requested historical generation. Rebuilding cannot restore a snapshot.
+pub const READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR: &str = "Historical workspace replay is unavailable. If current state is acceptable, retry with --read-fence latest --strict-read-fence; otherwise restore the required workspace snapshot before querying.";
 /// Backwards-compatible alias for the historical search-index repair.
 pub const READ_FENCE_REPAIR: &str = READ_FENCE_INDEX_REPAIR;
 
@@ -37,7 +42,7 @@ pub enum ReadFence {
     Eventual,
     /// High-stakes opt-in: require every derived asset to be >= the DB generation.
     Latest,
-    /// Replay a pinned workspace generation.
+    /// Request a pinned workspace generation; fail closed when it cannot be replayed.
     Snapshot(u64),
 }
 
@@ -83,8 +88,9 @@ pub enum ConsistencyVerdict {
         max_lag: u64,
         behind_assets: Vec<String>,
     },
-    /// A pinned snapshot generation was replayed.
-    PinnedSnapshot { generation: u64 },
+    /// The requested historical generation cannot be selected and replayed.
+    /// Observing a matching current generation does not establish a pinned read.
+    SnapshotUnavailable { requested_generation: u64 },
 }
 
 impl ConsistencyVerdict {
@@ -93,7 +99,7 @@ impl ConsistencyVerdict {
         match self {
             Self::Coherent => "coherent",
             Self::AssetsBehind { .. } => "assets_behind",
-            Self::PinnedSnapshot { .. } => "pinned_snapshot",
+            Self::SnapshotUnavailable { .. } => "snapshot_unavailable",
         }
     }
 }
@@ -110,8 +116,9 @@ pub struct ConsistencyBlock {
     pub verdict: ConsistencyVerdict,
     pub severity: ConsistencySeverity,
     pub repair: Option<String>,
-    /// `true` only in `Latest` + strict mode when an asset trails the DB — the
-    /// caller should fail closed (exit code 6 / `degraded_required`).
+    /// `true` for an unavailable snapshot, or in `Latest` + strict mode when an
+    /// asset trails the DB. The caller must fail closed (exit code 6 /
+    /// `degraded_required`) rather than serve a different generation.
     pub strict_failed: bool,
 }
 
@@ -121,7 +128,8 @@ pub struct ConsistencyBlock {
 ///
 /// `Eventual` reports lag as `warning` (advisory, never failing). `Latest`
 /// escalates lag to `high`, and sets `strict_failed` when `strict` is on.
-/// `Snapshot` is always an informational pinned replay.
+/// `Snapshot` fails closed: generation numbers alone cannot prove a pinned
+/// replay, and no historical database/asset selector is available here.
 #[must_use]
 pub fn evaluate_consistency(
     fence: ReadFence,
@@ -138,10 +146,12 @@ pub fn evaluate_consistency(
             mode: fence.mode_str(),
             db_generation,
             asset_generations,
-            verdict: ConsistencyVerdict::PinnedSnapshot { generation },
-            severity: ConsistencySeverity::Info,
-            repair: None,
-            strict_failed: false,
+            verdict: ConsistencyVerdict::SnapshotUnavailable {
+                requested_generation: generation,
+            },
+            severity: ConsistencySeverity::High,
+            repair: Some(READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR.to_owned()),
+            strict_failed: true,
         };
     }
 
@@ -237,7 +247,7 @@ mod tests {
     use super::{
         ConsistencySeverity, ConsistencyVerdict, READ_FENCE_CACHE_REPAIR,
         READ_FENCE_CONSISTENCY_SCHEMA_V1, READ_FENCE_GRAPH_REPAIR, READ_FENCE_INDEX_REPAIR,
-        ReadFence, evaluate_consistency,
+        READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR, ReadFence, evaluate_consistency,
     };
 
     fn assets() -> Vec<(String, u64)> {
@@ -294,15 +304,30 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_pinned_info() {
-        let block = evaluate_consistency(ReadFence::Snapshot(7), 12, assets(), true);
-        assert_eq!(
-            block.verdict,
-            ConsistencyVerdict::PinnedSnapshot { generation: 7 }
-        );
-        assert_eq!(block.severity, ConsistencySeverity::Info);
-        assert!(!block.strict_failed);
-        assert_eq!(block.mode, "snapshot");
+    fn snapshot_requires_replay_instead_of_certifying_observed_generations() {
+        for strict in [false, true] {
+            for generation in [0, 7, 12, u64::MAX] {
+                let block = evaluate_consistency(
+                    ReadFence::Snapshot(generation),
+                    12,
+                    vec![("search_index".to_owned(), 12)],
+                    strict,
+                );
+                assert_eq!(
+                    block.verdict,
+                    ConsistencyVerdict::SnapshotUnavailable {
+                        requested_generation: generation
+                    }
+                );
+                assert_eq!(block.severity, ConsistencySeverity::High);
+                assert!(block.strict_failed);
+                assert_eq!(block.mode, "snapshot");
+                assert_eq!(
+                    block.repair.as_deref(),
+                    Some(READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR)
+                );
+            }
+        }
     }
 
     #[test]

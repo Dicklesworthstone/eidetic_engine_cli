@@ -33289,7 +33289,16 @@ where
     }
 
     let (code, message, repair) =
-        if generations_unavailable {
+        if let crate::core::read_fence::ReadFence::Snapshot(generation) = read_fence {
+            (
+                "snapshot_unavailable",
+                format!(
+                    "{command} refused to serve rows: requested workspace generation \
+                 {generation} cannot be replayed; historical snapshot selection is unavailable"
+                ),
+                crate::core::read_fence::READ_FENCE_SNAPSHOT_UNAVAILABLE_REPAIR.to_owned(),
+            )
+        } else if generations_unavailable {
             (
                 "read_fence_generation_unavailable",
                 format!(

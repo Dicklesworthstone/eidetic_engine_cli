@@ -21,7 +21,7 @@ A read fence states the coherence a caller wants from a `search` / `pack` /
 |---|---|---|
 | **`Eventual`** (default) | Fast path; derived assets may trail the DB. | Lag is **reported** as a `warning`, never enforced. |
 | **`Latest`** | High-stakes opt-in; every derived asset must be ≥ the DB generation. | Lag escalates to `high`; in `--strict` it fails closed. |
-| **`Snapshot(n)`** | Replay a pinned workspace generation. | N/A — always an informational pinned replay. |
+| **`Snapshot(n)`** | Request a pinned workspace generation. | Historical database and asset selection is unavailable; refuse with `snapshot_unavailable`, including without strict mode. |
 
 `evaluate_consistency(fence, db_generation, asset_generations, strict)` returns a
 `ConsistencyBlock { schema, mode, db_generation, asset_generations, verdict,
@@ -31,10 +31,21 @@ severity, repair, strict_failed }`. The verdict is one of:
 - `AssetsBehind { max_lag, behind_assets }` — `max_lag` is the largest gap;
   `behind_assets` names the lagging assets, **sorted**. Carries the repair
   `ee index rebuild --workspace .`.
-- `PinnedSnapshot { generation }` — always `info`, never fails.
+- `SnapshotUnavailable { requested_generation }` — `high`, always fails closed.
+  Matching observed generation numbers do not establish that a historical
+  database and its derived assets were selected and pinned.
 
-`strict_failed` is `true` **only** under `Latest` + `strict` with a lagging
-asset; the caller should fail closed (exit code 6 / `degraded_required`).
+`strict_failed` is `true` under `Latest` + `strict` with a lagging asset, and for
+every unavailable `Snapshot(n)` request. The caller must fail closed (exit code
+6 / `degraded_required`) before serving rows, writing pack output, or streaming.
+For snapshot requests, `ee.store_integrity.read_fence.v1` preserves the requested
+generation in its existing `snapshotGeneration` field; the
+`snapshot_unavailable` verdict explicitly says it was not replayed. The field
+does not attest a pinned read. The response field set is unchanged.
+
+If a caller can use current state, it can explicitly retry with
+`--read-fence latest --strict-read-fence`. Rebuilding an index does not restore
+historical database state. Historical replay remains unimplemented.
 
 ### Two hard invariants
 
