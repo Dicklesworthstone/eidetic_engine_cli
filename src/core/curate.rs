@@ -6438,6 +6438,7 @@ fn apply_curation_candidate_with_recipe(
                     &absorb_resolution,
                     &now,
                 );
+                decision.allow_tombstone_load_bearing = options.allow_tombstone_load_bearing;
                 if let Some(absorb) = decision.consolidate_absorb.as_mut() {
                     absorb.allow_tombstone_load_bearing = options.allow_tombstone_load_bearing;
                 }
@@ -7681,38 +7682,13 @@ pub fn run_curate_tombstone(
     let next_action = "ee memory list --json".to_owned();
 
     let connection = open_bound_curate_read(&mut prepared)?;
-    let memory =
-        get_curate_memory_for_workspace(&connection, &prepared.workspace_id, options.memory_id)?;
-
-    if memory.tombstoned_at.is_some() {
-        return Err(DomainError::Usage {
-            message: format!("Memory {} is already tombstoned.", options.memory_id),
-            repair: Some("ee memory list --json".to_owned()),
-        });
-    }
-
-    if !options.allow_tombstone_load_bearing
-        && let Some(protection) = load_bearing_tombstone_protection(
+    if options.dry_run {
+        validate_curate_tombstone_target(
             &connection,
             &prepared.workspace_id,
             options.memory_id,
-        )?
-    {
-        return Err(DomainError::Usage {
-            message: load_bearing_tombstone_issue(
-                options.memory_id,
-                &protection,
-                "ee curate tombstone <memory-id> --allow-tombstone-load-bearing",
-            )
-            .message,
-            repair: Some(
-                "Re-run with --allow-tombstone-load-bearing after reviewing `ee why <memory-id> --json`."
-                    .to_owned(),
-            ),
-        });
-    }
-
-    if options.dry_run {
+            options.allow_tombstone_load_bearing,
+        )?;
         return Ok(CurateTombstoneReport {
             schema: CURATE_TOMBSTONE_SCHEMA_V1,
             command: "curate tombstone",
@@ -7732,24 +7708,14 @@ pub fn run_curate_tombstone(
         });
     }
 
-    let audit_id = connection
-        .tombstone_memory_audited(
-            options.memory_id,
-            &prepared.workspace_id,
-            actor.as_deref(),
-            reason.as_deref(),
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to tombstone memory: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-        .ok_or_else(|| DomainError::Storage {
-            message: format!(
-                "Failed to tombstone memory {}: no row updated.",
-                options.memory_id
-            ),
-            repair: Some("ee memory list --json".to_owned()),
-        })?;
+    let audit_id = persist_curate_tombstone(
+        &connection,
+        &prepared.workspace_id,
+        options.memory_id,
+        actor.as_deref(),
+        reason.as_deref(),
+        options.allow_tombstone_load_bearing,
+    )?;
 
     Ok(CurateTombstoneReport {
         schema: CURATE_TOMBSTONE_SCHEMA_V1,
@@ -7768,6 +7734,76 @@ pub fn run_curate_tombstone(
         degraded: Vec::new(),
         next_action,
     })
+}
+
+fn validate_curate_tombstone_target(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    allow_tombstone_load_bearing: bool,
+) -> Result<(), DomainError> {
+    let memory = get_curate_memory_for_workspace(connection, workspace_id, memory_id)?;
+    if memory.tombstoned_at.is_some() {
+        return Err(DomainError::Usage {
+            message: format!("Memory {memory_id} is already tombstoned."),
+            repair: Some("ee memory list --json".to_owned()),
+        });
+    }
+    if !allow_tombstone_load_bearing
+        && let Some(protection) =
+            load_bearing_tombstone_protection(connection, workspace_id, memory_id)?
+    {
+        return Err(DomainError::Usage {
+            message: load_bearing_tombstone_issue(
+                memory_id,
+                &protection,
+                "ee curate tombstone <memory-id> --allow-tombstone-load-bearing",
+            )
+            .message,
+            repair: Some(
+                "Re-run with --allow-tombstone-load-bearing after reviewing `ee why <memory-id> --json`."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn persist_curate_tombstone(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    actor: Option<&str>,
+    reason: Option<&str>,
+    allow_tombstone_load_bearing: bool,
+) -> Result<String, DomainError> {
+    // The audited tombstone opens its own transaction and reuses this fence.
+    // Hold it from the authorization read through that transaction's commit so
+    // a new provenance citation cannot bypass the load-bearing guard.
+    connection.with_write_owner_fence(
+        |error| DomainError::Storage {
+            message: format!("Failed to acquire memory tombstone writer fence: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        },
+        || {
+            validate_curate_tombstone_target(
+                connection,
+                workspace_id,
+                memory_id,
+                allow_tombstone_load_bearing,
+            )?;
+            connection
+                .tombstone_memory_audited(memory_id, workspace_id, actor, reason)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to tombstone memory: {error}"),
+                    repair: Some("ee doctor".to_owned()),
+                })?
+                .ok_or_else(|| DomainError::Storage {
+                    message: format!("Failed to tombstone memory {memory_id}: no row updated."),
+                    repair: Some("ee memory list --json".to_owned()),
+                })
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10828,6 +10864,10 @@ struct ApplyDecision {
     derived_create: Option<ApplyDerivedMemoryInput>,
     consolidate_absorb: Option<ApplyConsolidateAbsorbInput>,
     tombstone_memory: bool,
+    allow_tombstone_load_bearing: bool,
+    /// The full row also captures scores and metadata consumed by rule and
+    /// procedure creation but omitted from the public before/after preview.
+    target_snapshot: Option<StoredMemory>,
     target_before: Option<CurateApplyMemoryState>,
     target_after: Option<CurateApplyMemoryState>,
     next_action: String,
@@ -12238,6 +12278,8 @@ fn evaluate_candidate_for_apply(
                 derived_create: None,
                 consolidate_absorb: None,
                 tombstone_memory: false,
+                allow_tombstone_load_bearing: false,
+                target_snapshot: target_memory.cloned(),
                 target_before: target_before.clone(),
                 target_after: target_before,
                 next_action: "no action required".to_owned(),
@@ -12799,6 +12841,8 @@ fn evaluate_candidate_for_apply(
         derived_create: None,
         consolidate_absorb,
         tombstone_memory,
+        allow_tombstone_load_bearing: false,
+        target_snapshot: Some(target_memory.clone()),
         target_before,
         target_after: Some(target_after),
         next_action: "no action required".to_owned(),
@@ -13140,6 +13184,8 @@ fn evaluate_create_derived_candidate_for_apply(
         }),
         consolidate_absorb: None,
         tombstone_memory: false,
+        allow_tombstone_load_bearing: false,
+        target_snapshot: None,
         target_before: None,
         target_after: None,
         next_action: "no action required".to_owned(),
@@ -13190,6 +13236,8 @@ fn replay_create_derived_candidate_application(
                 derived_create: None,
                 consolidate_absorb: None,
                 tombstone_memory: false,
+                allow_tombstone_load_bearing: false,
+                target_snapshot: None,
                 target_before: None,
                 target_after: None,
                 next_action: "no action required".to_owned(),
@@ -14315,6 +14363,8 @@ fn blocked_apply(
         derived_create: None,
         consolidate_absorb: None,
         tombstone_memory: false,
+        allow_tombstone_load_bearing: false,
+        target_snapshot: None,
         target_before: target_before.clone(),
         target_after: target_before,
         next_action,
@@ -14778,6 +14828,8 @@ fn evaluate_link_candidate_for_apply(
                 derived_create: None,
                 consolidate_absorb: None,
                 tombstone_memory: false,
+                allow_tombstone_load_bearing: false,
+                target_snapshot: None,
                 target_before: None,
                 target_after: None,
                 next_action: "no action required".to_owned(),
@@ -14989,6 +15041,8 @@ fn evaluate_link_candidate_for_apply(
         derived_create: None,
         consolidate_absorb: None,
         tombstone_memory: false,
+        allow_tombstone_load_bearing: false,
+        target_snapshot: None,
         target_before: None,
         target_after: None,
         next_action: format!(
@@ -15432,6 +15486,18 @@ fn persist_candidate_application_inner(
         );
     }
 
+    if !matches!(
+        CandidateType::from_str(&stored.candidate_type),
+        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview)
+    ) {
+        revalidate_generic_candidate_application_in_transaction(
+            connection,
+            workspace_id,
+            stored,
+            decision,
+        )?;
+    }
+
     let target_memory_id = required_stored_target_memory_id(stored)?;
     // Link candidates create their typed link here (idempotent: an existing
     // identical link is a no-op) and fall through to the standard candidate
@@ -15769,6 +15835,75 @@ fn persist_candidate_application_inner(
             repair: Some("ee doctor".to_owned()),
         })?;
     Ok(audit_id)
+}
+
+/// Planning precedes the writer fence. Keep its generated rule/procedure IDs,
+/// but authorize the prepared mutation against the live rows and clock while
+/// the enclosing apply transaction excludes interleaved writers.
+fn revalidate_generic_candidate_application_in_transaction(
+    connection: &DbConnection,
+    workspace_id: &str,
+    stored: &StoredCurationCandidate,
+    decision: &ApplyDecision,
+) -> Result<(), DomainError> {
+    let stale = |reason: &str| DomainError::Usage {
+        message: format!(
+            "Curation candidate {} is no longer applicable: {reason}; apply rolled back with no mutation.",
+            stored.id
+        ),
+        repair: Some(format!("ee curate show {} --json", stored.id)),
+    };
+    let current = connection
+        .get_curation_candidate(workspace_id, &stored.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to recheck curation candidate: {error}"),
+            repair: Some(format!("ee curate show {} --json", stored.id)),
+        })?;
+    if current.as_ref() != Some(stored) {
+        return Err(stale("candidate changed during preparation"));
+    }
+    if stored.status != CandidateStatus::Approved.as_str() {
+        return Err(stale("candidate is no longer approved"));
+    }
+
+    let target_memory_id = required_stored_target_memory_id(stored)?;
+    let target = connection
+        .get_memory(target_memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to recheck curation target memory: {error}"),
+            repair: Some(format!("ee memory show {target_memory_id} --json")),
+        })?;
+    let mut target_errors = Vec::new();
+    validate_target_memory(stored, target.as_ref(), &mut target_errors);
+    if let Some(issue) = target_errors.first() {
+        return Err(stale(&issue.message));
+    }
+    if target.as_ref() != decision.target_snapshot.as_ref() {
+        return Err(stale("target memory changed during preparation"));
+    }
+    if decision.tombstone_memory
+        && !decision.allow_tombstone_load_bearing
+        && let Some(protection) =
+            load_bearing_tombstone_protection(connection, workspace_id, target_memory_id)?
+    {
+        let issue = load_bearing_tombstone_issue(
+            target_memory_id,
+            &protection,
+            "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
+        );
+        return Err(DomainError::Usage {
+            message: issue.message,
+            repair: Some(issue.repair),
+        });
+    }
+    if let Some(expires_at) = stored.ttl_expires_at.as_deref() {
+        match timestamp_has_expired(expires_at, &Utc::now().to_rfc3339()) {
+            Ok(true) => return Err(stale("candidate TTL expired during preparation")),
+            Ok(false) => {}
+            Err(_) => return Err(stale("candidate TTL is invalid")),
+        }
+    }
+    Ok(())
 }
 
 /// Persist a consolidate-absorb apply inside the caller's transaction:
@@ -28821,6 +28956,347 @@ mod tests {
             },
         )?;
         Ok(connection)
+    }
+
+    #[test]
+    fn generic_candidate_apply_rechecks_prepared_rows_and_expiry_before_writing() -> TestResult {
+        for (interleave, candidate_type, expected_refusal) in [
+            ("candidate_changed", "supersede", "candidate changed"),
+            ("target_content_changed", "promote", "target memory changed"),
+            ("target_utility_changed", "rule", "target memory changed"),
+            ("target_tombstoned", "procedure", "is tombstoned"),
+            ("expired_during_wait", "supersede", "TTL expired"),
+        ] {
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let database = dir.path().join("ee.db");
+            let workspace_id = test_workspace_id(dir.path());
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D21)).to_string();
+            let candidate_id = curate_id(0x7D22);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                candidate_type,
+                Some("approved"),
+                (candidate_type != "promote")
+                    .then_some("Verify the signed release artifact before deployment."),
+            )?;
+            // A historical planning clock makes expiry deterministic while
+            // leaving the candidate byte-identical between planning and apply.
+            let planned_clock = chrono::Utc::now() - chrono::Duration::days(2);
+            let planned_at = planned_clock.to_rfc3339();
+            if interleave == "expired_during_wait" {
+                let expires_at = (planned_clock + chrono::Duration::days(1)).to_rfc3339();
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE curation_candidates SET ttl_expires_at = '{expires_at}' WHERE id = '{candidate_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("candidate missing before preparation")?;
+            let target = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("target missing before preparation")?;
+            let decision = super::evaluate_candidate_for_apply(
+                &stored,
+                Some(&target),
+                &super::ConsolidateAbsorbResolution::LegacyUpdate,
+                &planned_at,
+            );
+            assert!(decision.should_persist, "{interleave}: {decision:?}");
+            assert!(decision.application.errors.is_empty());
+            match interleave {
+                "candidate_changed" => connection
+                    .execute_raw(&format!(
+                        "UPDATE curation_candidates SET proposed_content = 'Different approved instructions.' WHERE id = '{candidate_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?,
+                "target_content_changed" => {
+                    assert!(
+                        connection
+                            .apply_memory_curation_update(
+                                &memory_id,
+                                &crate::db::ApplyMemoryCurationInput {
+                                    workspace_id: workspace_id.clone(),
+                                    content: "Keep the newer approved release instructions.".to_owned(),
+                                    confidence: target.confidence,
+                                    trust_class: target.trust_class.clone(),
+                                },
+                            )
+                            .map_err(|error| error.to_string())?
+                    );
+                }
+                "target_utility_changed" => {
+                    assert!(
+                        connection
+                            .apply_memory_score_update_audited(
+                                &memory_id,
+                                &crate::db::ApplyMemoryScoreUpdateInput {
+                                    workspace_id: workspace_id.clone(),
+                                    confidence: target.confidence,
+                                    utility: 0.95,
+                                    importance: target.importance,
+                                    updated_at: chrono::Utc::now().to_rfc3339(),
+                                    actor: Some("interleaved-maintenance".to_owned()),
+                                    details: "{}".to_owned(),
+                                    feedback_event_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                    );
+                }
+                "target_tombstoned" => {
+                    assert!(
+                        connection
+                            .tombstone_memory_audited(
+                                &memory_id,
+                                &workspace_id,
+                                Some("interleaved-tombstone"),
+                                None,
+                            )
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                    );
+                }
+                "expired_during_wait" => {}
+                _ => return Err("unknown apply interleaving".to_owned()),
+            }
+            let memory_before = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?;
+            let candidate_before = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?;
+            let jobs_before = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            let audits_before = connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?;
+
+            let error = super::persist_candidate_application(
+                &connection,
+                &workspace_id,
+                &stored,
+                &decision,
+                None,
+                &planned_at,
+                "generic-apply-revalidation-test",
+            )
+            .expect_err("stale preparation must not authorize a curation mutation");
+            assert!(
+                error.message().contains(expected_refusal),
+                "{interleave}: {}",
+                error.message()
+            );
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?,
+                memory_before,
+            );
+            assert_eq!(
+                connection
+                    .get_curation_candidate(&workspace_id, &candidate_id)
+                    .map_err(|error| error.to_string())?,
+                candidate_before,
+            );
+            assert_eq!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                jobs_before,
+                "{interleave}: preserve any interleaved writer's jobs without enqueueing ours",
+            );
+            assert_eq!(
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                audits_before,
+            );
+            assert!(
+                connection
+                    .list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_procedure_records(&workspace_id, None, 10)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_writes_recheck_new_load_bearing_citations_before_commit() -> TestResult {
+        for via_candidate in [true, false] {
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            fs::create_dir(dir.path().join(".ee")).map_err(|error| error.to_string())?;
+            let database = dir.path().join("ee.db");
+            let workspace_id = test_workspace_id(dir.path());
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D31)).to_string();
+            let candidate_id = curate_id(0x7D32);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                "tombstone",
+                Some("approved"),
+                None,
+            )?;
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("tombstone candidate missing")?;
+            let target = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("tombstone target missing")?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let decision = super::evaluate_candidate_for_apply(
+                &stored,
+                Some(&target),
+                &super::ConsolidateAbsorbResolution::LegacyUpdate,
+                &now,
+            );
+            assert!(decision.should_persist);
+            super::validate_curate_tombstone_target(&connection, &workspace_id, &memory_id, false)
+                .map_err(|error| error.message())?;
+            // The target row does not change. Its new provenance citation is
+            // enough to invalidate either route's earlier authorization.
+            let rule_id = RuleId::from_uuid(uuid::Uuid::from_u128(0x7D33)).to_string();
+            connection
+                .insert_procedural_rule(
+                    &rule_id,
+                    &CreateProceduralRuleInput {
+                        workspace_id: workspace_id.clone(),
+                        content: "Verify the signed release artifact before deployment.".to_owned(),
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        trust_class: "human_explicit".to_owned(),
+                        scope: "workspace".to_owned(),
+                        scope_pattern: None,
+                        maturity: "validated".to_owned(),
+                        protected: false,
+                        source_memory_ids: vec![memory_id.clone()],
+                        tags: Vec::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let persist = |allow_tombstone_load_bearing| {
+                if via_candidate {
+                    let mut planned = decision.clone();
+                    planned.allow_tombstone_load_bearing = allow_tombstone_load_bearing;
+                    super::persist_candidate_application(
+                        &connection,
+                        &workspace_id,
+                        &stored,
+                        &planned,
+                        None,
+                        &now,
+                        "tombstone-revalidation-test",
+                    )
+                } else {
+                    super::persist_curate_tombstone(
+                        &connection,
+                        &workspace_id,
+                        &memory_id,
+                        Some("tombstone-revalidation-test"),
+                        None,
+                        allow_tombstone_load_bearing,
+                    )
+                }
+            };
+            let error = persist(false).expect_err("new citation must require explicit override");
+            assert!(
+                error.message().contains("load-bearing"),
+                "{}",
+                error.message()
+            );
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?,
+                Some(target),
+            );
+            assert_eq!(
+                connection
+                    .get_curation_candidate(&workspace_id, &candidate_id)
+                    .map_err(|error| error.to_string())?,
+                Some(stored.clone()),
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+
+            persist(true).map_err(|error| error.message())?;
+            assert!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("target missing after override")?
+                    .tombstoned_at
+                    .is_some()
+            );
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            if via_candidate {
+                let replay = apply_curation_candidate(&super::CurateApplyOptions {
+                    workspace_path: dir.path(),
+                    database_path: Some(&database),
+                    candidate_id: &candidate_id,
+                    actor: Some("tombstone-revalidation-test"),
+                    dry_run: false,
+                    allow_tombstone_load_bearing: true,
+                })
+                .map_err(|error| error.message())?;
+                assert_eq!(replay.application.status, "already_applied");
+                assert!(!replay.durable_mutation);
+            } else {
+                let replay = persist(true).expect_err("direct tombstone cannot run twice");
+                assert!(replay.message().contains("already tombstoned"));
+            }
+            let replay_jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(replay_jobs.len(), 1);
+            assert_eq!(replay_jobs[0].id, jobs[0].id);
+            let action = if via_candidate {
+                audit_actions::CURATION_CANDIDATE_APPLY
+            } else {
+                audit_actions::MEMORY_TOMBSTONE
+            };
+            assert_eq!(
+                connection
+                    .list_audit_by_action(action, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                1
+            );
+        }
+        Ok(())
     }
 
     #[test]
