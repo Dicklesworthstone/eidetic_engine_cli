@@ -10069,10 +10069,10 @@ mod tests {
             assert_eq!(result["success"], true, "{result}");
             let pack = &result["data"]["pack"];
             assert!(!pack["items"].as_array().expect("selected items").is_empty());
-            assert_eq!(pack["snapshotIdentity"]["version"], 5);
+            assert_eq!(pack["snapshotIdentity"]["version"], 6);
             assert_eq!(
                 pack["snapshotIdentity"]["inputSchema"],
-                "ee.pack.hash_input.v5"
+                "ee.pack.hash_input.v6"
             );
             let hash = pack["hash"].as_str().expect("finalized pack hash");
             let text = pack["text"].as_str().expect("delivered canonical text");
@@ -10097,7 +10097,7 @@ mod tests {
             );
             let mut hasher = blake3::Hasher::new();
             for (label, value) in [
-                ("schema", "ee.pack.hash_input.v5"),
+                ("schema", "ee.pack.hash_input.v6"),
                 ("component", "rendered_text"),
                 ("text", normalized.as_str()),
             ] {

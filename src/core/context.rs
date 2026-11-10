@@ -166,9 +166,9 @@ const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(debug_assertions)]
 const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v10: bind the executed quality policy and scored candidates after retrieval,
-/// and miss responses written before finalized pack-hash input v5 (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V10: &str = "ee.pack.l2_cache_key.v10";
+/// v11: bind the executed quality/selection policies and scored candidates,
+/// and miss responses written before pack-hash input v6 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V11: &str = "ee.pack.l2_cache_key.v11";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4: &str = "ee.pack.l2_context_response.v4";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -3251,6 +3251,7 @@ async fn run_context_pack_attempt(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_calibration_identity = None;
+    let mut search_fusion_weights = None;
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
         search_preloaded_memories = handoff.revalidate_with_feedback(
             &search_options,
@@ -3258,6 +3259,7 @@ async fn run_context_pack_attempt(
             validated_handoff_feedback.as_ref(),
         );
         request.quality_scoring_policy = Some(handoff.quality_scoring_policy.clone());
+        search_fusion_weights = Some(handoff.fusion_weights);
         search_calibration_identity = validated_handoff_feedback
             .as_ref()
             .map(|snapshot| snapshot.calibration_input_identity.clone());
@@ -3287,6 +3289,7 @@ async fn run_context_pack_attempt(
         {
             Ok(context_search) => {
                 request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
+                search_fusion_weights = Some(context_search.fusion_weights);
                 search_calibration_identity = context_search.calibration_input_identity;
                 search_preloaded_memories = context_search.preloaded_memories;
                 trace.record_search_subspans(context_search.performance);
@@ -3350,6 +3353,7 @@ async fn run_context_pack_attempt(
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         // This fallback does not carry the complete calibration/feedback proof.
         search_calibration_identity = None;
+        search_fusion_weights = None;
         let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
             &search_options,
@@ -3511,7 +3515,29 @@ async fn run_context_pack_attempt(
     // Quality policy is captured by actual retrieval, including empty results
     // and daemon handoffs. Only now can a cache key bind the executed config.
     // L2 reuses assembly/rendering; retrieval and source admission still run.
-    let l2_cache_context = if l2_cache_eligible {
+    // Capture graph/admission/LOD controls once and reuse those exact values
+    // below; equal selected items do not imply equal selection policies.
+    let selection_settings = ContextSelectionSettings::resolve(options);
+    request.effective_config_policy = Some(context_effective_config_policy(
+        options,
+        &effective_filters,
+        &selection_settings,
+        &search_report,
+        search_fusion_weights,
+        output_redaction_enabled,
+    ));
+    // A config file may disappear after a captured read failure. Later path
+    // absence cannot authorize replay that would suppress its pending diagnostic.
+    let selection_config_available = [
+        &selection_settings.memory_tier_admission,
+        &selection_settings.ppr_enabled,
+        &selection_settings.hits_profiles,
+        &selection_settings.proximity,
+    ]
+    .iter()
+    .all(|setting| setting.is_ok())
+        && selection_settings.ppr_weight_error.is_none();
+    let l2_cache_context = if l2_cache_eligible && selection_config_available {
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         let l2_context = context_pack_l2_prepare(
             options,
@@ -3860,7 +3886,7 @@ async fn run_context_pack_attempt(
     }
 
     let tier_admission_start = Instant::now();
-    match context_memory_tier_admission_enabled(&options.workspace_path) {
+    match &selection_settings.memory_tier_admission {
         Ok(true) => {
             let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
             let tier_metrics = apply_memory_tier_candidate_admission(
@@ -3877,7 +3903,7 @@ async fn run_context_pack_attempt(
             &mut degraded,
             "context_config_unavailable",
             ContextResponseSeverity::Medium,
-            message,
+            message.clone(),
             Some("Fix or remove .ee/config.toml.".to_string()),
         ),
     }
@@ -3923,29 +3949,22 @@ async fn run_context_pack_attempt(
 
     let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let configured_ppr_weight = if options.ppr_weight.is_some() {
-        None
-    } else {
-        match configured_context_ppr_weight(&options.workspace_path) {
-            Ok(weight) => weight,
-            Err(message) => {
-                push_degradation(
-                    &mut degraded,
-                    "context_config_unavailable",
-                    ContextResponseSeverity::Medium,
-                    message,
-                    Some("Fix or remove .ee/config.toml.".to_string()),
-                );
-                None
-            }
-        }
-    };
+    if let Some(message) = &selection_settings.ppr_weight_error {
+        push_degradation(
+            &mut degraded,
+            "context_config_unavailable",
+            ContextResponseSeverity::Medium,
+            message.clone(),
+            Some("Fix or remove .ee/config.toml.".to_string()),
+        );
+    }
     let ppr_metrics = apply_personalized_pagerank_rerank(
         read_connection,
         &options.workspace_path,
         &search_report,
         &mut candidates,
-        effective_context_ppr_weight(options.ppr_weight, configured_ppr_weight),
+        selection_settings.ppr_weight,
+        &selection_settings.ppr_enabled,
         &mut degraded,
     );
     trace.record_elapsed("pprRerank", ppr_rerank_start);
@@ -3958,6 +3977,7 @@ async fn run_context_pack_attempt(
         &options.workspace_path,
         request.profile,
         &mut candidates,
+        &selection_settings.hits_profiles,
         &mut degraded,
     );
     candidate_metrics.graph_boosted_candidates = candidate_metrics
@@ -3969,6 +3989,7 @@ async fn run_context_pack_attempt(
         &options.workspace_path,
         &search_report,
         &mut candidates,
+        &selection_settings.proximity,
         &mut degraded,
     );
     candidate_metrics.graph_boosted_candidates = candidate_metrics
@@ -4188,20 +4209,7 @@ async fn run_context_pack_attempt(
             include_anti_pattern_first: true,
             relevance_floor: options.relevance_floor,
             output_redaction_enabled,
-            // bd-1n0np.5.2: apply the [pack.lod_*] tier-ratio config override when
-            // all three basis points are configured (and fit u16); otherwise keep
-            // the in-code default so existing pack goldens stay byte-identical.
-            // bd-1n0np.5.8: `pack --no-lod` forces `None`, the legacy flat
-            // selector that assembles every candidate at the `Full` tier
-            // (byte-identical to pre-LOD packs); it overrides any config.
-            lod_budget_shares: if options.no_lod {
-                None
-            } else {
-                match context_lod_budget_shares(&options.workspace_path) {
-                    Ok(Some(shares)) => Some(shares),
-                    _ => crate::pack::PackAssemblyOptions::default().lod_budget_shares,
-                }
-            },
+            lod_budget_shares: selection_settings.lod_budget_shares,
             // bd-1prrl.7.3: arena mode is plumbed through the
             // `PackAssemblyOptions` surface. Context orchestration
             // selects `Disabled` for now — the parity-gated swap to
@@ -9164,13 +9172,13 @@ fn validate_cached_context_finalization(
         || identity
             .and_then(|value| value.get("inputSchema"))
             .and_then(serde_json::Value::as_str)
-            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V5)
+            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V6)
         || identity
             .and_then(|value| value.get("digest"))
             .and_then(serde_json::Value::as_str)
             != hash
     {
-        return Err("L2 pack cache responseJson is missing a finalized v5 identity".to_owned());
+        return Err("L2 pack cache responseJson is missing a finalized v6 identity".to_owned());
     }
     match (
         output_options.include_rendered_text,
@@ -9187,7 +9195,7 @@ fn validate_cached_context_finalization(
     }
     let components = identity
         .and_then(|value| value.get("components"))
-        .ok_or_else(|| "L2 pack cache v5 identity is missing component digests".to_owned())?;
+        .ok_or_else(|| "L2 pack cache v6 identity is missing component digests".to_owned())?;
     let read_digest = |name| -> Result<String, String> {
         components
             .get(name)
@@ -9201,7 +9209,7 @@ fn validate_cached_context_finalization(
                 })
             })
             .map(str::to_owned)
-            .ok_or_else(|| "L2 pack cache v5 identity has an invalid component digest".to_owned())
+            .ok_or_else(|| "L2 pack cache v6 identity has an invalid component digest".to_owned())
     };
     let digests = crate::pack::PackHashComponentDigests {
         request: read_digest("request")?,
@@ -9212,10 +9220,11 @@ fn validate_cached_context_finalization(
         degraded: read_digest("degraded")?,
         coordination: read_digest("coordination")?,
         rendered_text: read_digest("renderedText")?,
+        effective_config: read_digest("effectiveConfig")?,
     };
     let composite = compute_pack_hash_composite(&digests, output_options.include_skipped);
     if Some(composite.as_str()) != hash {
-        return Err("L2 pack cache v5 composite does not match its component digests".to_owned());
+        return Err("L2 pack cache v6 composite does not match its component digests".to_owned());
     }
     // `composite` equals the stored hash here, so it names the footer.
     let footer = crate::pack::context_markdown_identity_footer(
@@ -9495,7 +9504,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V10.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V11.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -9530,6 +9539,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     if let Some(identity) = &input.request.bead_affinity_identity {
         hash_labeled_bytes(&mut hasher, "bead_affinity", identity.as_bytes());
     }
+    hash_labeled_bytes(
+        &mut hasher,
+        "effective_config",
+        compute_pack_effective_config_digest(&input.request).as_bytes(),
+    );
     hash_labeled_bytes(
         &mut hasher,
         "context_profile",
@@ -9763,7 +9777,7 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     components.composite_hash
 }
 
-/// Freeze the complete canonical prompt and its v5 identity together. All
+/// Freeze the complete canonical prompt and its v6 identity together. All
 /// canonical attachments must be present before this boundary. Later delivery
 /// notices may extend the envelope but cannot change the persisted prompt.
 fn finalize_context_response(
@@ -9828,7 +9842,7 @@ fn compute_pack_hash_components(
     )
 }
 
-/// The v5 pack hash (ADR 0087 §4, §7, §8).
+/// The v6 pack hash (ADR 0087 §4, §7, §8).
 ///
 /// Each component is its own blake3 hasher, opened with the input schema tag
 /// and the component name, over labeled, length-prefixed fields only
@@ -10021,6 +10035,7 @@ fn compute_context_pack_hash_components(
         degraded: finalize_blake3(degraded_hasher),
         coordination: finalize_blake3(coordination_hasher),
         rendered_text: finalize_blake3(rendered_text_hasher),
+        effective_config: compute_pack_effective_config_digest(request),
     };
 
     PackHashComponents {
@@ -10038,7 +10053,7 @@ fn compute_pack_hash_composite(
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V6.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
     hash_labeled_bytes(
@@ -10070,11 +10085,16 @@ fn compute_pack_hash_composite(
         "rendered_text",
         digests.rendered_text.as_bytes(),
     );
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "effective_config",
+        digests.effective_config.as_bytes(),
+    );
 
     finalize_blake3(composite_hasher)
 }
 
-/// The degraded set the v5 pack hash binds (ADR 0087 §4): non-canonical
+/// The degraded set the pack hash binds (ADR 0087 §4): non-canonical
 /// telemetry codes are dropped, the rest sorted by (code, severity, message,
 /// repair) with exact duplicates removed. Emission order and repetition are
 /// presentation, and timing is telemetry, so neither can fork `pack.hash`,
@@ -10103,7 +10123,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V6.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
@@ -10128,6 +10148,389 @@ fn hash_labeled_optional_bytes(hasher: &mut blake3::Hasher, label: &str, value: 
     hash_labeled_bool(hasher, &format!("{label}.present"), value.is_some());
     if let Some(value) = value {
         hash_labeled_bytes(hasher, label, value);
+    }
+}
+
+/// S6: bind effective limits even when they happen to select the same items.
+/// Sections are an admission set, so spelling order and duplicates are inert.
+fn compute_pack_effective_config_digest(request: &ContextRequest) -> String {
+    let mut hasher = pack_hash_component_hasher("effective_config");
+    hash_labeled_u64(
+        &mut hasher,
+        "candidate_pool",
+        u64::from(request.candidate_pool),
+    );
+    hash_labeled_optional_u64(
+        &mut hasher,
+        "max_results",
+        request.max_results.map(u64::from),
+    );
+    hash_policy_string_set(
+        &mut hasher,
+        "sections",
+        request.sections.iter().map(|section| section.as_str()),
+    );
+    hash_labeled_optional_bytes(
+        &mut hasher,
+        "runtime_policy",
+        request
+            .effective_config_policy
+            .as_deref()
+            .map(str::as_bytes),
+    );
+    finalize_blake3(hasher)
+}
+
+/// Values are resolved once and reused by the actual selectors. Error text
+/// remains a degradation; it is never mistaken for a configuration value.
+#[derive(Clone, Debug)]
+struct ContextSelectionSettings {
+    memory_tier_admission: Result<bool, String>,
+    ppr_enabled: Result<bool, String>,
+    ppr_weight: f32,
+    ppr_weight_error: Option<String>,
+    hits_profiles: Result<bool, String>,
+    proximity: Result<bool, String>,
+    lod_budget_shares: Option<crate::pack::PackLodBudgetShares>,
+}
+
+impl ContextSelectionSettings {
+    fn resolve(options: &ContextPackOptions) -> Self {
+        let workspace = &options.workspace_path;
+        let configured_ppr = if options.ppr_weight.is_some() {
+            Ok(None)
+        } else {
+            configured_context_ppr_weight(workspace)
+        };
+        Self {
+            memory_tier_admission: context_memory_tier_admission_enabled(workspace),
+            ppr_enabled: context_ppr_feature_enabled(workspace),
+            ppr_weight: effective_context_ppr_weight(
+                options.ppr_weight,
+                configured_ppr.as_ref().ok().copied().flatten(),
+            ),
+            ppr_weight_error: configured_ppr.err(),
+            hits_profiles: context_hits_profiles_feature_enabled(workspace),
+            proximity: context_proximity_feature_enabled(workspace),
+            lod_budget_shares: if options.no_lod {
+                None
+            } else {
+                context_lod_budget_shares(workspace)
+                    .ok()
+                    .flatten()
+                    .or(crate::pack::PackAssemblyOptions::default().lod_budget_shares)
+            },
+        }
+    }
+}
+
+/// The runtime slice contains selection policy, never persistence paths,
+/// elapsed time, cache-hit state, diagnostics, or random audit/record IDs.
+/// Changing an input that selected no different items still changes S6.
+fn context_effective_config_policy(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+    settings: &ContextSelectionSettings,
+    search: &SearchReport,
+    fusion_weights: Option<crate::core::search::SearchFusionWeights>,
+    output_redaction_enabled: bool,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.effective_config.v1");
+    for (label, value) in [
+        ("speed", options.speed.as_str()),
+        ("source.requested", options.source_mode.as_str()),
+        ("source.applied", search.source_mode_applied.as_str()),
+        ("memory_scope", options.memory_scope.as_str()),
+        ("redaction.level", options.redaction_level.as_str()),
+        ("rerank.mode", search.rerank_configured_mode.as_str()),
+    ] {
+        hash_labeled_bytes(&mut hasher, label, value.as_bytes());
+    }
+    for (label, value) in [
+        ("source.strict", options.strict_source_mode),
+        ("scope.strict", options.strict_scope),
+        ("visibility.tombstoned", options.include_tombstoned),
+        (
+            "visibility.expired",
+            context_include_expired(options, filters),
+        ),
+        (
+            "visibility.future",
+            context_include_future(options, filters),
+        ),
+        ("visibility.stale", context_include_stale(options, filters)),
+        ("redaction.output_enabled", output_redaction_enabled),
+        ("sentinels.require_fresh", options.require_fresh_sentinels),
+        ("symbols.from_git", options.changed_symbols_from_git),
+        (
+            "memory_tier_admission",
+            matches!(settings.memory_tier_admission, Ok(true)),
+        ),
+        (
+            "graph.ppr_enabled",
+            matches!(settings.ppr_enabled, Ok(true)),
+        ),
+        (
+            "graph.hits_profiles",
+            matches!(settings.hits_profiles, Ok(true)),
+        ),
+        ("graph.proximity", matches!(settings.proximity, Ok(true))),
+    ] {
+        hash_labeled_bool(&mut hasher, label, value);
+    }
+    // None is the selector's automatic policy, not an explicit zero floor.
+    hash_labeled_bool(
+        &mut hasher,
+        "relevance_floor.explicit",
+        options.relevance_floor.is_some(),
+    );
+    if let Some(floor) = options.relevance_floor {
+        hash_policy_f32(&mut hasher, "relevance_floor", floor);
+    }
+    hash_policy_f32(
+        &mut hasher,
+        "graph.ppr_weight",
+        if matches!(settings.ppr_enabled, Ok(true)) {
+            settings.ppr_weight
+        } else {
+            0.0
+        },
+    );
+    if search.rerank_configured_mode == crate::config::SearchRerankMode::Auto {
+        hash_labeled_count(&mut hasher, "rerank.top_k", search.rerank_configured_top_k);
+    }
+    if search.source_mode_applied == SearchSourceMode::Hybrid {
+        hash_labeled_bool(&mut hasher, "fusion.available", fusion_weights.is_some());
+        if let Some(weights) = fusion_weights {
+            let (lexical, semantic) = weights.upstream_rrf_weights();
+            hash_labeled_bytes(
+                &mut hasher,
+                "fusion.lexical",
+                &lexical.to_bits().to_le_bytes(),
+            );
+            hash_labeled_bytes(
+                &mut hasher,
+                "fusion.semantic",
+                &semantic.to_bits().to_le_bytes(),
+            );
+        }
+    }
+    let symbols = options
+        .changed_symbols
+        .iter()
+        .filter_map(|symbol| normalize_symbol_selector(symbol))
+        .collect::<Vec<_>>();
+    hash_policy_string_set(&mut hasher, "symbols", symbols.iter().map(String::as_str));
+    hash_labeled_bool(
+        &mut hasher,
+        "pagination.enabled",
+        options.pagination.is_some(),
+    );
+    if let Some(pagination) = &options.pagination {
+        hash_labeled_u64(&mut hasher, "pagination.limit", u64::from(pagination.limit));
+        hash_labeled_u64(
+            &mut hasher,
+            "pagination.offset",
+            u64::from(pagination.offset),
+        );
+    }
+    hash_labeled_bool(
+        &mut hasher,
+        "coordination.enabled",
+        options.coordination_snapshot_path.is_some(),
+    );
+    if options.coordination_snapshot_path.is_some() {
+        hash_labeled_u64(
+            &mut hasher,
+            "coordination.stale_after_ms",
+            options.coordination_stale_after_ms,
+        );
+    }
+    hash_labeled_bool(
+        &mut hasher,
+        "lod.enabled",
+        settings.lod_budget_shares.is_some(),
+    );
+    if let Some(shares) = settings.lod_budget_shares {
+        let mut weights = [
+            shares.full_basis_points,
+            shares.truncated_preview_basis_points,
+            shares.link_only_basis_points,
+        ];
+        let divisor = weights.iter().copied().fold(0, |mut a, mut b| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        });
+        if divisor == 0 {
+            weights = [1, 0, 0];
+        } else {
+            weights.iter_mut().for_each(|weight| *weight /= divisor);
+        }
+        for (label, weight) in ["lod.full", "lod.preview", "lod.link"]
+            .into_iter()
+            .zip(weights)
+        {
+            hash_labeled_u64(&mut hasher, label, u64::from(weight));
+        }
+    }
+    hash_context_filter_policy(&mut hasher, filters);
+    finalize_blake3(hasher)
+}
+
+fn hash_policy_f32(hasher: &mut blake3::Hasher, label: &str, value: f32) {
+    // Preserve threshold precision; Q20.12 is for emitted scores, not controls.
+    let value = if value == 0.0 { 0.0 } else { value };
+    hash_labeled_bytes(hasher, label, &value.to_bits().to_le_bytes());
+}
+
+fn hash_policy_string_set<'a>(
+    hasher: &mut blake3::Hasher,
+    label: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) {
+    let values = values.into_iter().collect::<BTreeSet<_>>();
+    hash_labeled_count(hasher, &format!("{label}.count"), values.len());
+    for value in values {
+        hash_labeled_bytes(hasher, label, value.as_bytes());
+    }
+}
+
+fn hash_context_filter_policy(hasher: &mut blake3::Hasher, filters: &crate::models::QueryFilters) {
+    use crate::models::{FilterOperator, QueryTemporalValidityPosture};
+    // All metadata predicates are conjunctive. Their grouping/order is inert.
+    let mut predicates = BTreeSet::new();
+    for filter in &filters.filters {
+        for predicate in &filter.predicates {
+            let mut atom = blake3::Hasher::new();
+            hash_labeled_bytes(&mut atom, "field", filter.field.as_bytes());
+            let operator = match predicate.operator {
+                FilterOperator::Eq => "eq",
+                FilterOperator::Neq => "neq",
+                FilterOperator::In => "in",
+                FilterOperator::NotIn => "not_in",
+                FilterOperator::Gt => "gt",
+                FilterOperator::Gte => "gte",
+                FilterOperator::Lt => "lt",
+                FilterOperator::Lte => "lte",
+                FilterOperator::Exists => "exists",
+                FilterOperator::StartsWith => "starts_with",
+                FilterOperator::EndsWith => "ends_with",
+                FilterOperator::Contains => "contains",
+            };
+            hash_labeled_bytes(&mut atom, "operator", operator.as_bytes());
+            hash_filter_policy_value(&mut atom, &predicate.value);
+            predicates.insert(finalize_blake3(atom));
+        }
+    }
+    hash_policy_string_set(hasher, "filters", predicates.iter().map(String::as_str));
+    for (label, values) in [
+        ("tags.require", &filters.tags.require),
+        ("tags.require_any", &filters.tags.require_any),
+        ("tags.exclude", &filters.tags.exclude),
+        ("trust.exclude", &filters.trust.exclude_classes),
+        (
+            "redaction.allow_categories",
+            &filters.redaction.allow_categories,
+        ),
+    ] {
+        hash_policy_string_set(hasher, label, values.iter().map(String::as_str));
+    }
+    let min_trust = filters.trust.min_class.as_deref().map(|value| {
+        value
+            .parse::<crate::models::TrustClass>()
+            .map(|class| class.as_str().to_owned())
+            .unwrap_or_else(|_| "invalid".to_owned())
+    });
+    hash_labeled_optional_bytes(
+        hasher,
+        "trust.minimum",
+        min_trust.as_deref().map(str::as_bytes),
+    );
+    hash_labeled_optional_bytes(
+        hasher,
+        "trust.posture",
+        filters.trust.require_posture.as_deref().map(str::as_bytes),
+    );
+    hash_labeled_bool(
+        hasher,
+        "redaction.bypass",
+        filters.redaction.requests_bypass(),
+    );
+    for (label, value) in [
+        ("temporal.after", filters.temporal.after),
+        ("temporal.before", filters.temporal.before),
+        ("temporal.as_of", filters.temporal.as_of),
+    ] {
+        let value = value.map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+        hash_labeled_optional_bytes(hasher, label, value.as_deref().map(str::as_bytes));
+    }
+    let validity = match filters
+        .temporal
+        .validity
+        .as_ref()
+        .map(|value| value.posture)
+    {
+        Some(QueryTemporalValidityPosture::Strict) => "strict",
+        Some(QueryTemporalValidityPosture::Relaxed) => "relaxed",
+        Some(QueryTemporalValidityPosture::Ignore) | None => "ignore",
+    };
+    hash_labeled_bytes(hasher, "temporal.validity", validity.as_bytes());
+    // Effective lifecycle clock is already bound by referenceTime. Dormant
+    // graph options have no effect while graph expansion is disabled.
+    hash_labeled_bool(hasher, "graph.enabled", filters.graph.enabled);
+    if filters.graph.enabled {
+        hash_policy_string_set(
+            hasher,
+            "graph.seeds",
+            filters.graph.seed_memories.iter().map(String::as_str),
+        );
+        hash_policy_string_set(
+            hasher,
+            "graph.link_types",
+            filters.graph.link_types.iter().map(String::as_str),
+        );
+        hash_labeled_bytes(
+            hasher,
+            "graph.traversal",
+            filters.graph.traversal.as_str().as_bytes(),
+        );
+        hash_labeled_u64(hasher, "graph.max_hops", u64::from(filters.graph.max_hops));
+        hash_labeled_bool(
+            hasher,
+            "graph.include_orphans",
+            filters.graph.include_orphans,
+        );
+    }
+}
+
+fn hash_filter_policy_value(hasher: &mut blake3::Hasher, value: &crate::models::FilterValue) {
+    use crate::models::FilterValue;
+    match value {
+        FilterValue::String(value) => hash_labeled_bytes(hasher, "string", value.as_bytes()),
+        FilterValue::Number(value) => {
+            let value = if *value == 0.0 { 0.0 } else { *value };
+            hash_labeled_bytes(hasher, "f64", &value.to_bits().to_le_bytes());
+        }
+        FilterValue::SignedInteger(value) => {
+            hash_labeled_bytes(hasher, "i64", &value.to_le_bytes())
+        }
+        FilterValue::UnsignedInteger(value) => hash_labeled_u64(hasher, "u64", *value),
+        FilterValue::Bool(value) => hash_labeled_bool(hasher, "bool", *value),
+        FilterValue::Null => hash_labeled_bytes(hasher, "null", &[]),
+        FilterValue::List(values) => {
+            let digests = values
+                .iter()
+                .map(|value| {
+                    let mut atom = blake3::Hasher::new();
+                    hash_filter_policy_value(&mut atom, value);
+                    finalize_blake3(atom)
+                })
+                .collect::<BTreeSet<_>>();
+            hash_policy_string_set(hasher, "list", digests.iter().map(String::as_str));
+        }
     }
 }
 
@@ -10535,6 +10938,10 @@ fn log_pack_hash_components(components: &PackHashComponents) {
         .with_field(
             "rendered_text_hash",
             serde_json::Value::String(components.digests.rendered_text.clone()),
+        )
+        .with_field(
+            "effective_config_hash",
+            serde_json::Value::String(components.digests.effective_config.clone()),
         )
         .with_field(
             "composite_hash",
@@ -11217,6 +11624,7 @@ fn apply_personalized_pagerank_rerank(
     search_report: &SearchReport,
     candidates: &mut [PackCandidate],
     ppr_weight: f32,
+    feature_enabled: &Result<bool, String>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PersonalizedPageRankRerankMetrics {
     let ppr_weight = if ppr_weight.is_nan() {
@@ -11227,7 +11635,7 @@ fn apply_personalized_pagerank_rerank(
     if candidates.is_empty() || ppr_weight == 0.0 {
         return PersonalizedPageRankRerankMetrics::default();
     }
-    match context_ppr_feature_enabled(workspace_path) {
+    match feature_enabled {
         Ok(true) => {}
         Ok(false) => {
             push_ppr_feature_disabled_degradation(degraded);
@@ -11238,7 +11646,7 @@ fn apply_personalized_pagerank_rerank(
                 degraded,
                 "context_config_unavailable",
                 ContextResponseSeverity::Medium,
-                message,
+                message.clone(),
                 Some("Fix or remove .ee/config.toml.".to_string()),
             );
             return PersonalizedPageRankRerankMetrics::default();
@@ -11869,6 +12277,7 @@ fn apply_context_profile_hits_boost(
     workspace_path: &Path,
     profile: ContextPackProfile,
     candidates: &mut [PackCandidate],
+    feature_enabled: &Result<bool, String>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> ContextProfileHitsBoostMetrics {
     let weights = profile.hits_boost_weights();
@@ -11876,7 +12285,7 @@ fn apply_context_profile_hits_boost(
     if candidates.is_empty() || !total_weight.is_finite() || total_weight <= 0.0 {
         return ContextProfileHitsBoostMetrics::default();
     }
-    match context_hits_profiles_feature_enabled(workspace_path) {
+    match feature_enabled {
         Ok(true) => {}
         Ok(false) => {
             push_hits_profiles_feature_disabled_degradation(degraded);
@@ -11887,7 +12296,7 @@ fn apply_context_profile_hits_boost(
                 degraded,
                 "context_config_unavailable",
                 ContextResponseSeverity::Medium,
-                message,
+                message.clone(),
                 Some("Fix or remove .ee/config.toml.".to_string()),
             );
             return ContextProfileHitsBoostMetrics::default();
@@ -12031,12 +12440,13 @@ fn apply_proximity_to_seed_scores(
     workspace_path: &Path,
     search_report: &SearchReport,
     candidates: &mut [PackCandidate],
+    feature_enabled: &Result<bool, String>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> ProximityToSeedMetrics {
     if candidates.is_empty() {
         return ProximityToSeedMetrics::default();
     }
-    match context_proximity_feature_enabled(workspace_path) {
+    match feature_enabled {
         Ok(true) => {}
         Ok(false) => {
             push_proximity_feature_disabled_degradation(degraded);
@@ -12047,7 +12457,7 @@ fn apply_proximity_to_seed_scores(
                 degraded,
                 "context_config_unavailable",
                 ContextResponseSeverity::Medium,
-                message,
+                message.clone(),
                 Some("Fix or remove .ee/config.toml.".to_string()),
             );
             return ProximityToSeedMetrics::default();

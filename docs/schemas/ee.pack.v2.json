@@ -77,7 +77,7 @@
             "query": { "type": "string" },
             "text": {
               "type": "string",
-              "description": "Canonical rendered pack frozen with its v5 identity before persistence (ADR 0087). Includes the finalized backend and requested pack DNA. The rendered-text digest normalizes only the footer's own hash value. Volatile timing and later delivery notices remain in the envelope and do not change this text, so its degradation count can differ from advisoryBanner.degradationCount."
+              "description": "Canonical rendered pack frozen with its v6 identity before persistence (ADR 0087). Includes the finalized backend and requested pack DNA. The rendered-text digest normalizes only the footer's own hash value. Volatile timing and later delivery notices remain in the envelope and do not change this text, so its degradation count can differ from advisoryBanner.degradationCount."
             },
             "meta": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
             "slo": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
@@ -94,15 +94,15 @@
                 "componentDigestsAvailableLocally"
               ],
               "properties": {
-                "version": { "type": "integer", "const": 5 },
-                "inputSchema": { "type": "string", "const": "ee.pack.hash_input.v5" },
+                "version": { "type": "integer", "const": 6 },
+                "inputSchema": { "type": "string", "const": "ee.pack.hash_input.v6" },
                 "digest": { "type": "string", "minLength": 1 },
                 "numericDomain": { "type": "string", "const": "q20.12" },
                 "componentDigestsAvailableLocally": { "type": "boolean" },
                 "components": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["request", "referenceTime", "qualityScoring", "items", "omitted", "degraded", "coordination", "renderedText"],
+                  "required": ["request", "referenceTime", "qualityScoring", "items", "omitted", "degraded", "coordination", "renderedText", "effectiveConfig"],
                   "properties": {
                     "request": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
                     "referenceTime": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$", "description": "Digest of the effective explicit UTC millisecond reference time, or the wall-clock mode marker." },
@@ -111,7 +111,8 @@
                     "omitted": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
                     "degraded": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
                     "coordination": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
-                    "renderedText": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" }
+                    "renderedText": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" },
+                    "effectiveConfig": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$", "description": "Digest of effective capped selection limits, section set and execution-captured retrieval/assembly policy. Unordered sets and signed zero canonicalize; raw filters, paths and policy preimages are not emitted. Runtime policy is explicitly absent for direct pack builders." }
                   }
                 }
               }

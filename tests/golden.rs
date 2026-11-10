@@ -4830,17 +4830,17 @@ mod tests {
             .ok_or("pack golden must contain snapshot identity")?;
         if !canonical_digest(&hash)
             || identity.get("digest").and_then(serde_json::Value::as_str) != Some(hash.as_str())
-            || identity.get("version").and_then(serde_json::Value::as_u64) != Some(5)
+            || identity.get("version").and_then(serde_json::Value::as_u64) != Some(6)
             || identity
                 .get("inputSchema")
                 .and_then(serde_json::Value::as_str)
-                != Some("ee.pack.hash_input.v5")
+                != Some("ee.pack.hash_input.v6")
             || identity
                 .get("componentDigestsAvailableLocally")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
         {
-            return Err("pack golden must carry a matching canonical v5 identity".to_owned());
+            return Err("pack golden must carry a matching canonical v6 identity".to_owned());
         }
         let components = identity
             .get_mut("components")
@@ -4855,9 +4855,10 @@ mod tests {
             "degraded",
             "coordination",
             "renderedText",
+            "effectiveConfig",
         ];
         if components.len() != names.len() {
-            return Err("pack golden must contain exactly the declared v5 components".to_owned());
+            return Err("pack golden must contain exactly the declared v6 components".to_owned());
         }
         for (index, name) in names.into_iter().enumerate() {
             if !components
@@ -4871,7 +4872,7 @@ mod tests {
             }
             // These wire-shape goldens already normalize the pack hash and
             // footer. Normalize its opaque component values consistently, after
-            // validating the real values. The independent numerical v5 vector
+            // validating the real values. The independent numerical v6 vector
             // and delivered-text regressions retain exact identity coverage.
             components.insert(
                 name.to_owned(),

@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-24
-Updated: 2026-10-26 (pack-hash input v5, finalized renderer text)
+Updated: 2026-11-10 (pack-hash input v6, effective selection policy)
 Bead: bd-reality-core-convergence-1azkt.1
 Depends-on: ADR 0084 (hotset manifest), ADR 0085 (typed pack entity identity)
 
@@ -40,13 +40,19 @@ wall-clock marker; it does not bind a volatile per-run clock reading.
 
 v4 adds the quality policy now executed after authoritative search admission
 (`bd-6oqlx`). It binds the resolved active coefficients even when two policies
-select identical items. This owns the quality-scoring part of S6; the remaining
-retrieval and assembly settings listed below are still separate work.
+select identical items. This owns the quality-scoring part of S6.
 
 v5 closes `bd-pack-hash-shipped-text-8nafb`: the text component now uses the
 actual output renderer after backend, consensus/conflict analysis and requested
 Pack DNA are present. One finalization boundary freezes prompt text and identity
 before ledger persistence, baseline recording, audit and cache publication.
+
+v6 adds the remaining effective retrieval/assembly controls in S6
+(`bd-pack-identity-config-slice-188z4`). Two policies that happen to produce the
+same selected items and prompt now have distinct `effectiveConfig` digests.
+Equivalent sets/defaults share an identity; telemetry and audit IDs remain out
+of the policy. This is a contract change, not runtime closure evidence for that
+bead or the broader cross-host determinism work.
 
 ## Decision
 
@@ -125,13 +131,13 @@ The full target identity is S1–S10:
 | S9 | execution domain | target triple class, CPU feature class relevant to declared numeric paths, binary/toolchain digest, enabled features |
 | S10 | serialization versions | `ee.pack.v2`, hash input schema, canonical-hash construction |
 
-#### 2a. What v5 binds, literally
+#### 2a. What v6 binds, literally
 
-`pack.hash` under input schema `ee.pack.hash_input.v5` is a function of
+`pack.hash` under input schema `ee.pack.hash_input.v6` is a function of
 exactly these components and nothing else
 (`compute_context_pack_hash_components`, `src/core/context.rs`):
 
-| v5 component | Binds |
+| v6 component | Binds |
 |---|---|
 | `request` | query bytes (trimmed, no NFC), request profile, `budget.max_tokens`, output profile, resource profile, coverage/text/skipped/meta/verbose-meta output flags, non-affecting-degradation visibility, requested Pack DNA, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
 | `reference_time` | S7: `mode=explicit` and the effective UTC millisecond reference instant, or `mode=wall_clock` when no explicit clock was supplied |
@@ -141,28 +147,28 @@ exactly these components and nothing else
 | `degraded` | the degraded set at finalization: telemetry codes dropped, sorted by (code, severity, message, repair), exact duplicates removed; later delivery notices are excluded |
 | `coordination` | the coordination snapshot, when present |
 | `rendered_text` | exact finalized output-renderer markdown, including backend, consensus/conflict analysis and requested DNA, with only the typed terminal hash-footer value replaced by the declared placeholder (§1) |
+| `effective_config` | S6: effective capped candidate pool, optional result limit, section set, and the captured runtime policy described in §3a; direct builders explicitly bind runtime-policy absence |
 
 The composite is blake3 over the schema tag and the tagged component
 digests, in this order: `request`, `reference_time`, `quality_scoring`, `items`, `omitted` (only when skipped items
 are shown), `degraded`, `coordination`, `rendered_text` (always, including when
-JSON omits text). Equal composites therefore mean equal bound components, and a
+JSON omits text), `effective_config`. Equal composites therefore mean equal bound components, and a
 differing composite is localized by comparing the component digests.
 
-#### 2b. What v5 does not bind, and who owns it
+#### 2b. What v6 does not bind, and who owns it
 
-| Component | Status in v5 | Owning bead |
+| Component | Status in v6 | Owning bead |
 |---|---|---|
 | S1 store tiers / scope identity | not bound | `bd-pack-identity-tiers-vxx8l` |
 | S2 index manifest / entity-revision root | not bound | `bd-reality-core-convergence-1azkt.2` |
 | S3 retrieval subsystem identities (lexical cache, L2 candidate set, PPR/plan caches) | not bound | `bd-reality-core-convergence-1azkt.2` (lexical cache), `bd-reality-core-convergence-1azkt.3` (cache identity under concurrency) |
 | S4 model identity | backend label is bound through text; full model/provider/weight identity is not | `bd-reality-core-convergence-1azkt.2` |
-| S6 effective config slice (candidate pool, max results, sections, speed, source mode, filters, include-tombstoned/expired/future, relevance floor, seed) | not bound except through selected items | `bd-pack-identity-config-slice-188z4` |
 | S8 authorization / capability / agent | not bound | `bd-pack-identity-authz-ctr51` |
 | S8 trust / redaction / security policy epochs | per-item results bound, policy versions not | `bd-pack-identity-trust-epochs-b7cq9` |
 | S9 execution domain | not bound; see §3 | `bd-pack-identity-exec-domain-junoz` |
 | S5 tokenizer identity, Unicode normalization, locale, line endings | query hashed as trimmed bytes; nothing normalized; tokenizer not bound | `bd-pack-identity-unicode-gitmy` |
 | Selection thresholds/ties on Q20.12; one score domain for JSON | not done | `bd-reality-core-convergence-1azkt.11` |
-| Cross-process and cross-host determinism gates | not established by v5 | `bd-reality-core-convergence-1azkt.3` |
+| Cross-process and cross-host determinism gates | not established by v6 | `bd-reality-core-convergence-1azkt.3` |
 
 ### 2c. Executed quality policy
 
@@ -241,12 +247,48 @@ is guaranteed within one binary on one target and is NOT claimed across
 targets. That execution domain is owned by
 `bd-pack-identity-exec-domain-junoz`.
 
+### 3a. Effective retrieval and assembly policy
+
+The `ee.pack.effective_config.v1` runtime slice has individually labeled fields:
+
+| Control | Effective representation |
+|---|---|
+| Retrieval | speed, requested/applied source mode, strict source, memory scope and strict scope; configured rerank mode and active top-K; actual normalized lexical/semantic RRF weights only when hybrid retrieval executes |
+| Visibility | tombstone, expired, future and stale inclusion after query-validity posture is applied |
+| Filters | conjunctive metadata field/operator/typed-value atoms; tag sets; trust minimum/exclusions/posture; redaction bypass and allowed categories; temporal row bounds and validity posture; enabled graph seeds/direction/hops/link types/orphan policy |
+| Assembly | explicit relevance-floor presence and value; output redaction level and enablement; fresh-sentinel requirement; normalized changed-symbol set and git selection; pagination limit/offset; enabled coordination staleness limit |
+| Resolved workspace controls | memory-tier admission, PPR/HITS/proximity gates, active PPR weight, LOD enablement and reduced full/preview/link ratios |
+
+The request component already binds the actual capped/adaptive token budget,
+profile, output controls, task lens and normalized task paths. The quality
+component binds the executed scoring coefficients. Runtime controls are captured
+before L2 admission; the same captured graph/admission/LOD values are used by
+selection. Fusion values are carried from actual retrieval, including validated
+daemon handoffs, rather than reread from a potentially changed config file.
+
+Sets are sorted and deduplicated; disabled graph/coordination/LOD subsettings
+and disabled rerank top-K are absent. Equivalent LOD ratios and available fusion
+arm ratios canonicalize. Configuration thresholds retain their effective IEEE
+bits rather than score quantization, with negative zero folded into zero.
+`None` relevance floor means automatic behavior and differs from explicit zero.
+Temporal row bounds retain their actual precision; the lifecycle clock is bound
+separately in `referenceTime`. Explicit defaults and omitted defaults bind alike
+when their executed behavior is alike.
+
+The deterministic token currently supplies audit/persistence IDs and trace
+labels; pack ties and equivalent search scores use stable item comparisons,
+not seeded random choice. Consequently audit seed, cache eligibility/hit state,
+elapsed time, record paths, and persistence/baseline requests are excluded.
+Introducing seeded selection requires binding its effective seed and a version
+bump. This slice does not claim store/model/authorization identities owned in
+§2b, nor does it emit raw configuration or filter values.
+
 ### 4. Canonical serialization rules (hash input)
 
 - Every field is fed as `len(label) u64 LE ‖ label ‖ len(value) u64 LE ‖ value`
   (`hash_labeled_bytes`). Optional fields add a labeled presence flag, and
   repeated fields a labeled count.
-- Every component opens with the labeled schema tag `ee.pack.hash_input.v5`
+- Every component opens with the labeled schema tag `ee.pack.hash_input.v6`
   and its component name.
 - The composite is `blake3` over the labeled schema tag and the labeled
   component digests (§2a).
@@ -294,13 +336,13 @@ text; a digest reveals neither.
 
 ### 7. Differing-state diagnostics
 
-`snapshotIdentity.components` names eight components. Comparing two responses
+`snapshotIdentity.components` names nine components. Comparing two responses
 field by field names the component that differs; the typed
 `PackHashComponentDigests::differing_components` comparator uses those public
-field names, including `referenceTime` and `qualityScoring`. `renderedText` moves when a rendered
+field names, including `referenceTime`, `qualityScoring` and `effectiveConfig`. `renderedText` moves when a rendered
 input moves; changing only the clock can move `referenceTime` and the composite
 while leaving the rendered text and selected items identical. No CLI comparator
-is part of v5.
+is part of v6.
 
 ### 8. Versioning and migration
 
@@ -308,8 +350,8 @@ is part of v5.
 
 ```json
 {
-  "version": 5,
-  "inputSchema": "ee.pack.hash_input.v5",
+  "version": 6,
+  "inputSchema": "ee.pack.hash_input.v6",
   "digest": "<pack.hash>",
   "numericDomain": "q20.12",
   "componentDigestsAvailableLocally": true,
@@ -317,7 +359,8 @@ is part of v5.
     "request": "blake3:…", "referenceTime": "blake3:…",
     "qualityScoring": "blake3:…",
     "items": "blake3:…", "omitted": "blake3:…",
-    "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…"
+    "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…",
+    "effectiveConfig": "blake3:…"
   }
 }
 ```
@@ -331,22 +374,22 @@ is part of v5.
   `^blake3:[0-9a-f]{64}$`. The version travels beside the hash in every emitted
   pack (`version`, `inputSchema`), and the schema tag is bound into the
   preimage, so versions use separate hash domains.
-- `pack_records.pack_hash` has no version column. Rows written before v5 carry
-  earlier hash domains and are not comparable with v5 hashes; nothing in the
+- `pack_records.pack_hash` has no version column. Rows written before v6 carry
+  earlier hash domains and are not comparable with v6 hashes; nothing in the
   row identifies that domain. Historical ledgers and hashes are not rewritten.
   `context show` and `pack replay` retain their redacted selection-projection
   contract and preserve the original hash; they do not claim to reproduce the
-  original prompt bytes or relabel historical hashes as v5. No raw prompt is
+  original prompt bytes or relabel historical hashes as v6. No raw prompt is
   added to the durable ledger and no SQL migration is required.
-- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v10`, so older
+- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v11`, so older
   responses miss. Lookup now follows retrieval and adaptive budget resolution.
-  Its key binds the captured quality policy and returned candidate IDs, order,
+  Its key binds the captured quality/effective configuration policies and returned candidate IDs, order,
   source lanes, and exact ranking/pack-score bits. New harmful feedback can
   therefore invalidate assembly reuse even when no memory row changed.
   Retrieval and authoritative admission still execute on an L2 hit.
 - L2 payload schema `ee.pack.l2_context_response.v4` stores the finalized
   `canonicalText` separately from `responseJson`, including for Lean JSON.
-  Admission validates v5 identity, recomposes all component digests with the
+  Admission validates v6 identity, recomposes all component digests with the
   requested output policy, verifies the typed footer and text digest, and
   checks JSON text presence/type against that policy. Hits hydrate the frozen
   Markdown without adding a text field to Lean JSON. DNA requests bypass L2
@@ -361,19 +404,20 @@ is part of v5.
 |---|---|---|
 | Unit | `src/core/context_test_module.rs` `pack_hash_v2_*` | the flat-feed provenance collision is separated (red first against v1); each differing input moves its own component and the composite only; timing, order and repetition move nothing; evidence scores quantize |
 | Reference time | `context_reference_time_uses_one_precedence_and_millisecond_domain`, `pack_hash_v3_names_reference_time_without_changing_other_components`, `context_pack_validity_window_honors_as_of_and_include_future`, `pack_l2_cache_key_tracks_canonical_inputs` | precedence and actual selection share millisecond precision; wall-clock and explicit modes differ; offsets/sub-millisecond values canonicalize; identical selected items still distinguish different clocks; adaptive budgeting preserves identity; the comparator names `referenceTime`; L2 keys distinguish clocks |
-| Property | `tests/pack_hash_property.rs` (in `integration_property`) | timing stays outside prompt identity but visible in the envelope; order/repetition and sub-quantum noise properties remain; independently derived v5 composite and text-component vectors pin exact renderer bytes with the declared footer exception |
+| Effective configuration | `pack_hash_v6_*`, `pack_l2_cache_key_tracks_canonical_inputs` | equal selected items/text still distinguish controls in `effectiveConfig`; sets, signed zero, proportional ratios and observational changes canonicalize; L2 keys bind the captured policy |
+| Property | `tests/pack_hash_property.rs` (in `integration_property`) | timing stays outside prompt identity but visible in the envelope; order/repetition and sub-quantum noise properties remain; independently derived v6 composite and text-component vectors pin exact renderer bytes with the declared footer exception |
 | Finalization and replay | `src/core/context_test_module.rs` | backend/DNA changes move the text component; literal placeholder text is preserved; late notices do not rewrite finalized text; Lean still binds Markdown; cache tampering and forged composites are rejected; Lean cache hits retain canonical text; real seeded persistence records the finalized DNA hash |
 | Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
 
-Tests compare product output directly. The v5 text-leaf oracle substitutes only
+Tests compare product output directly. The v6 text-leaf oracle substitutes only
 the declared terminal footer value; it does not scrub any other content.
 
 ## Consequences
 
-- Every new pack hash changes once (v4 to v5). Backend, analysis and DNA bytes
-  now participate in the text component, and hiding JSON text no longer drops
-  that component. Historical hashes remain opaque references to their original
-  ledger records.
+- Every new pack hash changes once (v5 to v6). Effective selection policy now
+  has its own component, even when it does not change the selected items or
+  rendered prompt. Historical hashes remain opaque references to their original
+  ledger records and remain available through historical inspection/replay.
 - Cross-machine pack equality is a declared, bounded claim (§3), not an
   accident.
 - The excluded components have owners (§2b); none is silently claimed.

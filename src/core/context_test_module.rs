@@ -5316,6 +5316,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5364,6 +5365,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             effective,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5450,6 +5452,7 @@ pub fn unrelated_context() -> u64 {{
             &first_report,
             &mut first_candidates,
             1.0,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut first_degraded,
         );
 
@@ -5482,6 +5485,7 @@ pub fn unrelated_context() -> u64 {{
             &second_report,
             &mut second_candidates,
             1.0,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut second_degraded,
         );
 
@@ -5518,6 +5522,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5553,6 +5558,7 @@ pub fn unrelated_context() -> u64 {{
             &fixture.workspace_path,
             &search_report,
             &mut candidates,
+            &super::context_proximity_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5613,6 +5619,7 @@ pub fn unrelated_context() -> u64 {{
             &fixture.workspace_path,
             &search_report,
             &mut candidates,
+            &super::context_proximity_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5885,6 +5892,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5914,6 +5922,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5942,6 +5951,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -5972,6 +5982,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             0.0,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -6404,6 +6415,7 @@ pub fn unrelated_context() -> u64 {{
             &search_report,
             &mut candidates,
             1.0,
+            &super::context_ppr_feature_enabled(&fixture.workspace_path),
             &mut degraded,
         );
 
@@ -6442,6 +6454,7 @@ pub fn unrelated_context() -> u64 {{
                 &search_report,
                 &mut candidates,
                 ppr_weight,
+                &super::context_ppr_feature_enabled(&fixture.workspace_path),
                 &mut degraded,
             );
 
@@ -8392,7 +8405,15 @@ pub fn unrelated_context() -> u64 {{
             let mut response = original.clone();
             let mut canonical_text = text.clone();
             match case {
-                0 => response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(4),
+                0 => {
+                    response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(5);
+                    response["data"]["pack"]["snapshotIdentity"]["inputSchema"] =
+                        serde_json::json!("ee.pack.hash_input.v5");
+                    response["data"]["pack"]["snapshotIdentity"]["components"]
+                        .as_object_mut()
+                        .ok_or("cached components should be an object")?
+                        .remove("effectiveConfig");
+                }
                 1 => {
                     canonical_text = format!("Changed text\n{text}");
                     response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
@@ -12556,13 +12577,311 @@ pub fn unrelated_context() -> u64 {{
             serde_json::from_str(&crate::output::render_context_response_json(&response))
                 .map_err(|error| error.to_string())?;
         let identity = &json["data"]["pack"]["snapshotIdentity"];
-        assert_eq!(identity["version"], 5);
-        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v5");
+        assert_eq!(identity["version"], 6);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v6");
         assert_eq!(
             identity["components"]["referenceTime"],
             first.digests.reference_time
         );
         assert_eq!(identity["digest"], first.composite_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_v6_binds_selection_limits_without_changed_items_or_text() -> TestResult {
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |request: &ContextRequest| {
+            super::compute_pack_hash_components(
+                request,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let original = hash(&request);
+        let mut pool = request.clone();
+        pool.candidate_pool += 1;
+        let mut limit = request.clone();
+        limit.max_results = Some(1);
+        let mut sections = request.clone();
+        sections.sections = vec![crate::pack::PackSection::ProceduralRules];
+        let mut policy = request.clone();
+        policy.effective_config_policy = Some("captured-policy".to_owned());
+        for changed in [pool, limit, sections, policy] {
+            let changed = hash(&changed);
+            assert_eq!(
+                original.digests.differing_components(&changed.digests),
+                ["effectiveConfig"]
+            );
+            assert_ne!(original.composite_hash, changed.composite_hash);
+        }
+        let mut reordered = request.clone();
+        reordered.sections.reverse();
+        reordered.sections.push(reordered.sections[0]);
+        assert_eq!(original.digests, hash(&reordered).digests);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_v6_runtime_policy_names_different_selection_controls() -> TestResult {
+        use crate::models::{FilterOperator, FilterPredicate, FilterValue, QueryFilter};
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = directory.path().to_owned();
+        options.coordination_snapshot_path = None;
+        let search = ppr_search_report(Vec::new());
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |options: &super::ContextPackOptions| {
+            let mut request = request.clone();
+            request.effective_config_policy = Some(super::context_effective_config_policy(
+                options,
+                &super::context_effective_filters(options),
+                &super::ContextSelectionSettings::resolve(options),
+                &search,
+                None,
+                true,
+            ));
+            super::compute_pack_hash_components(
+                &request,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let original = hash(&options);
+        let cases: &[(&str, fn(&mut super::ContextPackOptions))] = &[
+            ("speed", |o| o.speed = crate::search::SpeedMode::Instant),
+            ("source", |o| {
+                o.source_mode = crate::core::search::SearchSourceMode::SemanticOnly
+            }),
+            ("strict source", |o| o.strict_source_mode = true),
+            ("scope", |o| o.memory_scope = MemoryScope::SelfOnly),
+            ("strict scope", |o| o.strict_scope = true),
+            ("tombstones", |o| o.include_tombstoned = true),
+            ("expired", |o| o.include_expired = true),
+            ("future", |o| o.include_future = true),
+            ("stale", |o| o.include_stale = true),
+            ("explicit zero floor", |o| o.relevance_floor = Some(0.0)),
+            ("LOD", |o| o.no_lod = true),
+            ("fresh sentinels", |o| o.require_fresh_sentinels = true),
+            ("changed symbols", |o| {
+                o.changed_symbols.push("Parser::parse".to_owned())
+            }),
+            ("git symbols", |o| o.changed_symbols_from_git = true),
+            ("pagination", |o| {
+                o.pagination = Some(super::ContextPagination {
+                    limit: 1,
+                    offset: 0,
+                    query_hash: "cursor-only".to_owned(),
+                })
+            }),
+            ("tags", |o| o.filters.tags.require.push("rust".to_owned())),
+            ("trust", |o| {
+                o.filters.trust.min_class = Some("human_explicit".to_owned())
+            }),
+            ("redaction", |o| {
+                o.filters
+                    .redaction
+                    .allow_categories
+                    .push("email".to_owned())
+            }),
+            ("temporal", |o| {
+                o.filters.temporal.before = Some(query_time("2026-05-01T00:00:00Z"))
+            }),
+            ("graph", |o| o.filters.graph.enabled = true),
+            ("metadata", |o| {
+                o.filters.filters.push(QueryFilter {
+                    field: "project".to_owned(),
+                    predicates: vec![FilterPredicate {
+                        operator: FilterOperator::Eq,
+                        value: FilterValue::String("ee".to_owned()),
+                    }],
+                })
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut variant = options.clone();
+            mutate(&mut variant);
+            let changed = hash(&variant);
+            assert_eq!(
+                original.digests.differing_components(&changed.digests),
+                ["effectiveConfig"],
+                "{name}"
+            );
+            assert_ne!(original.composite_hash, changed.composite_hash, "{name}");
+        }
+        // The published diagnostic remains an opaque digest, never raw filters.
+        request.effective_config_policy = Some("private-filter-value".to_owned());
+        let components = super::compute_pack_hash_components(
+            &request,
+            &draft,
+            &[],
+            Default::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !components
+                .digests
+                .effective_config
+                .contains("private-filter-value")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_v6_canonicalizes_equivalent_policies_and_ignores_observations() -> TestResult {
+        use crate::models::{FilterOperator, FilterPredicate, FilterValue, QueryFilter};
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = directory.path().to_owned();
+        options.coordination_snapshot_path = None;
+        options.relevance_floor = Some(0.0);
+        options.filters.tags.require = vec!["alpha".to_owned(), "beta".to_owned()];
+        options.filters.filters = vec![QueryFilter {
+            field: "project".to_owned(),
+            predicates: vec![FilterPredicate {
+                operator: FilterOperator::In,
+                value: FilterValue::List(vec![
+                    FilterValue::String("ee".to_owned()),
+                    FilterValue::Number(0.0),
+                ]),
+            }],
+        }];
+        options.changed_symbols = vec!["Parser::parse()".to_owned(), "Engine".to_owned()];
+        let search = ppr_search_report(Vec::new());
+        let settings = super::ContextSelectionSettings::resolve(&options);
+        let digest = |options: &super::ContextPackOptions,
+                      settings: &super::ContextSelectionSettings,
+                      search: &SearchReport| {
+            super::context_effective_config_policy(
+                options,
+                &super::context_effective_filters(options),
+                settings,
+                search,
+                None,
+                true,
+            )
+        };
+        let original = digest(&options, &settings, &search);
+        let mut equivalent = options.clone();
+        equivalent.relevance_floor = Some(-0.0);
+        equivalent.filters.tags.require =
+            vec!["beta".to_owned(), "alpha".to_owned(), "beta".to_owned()];
+        equivalent.filters.filters[0].predicates[0].value = FilterValue::List(vec![
+            FilterValue::Number(-0.0),
+            FilterValue::String("ee".to_owned()),
+            FilterValue::Number(0.0),
+        ]);
+        equivalent
+            .filters
+            .filters
+            .push(equivalent.filters.filters[0].clone());
+        equivalent.filters.redaction.policy = Some("respect".to_owned());
+        equivalent
+            .filters
+            .graph
+            .seed_memories
+            .push("inactive".to_owned());
+        equivalent.changed_symbols = vec![
+            " engine ".to_owned(),
+            "parser::parse".to_owned(),
+            "ENGINE".to_owned(),
+        ];
+        equivalent.persist_pack = !equivalent.persist_pack;
+        equivalent.output_options.cache_json_response =
+            !equivalent.output_options.cache_json_response;
+        equivalent.database_path = Some(PathBuf::from("/relocated/store"));
+        equivalent.coordination_stale_after_ms += 1;
+        let mut equivalent_settings = settings.clone();
+        equivalent_settings.lod_budget_shares =
+            Some(crate::pack::PackLodBudgetShares::new(7, 2, 1));
+        let mut observations = search.clone();
+        observations.elapsed_ms = 8_000.0;
+        observations.candidates_below_floor = 17;
+        assert_eq!(
+            original,
+            digest(&equivalent, &equivalent_settings, &observations)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_v6_binds_captured_graph_lod_and_fusion_policy() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = directory.path().to_owned();
+        options.coordination_snapshot_path = None;
+        let search = ppr_search_report(Vec::new());
+        let settings = super::ContextSelectionSettings::resolve(&options);
+        let digest =
+            |settings: &super::ContextSelectionSettings, search: &SearchReport, weights| {
+                super::context_effective_config_policy(
+                    &options,
+                    &options.filters,
+                    settings,
+                    search,
+                    weights,
+                    true,
+                )
+            };
+        let original = digest(&settings, &search, None);
+        let mut variants = Vec::new();
+        let mut tier = settings.clone();
+        tier.memory_tier_admission = Ok(true);
+        variants.push(tier);
+        let mut ppr = settings.clone();
+        ppr.ppr_enabled = Ok(true);
+        ppr.ppr_weight = 0.2;
+        variants.push(ppr);
+        let mut hits = settings.clone();
+        hits.hits_profiles = Ok(true);
+        variants.push(hits);
+        let mut proximity = settings.clone();
+        proximity.proximity = Ok(true);
+        variants.push(proximity);
+        let mut lod = settings.clone();
+        lod.lod_budget_shares = Some(crate::pack::PackLodBudgetShares::new(8, 1, 1));
+        variants.push(lod);
+        for variant in &variants {
+            assert_ne!(original, digest(variant, &search, None));
+        }
+        let mut hybrid = search.clone();
+        hybrid.source_mode_applied = crate::core::search::SearchSourceMode::Hybrid;
+        let first = crate::core::search::SearchFusionWeights {
+            lexical: 0.5,
+            semantic: 0.5,
+            graph: 0.0,
+        };
+        let proportional = crate::core::search::SearchFusionWeights {
+            lexical: 0.25,
+            semantic: 0.25,
+            graph: 0.5,
+        };
+        let changed = crate::core::search::SearchFusionWeights {
+            lexical: 0.75,
+            semantic: 0.25,
+            graph: 0.0,
+        };
+        assert_eq!(
+            digest(&settings, &hybrid, Some(first)),
+            digest(&settings, &hybrid, Some(proportional))
+        );
+        assert_ne!(
+            digest(&settings, &hybrid, Some(first)),
+            digest(&settings, &hybrid, Some(changed))
+        );
+        assert_eq!(
+            digest(&settings, &search, Some(first)),
+            digest(&settings, &search, Some(changed))
+        );
         Ok(())
     }
 
@@ -12593,6 +12912,7 @@ pub fn unrelated_context() -> u64 {{
                 ("degraded", l.degraded == r.degraded),
                 ("coordination", l.coordination == r.coordination),
                 ("rendered_text", l.rendered_text == r.rendered_text),
+                ("effectiveConfig", l.effective_config == r.effective_config),
                 ("composite", left.composite_hash == right.composite_hash),
             ]
             .into_iter()
@@ -13032,7 +13352,7 @@ pub fn unrelated_context() -> u64 {{
             text,
             crate::pack::render_context_response_markdown(response)
         );
-        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 5);
+        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 6);
         Ok(())
     }
 
@@ -13372,6 +13692,10 @@ pub fn unrelated_context() -> u64 {{
         scoring.request.quality_scoring_policy =
             Some(crate::search::SearchScoringConfig::default().policy_hash());
         assert_ne!(key, compute_pack_l2_cache_key(&scoring));
+
+        let mut selection = base.clone();
+        selection.request.effective_config_policy = Some("blake3:selection-policy".to_owned());
+        assert_ne!(key, compute_pack_l2_cache_key(&selection));
 
         let mut timed = base.clone();
         timed.request.reference_time = Some(query_time("2026-05-01T12:00:00.123456Z"));

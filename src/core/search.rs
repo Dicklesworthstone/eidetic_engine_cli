@@ -1883,7 +1883,7 @@ pub(crate) struct PackSearchHandoff {
     pub(crate) quality_scoring_policy: String,
     // Required v3 witness from the configuration actually used by retrieval.
     // A config-file change does not advance the source database generation.
-    fusion_weights: SearchFusionWeights,
+    pub(crate) fusion_weights: SearchFusionWeights,
     quality_reference_time: Option<DateTime<Utc>>,
     pub audit_facts: Option<SearchAuditFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2397,6 +2397,7 @@ impl SearchPerformanceTrace {
 pub struct ContextSearchReport {
     pub report: SearchReport,
     pub quality_scoring_policy: String,
+    pub(crate) fusion_weights: SearchFusionWeights,
     /// Complete accepted feedback and calibration consumed by this source view.
     pub(crate) calibration_input_identity: Option<String>,
     pub preloaded_memories: BTreeMap<String, StoredMemory>,
@@ -9308,6 +9309,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
     Ok(ContextSearchReport {
         report: run.report,
         quality_scoring_policy: run.quality_scoring_policy,
+        fusion_weights: run.fusion_weights,
         calibration_input_identity: run.pack_calibration_identity,
         preloaded_memories,
         performance: run.performance,
