@@ -75,7 +75,10 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// and warning preludes, instead of salvaging raw error-looking substrings.
 /// V20 materializes immutable incident-card revisions when current derivation
 /// changes their text or provenance, retaining prior cards and their feedback.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v20";
+/// V21 lets the shared Python decoder handle complete exception-group trees
+/// and mixed causal chains, using ordinary traceback keys and literal masking
+/// for grouped or stdout-prefixed reports without rewriting source evidence.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v21";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

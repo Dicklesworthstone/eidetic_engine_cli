@@ -86,7 +86,8 @@ fn mask_literals(text: &str) -> String {
     output
 }
 
-fn canonical(kind: &str, message: &str) -> CanonicalDiagnostic {
+/// Keep native, grouped and stdout-prefixed reports on the same masked key.
+pub(super) fn canonical(kind: &str, message: &str) -> CanonicalDiagnostic {
     let message = crate::policy::redact_secret_like_content(message).content;
     CanonicalDiagnostic {
         tool: DiagnosticTool::Shell,
@@ -130,8 +131,22 @@ pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()>
         return Ok(None);
     };
     if group_header(first)
-        || (first.starts_with("Traceback (most recent call last)") && first != HEADER)
+        || visible
+            .lines()
+            .any(|line| line.starts_with("  + Exception Group Traceback"))
     {
+        // The shared Python report decoder owns complete exception-group
+        // trees and mixed ordinary/group chains. This decoder runs before it
+        // at every diagnostic entry point; rejecting a supported group here
+        // would silently prevent import, diagnosis and incident-card creation.
+        // Require the complete validated report, never salvage its prefix or
+        // treat the native decoder's failure-only veto as a usable signature.
+        return super::test_coverage::python::decode(text)?
+            .filter(|report| report.failed && !report.diagnostics.is_empty())
+            .map(|report| Some(report.diagnostics))
+            .ok_or(());
+    }
+    if first.starts_with("Traceback (most recent call last)") && first != HEADER {
         return Err(());
     }
     if first != HEADER && !first.starts_with("  File \"") {
@@ -219,6 +234,152 @@ mod tests {
         format!(
             "{HEADER}\n  File \"/private/project/run.py\", line 12, in <module>\n    PRIVATE_SOURCE()\n    ~~~~~~~~~~~~~~^^\n{message}\n"
         )
+    }
+
+    fn grouped_trace() -> String {
+        concat!(
+            "  + Exception Group Traceback (most recent call last):\n",
+            "  |   File \"/private/project/run.py\", line 12, in main\n",
+            "  |     PRIVATE_SOURCE()\n",
+            "  | ExceptionGroup: PRIVATE_GROUP (2 sub-exceptions)\n",
+            "  +-+---------------- 1 ----------------\n",
+            "    | ValueError: invalid configuration\n",
+            "    +---------------- 2 ----------------\n",
+            "    | TypeError: expected bytes\n",
+            "    +------------------------------------\n",
+        )
+        .to_owned()
+    }
+
+    #[test]
+    fn grouped_reports_reach_the_shared_decoder_at_every_diagnostic_entry_point() {
+        let group = grouped_trace();
+        for (text, count) in [
+            (group.clone(), 2),
+            (
+                format!(
+                    "{}\n{DIRECT}\n\n{group}",
+                    trace("LookupError: missing queue")
+                ),
+                3,
+            ),
+            (
+                format!(
+                    "{group}\n{HANDLING}\n\n{}",
+                    trace("RuntimeError: queue aborted")
+                ),
+                3,
+            ),
+        ] {
+            let expected = super::super::test_coverage::python::decode(&text)
+                .unwrap()
+                .unwrap()
+                .diagnostics;
+            assert_eq!(
+                expected.len(),
+                count,
+                "the native parser must have real leaves"
+            );
+            for styled in [
+                text.clone(),
+                text.replace('\n', "\r\n"),
+                format!("\u{1b}[31m{text}\u{1b}[0m"),
+            ] {
+                assert_eq!(decode(&styled).unwrap().unwrap(), expected);
+                assert_eq!(structured_error_diagnostics(&styled), expected);
+                let output = ToolOutput {
+                    text: styled.clone(),
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                };
+                assert_eq!(failure_diagnostics(&output), expected);
+                assert!(crate::core::cass_error_recall::symptom_line(&output).is_some());
+                assert!(output.failed());
+                assert!(!output.succeeded());
+                assert_eq!(output.text, styled);
+            }
+        }
+        let ordinary = trace("ValueError: invalid configuration");
+        let expected = decode(&ordinary).unwrap().unwrap();
+        assert_eq!(
+            expected[0].message_template, "python exception valueerror: invalid configuration",
+            "ordinary traceback identity must not migrate with group dispatch",
+        );
+        let source_example = ordinary.replace(
+            "PRIVATE_SOURCE()",
+            "  + Exception Group Traceback (most recent call last):",
+        );
+        assert_eq!(decode(&source_example).unwrap().unwrap(), expected);
+    }
+
+    #[test]
+    fn ordinary_stdout_grouped_and_chained_exceptions_share_masked_identity() {
+        let ordinary = trace("ValueError: invalid literal for int() with base 10: 'PLAIN_VALUE'");
+        let expected = structured_error_diagnostics(&ordinary);
+        assert_eq!(expected.len(), 1);
+        assert_eq!(
+            expected[0].message_template,
+            "python exception valueerror: invalid literal for int() with base <num> <id>",
+        );
+        let group = grouped_trace()
+            .replace(
+                "ValueError: invalid configuration",
+                "ValueError: invalid literal for int() with base 10: 'GROUP_VALUE'",
+            )
+            .replace(
+                "TypeError: expected bytes",
+                "ValueError: invalid literal for int() with base 10: 'OTHER_GROUP_VALUE'",
+            );
+        for text in [
+            ordinary.clone(),
+            format!("ordinary stdout\n{ordinary}"),
+            group.clone(),
+            format!("ordinary stdout\n{group}"),
+            format!("{ordinary}\n{DIRECT}\n\n{group}"),
+            format!("{group}\n{HANDLING}\n\n{ordinary}"),
+        ] {
+            assert_eq!(structured_error_diagnostics(&text), expected, "{text}");
+            let output = ToolOutput {
+                text: text.clone(),
+                is_error: Some(true),
+                exit_code: Some(1),
+            };
+            assert_eq!(failure_diagnostics(&output), expected, "{text}");
+            assert_eq!(
+                output.text, text,
+                "normalization must preserve source evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_groups_cannot_salvage_a_complete_causal_prefix() {
+        let group = grouped_trace();
+        for damaged in [
+            group.replace("(2 sub-exceptions)", "(3 sub-exceptions)"),
+            group.replace("    +------------------------------------\n", ""),
+            group.replace("    | TypeError:", "   | TypeError:"),
+            format!("{group}Process exited with code 0\n"),
+        ] {
+            for text in [
+                damaged.clone(),
+                format!(
+                    "{}\n{DIRECT}\n\n{damaged}",
+                    trace("LookupError: missing queue")
+                ),
+            ] {
+                assert!(decode(&text).is_err());
+                assert!(structured_error_diagnostics(&text).is_empty());
+                let output = ToolOutput {
+                    text,
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                };
+                assert!(failure_diagnostics(&output).is_empty());
+                assert!(crate::core::cass_error_recall::symptom_line(&output).is_none());
+                assert!(!output.succeeded());
+            }
+        }
     }
 
     #[test]

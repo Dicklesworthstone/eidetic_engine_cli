@@ -88,14 +88,8 @@ fn repeated_frames(line: &str) -> bool {
 }
 
 fn diagnostic(summary: &str) -> CanonicalDiagnostic {
-    let safe = crate::policy::redact_secret_like_content(summary).content;
-    CanonicalDiagnostic {
-        tool: crate::core::error_recall::DiagnosticTool::Shell,
-        canonical_code: None,
-        message_template: crate::core::error_recall::canonical_message_template(&format!(
-            "python traceback: {safe}"
-        )),
-    }
+    let (kind, message) = summary.split_once(':').unwrap_or((summary, ""));
+    crate::core::cass_error_recall::traceback::canonical(kind, message.trim())
 }
 
 /// Validate the whole selected tail before returning any exception. A chain

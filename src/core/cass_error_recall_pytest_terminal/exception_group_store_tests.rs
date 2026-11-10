@@ -134,6 +134,18 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
     let failed = failure();
     let diagnostics = structured_error_diagnostics(&failed);
     assert_eq!(diagnostics.len(), 2);
+    let ordinary_diagnostics = [
+        "ValueError: test_drain queue fixture was shared",
+        "RuntimeError: test_drain worker used stale queue",
+    ]
+    .into_iter()
+    .flat_map(|summary| {
+        structured_error_diagnostics(&format!(
+            "Traceback (most recent call last):\n  File \"/other/queue.py\", line 1, in main\n{summary}\n"
+        ))
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(ordinary_diagnostics, diagnostics);
     let episode = episode(&failed, "queue workers completed", COMMAND)?;
     let before = episode
         .db
@@ -152,7 +164,8 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
     let mut checks = CardChecks::default();
     checks.observe(&card)?;
     assert!(checks.withheld(&episode.db, WS)?.is_empty());
-    for diagnostic in &diagnostics {
+    // The same error outside a group must retrieve the stored grouped repair.
+    for diagnostic in &ordinary_diagnostics {
         let recall = error_recall_report(&episode.db, WS, diagnostic)?;
         assert!(recall.exact);
         assert!(recall.helpful_repairs.contains(&episode.repair));
@@ -196,6 +209,88 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
                 .list_error_repair_links(WS, &diagnostic.layered_key().key)?
                 .len(),
             3
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mixed_group_chains_derive_repairs_and_cards_only_after_complete_validation() -> TestResult {
+    let group = failure();
+    let prefix = concat!(
+        "Traceback (most recent call last):\n",
+        "  File \"/private/task_queue.py\", line 4, in main\n",
+        "    private_lookup()\n",
+        "LookupError: test_drain queue configuration missing\n\n",
+        "The above exception was the direct cause of the following exception:\n\n",
+    );
+    let valid = format!("{prefix}{group}");
+    let diagnostics = structured_error_diagnostics(&valid);
+    assert_eq!(diagnostics.len(), 3, "ordinary cause plus two group leaves");
+    for (failed, accepted) in [
+        (valid, true),
+        (
+            format!(
+                "{prefix}{}",
+                group.replace("    +------------------------------------\n", ""),
+            ),
+            false,
+        ),
+    ] {
+        let episode = episode(&failed, "queue workers completed", COMMAND)?;
+        let source = episode
+            .db
+            .get_evidence_span(&episode.failure)?
+            .ok_or("missing failure source")?;
+        let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+        let card_id = incident_card_id(WS, &episode.failure);
+        if accepted {
+            assert_eq!(report.failures_seen, 1);
+            assert_eq!(report.fingerprints_recorded, 3);
+            assert_eq!(report.resolved_failures, 1);
+            assert_eq!(report.repair_links_recorded, 6);
+            assert_eq!(report.incident_cards_recorded, 1);
+            let card = episode
+                .db
+                .get_evidence_span(&card_id)?
+                .ok_or("missing mixed-chain incident card")?;
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            assert!(checks.withheld(&episode.db, WS)?.is_empty());
+        } else {
+            assert_eq!(report.failures_seen, 0, "no valid-prefix salvage");
+            assert_eq!(report.fingerprints_recorded, 0);
+            assert_eq!(report.resolved_failures, 0);
+            assert_eq!(report.repair_links_recorded, 0);
+            assert_eq!(report.incident_cards_recorded, 0);
+            assert!(episode.db.get_evidence_span(&card_id)?.is_none());
+        }
+        for diagnostic in &diagnostics {
+            let recall = error_recall_report(&episode.db, WS, diagnostic)?;
+            assert_eq!(recall.exact, accepted);
+            if accepted {
+                assert!(recall.helpful_repairs.contains(&episode.repair));
+                assert!(recall.helpful_repairs.contains(&card_id));
+                assert_eq!(recall.proof_links, std::slice::from_ref(&episode.proof));
+                let seed = pack_error_recall_query_seed(&episode.db, WS, diagnostic)?;
+                assert!(seed.contains("prior fix:") && seed.contains("fresh queue"));
+                assert!(!seed.contains("private_lookup"));
+            } else {
+                assert!(recall.helpful_repairs.is_empty());
+                assert!(recall.proof_links.is_empty());
+            }
+        }
+        let after = episode
+            .db
+            .get_evidence_span(&episode.failure)?
+            .ok_or("missing original failure source")?;
+        assert_eq!(after.excerpt, source.excerpt);
+        assert_eq!(after.content_hash, source.content_hash);
+        assert_eq!(after.metadata_json, source.metadata_json);
+        assert_eq!(
+            record_session_error_recall(&episode.db, WS, &episode.session)?.incident_cards_recorded,
+            0,
+            "retry must not create duplicate cards",
         );
     }
     Ok(())
