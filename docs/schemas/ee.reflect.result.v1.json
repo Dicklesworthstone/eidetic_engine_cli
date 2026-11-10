@@ -47,7 +47,7 @@
     "body": { "type": "string", "minLength": 1, "maxLength": 32768 },
     "kindFields": {
       "type": "object",
-      "description": "Kind-specific structured fields. Gaps results must include knowledgeGaps; summary_insight_strengths should include summary, insights, or strengths; plan_kinds should include planKinds or steps.",
+      "description": "Kind-specific structured fields. Gaps results must include knowledgeGaps; summary_insight_strengths should include summary, insights, or strengths; plan_kinds should include planKinds or steps. Procedural extraction and contradiction resolution use the strict conditional schemas below and create semantic advisory drafts only.",
       "maxProperties": 32,
       "properties": {
         "knowledgeGaps": {
@@ -66,10 +66,21 @@
     },
     "selfReportedConfidence": {
       "type": "number",
+      "description": "External producer estimate, never authority to apply or promote. Advisory procedure and conflict drafts retain this estimate in provenance but cap candidate and memory confidence at 0.5.",
       "minimum": 0,
       "maximum": 1
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "reflectionKind": { "const": "procedural_extract" } } },
+      "then": { "properties": { "kindFields": { "$ref": "#/$defs/procedureDraft" } } }
+    },
+    {
+      "if": { "properties": { "reflectionKind": { "const": "contradiction_resolve" } } },
+      "then": { "properties": { "kindFields": { "$ref": "#/$defs/conflictDraft" } } }
+    }
+  ],
   "field_presets": {
     "minimal": ["schema", "requestId", "requestHash", "reflectionKind"],
     "summary": [
@@ -95,6 +106,82 @@
     "full": ["*"]
   },
   "$defs": {
+    "advisoryText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Nonblank text screened for secrets, prompt injection, and private reasoning. Runtime limits count UTF-8 bytes; the final body including all qualifiers is limited to 32768 bytes."
+    },
+    "advisoryTextList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/advisoryText" }
+    },
+    "advisorySourceIds": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+      "description": "Unique canonical source ids. Runtime validation binds every id to the cited source set and its request content hash."
+    },
+    "procedureDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceIds", "scope", "procedureDraft", "preconditions", "negativeExamples", "confidenceLimits"],
+      "properties": {
+        "sourceIds": {
+          "$ref": "#/$defs/advisorySourceIds",
+          "minItems": 1,
+          "description": "Must account for exactly the citedSourceIds set. Different ids or hashes do not prove independent evidence."
+        },
+        "scope": { "$ref": "#/$defs/advisoryText" },
+        "procedureDraft": {
+          "$ref": "#/$defs/advisoryText",
+          "description": "Concrete, testable guidance that passes the curation specificity validator. Single-source drafts cannot make universal always/never/unconditionally claims."
+        },
+        "preconditions": { "$ref": "#/$defs/advisoryTextList" },
+        "negativeExamples": { "$ref": "#/$defs/advisoryTextList" },
+        "confidenceLimits": { "$ref": "#/$defs/advisoryText" },
+        "suggestedValidation": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/advisoryText" }
+        },
+        "singleSourceReason": {
+          "$ref": "#/$defs/advisoryText",
+          "description": "Required when cited sources contain fewer than two distinct content hashes, including duplicate rows. Explain why the single-source draft is useful and what evidence remains missing."
+        }
+      }
+    },
+    "conflictDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conflictingSourceIds", "resolutionMode", "resolutionDraft", "winningSourceIds", "confidenceLimits", "openQuestions", "staleWhen"],
+      "properties": {
+        "conflictingSourceIds": {
+          "$ref": "#/$defs/advisorySourceIds",
+          "minItems": 2,
+          "description": "At least two cited ids with different source content hashes."
+        },
+        "resolutionMode": { "enum": ["prefer_source", "synthesize", "insufficient_evidence", "defer"] },
+        "resolutionDraft": { "$ref": "#/$defs/advisoryText" },
+        "winningSourceIds": {
+          "$ref": "#/$defs/advisorySourceIds",
+          "description": "For prefer_source, a nonempty proper subset of conflictingSourceIds. Empty for every other mode. This is an advisory interpretation and does not mutate the sources."
+        },
+        "confidenceLimits": { "$ref": "#/$defs/advisoryText" },
+        "openQuestions": { "$ref": "#/$defs/advisoryTextList" },
+        "staleWhen": { "$ref": "#/$defs/advisoryText" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "resolutionMode": { "const": "prefer_source" } } },
+          "then": { "properties": { "winningSourceIds": { "minItems": 1 } } },
+          "else": { "properties": { "winningSourceIds": { "maxItems": 0 } } }
+        }
+      ]
+    },
     "challengeEcho": {
       "type": "object",
       "required": ["keyId", "algorithm", "hmac"],

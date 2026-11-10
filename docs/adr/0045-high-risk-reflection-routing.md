@@ -1,7 +1,8 @@
 # ADR 0045: High-Risk Reflection Routing
 
-Status: proposed
+Status: accepted (implementation present; RCH verification pending)
 Date: 2026-05-23
+Implementation: 2026-11-10
 Bead: bd-1bd0f
 
 ## Context
@@ -89,15 +90,29 @@ For high-risk kinds, valid results include kind-specific fields:
 
 - `procedural_extract`: `sourceIds`, `scope`, `procedureDraft`,
   `preconditions`, `negativeExamples`, `confidenceLimits`, and optional
-  `suggestedValidation`.
+  `suggestedValidation`. `singleSourceReason` is required when the cited sources
+  have fewer than two distinct content hashes, including duplicate source rows.
 - `contradiction_resolve`: `conflictingSourceIds`, `resolutionMode`
   (`prefer_source`, `synthesize`, `insufficient_evidence`, or `defer`),
   `resolutionDraft`, `winningSourceIds`, `confidenceLimits`, and
-  `openQuestions`.
+  `openQuestions`, plus `staleWhen` to make invalidation conditions explicit.
+
+Both field objects reject unknown keys, including mutation or auto-apply
+directives. Every textual field and list entry passes the same secret,
+prompt-injection, and private-reasoning screening as the result body. The
+materialized memory body includes all structured qualifiers so retrieval cannot
+separate a draft from its scope or limitations. The combined body remains within
+the existing 32 KiB limit.
 
 The self-reported confidence from an external producer is informational only.
 It can lower urgency or force review, but it cannot promote trust class, bypass
 validation, or choose an apply path.
+
+The implementation caps candidate and initial memory confidence at 0.5 while
+retaining the producer's original estimate in provenance. Procedure drafts use
+the `semantic` level and `procedure-draft` kind; conflict interpretations use
+`semantic` and `conflict-resolution-draft`. Both retain the `reflection` trust
+subclass. Neither route creates procedural-rule rows or targets a source memory.
 
 ## Validators
 
@@ -105,7 +120,8 @@ validation, or choose an apply path.
 
 A valid procedural extraction must:
 
-- cite at least two independent source ids when possible;
+- account for every cited source id in `sourceIds`, with at least two distinct
+  source bodies when available;
 - explain when a single-source extraction is unavoidable;
 - produce imperative or otherwise testable guidance;
 - state scope limits and preconditions;
@@ -134,6 +150,13 @@ A valid contradiction resolution must:
 The validator rejects results that omit conflicting sources, cite ids outside
 the request package, claim certainty without evidence, or mutate source state
 as part of ingest.
+
+The implemented validator requires at least two distinct conflicting source
+bodies. `prefer_source` requires a nonempty proper subset of
+`conflictingSourceIds` as `winningSourceIds`; the other modes require an empty
+winner list. All referenced ids must belong to the signed request's cited
+support. Different source ids or hashes are not proof of independent evidence;
+the routing metadata explicitly records that independence was not inferred.
 
 ## Audit Model
 
@@ -186,6 +209,26 @@ Positive tests must prove that accepted high-risk results create pending
 `create_derived_memory` candidates only, with `targetMemoryId = null`, retained
 source hashes, `trust_class = AgentAssertion`, and no source-memory mutation.
 
-RCH-backed tests are required when this design becomes code. Until then,
-documentation verification is limited to Markdown lint/static checks and diff
-review.
+The implementation has public handshake regression cases in
+`tests/reflection_handshake_contracts.rs` and a durable propose/ingest/validate/apply
+case in `src/core/curate.rs`. They cover malformed nested fields, source-set and
+winner constraints, duplicate source content, single-source limits, bounded
+materialized output, HMAC and expiry gates, idempotent replay, pending-only
+ingest, semantic-only apply, and unchanged original memories.
+
+RCH-backed execution remains required for behavioral proof. The implementation
+session could run formatting/parser checks and static review, but did not have
+an available RCH worker; these new tests must not be represented as executed.
+The compiled response-schema contract string and its HMAC-bound hash remain
+unchanged: it already advertises both kinds and delegates `kindFields` to
+kind-specific validation. The expanded JSON Schema documents these newly
+implemented validators without invalidating already-issued low-risk requests.
+
+Both prompt renderers provide the complete advisory field requirements before
+the untrusted source package. High-risk requests use distinct
+`ee.reflect.prompt.procedural_extract.v1` and
+`ee.reflect.prompt.contradiction_resolve.v1` template identities; their hashes
+bind the base instructions and the entire kind-specific guidance. Requests
+issued for these formerly deferred kinds under the old generic template must be
+reissued. Existing low-risk prompts, template hashes, and schema fingerprints
+remain unchanged.

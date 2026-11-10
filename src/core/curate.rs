@@ -18731,6 +18731,272 @@ mod tests {
     }
 
     #[test]
+    fn high_risk_reflection_ingest_requires_curation_and_preserves_source_memories() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let key_path = workspace_path.join("reflect.key");
+        fs::write(&key_path, b"advisory-reflection-fixture-key")
+            .map_err(|error| error.to_string())?;
+        let workspace_id = test_workspace_id(workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("advisory-reflection-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut source_ids = Vec::new();
+        let mut originals = Vec::new();
+        for (id, content) in [
+            (
+                0x2411,
+                "The tests/cache_replay.rs fixture recovered the previous value after an interrupted write.",
+            ),
+            (
+                0x2412,
+                "The tests/cache_replay.rs fixture lost the previous value on the alternative backend.",
+            ),
+        ] {
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(id)).to_string();
+            connection
+                .insert_memory(
+                    &memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.6,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            originals.push(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "source memory missing".to_owned())?,
+            );
+            source_ids.push(memory_id);
+        }
+        let created_at = chrono::Utc::now().to_rfc3339();
+        for (kind, memory_kind) in [
+            ("procedural_extract", "procedure-draft"),
+            ("contradiction_resolve", "conflict-resolution-draft"),
+        ] {
+            let before_count = connection
+                .list_curation_candidates(&workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?
+                .len();
+            let request = propose_reflection_request(&ReflectionProposeOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                reflection_kind: kind,
+                gaps_only: false,
+                source_ids: &[],
+                source_memory_ids: &source_ids,
+                source_evidence_span_ids: &[],
+                created_at: Some(&created_at),
+                limits: ReflectionSourcePackageLimits::default(),
+                dry_run: false,
+                hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                    Some("advisory-key".to_owned()),
+                    Some(key_path.clone()),
+                )),
+                lifecycle_config: Some(
+                    ReflectionRequestLifecycleConfig::new(3600, 60)
+                        .map_err(|error| error.to_string())?,
+                ),
+            })
+            .map_err(|error| error.to_string())?;
+            let fields = if kind == "procedural_extract" {
+                serde_json::json!({
+                    "sourceIds": source_ids,
+                    "scope": "Rust workspace changes to src/cache.rs",
+                    "procedureDraft": "When src/cache.rs changes, run `cargo test --test cache_replay` and require 0 failed tests before reviewing the change.",
+                    "preconditions": ["A disposable cache fixture is available in tests/cache_replay.rs."],
+                    "negativeExamples": ["An unrelated README.md edit does not exercise replay behavior."],
+                    "confidenceLimits": "The observations cover only the two cited cache backends."
+                })
+            } else {
+                serde_json::json!({
+                    "conflictingSourceIds": source_ids,
+                    "resolutionMode": "prefer_source",
+                    "resolutionDraft": "The first observation is provisionally preferred for the original backend; the alternative backend remains unresolved.",
+                    "winningSourceIds": [source_ids[0]],
+                    "confidenceLimits": "The two observations used different backends.",
+                    "openQuestions": ["Does the failure reproduce on the original backend?"],
+                    "staleWhen": "Revisit after a backend change or a shared replay reproduction."
+                })
+            };
+            let mut result = ReflectionResultArtifact {
+                schema: REFLECTION_RESULT_SCHEMA.to_owned(),
+                request_id: request.request_id.clone(),
+                request_hash: request.request_hash.clone(),
+                challenge: request
+                    .request
+                    .challenge
+                    .clone()
+                    .ok_or_else(|| "challenge missing".to_owned())?,
+                producer: ReflectionResultProducer {
+                    kind: "test_producer".to_owned(),
+                    id: "advisory-fixture".to_owned(),
+                    version: None,
+                    extra: BTreeMap::new(),
+                },
+                reflection_kind: kind.to_owned(),
+                cited_source_ids: source_ids.clone(),
+                body: "The cited cache observations support a bounded advisory draft for review."
+                    .to_owned(),
+                kind_fields: fields
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| "fields must be an object".to_owned())?,
+                self_reported_confidence: 0.99,
+            };
+            result
+                .kind_fields
+                .insert("autoApply".to_owned(), serde_json::json!(true));
+            let invalid_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+            let mut options = ReflectionIngestOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                result_json: &invalid_json,
+                consumed_at: Some(&created_at),
+                dry_run: false,
+                gaps_only: false,
+                hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                    Some("advisory-key".to_owned()),
+                    Some(key_path.clone()),
+                )),
+            };
+            assert!(ingest_reflection_result(&options).is_err());
+            let pending_ledger = connection
+                .get_reflection_request_ledger(&workspace_id, &request.request_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "ledger missing".to_owned())?;
+            assert_eq!(pending_ledger.status, "pending");
+            assert!(pending_ledger.consumed_candidate_id.is_none());
+            assert_eq!(
+                connection
+                    .list_curation_candidates(&workspace_id, None, None, None)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                before_count
+            );
+
+            result.kind_fields.remove("autoApply");
+            let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+            options.result_json = &result_json;
+            let ingested = ingest_reflection_result(&options).map_err(|error| error.to_string())?;
+            let candidate_id = ingested
+                .candidate_id
+                .as_deref()
+                .ok_or_else(|| "candidate id missing".to_owned())?;
+            let candidate = connection
+                .get_curation_candidate(&workspace_id, candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "candidate missing".to_owned())?;
+            assert_eq!(candidate.status, "pending");
+            assert_eq!(candidate.candidate_type, "create_derived_memory");
+            assert!(candidate.target_memory_id.is_none());
+            assert_eq!(
+                candidate.proposed_trust_class.as_deref(),
+                Some("agent_assertion")
+            );
+            assert_eq!(candidate.proposed_confidence, Some(0.5));
+            let replay = ingest_reflection_result(&options).map_err(|error| error.to_string())?;
+            assert_eq!(replay.outcome, "idempotent_replay");
+            assert_eq!(replay.candidate_id, ingested.candidate_id);
+            assert!(!replay.durable_mutation);
+
+            let apply_options = super::CurateApplyOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: Some("advisory-reviewer"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            };
+            let blocked =
+                apply_curation_candidate(&apply_options).map_err(|error| error.to_string())?;
+            assert_eq!(blocked.application.status, "blocked");
+            assert!(!blocked.durable_mutation);
+            let validation = validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: Some("advisory-reviewer"),
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                validation.validation.status, "passed",
+                "{:?}",
+                validation.validation.errors
+            );
+            let applied =
+                apply_curation_candidate(&apply_options).map_err(|error| error.to_string())?;
+            assert_eq!(
+                applied.application.status, "applied",
+                "{:?}",
+                applied.application.errors
+            );
+            let memory_id = applied
+                .application
+                .created_memory_id
+                .as_deref()
+                .ok_or_else(|| "derived memory missing".to_owned())?;
+            let memory = connection
+                .get_memory(memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "derived memory row missing".to_owned())?;
+            assert_eq!(memory.level, "semantic");
+            assert_eq!(memory.kind, memory_kind);
+            assert_eq!(memory.trust_class, "agent_assertion");
+            assert_eq!(memory.confidence, 0.5);
+            assert!(memory.content.contains("confidenceLimits"));
+            assert!(memory.content.starts_with("Advisory "));
+            let links = connection
+                .list_memory_links_for_memory(memory_id, Some(MemoryLinkRelation::DerivedFrom))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(links.len(), 2);
+            assert!(
+                connection
+                    .list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            for original in &originals {
+                let current = connection
+                    .get_memory(&original.id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "original memory disappeared".to_owned())?;
+                assert_eq!(
+                    &current, original,
+                    "advisory routing must preserve source memories"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reflection_ingest_rejects_evidence_posture_drift_without_candidate_or_excerpt_egress()
     -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;

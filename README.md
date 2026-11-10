@@ -1546,6 +1546,50 @@ by the rule. In JSON, native rule identity appears in `data.entity`, while
 `data.memoryId` is null. Human, Markdown, and Mermaid output identify the native
 entity too; stored secrets and private paths are redacted on output.
 
+### External reflection
+
+`ee reflect` packages cited memories or evidence for an external producer and
+ingests its structured result through curation. Configure a local signing key
+with `EE_REFLECTION_HMAC_KEY_ID` and `EE_REFLECTION_HMAC_KEY_PATH` before proposing
+a durable request. The key stays local; the request carries its signed challenge.
+
+```bash
+ee reflect propose --kind procedural_extract \
+  --source-memory <memory-id-1> --source-memory <memory-id-2> \
+  --workspace . --json > reflection-request.json
+
+# Give the returned request and its prompt to your external producer.
+# Save its ee.reflect.result.v1 response as reflection-result.json.
+ee reflect ingest --file reflection-result.json --dry-run --workspace . --json
+ee reflect ingest --file reflection-result.json --workspace . --json
+
+# Inspect the pending candidate, then explicitly validate and apply it.
+ee curate candidates --workspace .
+ee curate validate <candidate-id> --workspace .
+ee curate apply <candidate-id> --workspace .
+```
+
+`procedural_extract` requires a concrete procedure, scope, preconditions,
+negative examples, confidence limits, and cited source IDs. A single distinct
+source body also requires an explicit single-source limitation. Use
+`--kind contradiction_resolve` with at least two distinct conflicting source
+bodies to propose a preference, synthesis, or an unresolved interpretation;
+its result must include confidence limits, open questions, and a condition for
+revisiting the draft. Each generated prompt explains the required fields.
+
+Both kinds create pending `create_derived_memory` candidates. After explicit
+curation they become semantic `procedure-draft` or `conflict-resolution-draft`
+memories with `agent_assertion` trust, the `reflection` subclass, and confidence
+capped at 0.5. Scope and limitations remain in the searchable body, and source
+links preserve the supporting evidence. Rule promotion and changes to the
+conflicting source memories require separate curation. Ingest verifies the
+signed request, expiry, current source identity, and replay state; retries of
+an accepted result reuse its candidate.
+
+See the [result schema](docs/schemas/ee.reflect.result.v1.json) for exact field
+shapes and [reflection routing ADR](docs/adr/0045-high-risk-reflection-routing.md)
+for the evidence and curation contract.
+
 ### Memory inspection
 
 | Command | Purpose |

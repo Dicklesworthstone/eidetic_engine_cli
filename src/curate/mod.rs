@@ -886,6 +886,10 @@ pub const REFLECTION_CHALLENGE_ALGORITHM: &str = "hmac-sha256";
 pub const REFLECTION_REPLAY_POLICY: &str = "single_accept_idempotent_replay";
 pub const REFLECTION_PROMPT_TEMPLATE_ID: &str = "ee.reflect.prompt.source_package.v1";
 pub const REFLECTION_GAPS_ONLY_PROMPT_TEMPLATE_ID: &str = "ee.reflect.prompt.knowledge_gaps.v1";
+pub const REFLECTION_PROCEDURAL_ADVISORY_PROMPT_TEMPLATE_ID: &str =
+    "ee.reflect.prompt.procedural_extract.v1";
+pub const REFLECTION_CONFLICT_ADVISORY_PROMPT_TEMPLATE_ID: &str =
+    "ee.reflect.prompt.contradiction_resolve.v1";
 pub const REFLECTION_PROMPT_TEMPLATE_VERSION: &str = "1";
 pub const REFLECTION_SOURCE_SECRET_PLACEHOLDER: &str = "[REDACTED:reflection-source-secret]";
 pub const REFLECTION_SOURCE_REDACTION_NONE: &str = "none";
@@ -929,6 +933,8 @@ const REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_NODES: usize = 512;
 const REFLECTION_RESULT_MAX_KIND_FIELD_STRING_BYTES: usize = 4 * 1024;
 const REFLECTION_RESULT_MAX_KIND_FIELD_ARRAY_ITEMS: usize = 128;
 const REFLECTION_RESULT_MAX_KIND_FIELD_OBJECT_FIELDS: usize = 32;
+const REFLECTION_ADVISORY_CONFIDENCE_MAX: f32 = 0.5;
+const REFLECTION_ADVISORY_VALIDATOR_VERSION: &str = "ee.reflection.advisory.v1";
 const REFLECTION_OMIT_SOURCE_COUNT_LIMIT: &str = "source_count_limit";
 const REFLECTION_OMIT_TOTAL_EXCERPT_BYTE_LIMIT: &str = "total_excerpt_byte_limit";
 const REFLECTION_OMIT_PER_SOURCE_EXCERPT_BYTE_LIMIT: &str = "per_source_excerpt_byte_limit";
@@ -1306,6 +1312,34 @@ pub struct ReflectionResultProducer {
     pub version: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// External procedure extraction is a scoped advisory, never a rule mutation.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReflectionProcedureDraft {
+    source_ids: Vec<String>,
+    scope: String,
+    procedure_draft: String,
+    preconditions: Vec<String>,
+    negative_examples: Vec<String>,
+    confidence_limits: String,
+    #[serde(default)]
+    suggested_validation: Vec<String>,
+    single_source_reason: Option<String>,
+}
+
+/// A proposed interpretation keeps the original conflicting memories intact.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReflectionConflictDraft {
+    conflicting_source_ids: Vec<String>,
+    resolution_mode: String,
+    resolution_draft: String,
+    winning_source_ids: Vec<String>,
+    confidence_limits: String,
+    open_questions: Vec<String>,
+    stale_when: String,
 }
 
 /// Canonical material needed to create a pending reflection-derived candidate.
@@ -2837,6 +2871,27 @@ pub fn reflection_prompt_template_descriptor_for_profile(
     }
 }
 
+fn reflection_prompt_template_descriptor_for_kind(
+    reflection_kind: &str,
+    profile: ReflectionPromptProfile,
+) -> ReflectionPromptTemplateDescriptor {
+    let id = match ReflectionKind::from_str(reflection_kind) {
+        Ok(ReflectionKind::ProceduralExtract) => REFLECTION_PROCEDURAL_ADVISORY_PROMPT_TEMPLATE_ID,
+        Ok(ReflectionKind::ContradictionResolve) => REFLECTION_CONFLICT_ADVISORY_PROMPT_TEMPLATE_ID,
+        _ => return reflection_prompt_template_descriptor_for_profile(profile),
+    };
+    let body = format!(
+        "{}\n{}",
+        reflection_prompt_template_body(profile).trim_end(),
+        reflection_advisory_prompt_guidance(reflection_kind),
+    );
+    ReflectionPromptTemplateDescriptor {
+        id,
+        version: REFLECTION_PROMPT_TEMPLATE_VERSION,
+        hash: blake3_content_hash(&body),
+    }
+}
+
 #[must_use]
 pub const fn reflection_prompt_template_id(profile: ReflectionPromptProfile) -> &'static str {
     match profile {
@@ -2870,7 +2925,9 @@ fn reflection_prompt_profile_from_descriptor(
     }
 
     let profile = match descriptor.id {
-        REFLECTION_PROMPT_TEMPLATE_ID => ReflectionPromptProfile::SourcePackage,
+        REFLECTION_PROMPT_TEMPLATE_ID
+        | REFLECTION_PROCEDURAL_ADVISORY_PROMPT_TEMPLATE_ID
+        | REFLECTION_CONFLICT_ADVISORY_PROMPT_TEMPLATE_ID => ReflectionPromptProfile::SourcePackage,
         REFLECTION_GAPS_ONLY_PROMPT_TEMPLATE_ID => {
             if ReflectionKind::from_str(reflection_kind).ok() != Some(ReflectionKind::Gaps) {
                 return Err(
@@ -2892,8 +2949,8 @@ fn reflection_prompt_profile_from_descriptor(
             );
         }
     };
-    let expected = reflection_prompt_template_descriptor_for_profile(profile);
-    if descriptor.hash != expected.hash {
+    let expected = reflection_prompt_template_descriptor_for_kind(reflection_kind, profile);
+    if descriptor.id != expected.id || descriptor.hash != expected.hash {
         return Err(
             DerivationSourcePackageError::InvalidReflectionRequestArtifact {
                 field: "promptTemplate",
@@ -2959,7 +3016,8 @@ pub fn build_reflection_request_fingerprint_with_profile(
         );
     }
 
-    let prompt_template = reflection_prompt_template_descriptor_for_profile(prompt_profile);
+    let prompt_template =
+        reflection_prompt_template_descriptor_for_kind(reflection_kind, prompt_profile);
     let response_schema = reflection_response_schema_descriptor();
     let payload = ReflectionRequestHashPayload {
         schema: REFLECTION_REQUEST_SCHEMA,
@@ -3443,8 +3501,8 @@ pub fn reflection_result_candidate_material(
     Ok(ReflectionResultCandidateMaterial {
         candidate_type: CandidateType::CreateDerivedMemory.as_str(),
         target_memory_id: None,
-        proposed_content: result.body.trim().to_owned(),
-        proposed_confidence: result.self_reported_confidence,
+        proposed_content: reflection_result_proposed_content(result)?,
+        proposed_confidence: reflection_result_proposed_confidence(result),
         proposed_trust_class: TrustClass::AgentAssertion.as_str(),
         source_type: CandidateSource::AgentInference.as_str(),
         source_id: reflection_result_candidate_source_id(request.request_id.as_str()),
@@ -3452,7 +3510,7 @@ pub fn reflection_result_candidate_material(
             "Reflection result `{}` cites {cited_count} request source(s) and proposes a derived memory.",
             result.reflection_kind.trim()
         ),
-        confidence: result.self_reported_confidence,
+        confidence: reflection_result_proposed_confidence(result),
         derivation_source_refs_json,
         derivation_metadata_json,
     })
@@ -3648,8 +3706,8 @@ pub fn reflection_result_candidate_material_from_ledger(
     Ok(ReflectionResultCandidateMaterial {
         candidate_type: CandidateType::CreateDerivedMemory.as_str(),
         target_memory_id: None,
-        proposed_content: result.body.trim().to_owned(),
-        proposed_confidence: result.self_reported_confidence,
+        proposed_content: reflection_result_proposed_content(result)?,
+        proposed_confidence: reflection_result_proposed_confidence(result),
         proposed_trust_class: TrustClass::AgentAssertion.as_str(),
         source_type: CandidateSource::AgentInference.as_str(),
         source_id: reflection_result_candidate_source_id(material.request_id.as_str()),
@@ -3657,7 +3715,7 @@ pub fn reflection_result_candidate_material_from_ledger(
             "Reflection result `{}` cites {cited_count} request source(s) and proposes a derived memory.",
             result.reflection_kind.trim()
         ),
-        confidence: result.self_reported_confidence,
+        confidence: reflection_result_proposed_confidence(result),
         derivation_source_refs_json,
         derivation_metadata_json,
     })
@@ -3825,7 +3883,8 @@ fn validate_reflection_result_shape_and_ledger_identity(
         "self-reported confidence must be a finite number in [0, 1]".to_owned(),
     )?;
     validate_reflection_result_kind_fields(result)?;
-    reflection_result_cited_source_refs_from_ledger(material, result)?;
+    let source_refs = reflection_result_cited_source_refs_from_ledger(material, result)?;
+    validate_reflection_advisory_source_support(result, &source_refs)?;
     Ok(())
 }
 
@@ -4109,7 +4168,8 @@ fn reflection_prompt_template_descriptor_from_ledger(
         ReflectionPromptProfile::SourcePackage,
         ReflectionPromptProfile::GapsOnly,
     ] {
-        let descriptor = reflection_prompt_template_descriptor_for_profile(profile);
+        let descriptor =
+            reflection_prompt_template_descriptor_for_kind(&material.reflection_kind, profile);
         if descriptor.hash == material.prompt_template_hash {
             if profile == ReflectionPromptProfile::GapsOnly
                 && ReflectionKind::from_str(material.reflection_kind.as_str()).ok()
@@ -4238,7 +4298,7 @@ fn reflection_result_derivation_metadata_json_from_ledger(
     })?;
     let prompt_template = reflection_prompt_template_descriptor_from_ledger(material)?;
     let response_schema = reflection_response_schema_descriptor();
-    let producer_payload = serde_json::json!({
+    let mut producer_payload = serde_json::json!({
         "schema": REFLECTION_RESULT_SCHEMA,
         "requestId": material.request_id,
         "requestHash": material.request_hash,
@@ -4263,12 +4323,13 @@ fn reflection_result_derivation_metadata_json_from_ledger(
         "citedSourceIds": result.cited_source_ids,
         "selfReportedConfidence": result.self_reported_confidence,
     });
+    add_reflection_advisory_routing_metadata(result, &mut producer_payload);
     let metadata = DerivationMetadata {
         memory_spec: DerivationMemorySpec {
             level: level.to_owned(),
             kind: kind.to_owned(),
             workflow_id: None,
-            confidence: Some(result.self_reported_confidence),
+            confidence: Some(reflection_result_proposed_confidence(result)),
             utility: None,
             importance: None,
             provenance_uri: Some(format!("ee-reflect://{}", material.request_id.trim())),
@@ -4306,22 +4367,8 @@ fn reflection_result_candidate_memory_route(
         Ok(ReflectionKind::Strengths) => Ok(("semantic", "strength")),
         Ok(ReflectionKind::Question) => Ok(("semantic", "question")),
         Ok(ReflectionKind::Plan | ReflectionKind::PlanKinds) => Ok(("semantic", "plan")),
-        Ok(ReflectionKind::ProceduralExtract) => {
-            Err(ReflectionResultValidationError::DeferredReflectionKind {
-                reflection_kind: ReflectionKind::ProceduralExtract.as_str().to_owned(),
-                message:
-                    "procedural extraction needs a dedicated validator before routing to curation"
-                        .to_owned(),
-            })
-        }
-        Ok(ReflectionKind::ContradictionResolve) => {
-            Err(ReflectionResultValidationError::DeferredReflectionKind {
-                reflection_kind: ReflectionKind::ContradictionResolve.as_str().to_owned(),
-                message:
-                    "contradiction resolution needs a dedicated validator before routing to curation"
-                        .to_owned(),
-            })
-        }
+        Ok(ReflectionKind::ProceduralExtract) => Ok(("semantic", "procedure-draft")),
+        Ok(ReflectionKind::ContradictionResolve) => Ok(("semantic", "conflict-resolution-draft")),
         Err(_) => Err(ReflectionResultValidationError::UnsupportedReflectionKind {
             reflection_kind: reflection_kind.trim().to_owned(),
         }),
@@ -4340,7 +4387,7 @@ fn reflection_result_derivation_metadata_json(
             message: error.to_string(),
         }
     })?;
-    let producer_payload = serde_json::json!({
+    let mut producer_payload = serde_json::json!({
         "schema": REFLECTION_RESULT_SCHEMA,
         "requestId": request.request_id,
         "requestHash": request.request_hash,
@@ -4365,12 +4412,13 @@ fn reflection_result_derivation_metadata_json(
         "citedSourceIds": result.cited_source_ids,
         "selfReportedConfidence": result.self_reported_confidence,
     });
+    add_reflection_advisory_routing_metadata(result, &mut producer_payload);
     let metadata = DerivationMetadata {
         memory_spec: DerivationMemorySpec {
             level: level.to_owned(),
             kind: kind.to_owned(),
             workflow_id: None,
-            confidence: Some(result.self_reported_confidence),
+            confidence: Some(reflection_result_proposed_confidence(result)),
             utility: None,
             importance: None,
             provenance_uri: Some(format!("ee-reflect://{}", request.request_id.trim())),
@@ -4455,7 +4503,8 @@ fn validate_reflection_result_shape_and_identity(
         "self-reported confidence must be a finite number in [0, 1]".to_owned(),
     )?;
     validate_reflection_result_kind_fields(result)?;
-    reflection_result_cited_source_refs(request, result)?;
+    let source_refs = reflection_result_cited_source_refs(request, result)?;
+    validate_reflection_advisory_source_support(result, &source_refs)?;
     Ok(())
 }
 
@@ -4468,11 +4517,364 @@ fn validate_reflection_result_kind_fields(
             validate_reflection_summary_insight_strengths_kind_fields(result)
         }
         Ok(ReflectionKind::PlanKinds) => validate_reflection_plan_kinds_kind_fields(result),
+        Ok(ReflectionKind::ProceduralExtract) => validate_reflection_procedure_draft(result),
+        Ok(ReflectionKind::ContradictionResolve) => validate_reflection_conflict_draft(result),
         Ok(_) => Ok(()),
         Err(_) => Err(ReflectionResultValidationError::UnsupportedReflectionKind {
             reflection_kind: result.reflection_kind.trim().to_owned(),
         }),
     }
+}
+
+fn reflection_result_is_advisory(result: &ReflectionResultArtifact) -> bool {
+    matches!(
+        ReflectionKind::from_str(&result.reflection_kind),
+        Ok(ReflectionKind::ProceduralExtract | ReflectionKind::ContradictionResolve)
+    )
+}
+
+fn reflection_result_proposed_confidence(result: &ReflectionResultArtifact) -> f32 {
+    if reflection_result_is_advisory(result) {
+        result
+            .self_reported_confidence
+            .min(REFLECTION_ADVISORY_CONFIDENCE_MAX)
+    } else {
+        result.self_reported_confidence
+    }
+}
+
+fn add_reflection_advisory_routing_metadata(
+    result: &ReflectionResultArtifact,
+    producer_payload: &mut serde_json::Value,
+) {
+    if reflection_result_is_advisory(result) {
+        producer_payload["advisoryRouting"] = serde_json::json!({
+            "validatorVersion": REFLECTION_ADVISORY_VALIDATOR_VERSION,
+            "candidateType": CandidateType::CreateDerivedMemory.as_str(),
+            "memoryLevel": "semantic",
+            "advisory": true,
+            "autoPromoted": false,
+            "separateCurationRequired": true,
+            "confidenceCap": REFLECTION_ADVISORY_CONFIDENCE_MAX,
+            // Different ids or content hashes do not prove independent evidence.
+            "sourceIndependence": "not_inferred",
+        });
+    }
+}
+
+fn reflection_result_proposed_content(
+    result: &ReflectionResultArtifact,
+) -> Result<String, ReflectionResultValidationError> {
+    let label = match ReflectionKind::from_str(&result.reflection_kind) {
+        Ok(ReflectionKind::ProceduralExtract) => "procedure",
+        Ok(ReflectionKind::ContradictionResolve) => "conflict interpretation",
+        _ => return Ok(result.body.trim().to_owned()),
+    };
+    // Qualifiers belong to the retrieved content, not just a metadata sidecar:
+    // an external producer cannot put a broad claim in body and hide its scope
+    // or negative examples in fields omitted by search/pack projections.
+    let fields = serde_json::to_string_pretty(&result.kind_fields).map_err(|error| {
+        ReflectionResultValidationError::JsonSerialization {
+            message: error.to_string(),
+        }
+    })?;
+    let content = format!(
+        "Advisory {label} draft. Separate curation is required before changing rules, procedures, or source memories.\n\n{}\n\nScope, evidence, and limitations (part of this advisory):\n{fields}",
+        result.body.trim(),
+    );
+    ensure_reflection_result_field(
+        content.len() <= REFLECTION_RESULT_MAX_BODY_BYTES,
+        "kindFields",
+        format!(
+            "advisory body including its required qualifiers must not exceed {REFLECTION_RESULT_MAX_BODY_BYTES} bytes"
+        ),
+    )?;
+    Ok(content)
+}
+
+fn parse_reflection_advisory_fields<T: serde::de::DeserializeOwned>(
+    result: &ReflectionResultArtifact,
+    description: &'static str,
+) -> Result<T, ReflectionResultValidationError> {
+    serde_json::from_value(serde_json::Value::Object(result.kind_fields.clone())).map_err(
+        |_| ReflectionResultValidationError::InvalidResultField {
+            field: "kindFields",
+            // Do not echo unexpected producer-controlled keys or values.
+            message: format!(
+                "{description} must match its typed kindFields schema; missing, unknown, and incorrectly typed fields are rejected"
+            ),
+        },
+    )
+}
+
+fn validate_reflection_advisory_text(
+    text: &str,
+    field: &'static str,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        !text.trim().is_empty(),
+        field,
+        "advisory text must not be empty".to_owned(),
+    )?;
+    validate_reflection_result_body_policy(text).map_err(|error| match error {
+        ReflectionResultValidationError::InvalidResultField { message, .. } => {
+            ReflectionResultValidationError::InvalidResultField { field, message }
+        }
+        other => other,
+    })
+}
+
+fn validate_reflection_advisory_text_list(
+    texts: &[String],
+    field: &'static str,
+    required: bool,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        !required || !texts.is_empty(),
+        field,
+        "advisory field must contain at least one explicit entry".to_owned(),
+    )?;
+    for text in texts {
+        validate_reflection_advisory_text(text, field)?;
+    }
+    Ok(())
+}
+
+fn reject_reflection_direct_application_request(
+    text: &str,
+    field: &'static str,
+) -> Result<(), ReflectionResultValidationError> {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let requests_mutation = [
+        "apply this candidate now",
+        "apply this rule now",
+        "apply this procedure now",
+        "automatically apply this",
+        "auto-apply this",
+        "supersede these sources",
+        "tombstone these sources",
+    ]
+    .iter()
+    .any(|phrase| {
+        normalized.match_indices(*phrase).any(|(offset, _)| {
+            let prefix = normalized[..offset].trim_end();
+            ![
+                "do not",
+                "don't",
+                "never",
+                "must not",
+                "should not",
+                "not to",
+            ]
+            .iter()
+            .any(|negation| prefix.ends_with(*negation))
+        })
+    });
+    ensure_reflection_result_field(
+        !requests_mutation,
+        field,
+        "reflection assertions must remain advisory and must not request immediate source or procedural mutation".to_owned(),
+    )
+}
+
+fn validate_reflection_advisory_source_ids(
+    ids: &[String],
+    allowed_ids: &[String],
+    minimum: usize,
+    field: &'static str,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        ids.len() >= minimum && ids.len() <= REFLECTION_RESULT_MAX_CITED_SOURCE_IDS,
+        field,
+        format!(
+            "advisory field requires between {minimum} and {REFLECTION_RESULT_MAX_CITED_SOURCE_IDS} source ids"
+        ),
+    )?;
+    let allowed: BTreeSet<&str> = allowed_ids.iter().map(|id| id.trim()).collect();
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        ensure_reflection_result_field(
+            !id.is_empty()
+                && id == id.trim()
+                && id.len() <= REFLECTION_RESULT_MAX_CITED_SOURCE_ID_BYTES
+                && allowed.contains(id.as_str())
+                && seen.insert(id.as_str()),
+            field,
+            "advisory source ids must be unique, canonical, and present in the cited support set"
+                .to_owned(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_reflection_procedure_draft(
+    result: &ReflectionResultArtifact,
+) -> Result<(), ReflectionResultValidationError> {
+    let draft: ReflectionProcedureDraft =
+        parse_reflection_advisory_fields(result, "procedural_extract")?;
+    reject_reflection_direct_application_request(&result.body, "body")?;
+    reject_reflection_direct_application_request(
+        &draft.procedure_draft,
+        "kindFields.procedureDraft",
+    )?;
+    validate_reflection_advisory_source_ids(
+        &draft.source_ids,
+        &result.cited_source_ids,
+        1,
+        "kindFields.sourceIds",
+    )?;
+    ensure_reflection_result_field(
+        draft.source_ids.len() == result.cited_source_ids.len(),
+        "kindFields.sourceIds",
+        "procedural sourceIds must account for every cited source".to_owned(),
+    )?;
+    validate_reflection_advisory_text(&draft.scope, "kindFields.scope")?;
+    validate_reflection_advisory_text(&draft.procedure_draft, "kindFields.procedureDraft")?;
+    validate_reflection_advisory_text(&draft.confidence_limits, "kindFields.confidenceLimits")?;
+    validate_reflection_advisory_text_list(&draft.preconditions, "kindFields.preconditions", true)?;
+    validate_reflection_advisory_text_list(
+        &draft.negative_examples,
+        "kindFields.negativeExamples",
+        true,
+    )?;
+    validate_reflection_advisory_text_list(
+        &draft.suggested_validation,
+        "kindFields.suggestedValidation",
+        false,
+    )?;
+    if let Some(reason) = &draft.single_source_reason {
+        validate_reflection_advisory_text(reason, "kindFields.singleSourceReason")?;
+    }
+    ensure_reflection_result_field(
+        !result.kind_fields.contains_key("singleSourceReason")
+            || draft.single_source_reason.is_some(),
+        "kindFields.singleSourceReason",
+        "singleSourceReason must be a nonblank string when supplied".to_owned(),
+    )?;
+    ensure_reflection_result_field(
+        specificity_score(&draft.procedure_draft).passes_threshold,
+        "kindFields.procedureDraft",
+        "procedure draft must state a concrete, testable action rather than generic advice"
+            .to_owned(),
+    )?;
+    reflection_result_proposed_content(result)?;
+    Ok(())
+}
+
+fn validate_reflection_conflict_draft(
+    result: &ReflectionResultArtifact,
+) -> Result<(), ReflectionResultValidationError> {
+    let draft: ReflectionConflictDraft =
+        parse_reflection_advisory_fields(result, "contradiction_resolve")?;
+    reject_reflection_direct_application_request(&result.body, "body")?;
+    reject_reflection_direct_application_request(
+        &draft.resolution_draft,
+        "kindFields.resolutionDraft",
+    )?;
+    validate_reflection_advisory_source_ids(
+        &draft.conflicting_source_ids,
+        &result.cited_source_ids,
+        2,
+        "kindFields.conflictingSourceIds",
+    )?;
+    validate_reflection_advisory_source_ids(
+        &draft.winning_source_ids,
+        &draft.conflicting_source_ids,
+        0,
+        "kindFields.winningSourceIds",
+    )?;
+    let valid_mode = match draft.resolution_mode.as_str() {
+        "prefer_source" => {
+            !draft.winning_source_ids.is_empty()
+                && draft.winning_source_ids.len() < draft.conflicting_source_ids.len()
+        }
+        "synthesize" | "insufficient_evidence" | "defer" => draft.winning_source_ids.is_empty(),
+        _ => false,
+    };
+    ensure_reflection_result_field(
+        valid_mode,
+        "kindFields.resolutionMode",
+        "prefer_source requires a nonempty proper subset of conflicting sources as winners; synthesize, insufficient_evidence, and defer require no winners".to_owned(),
+    )?;
+    validate_reflection_advisory_text(&draft.resolution_draft, "kindFields.resolutionDraft")?;
+    ensure_reflection_result_field(
+        draft.resolution_draft.split_whitespace().take(4).count() == 4,
+        "kindFields.resolutionDraft",
+        "resolution draft must explain the proposed interpretation or why it remains unresolved"
+            .to_owned(),
+    )?;
+    validate_reflection_advisory_text(&draft.confidence_limits, "kindFields.confidenceLimits")?;
+    validate_reflection_advisory_text_list(
+        &draft.open_questions,
+        "kindFields.openQuestions",
+        true,
+    )?;
+    validate_reflection_advisory_text(&draft.stale_when, "kindFields.staleWhen")?;
+    reflection_result_proposed_content(result)?;
+    Ok(())
+}
+
+fn validate_reflection_advisory_source_support(
+    result: &ReflectionResultArtifact,
+    source_refs: &[DerivationSourceRef],
+) -> Result<(), ReflectionResultValidationError> {
+    match ReflectionKind::from_str(&result.reflection_kind) {
+        Ok(ReflectionKind::ContradictionResolve) => {
+            let draft: ReflectionConflictDraft =
+                parse_reflection_advisory_fields(result, "contradiction_resolve")?;
+            let distinct_conflicting_content: BTreeSet<&str> = source_refs
+                .iter()
+                .filter(|source| draft.conflicting_source_ids.contains(&source.id))
+                .map(|source| source.content_hash.as_str())
+                .collect();
+            return ensure_reflection_result_field(
+                distinct_conflicting_content.len() >= 2,
+                "kindFields.conflictingSourceIds",
+                "a conflict draft requires at least two distinct source bodies; duplicate rows are not conflicting evidence".to_owned(),
+            );
+        }
+        Ok(ReflectionKind::ProceduralExtract) => {}
+        _ => return Ok(()),
+    }
+    let distinct_content: BTreeSet<&str> = source_refs
+        .iter()
+        .map(|source| source.content_hash.as_str())
+        .collect();
+    if distinct_content.len() >= 2 {
+        return Ok(());
+    }
+    let draft: ReflectionProcedureDraft =
+        parse_reflection_advisory_fields(result, "procedural_extract")?;
+    ensure_reflection_result_field(
+        draft.single_source_reason.as_deref().is_some_and(|reason| !reason.trim().is_empty()),
+        "kindFields.singleSourceReason",
+        "a procedure supported by only one distinct source body requires an explicit single-source limitation".to_owned(),
+    )?;
+    // Duplicate rows are not repeated evidence. A single incident may support
+    // a bounded draft, but it cannot justify universal procedural claims.
+    for (field, text) in [
+        ("body", &result.body),
+        ("kindFields.procedureDraft", &draft.procedure_draft),
+    ] {
+        let universal_claim = text
+            .split(|character: char| !character.is_alphabetic())
+            .any(|word| {
+                matches!(
+                    word.to_ascii_lowercase().as_str(),
+                    "always" | "never" | "unconditionally"
+                )
+            });
+        ensure_reflection_result_field(
+            !universal_claim,
+            field,
+            "single-source procedure drafts must avoid universal claims".to_owned(),
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_reflection_gap_kind_fields(
@@ -5230,7 +5632,17 @@ pub fn render_reflection_prompt_with_profile(
     package: &ReflectionSourcePackage,
     prompt_profile: ReflectionPromptProfile,
 ) -> Result<String, DerivationSourcePackageError> {
-    let template = reflection_prompt_template_descriptor_for_profile(prompt_profile);
+    if prompt_profile == ReflectionPromptProfile::GapsOnly
+        && ReflectionKind::from_str(reflection_kind).ok() != Some(ReflectionKind::Gaps)
+    {
+        return Err(
+            DerivationSourcePackageError::InvalidReflectionRequestArtifact {
+                field: "reflectionKind",
+                message: "gaps-only reflection prompts must use reflectionKind gaps".to_owned(),
+            },
+        );
+    }
+    let template = reflection_prompt_template_descriptor_for_kind(reflection_kind, prompt_profile);
     let source_package_json = canonical_reflection_source_package_json(package)?;
     Ok(format!(
         "templateId: {template_id}\n\
@@ -5239,6 +5651,7 @@ templateHash: {template_hash}\n\
 reflectionKind: {reflection_kind}\n\
 resultSchema: {result_schema}\n\n\
 {template_body}\n\
+{kind_guidance}\
 BEGIN_UNTRUSTED_SOURCE_PACKAGE_JSON\n\
 {source_package_json}\n\
 END_UNTRUSTED_SOURCE_PACKAGE_JSON\n",
@@ -5248,6 +5661,7 @@ END_UNTRUSTED_SOURCE_PACKAGE_JSON\n",
         reflection_kind = reflection_kind.trim(),
         result_schema = REFLECTION_RESULT_SCHEMA,
         template_body = reflection_prompt_template_body(prompt_profile).trim_end(),
+        kind_guidance = reflection_advisory_prompt_guidance(reflection_kind),
     ))
 }
 
@@ -5282,6 +5696,7 @@ responseSchemaId: {response_schema_id}\n\
 responseSchemaHash: {response_schema_hash}\n\n\
 Copy requestHash exactly into ee.reflect.result.v1.\n\n\
 {template_body}\n\
+{kind_guidance}\
 BEGIN_UNTRUSTED_SOURCE_PACKAGE_JSON\n\
 {source_package_json}\n\
 END_UNTRUSTED_SOURCE_PACKAGE_JSON\n",
@@ -5296,7 +5711,28 @@ END_UNTRUSTED_SOURCE_PACKAGE_JSON\n",
         response_schema_id = fingerprint.response_schema.id,
         response_schema_hash = fingerprint.response_schema.hash.as_str(),
         template_body = reflection_prompt_template_body(prompt_profile).trim_end(),
+        kind_guidance = reflection_advisory_prompt_guidance(&fingerprint.reflection_kind),
     ))
+}
+
+// These requirements are included in the kind-aware template hash. Low-risk
+// prompts and their compiled template/schema fingerprints stay unchanged.
+fn reflection_advisory_prompt_guidance(reflection_kind: &str) -> &'static str {
+    match ReflectionKind::from_str(reflection_kind) {
+        Ok(ReflectionKind::ProceduralExtract) => {
+            "Advisory requirements for procedural_extract:\n\
+kindFields must contain exactly these required fields: sourceIds (array of all citedSourceIds), scope (nonblank string), procedureDraft (concrete, testable string), preconditions (nonempty string array), negativeExamples (nonempty string array), confidenceLimits (nonblank string).\n\
+Allowed optional fields: suggestedValidation (string array), singleSourceReason (nonblank string). Include singleSourceReason when cited sources have fewer than two distinct content hashes; duplicate rows do not establish repeated evidence. Do not infer independence from ids or hashes. Single-source body and procedureDraft must avoid universal always/never/unconditionally claims.\n\
+The result creates only a pending create_derived_memory candidate for a semantic procedure-draft, with agent_assertion trust and confidence capped at 0.5. Keep body advisory; do not request rule promotion or immediate application. All qualifiers remain part of the eventual memory body, which must fit within 32768 UTF-8 bytes including kindFields. Each text field is limited to 4096 UTF-8 bytes.\n"
+        }
+        Ok(ReflectionKind::ContradictionResolve) => {
+            "Advisory requirements for contradiction_resolve:\n\
+kindFields must contain exactly: conflictingSourceIds (at least two cited ids with different content hashes), resolutionMode (prefer_source, synthesize, insufficient_evidence, or defer), resolutionDraft (nonblank explanation), winningSourceIds (array), confidenceLimits (nonblank string), openQuestions (nonempty string array), staleWhen (nonblank string explaining invalidation conditions). Unknown fields are rejected.\n\
+prefer_source requires winningSourceIds to be a nonempty proper subset of conflictingSourceIds. All other modes require winningSourceIds to be empty. Every source id must belong to citedSourceIds and the signed request. Do not infer evidence independence from ids or hashes.\n\
+The result creates only a pending create_derived_memory candidate for a semantic conflict-resolution-draft, with agent_assertion trust and confidence capped at 0.5. Preserve original source memories; do not request automatic application, supersession, tombstoning, or merging. All qualifiers remain part of the eventual memory body, which must fit within 32768 UTF-8 bytes including kindFields. Each text field is limited to 4096 UTF-8 bytes.\n"
+        }
+        _ => "",
+    }
 }
 
 fn reflection_source_entry_metadata(
@@ -13158,19 +13594,19 @@ Then update src/policy/mod.rs on main."
             })
         ));
 
-        let (deferred_request, deferred_result, deferred_key) =
+        let (unstructured_request, unstructured_result, unstructured_key) =
             reflection_result_fixture_for_kind("procedural_extract")?;
         assert!(matches!(
             reflection_result_candidate_material(
-                &deferred_request,
-                &deferred_result,
-                &deferred_key,
+                &unstructured_request,
+                &unstructured_result,
+                &unstructured_key,
                 "2026-05-24T00:30:00Z"
             ),
-            Err(ReflectionResultValidationError::DeferredReflectionKind {
-                reflection_kind,
+            Err(ReflectionResultValidationError::InvalidResultField {
+                field: "kindFields",
                 ..
-            }) if reflection_kind == "procedural_extract"
+            })
         ));
 
         let (unsupported_request, unsupported_result, unsupported_key) =

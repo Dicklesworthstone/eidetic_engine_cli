@@ -134,7 +134,12 @@
       "properties": {
         "id": {
           "type": "string",
-          "enum": ["ee.reflect.prompt.source_package.v1", "ee.reflect.prompt.knowledge_gaps.v1"]
+          "enum": [
+            "ee.reflect.prompt.source_package.v1",
+            "ee.reflect.prompt.knowledge_gaps.v1",
+            "ee.reflect.prompt.procedural_extract.v1",
+            "ee.reflect.prompt.contradiction_resolve.v1"
+          ]
         },
         "version": { "type": "string", "minLength": 1 },
         "hash": { "$ref": "#/$defs/blake3Hash" }
