@@ -9227,7 +9227,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
         Some(&mut preloaded_memories),
         fast_embedder_override,
         empty_generation,
-        false,
+        audit_connection.is_none(),
     )
     .await?;
     Ok(ContextSearchReport {
@@ -10453,7 +10453,7 @@ async fn run_search_inner(
         preloaded_memories,
         None,
         None,
-        false,
+        audit_connection.is_none(),
     )
     .await
     .map(|run| run.report)
@@ -10471,7 +10471,7 @@ async fn run_search_inner_with_performance(
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     empty_generation: Option<PreparedEmptySearchGeneration>,
-    capture_deferred_audit: bool,
+    retrieval_only: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let model_free_empty_generation = empty_generation.is_some();
     options.validate()?;
@@ -10938,7 +10938,7 @@ async fn run_search_inner_with_performance(
                 &mut degraded,
                 Some(&mut global_source_memories),
                 &mut trace,
-                !capture_deferred_audit,
+                !retrieval_only,
                 unpublished_source,
             )
             .await;
@@ -11189,8 +11189,8 @@ async fn run_search_inner_with_performance(
             // `never_retrieved` as the ABSENCE of search.returned_mem rows, so a
             // surface that never writes them makes actively-used memories read as
             // debt. Always retain them; the caller decides whether to record.
-            // `capture_deferred_audit` is deliberately not reused as the switch --
-            // it also gates global-store hit collection below.
+            // `retrieval_only` is deliberately not reused as the switch --
+            // it also gates global-store index reconciliation.
             let audit_facts = Some(SearchAuditFacts {
                 floor_counts,
                 kept,
@@ -14324,33 +14324,6 @@ async fn global_store_frankensearch_hits(
         return Vec::new();
     }
 
-    if source_only {
-        // A workspace's first publication must not hide its separate global
-        // store. Reuse positively admitted source rows and the same lexical
-        // engine without requiring or repairing a global derived index.
-        let global_search_start = Instant::now();
-        let result = global_store_live_snapshot_hits(cx, options, &memories).await;
-        trace.record_elapsed("search::globalRetrieve", global_search_start);
-        return match result {
-            Ok(hits) => {
-                degraded.push(SearchDegradation {
-                    code: "search_live_snapshot_lexical".to_owned(),
-                    severity: "warning".to_owned(),
-                    message: format!(
-                        "This response also searched the complete admitted user-global memory snapshot ({} documents) with in-memory Frankensearch lexical retrieval; the global store and persisted index were not changed.",
-                        memories.len()
-                    ),
-                    repair: None,
-                });
-                admit_global_store_search_hits(options, memories, hits, preloaded_memories)
-            }
-            Err(reason) => {
-                degraded.push(SearchDegradation::global_index_unavailable(&reason));
-                Vec::new()
-            }
-        };
-    }
-
     let global_options = SearchOptions {
         workspace_path: paths.root.clone(),
         database_path: Some(paths.database_path.clone()),
@@ -14371,8 +14344,18 @@ async fn global_store_frankensearch_hits(
         memory_scope: MemoryScope::Global,
         strict_scope: options.strict_scope,
     };
-    if reconcile {
+    if reconcile && !source_only {
         reconcile_search_index_before_read_with_cx(cx, &global_options, false).await;
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = crate::core::index::ensure_index_path_has_no_symlinks(
+        &paths.index_dir,
+        "read global search sources",
+    ) {
+        degraded.push(SearchDegradation::global_index_unavailable(
+            &error.to_string(),
+        ));
+        return Vec::new();
     }
     #[cfg(unix)]
     let generation_lease = match pin_search_generation(cx, &paths.index_dir).await {
@@ -14384,9 +14367,66 @@ async fn global_store_frankensearch_hits(
             return Vec::new();
         }
     };
+    // This lane has its own publication lifecycle. A healthy workspace index
+    // must not hide newly remembered global rows while their index is absent
+    // or behind. Only a current request may replace the persisted view.
+    let current_source_request = options.as_of.is_none() && !options.include_tombstoned;
+    let unpublished_index = !paths.index_dir.exists() || index_dir_is_plain_empty(&paths.index_dir);
+    #[cfg(unix)]
+    let unpublished_index = if unpublished_index {
+        match generation_lease.has_retained_generation_directory(cx, &paths.index_dir) {
+            Ok(has_retained) => !has_retained,
+            Err(error) => {
+                degraded.push(SearchDegradation::global_index_unavailable(
+                    &error.to_string(),
+                ));
+                return Vec::new();
+            }
+        }
+    } else {
+        false
+    };
+    if current_source_request && unpublished_index {
+        return retrieve_global_store_live_snapshot(
+            cx,
+            options,
+            memories,
+            degraded,
+            preloaded_memories,
+            trace,
+        )
+        .await;
+    }
     let index_status =
         match cached_index_status_for_search(&global_options, &paths.index_dir, None, None) {
             Ok(probe) => probe.report,
+            Err(IndexStatusError::SourceInspectionDeferred {
+                db_generation,
+                index_generation,
+            }) if current_source_request
+                && index_generation.is_some_and(|generation| generation < db_generation) =>
+            {
+                // The status count scan has a lower ceiling than the complete
+                // source fallback. Its typed watermark may establish lag, but
+                // never replace structural admission of the persisted tiers.
+                if let Err(reason) =
+                    crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                        &paths.index_dir,
+                    )
+                {
+                    degraded.push(SearchDegradation::global_index_unavailable(&reason));
+                    return Vec::new();
+                }
+                return retrieve_global_store_live_snapshot(
+                    cx,
+                    options,
+                    memories,
+                    degraded,
+                    preloaded_memories,
+                    trace,
+                )
+                .await;
+            }
             Err(error) => {
                 degraded.push(SearchDegradation::global_index_unavailable(&format!(
                     "index status probe failed: {error}"
@@ -14394,12 +14434,36 @@ async fn global_store_frankensearch_hits(
                 return Vec::new();
             }
         };
+    // Stale also describes incompatible metadata and incomplete persisted
+    // tiers. Source fallback may cover generation lag, never conceal those
+    // integrity failures or an index newer than the source snapshot.
+    let clean_generation_lag = index_status.health == IndexHealth::Stale
+        && matches!(
+            (index_status.db_generation, index_status.index_generation),
+            (Some(source), Some(index)) if index < source
+        );
+    if current_source_request
+        && index_status.last_check_error.is_none()
+        && (clean_generation_lag || (source_only && index_status.health == IndexHealth::Ready))
+    {
+        return retrieve_global_store_live_snapshot(
+            cx,
+            options,
+            memories,
+            degraded,
+            preloaded_memories,
+            trace,
+        )
+        .await;
+    }
     if index_status.health != IndexHealth::Ready {
         let reason = match index_status.health {
-            IndexHealth::Stale => format!(
-                "index is stale (database generation {:?}, index generation {:?})",
-                index_status.db_generation, index_status.index_generation
-            ),
+            IndexHealth::Stale => index_status.last_check_error.unwrap_or_else(|| {
+                format!(
+                    "index is stale (database generation {:?}, index generation {:?})",
+                    index_status.db_generation, index_status.index_generation
+                )
+            }),
             IndexHealth::Missing => "index is missing".to_owned(),
             IndexHealth::Corrupt => index_status.last_check_error.map_or_else(
                 || "index failed integrity checks".to_owned(),
@@ -14448,6 +14512,39 @@ async fn global_store_frankensearch_hits(
     degraded.extend(retrieval_degraded);
 
     admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories)
+}
+
+async fn retrieve_global_store_live_snapshot(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    memories: Vec<StoredMemory>,
+    degraded: &mut Vec<SearchDegradation>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    trace: &mut SearchPerformanceTrace,
+) -> Vec<SearchHit> {
+    let global_search_start = Instant::now();
+    let result = global_store_live_snapshot_hits(cx, options, &memories).await;
+    trace.record_elapsed("search::globalRetrieve", global_search_start);
+    match result {
+        Ok(hits) => {
+            degraded.push(SearchDegradation {
+                // Global completeness cannot certify the workspace snapshot
+                // for PackSearchHandoff::can_reuse_for_pack.
+                code: "global_live_snapshot_lexical".to_owned(),
+                severity: "warning".to_owned(),
+                message: format!(
+                    "This response searched the complete admitted user-global memory snapshot ({} documents) with in-memory Frankensearch lexical retrieval; the global store and persisted index were not changed by this source retrieval.",
+                    memories.len()
+                ),
+                repair: None,
+            });
+            admit_global_store_search_hits(options, memories, hits, preloaded_memories)
+        }
+        Err(reason) => {
+            degraded.push(SearchDegradation::global_index_unavailable(&reason));
+            Vec::new()
+        }
+    }
 }
 
 async fn global_store_live_snapshot_hits(

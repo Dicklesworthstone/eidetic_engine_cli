@@ -37,6 +37,7 @@ in the same commit, keeping the catalog complete by construction.
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |
 | `index_incompatible` | search, context | medium | gh-37 (B) |
 | `global_index_unavailable` | search, pack | medium | bd-reality-core-convergence-1azkt.4 |
+| `global_live_snapshot_lexical` | search, context, pack | warning | bd-c4eoq |
 | `tombstoned_in_results` | search | low | bd-17c65.2.8 (B8) |
 | `tombstoned_filtered` | search | low | bd-17c65.2.8 (B8) |
 | `expired_filtered` | search | low | bd-17c65.2.8 (B8) |

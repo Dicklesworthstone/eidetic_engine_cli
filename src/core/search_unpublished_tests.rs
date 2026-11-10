@@ -254,6 +254,74 @@ fn source_state(db: &DbConnection) -> Vec<Vec<Vec<(String, Value)>>> {
     .collect()
 }
 
+fn global_memory(db: &DbConnection, workspace: &str, number: u128, content: &str) -> String {
+    let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+    db.insert_memory(
+        &id,
+        &CreateMemoryInput {
+            workspace_id: workspace.to_owned(),
+            content: content.to_owned(),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            workflow_id: None,
+            confidence: 1.0,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            provenance_uri: Some("manual://unpublished-global-source".to_owned()),
+            tags: Vec::new(),
+            valid_from: Some("2000-01-01T00:00:00Z".to_owned()),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+    id
+}
+
+fn publish_store_index(
+    root: &Path,
+    database: &Path,
+    index: &Path,
+    workspace: &str,
+) -> crate::core::index::TestWorkspaceEmbedderStackGuard {
+    let guard = crate::core::index::install_test_hash_workspace_embedder(workspace);
+    let report = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+        workspace_path: root.to_path_buf(),
+        database_path: Some(database.to_path_buf()),
+        index_dir: Some(index.to_path_buf()),
+        dry_run: false,
+    })
+    .unwrap();
+    assert_eq!(
+        report.status,
+        crate::core::index::IndexRebuildStatus::Success
+    );
+    guard
+}
+
+fn index_file_hashes(root: &Path) -> BTreeMap<PathBuf, blake3::Hash> {
+    fn collect(root: &Path, path: &Path, files: &mut BTreeMap<PathBuf, blake3::Hash>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    blake3::hash(&std::fs::read(path).unwrap()),
+                );
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    if root.exists() {
+        collect(root, root, &mut files);
+    }
+    files
+}
+
 fn complete_lexical(report: &SearchReport) {
     assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
     assert!(!report.rerank_runtime_available);
@@ -348,31 +416,7 @@ fn assert_global_sources_without_publication() {
     let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
     let (global, workspace) =
         crate::core::global_store::open_or_create_global_store(&paths).unwrap();
-    let insert = |number, content: &str| {
-        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-        global
-            .insert_memory(
-                &id,
-                &CreateMemoryInput {
-                    workspace_id: workspace.clone(),
-                    content: content.to_owned(),
-                    level: "semantic".to_owned(),
-                    kind: "fact".to_owned(),
-                    workflow_id: None,
-                    confidence: 1.0,
-                    utility: 0.5,
-                    importance: 0.5,
-                    trust_class: "human_explicit".to_owned(),
-                    trust_subclass: None,
-                    provenance_uri: Some("manual://unpublished-global-source".to_owned()),
-                    tags: Vec::new(),
-                    valid_from: Some("2000-01-01T00:00:00Z".to_owned()),
-                    valid_to: None,
-                },
-            )
-            .unwrap();
-        id
-    };
+    let insert = |number, content: &str| global_memory(&global, &workspace, number, content);
     let global_body = "The unpublishedquasar deployment needs signed release attestations.";
     let visible = insert(291, global_body);
     let sealed = insert(292, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT);
@@ -426,6 +470,334 @@ fn assert_global_sources_without_publication() {
     assert_eq!(excluded.report.results.len(), 1);
     assert_eq!(excluded.report.results[0].doc_id, local);
     assert_eq!(source_state(&global), global_before);
+}
+
+#[test]
+fn healthy_workspace_searches_missing_and_stale_global_indexes_without_writes() {
+    const GLOBAL_CHILD: &str = "EE_TEST_UNPUBLISHED_GLOBAL_HEALTHY_WORKSPACE";
+    if std::env::var_os(GLOBAL_CHILD).is_some() {
+        assert_global_sources_with_healthy_workspace();
+        return;
+    }
+    let global_root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("core::search::unpublished_tests::healthy_workspace_searches_missing_and_stale_global_indexes_without_writes")
+        .arg("--nocapture")
+        .env(GLOBAL_CHILD, "1")
+        .env("XDG_DATA_HOME", global_root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "global source child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+fn assert_global_sources_with_healthy_workspace() {
+    let fixture = Fixture::new();
+    let local = fixture.memory(300, BODY);
+    let local_index = fixture.root.join(".ee/index");
+    let _local_stack = publish_store_index(
+        &fixture.root,
+        &fixture.root.join(".ee/ee.db"),
+        &local_index,
+        &fixture.workspace,
+    );
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = true\n",
+    )
+    .unwrap();
+    let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+    let insert = |number, content: &str| global_memory(&global, &workspace, number, content);
+    let visible = insert(
+        301,
+        "The unpublishedquasar deployment needs signed attestations.",
+    );
+    let excluded = insert(
+        302,
+        &format!("{BODY} {} forbidden", "ordinary context ".repeat(512)),
+    );
+    let sealed = insert(303, BODY);
+    let tombstoned = insert(304, BODY);
+    let retired = insert(305, BODY);
+    global
+        .insert_memory_seal(
+            &sealed,
+            &format!("blake3:{}", "a".repeat(64)),
+            "2020-01-01T00:00:00Z",
+        )
+        .unwrap();
+    global.tombstone_memory(&tombstoned).unwrap();
+    global
+        .mark_memory_superseded(&retired, "2020-01-01T00:00:00Z")
+        .unwrap();
+    let mut expected_global = BTreeSet::from([visible.clone(), excluded.clone()]);
+    for phase in ["missing", "stale", "deferred"] {
+        let stale = phase != "missing";
+        let _global_stack = (phase == "stale").then(|| {
+            publish_store_index(
+                &paths.root,
+                &paths.database_path,
+                &paths.index_dir,
+                &workspace,
+            )
+        });
+        if phase == "stale" {
+            let fresh = insert(
+                306,
+                "The unpublishedquasar rollout needs the new approval receipt.",
+            );
+            global
+                .insert_search_index_job(
+                    "sidx_00000000000000000000000306",
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace.clone(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(fresh.clone()),
+                        documents_total: 1,
+                    },
+                )
+                .unwrap();
+            expected_global.insert(fresh);
+        }
+        if phase == "deferred" {
+            global
+                .with_transaction(|| {
+                    for number in 10_000..12_049 {
+                        insert(number, "An unrelated user convention about editor colors.");
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(
+                crate::core::index::get_index_status_for_lexical_search(
+                    &IndexStatusOptions {
+                        workspace_path: paths.root.clone(),
+                        database_path: Some(paths.database_path.clone()),
+                        index_dir: Some(paths.index_dir.clone()),
+                    },
+                    None,
+                    false,
+                ),
+                Err(IndexStatusError::SourceInspectionDeferred { .. })
+            ));
+        }
+        let local_before = fixture.state();
+        let global_before = source_state(&global);
+        let local_index_before = index_file_hashes(&local_index);
+        let global_index_before = index_file_hashes(&paths.index_dir);
+        let options = fixture.options();
+        let handoff = run_pack_search(&options).unwrap();
+        assert!(handoff.can_reuse_for_pack());
+        assert!(
+            handoff
+                .report
+                .index_freshness
+                .as_ref()
+                .is_none_or(|status| !status.stale)
+        );
+        assert!(
+            handoff
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_live_snapshot_lexical")
+        );
+        assert!(!handoff.report.degraded.iter().any(|entry| matches!(
+            entry.code.as_str(),
+            "global_index_unavailable" | "search_live_snapshot_lexical"
+        )));
+        let mut expected = expected_global.clone();
+        expected.insert(local.clone());
+        assert_eq!(
+            handoff
+                .report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        let mut global_only = options.clone();
+        global_only.memory_scope = MemoryScope::Global;
+        let global_report = run_pack_search(&global_only).unwrap().report;
+        assert_eq!(
+            global_report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_global
+        );
+        let mut negative = options.clone();
+        negative.query = format!("{WORD} -forbidden");
+        expected.remove(&excluded);
+        let negative_report =
+            run_search_with_read_connection(&negative, &fixture.reader()).unwrap();
+        assert_eq!(
+            negative_report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        let mut pack_options = fixture.pack_options();
+        pack_options.query = negative.query;
+        let response = crate::core::context::run_context_pack(&pack_options).unwrap();
+        assert!(response.success);
+        assert!(
+            response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == visible)
+        );
+        assert!(
+            response
+                .data
+                .pack
+                .items
+                .iter()
+                .all(|item| expected.contains(&item.memory_id.to_string()))
+        );
+
+        let mut historical = options.clone();
+        historical.as_of = Some(Utc::now());
+        let history = run_pack_search(&historical).unwrap().report;
+        assert!(
+            !history
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_live_snapshot_lexical")
+        );
+        assert!(
+            history
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_index_unavailable")
+        );
+        assert_eq!(
+            history
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![local.as_str()]
+        );
+
+        std::fs::write(
+            fixture.root.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .unwrap();
+        let disabled = run_pack_search(&global_only).unwrap().report;
+        assert!(disabled.results.is_empty());
+        assert!(
+            disabled
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_lane_disabled")
+        );
+        std::fs::write(
+            fixture.root.join(".ee/config.toml"),
+            "[memory]\ninclude_global = true\n",
+        )
+        .unwrap();
+        assert_eq!(fixture.state(), local_before);
+        assert_eq!(source_state(&global), global_before);
+        assert_eq!(index_file_hashes(&local_index), local_index_before);
+        assert_eq!(index_file_hashes(&paths.index_dir), global_index_before);
+        assert_eq!(paths.index_dir.exists(), stale);
+    }
+
+    // Incompatibility and corruption are not ordinary generation lag. Both
+    // published and source-only workspace reads must retain the refusal.
+    let metadata_path = paths.index_dir.join("meta.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["corpusRevision"] = serde_json::json!("incompatible-global-corpus");
+    let unpublished = Fixture::new();
+    let unpublished_local = unpublished.memory(307, BODY);
+    std::fs::write(
+        unpublished.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = true\n",
+    )
+    .unwrap();
+    for bytes in [
+        serde_json::to_vec(&metadata).unwrap(),
+        b"corrupt-global-metadata".to_vec(),
+    ] {
+        std::fs::write(&metadata_path, &bytes).unwrap();
+        for (fixture, expected_local) in [(&fixture, &local), (&unpublished, &unpublished_local)] {
+            let report = run_pack_search(&fixture.options()).unwrap().report;
+            assert!(
+                report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_index_unavailable")
+            );
+            assert!(
+                !report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_live_snapshot_lexical")
+            );
+            assert_eq!(
+                report
+                    .results
+                    .iter()
+                    .map(|hit| &hit.doc_id)
+                    .collect::<Vec<_>>(),
+                vec![expected_local]
+            );
+        }
+        assert_eq!(std::fs::read(&metadata_path).unwrap(), bytes);
+    }
+    #[cfg(unix)]
+    {
+        std::fs::rename(&paths.index_dir, paths.root.join("rejected-index")).unwrap();
+        std::os::unix::fs::symlink(paths.root.join("nonexistent-target"), &paths.index_dir)
+            .unwrap();
+        let report = run_pack_search(&fixture.options()).unwrap().report;
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_index_unavailable")
+        );
+        assert!(
+            !report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "global_live_snapshot_lexical")
+        );
+        assert_eq!(
+            report
+                .results
+                .iter()
+                .map(|hit| &hit.doc_id)
+                .collect::<Vec<_>>(),
+            vec![&local]
+        );
+        assert!(
+            std::fs::symlink_metadata(&paths.index_dir)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }
 
 #[test]
@@ -718,6 +1090,16 @@ fn source_only_handoff_cannot_hide_integrity_failures_or_invent_complete_executi
         .degraded
         .retain(|entry| entry.code != "search_live_snapshot_lexical");
     assert!(!incomplete.can_reuse_for_pack());
+    incomplete.report.degraded.push(SearchDegradation {
+        code: "global_live_snapshot_lexical".to_owned(),
+        severity: "warning".to_owned(),
+        message: "Only the separate global snapshot was completely searched".to_owned(),
+        repair: None,
+    });
+    assert!(
+        !incomplete.can_reuse_for_pack(),
+        "global completeness cannot certify an incomplete workspace snapshot"
+    );
     let mut wrong_execution = handoff.clone();
     wrong_execution.report.source_mode_applied = SearchSourceMode::Hybrid;
     assert!(!wrong_execution.can_reuse_for_pack());

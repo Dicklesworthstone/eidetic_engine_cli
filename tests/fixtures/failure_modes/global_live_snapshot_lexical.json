@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_live_snapshot_lexical",
+  "introduced_by": {"bead": "bd-c4eoq", "epic_letter": "D"},
+  "surfaces": ["search", "context", "pack"],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A current request searches the complete admitted user-global memory snapshot through an in-memory Frankensearch lexical index when the global index is genuinely missing or has clean source-generation lag, independently of workspace index readiness. The source corpus must fit the 4096-document and 16-MiB bounds. Explicit historical reads, incompatible or corrupt assets, retained-generation ambiguity, and redirected paths do not acquire fallback authority. Read-only retrieval does not consume global index jobs or publish an index. This global-only advisory cannot certify a complete workspace snapshot for cached pack reuse.",
+    "setup_commands": [
+      "# In an isolated store, publish the workspace index and create an admitted global memory without publishing its global index."
+    ],
+    "invocation": "ee pack globalmemorycanary --read-only --source-mode lexical-only --json"
+  },
+  "expected_emission": {
+    "code": "global_live_snapshot_lexical",
+    "severity": "warning",
+    "message_contains": [
+      "complete admitted user-global memory snapshot",
+      "in-memory Frankensearch lexical retrieval",
+      "global store and persisted index were not changed"
+    ]
+  }
+}

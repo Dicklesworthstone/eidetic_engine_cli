@@ -9,11 +9,11 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The user-global store contains memories, but its derived Frankensearch index is missing, stale, corrupt, or cannot be opened. Workspace retrieval remains available while global recall is explicitly marked incomplete.",
+    "description": "The user-global store contains memories, but its Frankensearch index cannot be safely used and complete current-source lexical fallback is unavailable. Examples include corrupt or incompatible assets, redirected paths, a bounded-source retrieval failure, and an explicit historical request against a missing or stale global index. Clean current missing/stale indexes within the source bounds emit global_live_snapshot_lexical instead. Workspace retrieval remains available while global recall is explicitly marked incomplete.",
     "setup_commands": [
       "ee init --workspace . --json",
       "ee remember --global --level procedural --kind rule 'Global index fixture.' --json",
-      "mv \"$XDG_DATA_HOME/ee/global/indexes\" \"$XDG_DATA_HOME/ee/global/indexes.fixture-backup\""
+      "# In an isolated fixture, make the global index metadata incompatible or corrupt."
     ],
     "invocation": "ee search 'Global index fixture' --workspace . --json"
   },

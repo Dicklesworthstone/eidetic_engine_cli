@@ -2252,6 +2252,14 @@ instead of silently narrowing. See the
 [trust model](docs/trust-model.md#global-knowledge-lane) for how the lane
 sits in the trust taxonomy.
 
+Current search and context packs can retrieve admitted global memories before
+their global index is published, or while a healthy index lags behind its source
+rows. This bounded lexical fallback reports `global_live_snapshot_lexical` and
+preserves the lane's trust, privacy, and query filters. Read-only retrieval
+leaves the source store, queued jobs, and persisted index unchanged. Explicit
+historical requests and corrupt or incompatible indexes retain the
+`global_index_unavailable` refusal instead of substituting current source rows.
+
 ---
 
 ## Context Profiles

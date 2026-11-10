@@ -425,6 +425,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `explanation_useful_omitted` | low | bd-1nxz4.4 (optional explanation admission) |
 | `future_validity_filtered` | low | bd-17c65.2.10 (B11) |
 | `global_index_unavailable` | medium | bd-reality-core-convergence-1azkt.4 |
+| `global_live_snapshot_lexical` | warning | bd-c4eoq — complete admitted global rows were searched lexically without changing the store or index; this independent lane does not certify workspace snapshot completeness |
 | `index_corrupt` | high | bd-17c65.2.1 (B1) |
 | `index_missing` | medium | bd-17c65.2.1 (B1) |
 | `index_stale` | high | bd-17c65.2.1 (B1) |
