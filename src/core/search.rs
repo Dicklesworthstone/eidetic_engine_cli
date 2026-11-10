@@ -2812,6 +2812,41 @@ impl SearchMemoryFilters<'_> {
         *hits = filtered;
         Ok(())
     }
+
+    fn retain_global_memories_with_local_authority(
+        self,
+        connection: &DbConnection,
+        memories: &mut Vec<StoredMemory>,
+    ) -> Result<(), SearchError> {
+        if self.is_empty() || memories.is_empty() {
+            return Ok(());
+        }
+
+        // Later hydration gives a local row precedence over a same-ID global
+        // row. Admit that authoritative row before the global candidate can
+        // occupy retrieval, dedupe, floor or query-assist slots. The global
+        // row has already passed its own filters in the global snapshot.
+        // Bound each IN query even when the optional global corpus is large.
+        let mut excluded = BTreeSet::new();
+        for batch in memories.chunks(256) {
+            let ids = batch
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<Vec<_>>();
+            let local = connection.get_memories_batch(&ids).map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to resolve local ownership for typed search filters: {error}"
+                ))
+            })?;
+            for memory in local.values() {
+                if !typed_memory_matches(connection, memory, self.kind, self.fields)? {
+                    excluded.insert(memory.id.clone());
+                }
+            }
+        }
+        memories.retain(|memory| !excluded.contains(&memory.id));
+        Ok(())
+    }
 }
 
 pub fn apply_memory_kind_and_typed_field_filters_to_report(
@@ -10994,6 +11029,7 @@ async fn run_search_inner_with_performance(
                 cx,
                 options,
                 memory_filters,
+                read_connection,
                 &global_memory_policy,
                 scoring_candidate_limit,
                 &mut degraded,
@@ -14380,6 +14416,7 @@ async fn global_store_frankensearch_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     memory_filters: SearchMemoryFilters<'_>,
+    local_connection: Option<&DbConnection>,
     memory_config: &crate::config::MemoryConfig,
     effective_limit: u32,
     degraded: &mut Vec<SearchDegradation>,
@@ -14394,11 +14431,24 @@ async fn global_store_frankensearch_hits(
     if options.query.trim().is_empty() {
         return Vec::new();
     }
-    let Some((paths, memories)) =
+    let Some((paths, mut memories)) =
         admitted_global_store_memories(options, memory_config, memory_filters, degraded)
     else {
         return Vec::new();
     };
+    if !memory_filters.is_empty() && !memories.is_empty() {
+        let admitted = local_connection.is_some_and(|connection| {
+            memory_filters
+                .retain_global_memories_with_local_authority(connection, &mut memories)
+                .is_ok()
+        });
+        if !admitted {
+            degraded.push(SearchDegradation::scope_metadata_unavailable(
+                "Could not verify local memory ownership for filtered global retrieval; the optional global lane was withheld",
+            ));
+            return Vec::new();
+        }
+    }
     if memories.is_empty() {
         return Vec::new();
     }

@@ -1331,6 +1331,254 @@ fn assert_global_memory_filters_use_the_global_snapshot() {
 }
 
 #[test]
+fn global_filter_collisions_obey_local_authority_before_top_one() {
+    const GLOBAL_CHILD: &str = "EE_TEST_GLOBAL_FILTER_COLLISIONS";
+    if std::env::var_os(GLOBAL_CHILD).is_some() {
+        assert_global_filter_collisions_obey_local_authority();
+        return;
+    }
+    let global_root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("core::search::quality_tests::global_filter_collisions_obey_local_authority_before_top_one")
+        .arg("--nocapture")
+        .env(GLOBAL_CHILD, "1")
+        .env("XDG_DATA_HOME", global_root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "global collision search child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+fn assert_global_filter_collisions_obey_local_authority() {
+    let fixture = Fixture::new();
+    let now = Utc::now();
+    let wrong_kind = fixture.memory(101, 1.0, 1.0, now);
+    let wrong_field = fixture.memory_with_kind(102, 0.9, 1.0, now, BODY, "failure");
+    fixture
+        .db
+        .set_memory_typed_fields_json(&wrong_field, Some(r#"{"family":"other-cache"}"#))
+        .unwrap();
+    let matching_local = fixture.memory_with_kind(104, 0.2, 1.0, now, BODY, "failure");
+    fixture
+        .db
+        .set_memory_typed_fields_json(&matching_local, Some(r#"{"family":"kept-local"}"#))
+        .unwrap();
+    let _local_embedder = fixture.publish_index();
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = true\n",
+    )
+    .unwrap();
+    let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+    let replacement = MemoryId::from_uuid(uuid::Uuid::from_u128(103)).to_string();
+    for (id, confidence, fields) in [
+        (&wrong_kind, 1.0, r#"{"family":"target-cache"}"#),
+        (&wrong_field, 0.9, r#"{"family":"target-cache"}"#),
+        (&replacement, 0.4, r#"{"family":"target-cache"}"#),
+        (&matching_local, 0.2, r#"{"family":"kept-local"}"#),
+    ] {
+        global
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.clone(),
+                    content: BODY.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "failure".to_owned(),
+                    workflow_id: None,
+                    confidence,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://global-filter-collision".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        global
+            .set_memory_typed_fields_json(id, Some(fields))
+            .unwrap();
+    }
+    let mut options = fixture.options();
+    options.limit = 1;
+    let search = |kind, fields: &[TypedMemoryFieldFilter]| {
+        let options = &options;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                options,
+                kind,
+                fields,
+                Duration::ZERO,
+                Duration::from_secs(30),
+                None,
+                true,
+                false,
+            )
+            .await
+        })
+        .unwrap()
+        .unwrap()
+    };
+    let _global_embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace);
+    for published in [false, true] {
+        if published {
+            crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                workspace_path: paths.root.clone(),
+                database_path: Some(paths.database_path.clone()),
+                index_dir: Some(paths.index_dir.clone()),
+                dry_run: false,
+            })
+            .unwrap();
+        }
+        let unfiltered = search(None, &[]);
+        assert_eq!(unfiltered.report.results[0].doc_id, wrong_kind);
+        assert_ne!(
+            unfiltered.report.results[0].metadata.as_ref().unwrap()["storeLane"],
+            crate::core::global_store::GLOBAL_PROVENANCE_LANE
+        );
+        let kind_only = search(Some("failure"), &[]);
+        assert_eq!(kind_only.report.results.len(), 1);
+        assert_eq!(kind_only.report.results[0].doc_id, wrong_field);
+
+        let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
+        for kind in [None, Some("failure")] {
+            let matching = search(kind, &fields);
+            assert_eq!(matching.report.status, SearchStatus::Success);
+            assert_eq!(matching.report.results.len(), 1);
+            assert_eq!(matching.report.results[0].doc_id, replacement);
+            assert_eq!(
+                matching
+                    .audit_facts
+                    .as_ref()
+                    .unwrap()
+                    .floor_counts
+                    .considered,
+                1
+            );
+            assert_eq!(matching.report.candidates_below_floor, 0);
+            assert_eq!(
+                matching.report.results[0].metadata.as_ref().unwrap()["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            assert!(matching.report.query_assist.as_ref().is_none_or(|assist| {
+                assist
+                    .did_you_mean
+                    .iter()
+                    .all(|hit| hit.doc_id != wrong_kind && hit.doc_id != wrong_field)
+            }));
+        }
+        let fields = [TypedMemoryFieldFilter::parse("family=kept-local").unwrap()];
+        let matching = search(Some("failure"), &fields);
+        assert_eq!(matching.report.results.len(), 1);
+        assert_eq!(matching.report.results[0].doc_id, matching_local);
+        assert_ne!(
+            matching.report.results[0].metadata.as_ref().unwrap()["storeLane"],
+            crate::core::global_store::GLOBAL_PROVENANCE_LANE
+        );
+    }
+}
+
+#[test]
+fn global_memory_filter_admission_uses_the_pinned_local_source() {
+    let fixture = Fixture::new();
+    let id = fixture.memory_with_kind(111, 0.8, 1.0, Utc::now(), BODY, "failure");
+    fixture
+        .db
+        .set_memory_typed_fields_json(&id, Some(r#"{"family":"target-cache"}"#))
+        .unwrap();
+    let mut global_only = fixture.db.get_memory(&id).unwrap().unwrap();
+    global_only.id = MemoryId::from_uuid(uuid::Uuid::from_u128(112)).to_string();
+    let candidates = vec![
+        fixture.db.get_memory(&id).unwrap().unwrap(),
+        global_only.clone(),
+    ];
+    let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
+    let filters = SearchMemoryFilters {
+        kind: Some("failure"),
+        fields: &fields,
+    };
+    let reader =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    reader.begin_read_snapshot().unwrap();
+    assert!(
+        reader
+            .get_memory_typed_fields_json(&id)
+            .unwrap()
+            .unwrap()
+            .contains("target-cache")
+    );
+    fixture
+        .db
+        .set_memory_typed_fields_json(&id, Some(r#"{"family":"other-cache"}"#))
+        .unwrap();
+    let mut pinned = candidates.clone();
+    filters
+        .retain_global_memories_with_local_authority(&reader, &mut pinned)
+        .unwrap();
+    assert_eq!(
+        pinned.len(),
+        2,
+        "the local sidecar must use the held snapshot"
+    );
+    reader.rollback_read_snapshot().unwrap();
+    let mut current = candidates.clone();
+    filters
+        .retain_global_memories_with_local_authority(&reader, &mut current)
+        .unwrap();
+    assert_eq!(
+        current.iter().map(|memory| &memory.id).collect::<Vec<_>>(),
+        vec![&global_only.id]
+    );
+
+    // Invalid typed data is not permission to reuse the global twin's fields.
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET typed_fields_json = '{{\"family\":42}}' WHERE id = '{id}'"
+        ))
+        .unwrap();
+    let mut malformed = candidates.clone();
+    filters
+        .retain_global_memories_with_local_authority(&reader, &mut malformed)
+        .unwrap();
+    assert_eq!(
+        malformed
+            .iter()
+            .map(|memory| &memory.id)
+            .collect::<Vec<_>>(),
+        vec![&global_only.id]
+    );
+
+    fixture
+        .db
+        .execute_raw("ALTER TABLE memories RENAME TO unavailable_global_collision_sources")
+        .unwrap();
+    let mut unavailable = candidates.clone();
+    assert!(
+        filters
+            .retain_global_memories_with_local_authority(&reader, &mut unavailable)
+            .is_err()
+    );
+    // Unfiltered retrieval adds neither a new store dependency nor extra reads.
+    SearchMemoryFilters::default()
+        .retain_global_memories_with_local_authority(&reader, &mut unavailable)
+        .unwrap();
+    assert_eq!(unavailable.len(), candidates.len());
+}
+
+#[test]
 fn unavailable_feedback_is_neutral_and_never_claims_observed_zero_harm() {
     let fixture = Fixture::new();
     let id = fixture.memory(1, 0.8, 0.7, Utc::now());
