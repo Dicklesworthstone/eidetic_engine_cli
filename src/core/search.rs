@@ -2783,6 +2783,37 @@ pub fn normalize_memory_kind_filter(raw: &str) -> Result<String, String> {
     Ok(kind.as_str().to_owned())
 }
 
+#[derive(Clone, Copy, Default)]
+struct SearchMemoryFilters<'a> {
+    kind: Option<&'a str>,
+    fields: &'a [TypedMemoryFieldFilter],
+}
+
+impl SearchMemoryFilters<'_> {
+    fn is_empty(self) -> bool {
+        self.kind.is_none() && self.fields.is_empty()
+    }
+
+    fn retain_hits(
+        self,
+        connection: &DbConnection,
+        hits: &mut Vec<SearchHit>,
+    ) -> Result<(), SearchError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        let mut filtered = Vec::with_capacity(hits.len());
+        for hit in std::mem::take(hits) {
+            if typed_memory_hit_matches(connection, &hit, self.kind, self.fields)? {
+                filtered.push(hit);
+            }
+        }
+        *hits = filtered;
+        Ok(())
+    }
+}
+
 pub fn apply_memory_kind_and_typed_field_filters_to_report(
     options: &SearchOptions,
     report: &mut SearchReport,
@@ -2822,17 +2853,14 @@ fn apply_memory_kind_and_typed_field_filters_to_report_with_connection(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<(), SearchError> {
-    if kind_filter.is_none() && typed_field_filters.is_empty() {
+    let filters = SearchMemoryFilters {
+        kind: kind_filter,
+        fields: typed_field_filters,
+    };
+    if filters.is_empty() {
         return Ok(());
     }
-
-    let mut filtered = Vec::with_capacity(report.results.len());
-    for hit in std::mem::take(&mut report.results) {
-        if typed_memory_hit_matches(connection, &hit, kind_filter, typed_field_filters)? {
-            filtered.push(hit);
-        }
-    }
-    report.results = filtered;
+    filters.retain_hits(connection, &mut report.results)?;
     if report.results.is_empty() && report.status == SearchStatus::Success {
         report.status = SearchStatus::NoResults;
     }
@@ -2856,6 +2884,15 @@ fn typed_memory_hit_matches(
     else {
         return Ok(false);
     };
+    typed_memory_matches(connection, &memory, kind_filter, typed_field_filters)
+}
+
+fn typed_memory_matches(
+    connection: &DbConnection,
+    memory: &StoredMemory,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<bool, SearchError> {
     if let Some(kind_filter) = kind_filter
         && memory.kind != kind_filter
     {
@@ -2870,7 +2907,7 @@ fn typed_memory_hit_matches(
         return Ok(true);
     }
     let typed_fields_json = connection
-        .get_memory_typed_fields_json(&hit.doc_id)
+        .get_memory_typed_fields_json(&memory.id)
         .map_err(|error| {
             SearchError::Index(format!(
                 "Failed to load typed memory fields for search filter: {error}"
@@ -8653,6 +8690,10 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             run_search_inner_with_performance(
                 cx,
                 options,
+                SearchMemoryFilters {
+                    kind: kind_filter,
+                    fields: typed_field_filters,
+                },
                 Some(connection),
                 determinism.shared_child("search.rerank"),
                 &mut audit_ids,
@@ -8685,12 +8726,6 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                         generation,
                     });
                 }
-                apply_memory_kind_and_typed_field_filters_to_report_with_connection(
-                    connection,
-                    &mut run.report,
-                    kind_filter,
-                    typed_field_filters,
-                )?;
                 Ok(run)
             })
         };
@@ -8746,6 +8781,10 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let mut run = run_search_inner_with_performance(
         cx,
         options,
+        SearchMemoryFilters {
+            kind: kind_filter,
+            fields: typed_field_filters,
+        },
         None,
         determinism.shared_child("search.rerank"),
         &mut audit_ids,
@@ -9218,6 +9257,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
     let run = run_search_inner_with_performance(
         cx,
         options,
+        SearchMemoryFilters::default(),
         Some(read_connection),
         rerank_seed,
         &mut audit_ids,
@@ -10444,6 +10484,7 @@ async fn run_search_inner(
     run_search_inner_with_performance(
         cx,
         options,
+        SearchMemoryFilters::default(),
         read_connection,
         rerank_seed,
         audit_ids,
@@ -10462,6 +10503,7 @@ async fn run_search_inner(
 async fn run_search_inner_with_performance(
     cx: &asupersync::Cx,
     options: &SearchOptions,
+    memory_filters: SearchMemoryFilters<'_>,
     read_connection: Option<&DbConnection>,
     rerank_seed: Deterministic<Seed>,
     audit_ids: &mut SearchAuditIdSource,
@@ -10918,6 +10960,24 @@ async fn run_search_inner_with_performance(
                 ..
             } = retrieval;
             degraded.extend(retrieval_degraded);
+            // A result limit applies to matching memories, not to the
+            // unfiltered top-K. Filter the bounded local candidate pool using
+            // the held source snapshot before merging the independently
+            // admitted global lane. Doing this before dedupe and the floor
+            // also keeps excluded kinds/fields out of query-assist candidates
+            // and relevance-loss diagnostics. Retrieval remains bounded by
+            // scoring_candidate_limit; this is not an exhaustive corpus scan.
+            if !memory_filters.is_empty() {
+                let memory_filter_start = Instant::now();
+                let connection = read_connection.ok_or_else(|| {
+                    SearchError::Index(format!(
+                        "Database not found at {}; typed memory filters require an initialized workspace",
+                        options.resolve_database_path().display()
+                    ))
+                })?;
+                memory_filters.retain_hits(connection, &mut raw_hits)?;
+                trace.record_elapsed("search::memoryFilters", memory_filter_start);
+            }
             // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
             // filter so the floor metrics reflect the deduped pool.
             // After fusion, the same docId can appear multiple times
@@ -10933,6 +10993,7 @@ async fn run_search_inner_with_performance(
             let global_hits = global_store_frankensearch_hits(
                 cx,
                 options,
+                memory_filters,
                 &global_memory_policy,
                 scoring_candidate_limit,
                 &mut degraded,
@@ -14217,6 +14278,7 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
 fn admitted_global_store_memories(
     options: &SearchOptions,
     memory_config: &crate::config::MemoryConfig,
+    memory_filters: SearchMemoryFilters<'_>,
     degraded: &mut Vec<SearchDegradation>,
 ) -> Option<(super::global_store::GlobalStorePaths, Vec<StoredMemory>)> {
     let paths = match super::global_store::default_global_store_paths_from_env() {
@@ -14252,10 +14314,22 @@ fn admitted_global_store_memories(
         }
         return None;
     }
-    match super::global_store::read_global_store_memories_at(
+    match super::global_store::read_global_store_memories_filtered_at(
         &paths,
         options.include_tombstoned,
         Some(options.as_of.unwrap_or_else(Utc::now)),
+        |connection, memory| {
+            if memory_filters.is_empty() {
+                return Ok(true);
+            }
+            typed_memory_matches(
+                connection,
+                memory,
+                memory_filters.kind,
+                memory_filters.fields,
+            )
+            .map_err(|error| error.to_string())
+        },
     ) {
         Ok(memories) => Some((paths, memories)),
         Err(error) => {
@@ -14292,16 +14366,20 @@ pub(crate) fn global_store_fallback_memories(
     }
     let memory_config = crate::config::workspace_memory_policy(&options.workspace_path)
         .map_err(SearchError::Configuration)?;
-    Ok(
-        admitted_global_store_memories(options, &memory_config, degraded)
-            .map(|(_, memories)| memories)
-            .unwrap_or_default(),
+    Ok(admitted_global_store_memories(
+        options,
+        &memory_config,
+        SearchMemoryFilters::default(),
+        degraded,
     )
+    .map(|(_, memories)| memories)
+    .unwrap_or_default())
 }
 
 async fn global_store_frankensearch_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
+    memory_filters: SearchMemoryFilters<'_>,
     memory_config: &crate::config::MemoryConfig,
     effective_limit: u32,
     degraded: &mut Vec<SearchDegradation>,
@@ -14316,7 +14394,8 @@ async fn global_store_frankensearch_hits(
     if options.query.trim().is_empty() {
         return Vec::new();
     }
-    let Some((paths, memories)) = admitted_global_store_memories(options, memory_config, degraded)
+    let Some((paths, memories)) =
+        admitted_global_store_memories(options, memory_config, memory_filters, degraded)
     else {
         return Vec::new();
     };

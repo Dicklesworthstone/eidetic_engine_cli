@@ -753,6 +753,19 @@ pub fn read_global_store_memories_at(
     include_tombstoned: bool,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Vec<StoredMemory>, String> {
+    read_global_store_memories_filtered_at(paths, include_tombstoned, as_of, |_, _| Ok(true))
+}
+
+/// Apply source-dependent filters before releasing the same snapshot that
+/// admitted each global memory. Sidecar reads must not use a workspace store
+/// or a later view of the global store. A failed filter read withholds this
+/// optional lane through the existing private-detail-free error contract.
+pub(crate) fn read_global_store_memories_filtered_at(
+    paths: &GlobalStorePaths,
+    include_tombstoned: bool,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+    mut include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
+) -> Result<Vec<StoredMemory>, String> {
     if !paths
         .database_path
         .try_exists()
@@ -767,7 +780,16 @@ pub fn read_global_store_memories_at(
         .map_err(global_read_error)?;
     // The synchronous helper cannot yield between authority reads. On error
     // the snapshot is still released; unwinding drops the owned connection.
-    let result = read_global_rows_in_snapshot(&connection, paths, include_tombstoned, as_of);
+    let result = read_global_rows_in_snapshot(&connection, paths, include_tombstoned, as_of)
+        .and_then(|memories| {
+            let mut filtered = Vec::with_capacity(memories.len());
+            for memory in memories {
+                if include_memory(&connection, &memory).map_err(global_read_error)? {
+                    filtered.push(memory);
+                }
+            }
+            Ok(filtered)
+        });
     let released = connection
         .rollback_read_snapshot()
         .map_err(global_read_error);

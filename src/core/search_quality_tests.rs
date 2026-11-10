@@ -88,6 +88,18 @@ impl Fixture {
         created: DateTime<Utc>,
         content: &str,
     ) -> String {
+        self.memory_with_kind(number, confidence, utility, created, content, "note")
+    }
+
+    fn memory_with_kind(
+        &self,
+        number: u128,
+        confidence: f32,
+        utility: f32,
+        created: DateTime<Utc>,
+        content: &str,
+        kind: &str,
+    ) -> String {
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         self.db
             .insert_memory(
@@ -96,7 +108,7 @@ impl Fixture {
                     workspace_id: self.workspace.clone(),
                     content: content.to_owned(),
                     level: "semantic".to_owned(),
-                    kind: "note".to_owned(),
+                    kind: kind.to_owned(),
                     workflow_id: None,
                     confidence,
                     utility,
@@ -1024,6 +1036,298 @@ fn published_search_and_diagnostics_overretrieve_before_quality_top_one() {
     let diagnostic = run_diag_search(&options).unwrap();
     assert_eq!(diagnostic.final_report.results.len(), 1);
     assert_eq!(diagnostic.final_report.results[0].doc_id, strong);
+}
+
+#[test]
+fn published_search_filters_matching_candidates_before_top_one_and_diagnostics() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let note = fixture.memory(1, 1.0, 1.0, now);
+    let other_failure = fixture.memory_with_kind(2, 0.8, 1.0, now, BODY, "failure");
+    let matching = fixture.memory_with_kind(3, 0.4, 1.0, now, BODY, "failure");
+    fixture
+        .db
+        .set_memory_typed_fields_json(&other_failure, Some(r#"{"family":"other-cache"}"#))
+        .unwrap();
+    fixture
+        .db
+        .set_memory_typed_fields_json(&matching, Some(r#"{"family":"target-cache"}"#))
+        .unwrap();
+    let mut options = fixture.options();
+    options.limit = 1;
+    let _embedder = fixture.publish_index();
+    fixture.db.close().unwrap();
+
+    // The wrong-kind note ranks first; the wrong-field failure ranks ahead
+    // of the matching failure. Both filters must refill from the larger
+    // retrieval pool instead of removing the already-truncated top result.
+    for (kind, fields, expected, considered) in [
+        (None, Vec::new(), Some(note.as_str()), 3),
+        (Some("failure"), Vec::new(), Some(other_failure.as_str()), 2),
+        (
+            None,
+            vec![TypedMemoryFieldFilter::parse("family=target-cache").unwrap()],
+            Some(matching.as_str()),
+            1,
+        ),
+        (
+            Some("failure"),
+            vec![TypedMemoryFieldFilter::parse("family=target-cache").unwrap()],
+            Some(matching.as_str()),
+            1,
+        ),
+        (Some("decision"), Vec::new(), None, 0),
+        (
+            Some("failure"),
+            vec![TypedMemoryFieldFilter::parse("family=missing-cache").unwrap()],
+            None,
+            0,
+        ),
+    ] {
+        let run = run_search_with_performance_and_filters(&options, kind, &fields).unwrap();
+        assert_eq!(
+            run.report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        let audit = run.audit_facts.as_ref().unwrap();
+        assert_eq!(audit.kept, run.report.results.len());
+        assert_eq!(audit.floor_counts.considered, considered);
+        assert_eq!(audit.floor_counts.passed, considered);
+        assert_eq!(run.report.candidates_below_floor, 0);
+        assert_eq!(
+            run.report.status,
+            if expected.is_some() {
+                SearchStatus::Success
+            } else {
+                SearchStatus::NoResults
+            }
+        );
+        if expected.is_none() {
+            let assist = run.report.query_assist.as_ref().unwrap();
+            assert_eq!(assist.candidate_count, 0);
+            assert!(assist.did_you_mean.is_empty());
+            assert!(run.report.degraded.iter().all(|entry| !matches!(
+                entry.code.as_str(),
+                "no_relevant_results" | "low_recall_after_floor"
+            )));
+        }
+    }
+}
+
+#[test]
+fn empty_search_with_memory_filters_keeps_empty_result_diagnostics() {
+    let fixture = Fixture::new();
+    let options = fixture.options();
+    let _embedder = fixture.publish_index();
+    fixture.db.close().unwrap();
+    let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
+    let run = run_search_with_performance_and_filters(&options, Some("failure"), &fields).unwrap();
+    assert_eq!(run.report.status, SearchStatus::NoResults);
+    assert!(run.report.results.is_empty());
+    assert_eq!(run.audit_facts.as_ref().unwrap().kept, 0);
+    assert_eq!(run.report.query_assist.as_ref().unwrap().candidate_count, 0);
+}
+
+#[test]
+fn global_memory_filters_use_the_global_snapshot_before_top_one() {
+    const GLOBAL_CHILD: &str = "EE_TEST_GLOBAL_TYPED_SEARCH_FILTERS";
+    if std::env::var_os(GLOBAL_CHILD).is_some() {
+        assert_global_memory_filters_use_the_global_snapshot();
+        return;
+    }
+    let global_root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("core::search::quality_tests::global_memory_filters_use_the_global_snapshot_before_top_one")
+        .arg("--nocapture")
+        .env(GLOBAL_CHILD, "1")
+        .env("XDG_DATA_HOME", global_root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "global filtered search child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+fn assert_global_memory_filters_use_the_global_snapshot() {
+    let fixture = Fixture::new();
+    fixture.memory(1, 1.0, 1.0, Utc::now());
+    let _local_embedder = fixture.publish_index();
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = true\n",
+    )
+    .unwrap();
+    let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
+    let (global, workspace) =
+        crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+    let mut ids = Vec::new();
+    for (number, kind, confidence, fields) in [
+        (2, "note", 1.0, None),
+        (3, "failure", 0.8, Some(r#"{"family":"other-cache"}"#)),
+        (4, "failure", 0.4, Some(r#"{"family":"target-cache"}"#)),
+    ] {
+        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        global
+            .insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.clone(),
+                    content: BODY.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: kind.to_owned(),
+                    workflow_id: None,
+                    confidence,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://global-typed-filters".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        global.set_memory_typed_fields_json(&id, fields).unwrap();
+        assert!(fixture.db.get_memory(&id).unwrap().is_none());
+        ids.push(id);
+    }
+    let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
+    let mut options = fixture.options();
+    options.limit = 1;
+    let search = |scope, kind, fields: &[TypedMemoryFieldFilter]| {
+        let mut options = options.clone();
+        options.memory_scope = scope;
+        // Exercise the canonical held-snapshot path without reconciliation,
+        // keeping both unpublished and published global retrieval observable.
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                &options,
+                kind,
+                fields,
+                Duration::ZERO,
+                Duration::from_secs(30),
+                None,
+                true,
+                false,
+            )
+            .await
+        })
+        .unwrap()
+        .unwrap()
+    };
+    let _global_embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace);
+    for published in [false, true] {
+        if published {
+            let rebuilt =
+                crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                    workspace_path: paths.root.clone(),
+                    database_path: Some(paths.database_path.clone()),
+                    index_dir: Some(paths.index_dir.clone()),
+                    dry_run: false,
+                })
+                .unwrap();
+            assert_eq!(
+                rebuilt.status,
+                crate::core::index::IndexRebuildStatus::Success
+            );
+        }
+        for scope in [MemoryScope::Workspace, MemoryScope::Global] {
+            let unfiltered = search(scope, None, &[]);
+            assert_eq!(unfiltered.report.results.len(), 1);
+            assert_eq!(
+                unfiltered.report.results[0].metadata.as_ref().unwrap()["kind"],
+                "note"
+            );
+            let kind_only = search(scope, Some("failure"), &[]);
+            assert_eq!(kind_only.report.results.len(), 1);
+            assert_eq!(kind_only.report.results[0].doc_id, ids[1]);
+            let matching = search(scope, Some("failure"), &fields);
+            assert_eq!(matching.report.status, SearchStatus::Success);
+            assert_eq!(matching.report.results.len(), 1);
+            assert_eq!(matching.report.results[0].doc_id, ids[2]);
+            assert_eq!(matching.audit_facts.as_ref().unwrap().kept, 1);
+            assert_eq!(
+                matching
+                    .audit_facts
+                    .as_ref()
+                    .unwrap()
+                    .floor_counts
+                    .considered,
+                1
+            );
+            assert_eq!(
+                matching.report.results[0].metadata.as_ref().unwrap()["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            let missing = search(scope, Some("decision"), &[]);
+            assert_eq!(missing.report.status, SearchStatus::NoResults);
+            assert!(missing.report.results.is_empty());
+            assert!(missing.report.query_assist.unwrap().did_you_mean.is_empty());
+        }
+    }
+
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = false\n",
+    )
+    .unwrap();
+    let disabled = search(MemoryScope::Workspace, Some("failure"), &fields);
+    assert!(disabled.report.results.is_empty());
+    assert!(
+        disabled
+            .report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_lane_disabled")
+    );
+
+    // Change the sidecar after the helper has read/admitted the memory body.
+    // Filtering must still see the old fields in that same global snapshot.
+    let admitted = crate::core::global_store::read_global_store_memories_filtered_at(
+        &paths,
+        false,
+        None,
+        |connection, memory| {
+            if memory.id != ids[2] {
+                return Ok(false);
+            }
+            global
+                .set_memory_typed_fields_json(&memory.id, Some(r#"{"family":"new-cache"}"#))
+                .map_err(|error| error.to_string())?;
+            typed_memory_matches(connection, memory, Some("failure"), &fields)
+                .map_err(|error| error.to_string())
+        },
+    )
+    .unwrap();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].id, ids[2]);
+    assert!(
+        global
+            .get_memory_typed_fields_json(&ids[2])
+            .unwrap()
+            .unwrap()
+            .contains("new-cache")
+    );
+    let error = crate::core::global_store::read_global_store_memories_filtered_at(
+        &paths,
+        false,
+        None,
+        |_, _| Err("PRIVATE-FILTER-READ-CANARY".to_owned()),
+    )
+    .unwrap_err();
+    assert!(error.contains("optional global lane was withheld"));
+    assert!(!error.contains("PRIVATE-FILTER-READ-CANARY"));
 }
 
 #[test]

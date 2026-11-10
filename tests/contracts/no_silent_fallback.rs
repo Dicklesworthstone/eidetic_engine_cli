@@ -3477,7 +3477,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-GLOBAL-FALLBACK-ADMISSION",
         "src/core/search.rs",
         "global_store_fallback_memories",
-        "admitted_global_store_memories(options, &memory_config, degraded)",
+        ".map(|(_, memories)| memories)",
         "EXEMPLARY, and the positive control cited by bd-p42mq. The callee returns Option, not Result, and every None return is immediately preceded by a degraded.push -- scope_metadata_unavailable, global_memory_disabled, global_lane_migration_required, and scope_metadata_unavailable again. The REASON travels out through the degraded channel; only the VALUE falls back, which is exactly what a fail-soft default should look like. The genuinely untrustworthy case is separated and fails hard instead: workspace_memory_policy(..)? propagates one line above, matching the doc comment's promise that an untrustworthy privacy policy fails the request rather than enabling the lane.",
     ),
     allowed_in(
