@@ -5,8 +5,10 @@ use super::*;
 use crate::core::profile::OperatingProfile;
 use crate::db::{CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput};
 use crate::models::{
-    QueryFilters, QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture,
-    RedactionFilters, TagFilters, TrustFilters,
+    MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultInput,
+    MemorySentinelResultStatus, MemorySentinelSpec, QueryFilters, QueryTemporalFilters,
+    QueryTemporalValidity, QueryTemporalValidityPosture, RedactionFilters, TagFilters,
+    TrustFilters,
 };
 
 const OLD: &str = "2020-01-01T00:00:00Z";
@@ -185,6 +187,45 @@ impl Fixture {
             self.db.get_rule_tags(&pair.rule).unwrap(),
             self.db.get_rule_source_memory_ids(&pair.rule).unwrap(),
         )
+    }
+
+    fn sentinel(
+        &self,
+        memory: &str,
+        polarity: MemorySentinelPolarity,
+        result: Option<(MemorySentinelResultStatus, &str)>,
+    ) -> MemorySentinelSpec {
+        let spec = MemorySentinelSpec::from_raw(
+            memory,
+            "env_var_registered:EE_PACK_TRACE",
+            polarity,
+            Some("registered"),
+            "test://native-rule-source",
+            Some(60),
+        )
+        .unwrap();
+        self.db.upsert_memory_sentinel_spec(&spec).unwrap();
+        if let Some((status, checked_at)) = result {
+            self.sentinel_result(&spec, status, checked_at);
+        }
+        spec
+    }
+
+    fn sentinel_result(
+        &self,
+        spec: &MemorySentinelSpec,
+        status: MemorySentinelResultStatus,
+        checked_at: &str,
+    ) {
+        let result = MemorySentinelResult::new(MemorySentinelResultInput {
+            spec_hash: spec.spec_hash.clone(),
+            status,
+            checked_at: checked_at.to_owned(),
+            evidence_summary: "Native rule source freshness fixture.".to_owned(),
+            stale_threshold_seconds: Some(60),
+        })
+        .unwrap();
+        self.db.insert_memory_sentinel_result(&result).unwrap();
     }
 
     fn apply_scope(
@@ -718,6 +759,175 @@ fn native_rule_attribution_rejects_missing_foreign_and_unreadable_sources() {
         .unwrap();
     assert_eq!(failure.repair.as_deref(), Some("ee doctor --json"));
     assert!(!failure.message.contains("unavailable_trust_subclass"));
+}
+
+#[test]
+fn native_rule_fresh_sentinels_require_every_source_independent_of_source_order() {
+    let f = Fixture::new();
+    let reference_time = "2023-01-01T00:00:30Z".parse::<DateTime<Utc>>().unwrap();
+    let first_fresh = f.add(1, |_| {}, |_| {});
+    let unguarded = f.add(2, |_| {}, |_| {});
+    let last_fresh = f.add(20, |_| {}, |_| {});
+    for memory in [&first_fresh.memory, &last_fresh.memory] {
+        f.sentinel(
+            memory,
+            MemorySentinelPolarity::Gate,
+            Some((MemorySentinelResultStatus::Pass, BOUND)),
+        );
+    }
+    let revive_only = f.add(21, |_| {}, |_| {});
+    f.sentinel(
+        &revive_only.memory,
+        MemorySentinelPolarity::Revive,
+        Some((MemorySentinelResultStatus::Fail, OLD)),
+    );
+    let mut rules = Vec::new();
+    let mut expected = BTreeSet::new();
+    let mut next_seed = 100;
+    for source_ids in [
+        vec![first_fresh.memory.clone(), last_fresh.memory.clone()],
+        vec![unguarded.memory.clone()],
+        vec![first_fresh.memory.clone(), unguarded.memory.clone()],
+        vec![revive_only.memory.clone()],
+        vec![first_fresh.memory.clone(), revive_only.memory.clone()],
+        Vec::new(),
+    ] {
+        let rule = f.add(
+            next_seed,
+            |_| {},
+            |rule| rule.source_memory_ids = source_ids,
+        );
+        expected.insert(rule.rule.clone());
+        rules.push(rule);
+        next_seed += 1;
+    }
+    let mut blocked_specs = Vec::new();
+    for (seed, status) in [
+        (3, None),
+        (4, Some(MemorySentinelResultStatus::Fail)),
+        (5, Some(MemorySentinelResultStatus::Unknown)),
+        (6, Some(MemorySentinelResultStatus::Degraded)),
+        (7, Some(MemorySentinelResultStatus::Pass)),
+    ] {
+        let source = f.add(seed, |_| {}, |_| {});
+        let spec = f.sentinel(
+            &source.memory,
+            MemorySentinelPolarity::Gate,
+            status.map(|status| (status, OLD)),
+        );
+        blocked_specs.push(spec);
+        for (source_ids, expected_first) in [
+            (
+                vec![first_fresh.memory.clone(), source.memory.clone()],
+                &first_fresh.memory,
+            ),
+            (
+                vec![source.memory.clone(), last_fresh.memory.clone()],
+                &source.memory,
+            ),
+        ] {
+            let rule = f.add(
+                next_seed,
+                |_| {},
+                |rule| rule.source_memory_ids = source_ids,
+            );
+            assert_eq!(
+                &f.projection(&rule).source_memory_ids()[0],
+                expected_first,
+                "the fixture must exercise both first-source positions"
+            );
+            rules.push(rule);
+            next_seed += 1;
+        }
+    }
+    let ids: Vec<_> = rules.iter().map(|rule| rule.rule.as_str()).collect();
+    let mut resolved = f.resolve(&ids, &QueryFilters::default());
+    assert_eq!(resolved.hits.len(), 16, "every rule is otherwise admitted");
+    filter_native_rule_sources_by_fresh_sentinels(
+        &f.db,
+        &mut resolved.hits,
+        reference_time,
+        &mut resolved.degraded,
+    )
+    .unwrap();
+    let selected = direct_rule_pack_candidates(
+        resolved.hits,
+        &ContextRequest::from_query("prepare release").unwrap(),
+        &QueryFilters::default(),
+        true,
+        &mut resolved.degraded,
+    );
+    assert_eq!(sources(&selected), expected);
+    let filtered: Vec<_> = resolved
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == "context_filtered_results")
+        .collect();
+    assert_eq!(filtered.len(), 1);
+    assert!(
+        filtered[0]
+            .message
+            .starts_with("10 procedural rules excluded")
+    );
+
+    for spec in &blocked_specs {
+        f.sentinel_result(spec, MemorySentinelResultStatus::Pass, BOUND);
+    }
+    let mut recovered = f.resolve(&ids, &QueryFilters::default());
+    filter_native_rule_sources_by_fresh_sentinels(
+        &f.db,
+        &mut recovered.hits,
+        reference_time,
+        &mut recovered.degraded,
+    )
+    .unwrap();
+    assert_eq!(recovered.hits.len(), ids.len());
+    assert!(
+        recovered
+            .degraded
+            .iter()
+            .all(|entry| entry.code != "context_filtered_results")
+    );
+}
+
+#[test]
+fn native_rule_fresh_sentinels_propagate_later_source_storage_errors() {
+    let f = Fixture::new();
+    let unguarded = f.add(1, |_| {}, |_| {});
+    let guarded = f.add(2, |_| {}, |_| {});
+    f.sentinel(
+        &guarded.memory,
+        MemorySentinelPolarity::Gate,
+        Some((MemorySentinelResultStatus::Pass, BOUND)),
+    );
+    let derived = f.add(
+        3,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids = vec![unguarded.memory.clone(), guarded.memory.clone()];
+        },
+    );
+    assert_eq!(
+        f.projection(&derived).source_memory_ids()[0],
+        unguarded.memory
+    );
+    let mut resolved = f.resolve(&[&derived.rule], &QueryFilters::default());
+    assert_eq!(resolved.hits.len(), 1);
+    f.db.execute_raw(
+        "ALTER TABLE memory_sentinel_results RENAME COLUMN status TO unavailable_status",
+    )
+    .unwrap();
+    let error = filter_native_rule_sources_by_fresh_sentinels(
+        &f.db,
+        &mut resolved.hits,
+        BOUND.parse().unwrap(),
+        &mut resolved.degraded,
+    )
+    .expect_err("a later source read failure must not be treated as fresh");
+    assert!(matches!(
+        error,
+        ContextPackError::Storage(message) if message.contains("Failed to load sentinel result")
+    ));
 }
 
 #[test]

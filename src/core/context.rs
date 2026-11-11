@@ -15706,14 +15706,13 @@ fn filter_native_rule_sources_by_fresh_sentinels(
     let mut retained = Vec::new();
     let mut excluded = 0_usize;
     for hit in std::mem::take(hits) {
-        let blocked = if let Some(source) = hit.1.source_memory_ids().first() {
-            matches!(
+        let mut blocked = false;
+        for source in hit.1.source_memory_ids() {
+            blocked |= matches!(
                 sentinel_candidate_freshness(connection, source, reference_time)?,
                 SentinelCandidateFreshness::Blocked(_)
-            )
-        } else {
-            false
-        };
+            );
+        }
         if blocked {
             excluded = excluded.saturating_add(1);
         } else {
