@@ -68541,7 +68541,10 @@ UPDATE memories
         connection.migrate()?;
         setup_entities(&connection)?;
         let rule_rev = super::blake3_text_hash("rule-rev-1");
-        let evidence_rev = super::blake3_text_hash("evidence-rev-1");
+        let evidence_rev = connection
+            .get_evidence_span(evidence_id)?
+            .expect("inserted evidence span")
+            .pack_entity_revision();
         let provenance = r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project rule"}]}"#;
         connection.insert_pack_record_with_native_items(
             pack_id,
