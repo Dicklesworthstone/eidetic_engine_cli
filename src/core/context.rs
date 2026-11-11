@@ -15625,8 +15625,31 @@ fn filter_native_rule_sources_by_scope(
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> MemoryScopeStats {
     let mut stats = context.stats();
+    // Match search's native rule scope: the rule owns global/verified
+    // authority, while every parent must establish self/team attribution.
+    // Read shared parents once in bind-safe pages from the held source view.
+    let mut parents = BTreeMap::new();
+    if matches!(context.scope, MemoryScope::SelfOnly | MemoryScope::Team) {
+        let source_ids = hits
+            .iter()
+            .flat_map(|(_, projection)| projection.source_memory_ids().iter().map(String::as_str))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for page in source_ids.chunks(256) {
+            match connection.get_memories_batch(page) {
+                Ok(memories) => parents.extend(memories),
+                Err(_) => push_degradation(
+                    degraded,
+                    "scope_metadata_unavailable",
+                    ContextResponseSeverity::Medium,
+                    "Context could not verify native-rule source attribution; affected rules were excluded.",
+                    Some("ee doctor --json".to_owned()),
+                ),
+            }
+        }
+    }
     hits.retain(|(_, projection)| {
-        let source = projection.source_memory_ids().first();
         let visible = match context.scope {
             MemoryScope::Workspace | MemoryScope::Swarm => true,
             MemoryScope::Verified => matches!(
@@ -15635,32 +15658,24 @@ fn filter_native_rule_sources_by_scope(
                     | TrustClass::PeerHumanAttested
                     | TrustClass::AgentValidated)
             ),
-            MemoryScope::Global if source.is_none() => {
-                projection.rule().scope == "global"
-                    || crate::models::memory_tags_include_global_scope(projection.tags())
+            MemoryScope::Global => {
+                matches!(
+                    crate::models::RuleScope::from_str(&projection.rule().scope),
+                    Ok(crate::models::RuleScope::Global)
+                ) || crate::models::memory_tags_include_global_scope(projection.tags())
             }
-            MemoryScope::Global | MemoryScope::SelfOnly | MemoryScope::Team => {
-                source.is_some_and(|id| {
-                    connection
-                        .get_memory(id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|memory| {
-                            let tags = if context.scope == MemoryScope::Global {
-                                match connection.get_memory_tags_batch(&[id.as_str()]) {
-                                    Ok(mut tags) => tags.remove(id).unwrap_or_default(),
-                                    Err(_) => return false,
-                                }
-                            } else {
-                                Vec::new()
-                            };
+            MemoryScope::SelfOnly | MemoryScope::Team => {
+                let sources = projection.source_memory_ids();
+                !sources.is_empty()
+                    && sources.iter().all(|id| {
+                        parents.get(id).is_some_and(|memory| {
                             memory.workspace_id == projection.rule().workspace_id
-                                && context.memory_in_scope_with_tags(&memory, &tags)
+                                && context.memory_in_scope(memory)
                         })
-                })
+                    })
             }
         };
-        stats.record_candidate_id(visible, source.map(String::as_str));
+        stats.record_candidate_id(visible, Some(&projection.rule().id));
         visible
     });
     if stats.candidates_excluded_by_scope > 0 {

@@ -186,6 +186,27 @@ impl Fixture {
             self.db.get_rule_source_memory_ids(&pair.rule).unwrap(),
         )
     }
+
+    fn apply_scope(
+        &self,
+        mut resolved: Resolution,
+        context: &MemoryScopeContext,
+    ) -> (Resolution, MemoryScopeStats) {
+        let stats = filter_native_rule_sources_by_scope(
+            &self.db,
+            &mut resolved.hits,
+            context,
+            &mut resolved.degraded,
+        );
+        resolved.candidates = direct_rule_pack_candidates(
+            resolved.hits.clone(),
+            &ContextRequest::from_query("prepare release").unwrap(),
+            &QueryFilters::default(),
+            true,
+            &mut resolved.degraded,
+        );
+        (resolved, stats)
+    }
 }
 
 fn report(ids: &[&str]) -> SearchReport {
@@ -243,6 +264,16 @@ fn timestamp(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .unwrap()
         .with_timezone(&Utc)
+}
+
+fn rule_scope_context(scope: MemoryScope) -> MemoryScopeContext {
+    MemoryScopeContext {
+        scope,
+        strict_scope: false,
+        current_agent: Some("Alice".to_owned()),
+        team_members: BTreeSet::from(["Bob".to_owned()]),
+        team_roster_read_error: None,
+    }
 }
 
 #[test]
@@ -406,6 +437,287 @@ fn verified_scope_uses_rule_class_without_inheriting_parent_authority() {
             .iter()
             .all(|candidate| candidate.trust.posture() == PackTrustPosture::Advisory)
     );
+}
+
+#[test]
+fn global_rule_scope_uses_live_native_ownership_instead_of_parent_tags() {
+    let f = Fixture::new();
+    let global = f.add(1, |_| {}, |rule| rule.scope = "global".to_owned());
+    let tagged = f.add(2, |_| {}, |rule| rule.tags = vec!["house_rule".to_owned()]);
+    let parent_only = f.add(
+        3,
+        |memory| memory.tags = vec!["house_rule".to_owned()],
+        |_| {},
+    );
+    let local = f.add(4, |_| {}, |_| {});
+    let sourceless = f.add(
+        5,
+        |_| {},
+        |rule| {
+            rule.scope = "global".to_owned();
+            rule.source_memory_ids.clear();
+        },
+    );
+    let ids = [
+        &*global.rule,
+        &tagged.rule,
+        &parent_only.rule,
+        &local.rule,
+        &sourceless.rule,
+    ];
+    let resolved = f.resolve(&ids, &QueryFilters::default());
+    assert_eq!(resolved.hits.len(), ids.len());
+    let (resolved, stats) = f.apply_scope(resolved, &rule_scope_context(MemoryScope::Global));
+    assert_eq!(
+        sources(&resolved.candidates),
+        BTreeSet::from([
+            global.rule.clone(),
+            tagged.rule.clone(),
+            sourceless.rule.clone()
+        ])
+    );
+    assert_eq!(stats.candidates_total, 5);
+    assert_eq!(stats.candidates_in_scope, 3);
+    assert_eq!(stats.candidates_excluded_by_scope, 2);
+    assert_eq!(
+        stats.excluded_memory_ids,
+        vec![parent_only.rule, local.rule]
+    );
+    for candidate in &resolved.candidates {
+        assert!(
+            candidate
+                .content
+                .starts_with("Run formatting before release")
+        );
+        assert!(!candidate.content.contains("Historical release incident"));
+        assert_eq!(candidate.trust.posture(), PackTrustPosture::Advisory);
+    }
+    assert!(
+        resolved.memories.is_empty(),
+        "source bodies must not become global evidence"
+    );
+
+    f.db.execute_raw(&format!(
+        "UPDATE rule_tags SET tag = 'local-only' WHERE rule_id = '{}'",
+        tagged.rule
+    ))
+    .unwrap();
+    let mut resolved = f.resolve(&[&tagged.rule], &QueryFilters::default());
+    assert_eq!(resolved.hits.len(), 1);
+    resolved.hits[0].0.metadata =
+        Some(serde_json::json!({"scope": "global", "tags": "house_rule"}));
+    let (resolved, stats) = f.apply_scope(resolved, &rule_scope_context(MemoryScope::Global));
+    assert!(
+        resolved.candidates.is_empty(),
+        "stale index tags cannot restore revoked visibility"
+    );
+    assert_eq!(stats.excluded_memory_ids, vec![tagged.rule]);
+}
+
+#[test]
+fn self_and_team_rule_scope_require_all_sources_and_record_native_ids() {
+    let f = Fixture::new();
+    let alice = f.add(
+        1,
+        |memory| memory.trust_subclass = Some("agent:Alice".to_owned()),
+        |_| {},
+    );
+    let bob = f.add(
+        2,
+        |memory| memory.trust_subclass = Some("agent:Bob".to_owned()),
+        |_| {},
+    );
+    let eve = f.add(
+        3,
+        |memory| memory.trust_subclass = Some("agent:Eve".to_owned()),
+        |_| {},
+    );
+    let own = f.add(
+        4,
+        |memory| memory.trust_subclass = Some("agent:Alice".to_owned()),
+        |rule| {
+            rule.source_memory_ids.push(alice.memory.clone());
+        },
+    );
+    let team = f.add(
+        5,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids = vec![alice.memory.clone(), bob.memory.clone()];
+        },
+    );
+    let own_first = f.add(
+        6,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids = vec![alice.memory.clone(), eve.memory.clone()];
+        },
+    );
+    let foreign_first = f.add(
+        7,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids = vec![own.memory.clone(), eve.memory.clone()];
+        },
+    );
+    let sourceless = f.add(8, |_| {}, |rule| rule.source_memory_ids.clear());
+    let ids = [
+        &*own.rule,
+        &team.rule,
+        &own_first.rule,
+        &foreign_first.rule,
+        &sourceless.rule,
+    ];
+    // Canonical source ordering must not decide attribution: both the own
+    // and foreign producer occur first in an otherwise mixed-source rule.
+    assert_eq!(
+        f.projection(&own_first).source_memory_ids()[0],
+        alice.memory
+    );
+    assert_eq!(
+        f.projection(&foreign_first).source_memory_ids()[0],
+        eve.memory
+    );
+    for (scope, admitted, excluded) in [
+        (
+            MemoryScope::SelfOnly,
+            BTreeSet::from([own.rule.clone()]),
+            vec![
+                team.rule.clone(),
+                own_first.rule.clone(),
+                foreign_first.rule.clone(),
+                sourceless.rule.clone(),
+            ],
+        ),
+        (
+            MemoryScope::Team,
+            BTreeSet::from([own.rule.clone(), team.rule.clone()]),
+            vec![
+                own_first.rule.clone(),
+                foreign_first.rule.clone(),
+                sourceless.rule.clone(),
+            ],
+        ),
+    ] {
+        let resolved = f.resolve(&ids, &QueryFilters::default());
+        assert_eq!(resolved.hits.len(), ids.len());
+        let context = rule_scope_context(scope);
+        let (resolved, stats) = f.apply_scope(resolved, &context);
+        assert_eq!(sources(&resolved.candidates), admitted);
+        assert_eq!(stats.candidates_total, 5);
+        assert_eq!(stats.candidates_in_scope, admitted.len());
+        assert_eq!(stats.candidates_excluded_by_scope, excluded.len());
+        assert_eq!(stats.excluded_memory_ids, excluded);
+
+        let mut strict = context;
+        strict.strict_scope = true;
+        let (resolved, stats) = f.apply_scope(f.resolve(&ids, &QueryFilters::default()), &strict);
+        assert!(resolved.hits.is_empty());
+        assert!(resolved.candidates.is_empty());
+        assert_eq!(stats.strict_violations, excluded.len());
+        assert_eq!(stats.excluded_memory_ids, excluded);
+    }
+    let mut unknown_agent = rule_scope_context(MemoryScope::SelfOnly);
+    unknown_agent.current_agent = None;
+    let (resolved, stats) = f.apply_scope(
+        f.resolve(&[&own.rule], &QueryFilters::default()),
+        &unknown_agent,
+    );
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(stats.excluded_memory_ids, vec![own.rule]);
+
+    let mut revoked_team = rule_scope_context(MemoryScope::Team);
+    revoked_team.team_members.clear();
+    let (resolved, stats) = f.apply_scope(
+        f.resolve(&[&team.rule], &QueryFilters::default()),
+        &revoked_team,
+    );
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(stats.excluded_memory_ids, vec![team.rule]);
+}
+
+#[test]
+fn native_rule_attribution_rejects_missing_foreign_and_unreadable_sources() {
+    let f = Fixture::new();
+    let alice = f.add(
+        1,
+        |memory| memory.trust_subclass = Some("agent:Alice".to_owned()),
+        |_| {},
+    );
+    let derived = f.add(
+        2,
+        |memory| memory.trust_subclass = Some("agent:Alice".to_owned()),
+        |rule| {
+            rule.source_memory_ids.push(alice.memory.clone());
+        },
+    );
+    let context = rule_scope_context(MemoryScope::SelfOnly);
+    let (resolved, stats) = f.apply_scope(
+        f.resolve(&[&derived.rule], &QueryFilters::default()),
+        &context,
+    );
+    assert_eq!(
+        sources(&resolved.candidates),
+        BTreeSet::from([derived.rule.clone()])
+    );
+    assert_eq!(stats.candidates_in_scope, 1);
+
+    let foreign_workspace = "wsp_00000000000000000000000071";
+    f.db.insert_workspace(
+        foreign_workspace,
+        &CreateWorkspaceInput {
+            path: f.workspace.join("foreign").to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .unwrap();
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET workspace_id = '{foreign_workspace}' WHERE id = '{}'",
+        derived.memory
+    ))
+    .unwrap();
+    let resolved = f.resolve(&[&derived.rule], &QueryFilters::default());
+    assert_eq!(
+        resolved.hits.len(),
+        1,
+        "first source is still local and live"
+    );
+    let (resolved, stats) = f.apply_scope(resolved, &context);
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(stats.excluded_memory_ids, vec![derived.rule.clone()]);
+
+    f.db.execute_raw("PRAGMA foreign_keys = OFF").unwrap();
+    f.db.execute_raw(&format!(
+        "DELETE FROM memories WHERE id = '{}'",
+        derived.memory
+    ))
+    .unwrap();
+    let resolved = f.resolve(&[&derived.rule], &QueryFilters::default());
+    assert_eq!(
+        resolved.hits.len(),
+        1,
+        "missing later sources cannot inherit the first source's attribution"
+    );
+    let (resolved, stats) = f.apply_scope(resolved, &context);
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(stats.excluded_memory_ids, vec![derived.rule]);
+
+    let resolved = f.resolve(&[&alice.rule], &QueryFilters::default());
+    assert_eq!(resolved.hits.len(), 1);
+    f.db.execute_raw(
+        "ALTER TABLE memories RENAME COLUMN trust_subclass TO unavailable_trust_subclass",
+    )
+    .unwrap();
+    let (resolved, stats) = f.apply_scope(resolved, &context);
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(stats.excluded_memory_ids, vec![alice.rule]);
+    let failure = resolved
+        .degraded
+        .iter()
+        .find(|entry| entry.code == "scope_metadata_unavailable")
+        .unwrap();
+    assert_eq!(failure.repair.as_deref(), Some("ee doctor --json"));
+    assert!(!failure.message.contains("unavailable_trust_subclass"));
 }
 
 #[test]
