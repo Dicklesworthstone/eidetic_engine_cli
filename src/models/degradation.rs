@@ -275,7 +275,7 @@ pub const DATABASE_READ_ONLY: DegradationCode = DegradationCode {
     description: "Database is in read-only mode",
     behavior_change: "Write operations will fail; reads work normally",
     auto_recoverable: false,
-    repair: Some("ee doctor --fix-plan --json"),
+    repair: Some("ee status --workspace . --json"),
 };
 
 pub const WAL_MODE_DISABLED: DegradationCode = DegradationCode {
@@ -295,7 +295,7 @@ pub const LARGE_DATABASE: DegradationCode = DegradationCode {
     description: "Database size exceeds recommended threshold",
     behavior_change: "Some operations may be slower",
     auto_recoverable: false,
-    repair: Some("ee doctor --fix-plan --json"),
+    repair: Some("ee status --workspace . --json"),
 };
 
 pub const ADVISORY_LOCK_TIMEOUT: DegradationCode = DegradationCode {
@@ -518,7 +518,7 @@ pub const POLICY_NOT_LOADED: DegradationCode = DegradationCode {
     description: "Policy file not loaded",
     behavior_change: "Default policies in effect; custom rules ignored",
     auto_recoverable: false,
-    repair: Some("ee doctor --fix-plan --json"),
+    repair: Some("ee config show --json"),
 };
 
 pub const REDACTION_PATTERNS_STALE: DegradationCode = DegradationCode {
@@ -528,7 +528,7 @@ pub const REDACTION_PATTERNS_STALE: DegradationCode = DegradationCode {
     description: "Redaction patterns may be outdated",
     behavior_change: "Some sensitive data may not be caught",
     auto_recoverable: false,
-    repair: Some("ee doctor --fix-plan --json"),
+    repair: Some("ee config show --json"),
 };
 
 // Network degradations (D700 - D799)
@@ -951,5 +951,28 @@ mod tests {
         assert_eq!(active.code.id, "D001");
         assert_eq!(active.detected_at, Some("2026-01-01T00:00:00Z".to_string()));
         assert_eq!(active.context, Some("Model file missing".to_string()));
+    }
+
+    /// `ee doctor --fix-plan` builds steps only from doctor checks, so a
+    /// degradation repair that points back at `doctor --fix-plan` sends an
+    /// agent to a plan that cannot contain a step for that degradation
+    /// (bd-rxdu8: D100, D102, D600, D601).
+    #[test]
+    fn degradation_repairs_never_point_back_to_the_fix_plan() -> TestResult {
+        let circular = ALL_DEGRADATION_CODES
+            .iter()
+            .filter(|code| {
+                code.repair
+                    .is_some_and(|repair| repair.contains("doctor --fix-plan"))
+            })
+            .map(|code| code.id)
+            .collect::<Vec<_>>();
+        if circular.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "degradation repairs point back to --fix-plan: {circular:?}"
+            ))
+        }
     }
 }

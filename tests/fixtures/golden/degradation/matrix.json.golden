@@ -45,7 +45,7 @@
       "description": "Database is in read-only mode",
       "behavior_change": "Write operations will fail; reads work normally",
       "auto_recoverable": false,
-      "repair": "ee doctor --fix-plan --json"
+      "repair": "ee status --workspace . --json"
     },
     {
       "id": "D101",
@@ -63,7 +63,7 @@
       "description": "Database size exceeds recommended threshold",
       "behavior_change": "Some operations may be slower",
       "auto_recoverable": false,
-      "repair": "ee doctor --fix-plan --json"
+      "repair": "ee status --workspace . --json"
     },
     {
       "id": "D103",
@@ -198,7 +198,7 @@
       "description": "Policy file not loaded",
       "behavior_change": "Default policies in effect; custom rules ignored",
       "auto_recoverable": false,
-      "repair": "ee doctor --fix-plan --json"
+      "repair": "ee config show --json"
     },
     {
       "id": "D601",
@@ -207,7 +207,7 @@
       "description": "Redaction patterns may be outdated",
       "behavior_change": "Some sensitive data may not be caught",
       "auto_recoverable": false,
-      "repair": "ee doctor --fix-plan --json"
+      "repair": "ee config show --json"
     },
     {
       "id": "D700",
