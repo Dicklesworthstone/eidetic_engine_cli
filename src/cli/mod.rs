@@ -25357,7 +25357,7 @@ mod cass_timeout_tests {
 
 fn cass_import_domain_error(error: &CassImportError) -> DomainError {
     let message = error.to_string();
-    let repair = error.repair_hint().map(str::to_string);
+    let repair = error.resolved_repair_hint();
     match error.subprocess_diagnostics_json() {
         Some(diagnostics) => DomainError::ImportWithDetails {
             message,
@@ -73935,6 +73935,89 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn cass_import_domain_error_carries_redacted_upstream_repair_hint_and_preserves_fallback()
+    -> TestResult {
+        let host_db_path = "/Users/Alice/.local/share/coding-agent-search/agent_search.db";
+        let missing_db_error = CassImportError::CassCommand {
+            command: "cass sessions".to_string(),
+            exit_code: Some(3),
+            stderr: format!(
+                r#"{{"error":{{"code":3,"kind":"missing-db","message":"Database not found at {host_db_path}. Run 'cass index --full' first.","hint":"Run 'cass index --full --data-dir {host_db_path}' to create the database at {host_db_path}.","retryable":true}}}}"#
+            ),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: None,
+            peak_stdout_line_bytes: None,
+            peak_stdout_buffer_bytes: None,
+        };
+        let domain = cass_import_domain_error(&missing_db_error);
+        let rendered = crate::output::error_response_json(&domain);
+        if rendered.contains("/Users/Alice") {
+            return Err(format!(
+                "upstream CASS repair hint leaked host database path into error envelope: {rendered}"
+            ));
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|err| err.to_string())?;
+        let repair = parsed["error"]["repair"]
+            .as_str()
+            .ok_or("missing error.repair")?;
+        if !repair.contains("cass index --full") || !repair.contains("[REDACTED_PATH]") {
+            return Err(format!(
+                "expected error.repair to carry redacted 'cass index --full', got {repair:?}"
+            ));
+        }
+        let repair_kind = parsed["error"]["repairKind"]
+            .as_str()
+            .ok_or("missing error.repairKind")?;
+        if repair_kind == "unknown" {
+            return Err(format!(
+                "expected error.repairKind to not be unknown for upstream CASS command, got {repair_kind:?}"
+            ));
+        }
+        let recovery = parsed["error"]["details"]["recovery"]
+            .as_array()
+            .ok_or("missing error.details.recovery array")?;
+        if recovery.is_empty()
+            || recovery[0]["kind"].as_str() != Some("command")
+            || !recovery[0]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cass index --full")
+            || !recovery[0]["rationale"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[REDACTED_PATH]")
+        {
+            return Err(format!(
+                "expected structured recovery action with redacted rationale, got {recovery:?}"
+            ));
+        }
+
+        // Negative control: a CASS command failure without an upstream hint
+        // keeps the generic `run cass health --json` repair.
+        let no_hint_error = CassImportError::CassCommand {
+            command: "cass sessions".to_string(),
+            exit_code: Some(1),
+            stderr: r#"{"error":{"code":1,"kind":"internal","message":"unexpected failure"}}"#
+                .to_string(),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: None,
+            peak_stdout_line_bytes: None,
+            peak_stdout_buffer_bytes: None,
+        };
+        let fallback_domain = cass_import_domain_error(&no_hint_error);
+        ensure(
+            fallback_domain.repair() == Some("run cass health --json"),
+            format!(
+                "expected generic fallback repair when upstream supplies no hint, got {:?}",
+                fallback_domain.repair()
+            ),
+        )
+    }
+
     #[derive(Clone, Default)]
     struct SharedWriteBuffer {
         bytes: Rc<RefCell<Vec<u8>>>,
@@ -96437,6 +96520,7 @@ mod tests {
                 .count_table_rows("audit_log")
                 .map_err(|error| error.to_string())?;
             drop(connection);
+            let root_arg = root.to_string_lossy();
             let mut readonly_hash = None;
             for read_only in [true, false] {
                 // This fixture deliberately installs the deterministic hash
@@ -96447,7 +96531,7 @@ mod tests {
                     "ee",
                     "--json",
                     "--workspace",
-                    &workspace,
+                    root_arg.as_ref(),
                     "pack",
                     "quasar release checksums",
                     "--use-daemon",

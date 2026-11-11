@@ -535,6 +535,27 @@ impl CassImportError {
         }
     }
 
+    /// Return the redacted upstream repair command/hint and rationale when a
+    /// failed CASS subprocess payload supplies `error.hint` or `error.repair`
+    /// (bd-reality-core-convergence-1azkt.69).
+    #[must_use]
+    pub fn upstream_repair_action(&self) -> Option<(String, String)> {
+        match self {
+            Self::CassCommand { stderr, .. } => extract_upstream_cass_repair_hint(stderr),
+            _ => None,
+        }
+    }
+
+    /// Return the best repair string for `ee.error.v2`, preferring a redacted
+    /// upstream subprocess repair hint over the generic fallback when present.
+    #[must_use]
+    pub fn resolved_repair_hint(&self) -> Option<String> {
+        if let Some((repair, _)) = self.upstream_repair_action() {
+            return Some(repair);
+        }
+        self.repair_hint().map(str::to_owned)
+    }
+
     /// Render redaction-safe subprocess supervision diagnostics for failures
     /// where the adapter has structured cleanup evidence.
     #[must_use]
@@ -783,6 +804,79 @@ fn first_usize_in_text(text: &str) -> Option<usize> {
     text.split(|ch: char| !ch.is_ascii_digit())
         .find(|token| !token.is_empty())
         .and_then(|token| token.parse().ok())
+}
+
+fn parse_upstream_cass_error_json(text: &str) -> Option<JsonValue> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed) {
+        return Some(value);
+    }
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.starts_with('{')
+            && line.ends_with('}')
+            && let Ok(value) = serde_json::from_str::<JsonValue>(line)
+        {
+            return Some(value);
+        }
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    (start < end)
+        .then(|| serde_json::from_str::<JsonValue>(&trimmed[start..=end]).ok())
+        .flatten()
+}
+
+fn extract_actionable_cass_or_ee_command(redacted_hint: &str) -> Option<String> {
+    let trimmed = redacted_hint.trim().trim_end_matches('.').trim();
+    if trimmed.starts_with("cass ") || trimmed.starts_with("ee ") {
+        return Some(trimmed.to_string());
+    }
+    if trimmed.len() > 4
+        && trimmed[..4].eq_ignore_ascii_case("run ")
+        && (trimmed[4..].trim_start().starts_with("cass ")
+            || trimmed[4..].trim_start().starts_with("ee "))
+    {
+        return Some(trimmed[4..].trim_start().to_string());
+    }
+    for quote in ['\'', '`', '"'] {
+        let mut rest = redacted_hint;
+        while let Some(open_idx) = rest.find(quote) {
+            let after_open = &rest[open_idx + quote.len_utf8()..];
+            let Some(close_idx) = after_open.find(quote) else {
+                break;
+            };
+            let candidate = after_open[..close_idx].trim();
+            if candidate.starts_with("cass ") || candidate.starts_with("ee ") {
+                return Some(candidate.to_string());
+            }
+            rest = &after_open[close_idx + quote.len_utf8()..];
+        }
+    }
+    None
+}
+
+fn extract_upstream_cass_repair_hint(stderr: &str) -> Option<(String, String)> {
+    let value = parse_upstream_cass_error_json(stderr)?;
+    let raw_hint = value
+        .pointer("/error/repair")
+        .and_then(JsonValue::as_str)
+        .or_else(|| value.pointer("/error/hint").and_then(JsonValue::as_str))
+        .or_else(|| value.get("repair").and_then(JsonValue::as_str))
+        .or_else(|| value.get("hint").and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())?;
+    let redacted_hint = bounded_public_cass_text(raw_hint, 512);
+    let redacted_trimmed = redacted_hint.trim();
+    if redacted_trimmed.is_empty() {
+        return None;
+    }
+    let repair = extract_actionable_cass_or_ee_command(redacted_trimmed)
+        .unwrap_or_else(|| redacted_trimmed.to_string());
+    Some((repair, redacted_trimmed.to_string()))
 }
 
 /// Bounded summary of CASS import parser output for fuzzing and parser

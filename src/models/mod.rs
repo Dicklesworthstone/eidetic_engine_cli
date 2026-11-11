@@ -2140,6 +2140,22 @@ impl DomainError {
                     ),
                 ]
             }
+            // Upstream CASS subprocess failure carrying an actionable `cass ...`
+            // repair command (bd-reality-core-convergence-1azkt.69).
+            Self::Import {
+                repair: Some(repair),
+                ..
+            }
+            | Self::ImportWithDetails {
+                repair: Some(repair),
+                ..
+            } if repair.starts_with("cass ") => {
+                let rationale = extract_upstream_cass_hint_rationale(&self.message())
+                    .unwrap_or_else(|| {
+                        "Run the upstream CASS repair command and retry the import.".to_owned()
+                    });
+                vec![RecoveryAction::command(1, repair.clone(), rationale)]
+            }
             // Search index missing / corrupt / stale.
             Self::SearchIndex { .. } if message.contains("index") => vec![
                 RecoveryAction {
@@ -2384,6 +2400,28 @@ impl DomainError {
             Self::MigrationDrift { .. } => ProcessExitCode::MigrationRequired,
         }
     }
+}
+
+fn extract_upstream_cass_hint_rationale(message: &str) -> Option<String> {
+    let start = message.find('{')?;
+    let end = message.rfind('}')?;
+    if start >= end {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&message[start..=end]).ok()?;
+    value
+        .pointer("/error/repair")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/error/hint")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| value.get("repair").and_then(serde_json::Value::as_str))
+        .or_else(|| value.get("hint").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
