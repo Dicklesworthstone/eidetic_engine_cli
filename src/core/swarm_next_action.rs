@@ -16857,4 +16857,47 @@ mod tests {
             repair,
         }
     }
+
+    #[test]
+    fn actionable_queue_evidence_from_brief_fallback_distinguishes_current_ready_from_stale_fallback()
+     {
+        let mut ready_current = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        ready_current.beads.ready = vec![bead("bd-1", "Ready current task", 1)];
+        ready_current.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::Beads,
+            status: SwarmBriefSourceStatus::Ready,
+            freshness: SwarmBriefSourceFreshness::current(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 1,
+            degraded: Vec::new(),
+        });
+
+        let current_evidence = actionable_queue_evidence_from_brief_fallback(&ready_current);
+        assert_eq!(current_evidence.queue_state, ACTIONABLE_QUEUE_STATE_READY);
+        assert_eq!(current_evidence.exit_class, "ok");
+        assert_eq!(current_evidence.row_count, Some(1));
+        assert_eq!(current_evidence.candidate_ids, vec!["bd-1".to_owned()]);
+
+        let mut ready_stale = ready_current.clone();
+        ready_stale.sources[0].freshness = SwarmBriefSourceFreshness {
+            state: "stale",
+            ..SwarmBriefSourceFreshness::unknown()
+        };
+        let stale_evidence = actionable_queue_evidence_from_brief_fallback(&ready_stale);
+        assert_eq!(
+            stale_evidence.queue_state,
+            ACTIONABLE_QUEUE_STATE_STALE_FALLBACK
+        );
+        assert_eq!(stale_evidence.exit_class, "ok");
+        assert_eq!(stale_evidence.row_count, Some(1));
+
+        let empty_brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let unavailable_evidence = actionable_queue_evidence_from_brief_fallback(&empty_brief);
+        assert_eq!(
+            unavailable_evidence.queue_state,
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE
+        );
+        assert_eq!(unavailable_evidence.exit_class, "unknown");
+        assert_eq!(unavailable_evidence.row_count, None);
+    }
 }

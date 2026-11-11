@@ -31,8 +31,9 @@ use crate::core::query_miss_cluster::{
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
     TOOLCHAIN_PROVENANCE_REDACTION_STATUS, TOOLCHAIN_PROVENANCE_SCHEMA_V1, ToolchainFreshness,
-    ToolchainProvenanceOptions, ToolchainProvenanceReport, ToolchainSourceHint, ToolchainToolId,
-    ToolchainToolKind, collect_toolchain_provenance_with_runner,
+    ToolchainProvenanceOptions, ToolchainProvenanceReport, ToolchainScriptTracking,
+    ToolchainSourceHint, ToolchainToolId, ToolchainToolKind,
+    collect_toolchain_provenance_with_runner,
 };
 use crate::core::verify::{
     VerificationPostureAdvisoryCounts, VerificationPostureEvidenceHealth,
@@ -924,6 +925,7 @@ pub struct SwarmBriefToolchainScriptSummary {
     pub script: String,
     pub blake3_preview: String,
     pub tracked: bool,
+    pub tracking: ToolchainScriptTracking,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2704,6 +2706,7 @@ fn toolchain_brief_summary_from_report(
             script: row.script.clone(),
             blake3_preview: hash_preview(&row.blake3),
             tracked: row.tracked,
+            tracking: row.tracking,
         })
         .collect::<Vec<_>>();
     script_hashes.sort();
@@ -15196,6 +15199,91 @@ mod tests {
                 .any(|source| source.source == SwarmBriefSourceKind::AgentMail
                     && source.status == SwarmBriefSourceStatus::NotConfigured)
         );
+    }
+
+    #[test]
+    fn toolchain_brief_summary_preserves_three_valued_script_tracking() {
+        use crate::core::support_bundle::{
+            ToolchainProvenanceDegradation, ToolchainScriptHashRow, ToolchainScriptTracking,
+        };
+
+        let report = ToolchainProvenanceReport {
+            schema: TOOLCHAIN_PROVENANCE_SCHEMA_V1.to_owned(),
+            collected_at: "2026-11-11T00:00:00Z".to_owned(),
+            workspace_fingerprint: "ws_fp_1".to_owned(),
+            redaction_status: TOOLCHAIN_PROVENANCE_REDACTION_STATUS.to_owned(),
+            tools: Vec::new(),
+            script_hashes: vec![
+                ToolchainScriptHashRow {
+                    script: "scripts/verify.sh".to_owned(),
+                    blake3: "a".repeat(64),
+                    tracked: true,
+                    tracking: ToolchainScriptTracking::Tracked,
+                    probe: None,
+                },
+                ToolchainScriptHashRow {
+                    script: "scripts/local-scratch.sh".to_owned(),
+                    blake3: "b".repeat(64),
+                    tracked: false,
+                    tracking: ToolchainScriptTracking::Untracked,
+                    probe: None,
+                },
+                ToolchainScriptHashRow {
+                    script: "scripts/rch_verify.sh".to_owned(),
+                    blake3: "c".repeat(64),
+                    tracked: false,
+                    tracking: ToolchainScriptTracking::Unknown,
+                    probe: None,
+                },
+            ],
+            degraded: vec![ToolchainProvenanceDegradation::new(
+                "toolchain_git_repository_absent",
+                "info",
+                "no git repository at or above the workspace",
+                None,
+            )],
+        };
+
+        let summary = toolchain_brief_summary_from_report(&report);
+        assert_eq!(summary.script_hashes.len(), 3);
+
+        let by_script = summary
+            .script_hashes
+            .iter()
+            .map(|row| (row.script.as_str(), row))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let tracked_row = by_script["scripts/verify.sh"];
+        assert!(tracked_row.tracked);
+        assert_eq!(tracked_row.tracking, ToolchainScriptTracking::Tracked);
+
+        let untracked_row = by_script["scripts/local-scratch.sh"];
+        assert!(!untracked_row.tracked);
+        assert_eq!(untracked_row.tracking, ToolchainScriptTracking::Untracked);
+
+        let unknown_row = by_script["scripts/rch_verify.sh"];
+        assert!(!unknown_row.tracked);
+        assert_eq!(unknown_row.tracking, ToolchainScriptTracking::Unknown);
+
+        let serialized = serde_json::to_value(&summary).expect("serialize summary");
+        let json_rows = serialized["scriptHashes"]
+            .as_array()
+            .expect("scriptHashes array");
+        assert!(json_rows.iter().any(|row| {
+            row["script"] == "scripts/rch_verify.sh"
+                && row["tracked"] == false
+                && row["tracking"] == "unknown"
+        }));
+        assert!(json_rows.iter().any(|row| {
+            row["script"] == "scripts/local-scratch.sh"
+                && row["tracked"] == false
+                && row["tracking"] == "untracked"
+        }));
+        assert!(json_rows.iter().any(|row| {
+            row["script"] == "scripts/verify.sh"
+                && row["tracked"] == true
+                && row["tracking"] == "tracked"
+        }));
     }
 }
 

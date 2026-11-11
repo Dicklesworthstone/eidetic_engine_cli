@@ -506,7 +506,7 @@ pub struct ToolchainProbeEvidence {
 /// probe alone cannot separate "this script is untracked", which is a real
 /// finding, from "git could not answer", which says nothing about the script.
 /// A bool has to pick one of those to be wrong about.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolchainScriptTracking {
     Tracked,
