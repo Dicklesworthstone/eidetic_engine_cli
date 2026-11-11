@@ -33,7 +33,7 @@ use clap_complete::{Shell, generate};
 
 use crate::cass::{
     CassClient, CassImportDegradation, CassImportError, CassImportOptions, CassImportReport,
-    discover_import_binary, import_cass_sessions, parse_import_since_duration,
+    discover_import_binary, import_cass_sessions_with_cx, parse_import_since_duration,
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
@@ -162,7 +162,8 @@ use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexHealth, IndexRebuildError,
     IndexRebuildOptions, IndexRebuildReport, IndexRebuildStatus, IndexReembedOptions,
     IndexStatusOptions, IndexVacuumOptions, get_index_status, get_index_status_with_connection,
-    get_index_vacuum_report, process_pending_index_jobs_coalesced, rebuild_index, reembed_index,
+    get_index_vacuum_report, process_pending_index_jobs_coalesced_with_cx, rebuild_index,
+    reembed_index,
 };
 use crate::core::init::{InitOptions, InitReport, init_workspace};
 use crate::core::install::{
@@ -11718,6 +11719,10 @@ pub struct CassImportArgs {
     /// Skip first-window evidence span capture through `cass view`.
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_spans: bool,
+
+    /// Total import and index publication budget in milliseconds; defaults to a budget scaled by --limit.
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub timeout_ms: Option<u64>,
 
     /// Override the per-CASS subprocess timeout in milliseconds for diagnostics.
     #[arg(long, value_name = "MS", hide = true)]
@@ -24891,40 +24896,151 @@ where
         None => cass_client,
     };
 
-    match import_cass_sessions(&cass_client, &options) {
-        Ok(mut report) => {
-            let review = args.propose.then(|| review_imported_sessions(&report));
-            // Proposals advance the workspace generation, including when a
-            // repeat import reused every source and queued no new index jobs.
-            let degradation = reconcile_cass_import_index(
-                &mut report,
-                review
-                    .as_ref()
-                    .is_some_and(|review| review.durable_mutation),
-            );
-            match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-                    stdout,
-                    &cass_import_human_summary(&report, degradation.as_ref(), review.as_ref()),
-                ),
-                output::Renderer::Toon => {
-                    let json =
-                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
-                    write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
-                }
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    let json =
-                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
-                    write_stdout(stdout, &(json.to_string() + "\n"))
-                }
+    let timeout = cass_import_request_timeout(args, &cass_client);
+    let result = crate::core::run_cli_with_cx(timeout, |cx| async move {
+        #[cfg(unix)]
+        let _signals = CassImportSignals::new(&cx)?;
+        let mut report = import_cass_sessions_with_cx(&cx, &cass_client, &options)
+            .map_err(cass_import_cli_error)?;
+        crate::cass::process::cass_request_checkpoint()
+            .map_err(CassImportError::from)
+            .map_err(cass_import_cli_error)?;
+        let review = args.propose.then(|| review_imported_sessions(&report));
+        crate::cass::process::cass_request_checkpoint()
+            .map_err(CassImportError::from)
+            .map_err(cass_import_cli_error)?;
+        // Source writes, optional proposals and coalesced publication share
+        // one request. Publication must not replace cancellation with a fresh
+        // independent runtime or turn it into successful degraded output.
+        let degradation = reconcile_cass_import_index(
+            &cx,
+            &mut report,
+            review
+                .as_ref()
+                .is_some_and(|review| review.durable_mutation),
+        )
+        .await
+        .map_err(CancellationAwareCliError::Cancelled)?;
+        crate::cass::process::cass_request_checkpoint()
+            .map_err(CassImportError::from)
+            .map_err(cass_import_cli_error)?;
+        Ok::<_, CancellationAwareCliError>((report, review, degradation))
+    })
+    .map_err(|error| {
+        CancellationAwareCliError::Domain(DomainError::Import {
+            message: format!("Failed to start CASS import runtime: {error}"),
+            repair: Some("Check Asupersync runtime health and retry the import.".to_owned()),
+        })
+    })
+    .and_then(std::convert::identity);
+
+    match result {
+        Ok((report, review, degradation)) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                stdout,
+                &cass_import_human_summary(&report, degradation.as_ref(), review.as_ref()),
+            ),
+            output::Renderer::Toon => {
+                let json = cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
+                write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
             }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(CancellationAwareCliError::Cancelled(reason)) => {
+            write_cancelled_error(&reason, cli.renderer(), stdout, stderr)
         }
-        Err(error) => {
-            let domain_error = cass_import_domain_error(&error);
-            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
+        Err(CancellationAwareCliError::Domain(error)) => {
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
+        }
+    }
+}
+
+fn cass_import_cli_error(error: CassImportError) -> CancellationAwareCliError {
+    match error.cancellation_reason() {
+        Some(reason) => CancellationAwareCliError::Cancelled(reason.clone()),
+        None => CancellationAwareCliError::Domain(cass_import_domain_error(&error)),
+    }
+}
+
+fn cass_import_request_timeout(args: &CassImportArgs, client: &CassClient) -> Duration {
+    if let Some(timeout_ms) = args.timeout_ms {
+        return Duration::from_millis(timeout_ms);
+    }
+    // A session can require many bounded view pages plus local derivation.
+    // Give each selected session at least five minutes, scale with configured
+    // slow CASS calls, and retain the existing full index rebuild allowance.
+    client
+        .subprocess_timeout()
+        .max(Duration::from_secs(300))
+        .saturating_mul(args.limit.saturating_add(1))
+        .saturating_add(crate::core::index::index_rebuild_timeout())
+}
+
+/// The current-thread CLI runtime cannot poll signals while a synchronous
+/// adapter owns the thread. This scoped watcher only marks its request Cx;
+/// subprocess and transaction owners perform cleanup at their checkpoints.
+#[cfg(unix)]
+struct CassImportSignals {
+    handle: signal_hook::iterator::Handle,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl CassImportSignals {
+    fn new(cx: &asupersync::Cx) -> Result<Self, DomainError> {
+        let signal_error = |error| DomainError::Configuration {
+            message: format!("Failed to install CASS import signal handler: {error}"),
+            repair: Some("Inspect host signal-handler limits, then retry the import.".to_owned()),
+        };
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::signal::SIGINT,
+            signal_hook::consts::signal::SIGTERM,
+        ])
+        .map_err(signal_error)?;
+        let handle = signals.handle();
+        let cx = cx.clone();
+        let worker = std::thread::Builder::new()
+            .name("ee-cass-import-signals".to_owned())
+            .spawn(move || {
+                if let Some(signal) = signals.forever().next()
+                    && cx.cancel_reason().is_none()
+                {
+                    let (kind, message) = if signal == signal_hook::consts::signal::SIGINT {
+                        (
+                            asupersync::CancelKind::User,
+                            "CASS import interrupted by SIGINT",
+                        )
+                    } else {
+                        (
+                            asupersync::CancelKind::Shutdown,
+                            "CASS import stopped by SIGTERM",
+                        )
+                    };
+                    cx.set_cancel_reason(crate::core::outcome::attributed_cancel_reason(
+                        &cx, kind, message,
+                    ));
+                }
+            })
+            .map_err(signal_error)?;
+        Ok(Self {
+            handle,
+            worker: Some(worker),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CassImportSignals {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -24974,27 +25090,45 @@ fn cass_import_human_summary(
     summary
 }
 
-fn reconcile_cass_import_index(
+async fn reconcile_cass_import_index(
+    cx: &asupersync::Cx,
     report: &mut CassImportReport,
     proposal_mutation: bool,
-) -> Option<CassImportDegradation> {
+) -> Result<Option<CassImportDegradation>, CancelReason> {
     // A proposal-only backfill still needs a generation check. If no queued
     // job can publish that generation, keep an explicit rebuild repair rather
     // than describing the previous index as ready.
     if report.dry_run || (report.index_jobs_queued == 0 && !proposal_mutation) {
-        return None;
+        return Ok(None);
     }
 
-    match publish_cass_import_index(report) {
+    match publish_cass_import_index(cx, report).await {
         Ok(()) => {
             report.record_index_publish_success();
-            None
+            Ok(None)
         }
-        Err(detail) => Some(report.record_index_publish_failure(detail)),
+        Err(CassImportPublicationError::Cancelled(reason)) => Err(reason),
+        Err(CassImportPublicationError::Failed(detail)) => {
+            Ok(Some(report.record_index_publish_failure(detail)))
+        }
     }
 }
 
-fn publish_cass_import_index(report: &CassImportReport) -> Result<(), String> {
+enum CassImportPublicationError {
+    Cancelled(CancelReason),
+    Failed(String),
+}
+
+impl From<String> for CassImportPublicationError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+async fn publish_cass_import_index(
+    cx: &asupersync::Cx,
+    report: &CassImportReport,
+) -> Result<(), CassImportPublicationError> {
     let database_path = report
         .database_path
         .as_deref()
@@ -25017,12 +25151,24 @@ fn publish_cass_import_index(report: &CassImportReport) -> Result<(), String> {
             "import report listed {} distinct index job IDs for {} queued jobs",
             expected_job_ids.len(),
             report.index_jobs_queued
-        ));
+        )
+        .into());
     }
 
-    let processing_reports =
-        process_pending_index_jobs_coalesced(&connection, &workspace_id, &index_dir, None)
-            .map_err(|error| format!("coalesced index publication could not start: {error}"))?;
+    let processing_reports = process_pending_index_jobs_coalesced_with_cx(
+        cx,
+        &connection,
+        &workspace_id,
+        &index_dir,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        IndexRebuildError::Cancelled(reason) => CassImportPublicationError::Cancelled(reason),
+        error => CassImportPublicationError::Failed(format!(
+            "coalesced index publication could not start: {error}"
+        )),
+    })?;
 
     for job_id in expected_job_ids {
         let job = connection
@@ -25038,7 +25184,8 @@ fn publish_cass_import_index(report: &CassImportReport) -> Result<(), String> {
             return Err(format!(
                 "search-index job {job_id} ended with status {}: {detail}",
                 job.status
-            ));
+            )
+            .into());
         }
     }
 
@@ -25057,7 +25204,7 @@ fn publish_cass_import_index(report: &CassImportReport) -> Result<(), String> {
             status.health.as_str(),
             status.db_generation,
             status.index_generation
-        ));
+        ).into());
     }
 
     Ok(())
@@ -73611,6 +73758,73 @@ mod tests {
             ["e", "e", "a", "p", "1", "_"].concat(),
             "A".repeat(151)
         )
+    }
+
+    #[test]
+    fn cass_import_request_budget_is_positive_scaled_and_saturating() -> TestResult {
+        use clap::Parser;
+
+        assert!(super::CassImportArgs::try_parse_from(["cass", "--timeout-ms", "0"]).is_err());
+        let client =
+            crate::cass::CassClient::with_binary("cass").with_timeout(Duration::from_secs(30));
+        let args = super::CassImportArgs::try_parse_from(["cass", "--limit", "50"])
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            super::cass_import_request_timeout(&args, &client),
+            Duration::from_secs(300 * 51)
+                .saturating_add(crate::core::index::index_rebuild_timeout()),
+        );
+        let explicit = super::CassImportArgs::try_parse_from(["cass", "--timeout-ms", "7"])
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            super::cass_import_request_timeout(&explicit, &client),
+            Duration::from_millis(7)
+        );
+        let slow_client = client.with_timeout(Duration::MAX);
+        assert_eq!(
+            super::cass_import_request_timeout(&args, &slow_client),
+            Duration::MAX
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cass_import_cancellation_retains_reason_and_renders_exit_130() -> TestResult {
+        for reason in [
+            CancelReason::user("operator stopped the import"),
+            CancelReason::deadline().with_message("import request budget expired"),
+        ] {
+            for error in [
+                CassImportError::Cancelled(reason.clone()),
+                CassImportError::Cass(crate::cass::CassError::Cancelled(reason.clone())),
+            ] {
+                let super::CancellationAwareCliError::Cancelled(actual) =
+                    super::cass_import_cli_error(error)
+                else {
+                    return Err("CASS cancellation was mapped to an import failure".to_owned());
+                };
+                assert_eq!(actual, reason);
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let exit = write_cancelled_error(
+                    &actual,
+                    super::output::Renderer::Json,
+                    &mut stdout,
+                    &mut stderr,
+                );
+                assert_eq!(exit, ProcessExitCode::Cancelled);
+                let envelope: serde_json::Value =
+                    serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
+                assert_eq!(envelope["schema"], "ee.error.v2");
+                assert_eq!(envelope["error"]["code"], "cancelled");
+                assert_eq!(
+                    envelope["error"]["message"],
+                    crate::core::outcome::cancel_message(&reason)
+                );
+                assert!(stderr.is_empty());
+            }
+        }
+        Ok(())
     }
 
     #[test]

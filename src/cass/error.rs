@@ -31,6 +31,10 @@ use std::{fmt, io};
 /// envelope value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CassError {
+    /// The owning request stopped before the subprocess completed. Its child
+    /// process has been terminated and reaped before this error is returned.
+    Cancelled(asupersync::CancelReason),
+
     /// The configured binary path is outside the EE-100 allowlist.
     /// Explicit binary discovery and path validation land in EE-101;
     /// until then, the subprocess layer only spawns the fixed `cass`
@@ -105,6 +109,7 @@ impl CassError {
     #[must_use]
     pub fn kind_str(&self) -> &str {
         match self {
+            Self::Cancelled(_) => "cancelled",
             Self::InvalidBinary { .. } => "invalid_binary",
             Self::BinaryNotFound { .. } => "binary_not_found",
             Self::FoundButUntrusted { .. } => "found_but_untrusted",
@@ -133,6 +138,7 @@ impl CassError {
     #[must_use]
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
+            Self::Cancelled(_) => Some("rerun the import to resume committed sessions"),
             Self::InvalidBinary { .. } => Some(
                 "set EE_CASS_BINARY to an absolute, trusted cass executable (e.g. `EE_CASS_BINARY=$(command -v cass)`) or set [cass.binary] in config; ee only auto-runs a bare `cass` on PATH or a trusted absolute path to a file named `cass`",
             ),
@@ -163,6 +169,7 @@ impl CassError {
 impl fmt::Display for CassError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
             Self::InvalidBinary { binary, reason } => {
                 write!(
                     f,

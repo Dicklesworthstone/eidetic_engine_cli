@@ -227,6 +227,153 @@ impl Fixture {
 }
 
 #[test]
+fn cancelled_derivation_preserves_committed_evidence_and_resumes_without_double_counting() {
+    let fixture = Fixture::new();
+    let cx = asupersync::Cx::for_testing();
+    let reason = asupersync::CancelReason::user("stop before deriving repair evidence");
+    let cancellation_cx = cx.clone();
+    let cancellation_reason = reason.clone();
+    BEFORE_RECORDER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            cancellation_cx.set_cancel_reason(cancellation_reason);
+        }));
+    });
+
+    let error = import_cass_sessions_with_cx(&cx, &fixture.client, &fixture.options)
+        .expect_err("the committed source must not hide request cancellation");
+    assert_eq!(error.cancellation_reason(), Some(&reason));
+    assert!(
+        fixture
+            .db
+            .get_session(&fixture.session_id)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session_id)
+            .unwrap()
+            .len(),
+        6
+    );
+    assert!(fixture.cards().is_empty());
+    assert!(
+        fixture
+            .db
+            .get_audit(&fixture.marker_id())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_search_index_job(&fixture.source_job())
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+
+    let ledger_id = stable_import_id(&source_id(&fixture.options.workspace_path, 1, None));
+    let ledger = fixture.db.get_import_ledger(&ledger_id).unwrap().unwrap();
+    assert_eq!(ledger.status, "failed");
+    assert_eq!(ledger.error_code.as_deref(), Some("cancelled"));
+    assert_eq!(
+        (ledger.imported_session_count, ledger.imported_span_count),
+        (1, 6)
+    );
+    let cursor: JsonValue = serde_json::from_str(ledger.cursor_json.as_deref().unwrap()).unwrap();
+    assert_eq!(cursor["sessionsImported"], 1);
+    assert_eq!(cursor["spansImported"], 6);
+
+    let resumed = fixture.import(true);
+    assert_eq!(resumed.sessions_imported, 0);
+    assert_eq!(resumed.sessions_skipped, 1);
+    assert_eq!(resumed.spans_imported, 0);
+    assert_eq!(
+        resumed.sessions[0].index_job_id,
+        Some(fixture.derived_job())
+    );
+    assert_eq!(fixture.cards().len(), 1);
+    assert!(
+        fixture
+            .db
+            .get_audit(&fixture.marker_id())
+            .unwrap()
+            .is_some()
+    );
+    let ledger = fixture.db.get_import_ledger(&ledger_id).unwrap().unwrap();
+    assert_eq!(ledger.status, "completed");
+    assert_eq!(ledger.attempt_count, 2);
+    assert_eq!(
+        (ledger.imported_session_count, ledger.imported_span_count),
+        (1, 6)
+    );
+}
+
+#[test]
+fn cancelled_selection_keeps_full_discovery_count_and_resumes_remaining_sessions() {
+    let mut fixture = Fixture::new();
+    fixture.options.limit = 2;
+    fixture.options.include_spans = false;
+    let first_path = fixture._root.path().join("recall.jsonl");
+    let second_path = fixture._root.path().join("second.jsonl");
+    let sessions = json!({"sessions":[
+        {"path":first_path, "workspace":fixture.options.workspace_path, "agent":"codex"},
+        {"path":second_path, "workspace":fixture.options.workspace_path, "agent":"codex"}
+    ]});
+    std::fs::write(
+        fixture._root.path().join("cass"),
+        format!("#!/bin/sh\ncat <<'EE_SESSIONS'\n{sessions}\nEE_SESSIONS\n"),
+    )
+    .unwrap();
+    let cx = asupersync::Cx::for_testing();
+    let cancellation_cx = cx.clone();
+    BEFORE_RECORDER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            cancellation_cx.set_cancel_reason(asupersync::CancelReason::deadline());
+        }));
+    });
+    let error = import_cass_sessions_with_cx(&cx, &fixture.client, &fixture.options)
+        .expect_err("stop after the first source commit");
+    assert_eq!(
+        error.cancellation_reason().unwrap().kind,
+        asupersync::CancelKind::Deadline
+    );
+    let ledger_id = stable_import_id(&source_id(&fixture.options.workspace_path, 2, None));
+    let ledger = fixture.db.get_import_ledger(&ledger_id).unwrap().unwrap();
+    let cursor: JsonValue = serde_json::from_str(ledger.cursor_json.as_deref().unwrap()).unwrap();
+    assert_eq!(cursor["sessionsDiscovered"], 2);
+    assert_eq!(cursor["sessionsImported"], 1);
+    assert_eq!(cursor["complete"], false);
+    assert_eq!(ledger.imported_session_count, 1);
+    assert!(
+        fixture
+            .db
+            .get_session_by_cass_id(&fixture.workspace_id, &second_path.to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+
+    let resumed = fixture.import(false);
+    assert_eq!(resumed.sessions_discovered, 2);
+    assert_eq!(resumed.sessions_imported, 1);
+    assert_eq!(resumed.sessions_skipped, 1);
+    assert!(
+        fixture
+            .db
+            .get_session_by_cass_id(&fixture.workspace_id, &second_path.to_string_lossy())
+            .unwrap()
+            .is_some()
+    );
+    let ledger = fixture.db.get_import_ledger(&ledger_id).unwrap().unwrap();
+    assert_eq!(ledger.imported_session_count, 2);
+    assert_eq!(ledger.attempt_count, 2);
+    assert_eq!(ledger.status, "completed");
+}
+
+#[test]
 fn unchanged_import_refreshes_old_derivation_and_publishes_one_immutable_revision() {
     let fixture = Fixture::new();
     fixture.import_source_without_derivation();

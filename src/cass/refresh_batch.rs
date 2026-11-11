@@ -6,7 +6,8 @@
 //! all commit, or none of them do.
 
 use crate::db::{
-    CreateEvidenceSpanInput, DbConnection, DbError, EvidenceAdmissionTally, StoredSession,
+    CreateEvidenceSpanInput, DbConnection, DbError, DbOperation, EvidenceAdmissionTally,
+    StoredSession,
 };
 use crate::policy::store_auth::StoreAuthRoot;
 use sqlmodel_core::Value;
@@ -62,6 +63,7 @@ pub(in crate::cass::import) fn insert_initial_spans(
         connection.insert_evidence_spans_in_session(rows, session)
     })?;
     for span in spans.iter().filter(|span| span.redacted) {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, std::time::Duration::ZERO)?;
         let evidence_id = stable_evidence_id(&session.id, &span.cass_span_id);
         connection.insert_audit(
             &stable_cass_redaction_audit_id(&evidence_id),
@@ -81,6 +83,7 @@ pub(super) fn insert_additions(
     let mut added_lines = Vec::with_capacity(additions.len());
     let mut admission = EvidenceAdmissionTally::default();
     for batch in additions.chunks(REFRESH_WRITE_BATCH_ROWS) {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Query, std::time::Duration::ZERO)?;
         let identities = batch
             .iter()
             .map(|span| stable_evidence_id(&session.id, &span.cass_span_id))
@@ -186,6 +189,7 @@ fn write_prepared_batches(
     let mut heap_bytes = 0_usize;
     let mut admission = EvidenceAdmissionTally::default();
     for row in rows {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, std::time::Duration::ZERO)?;
         let row = row?;
         let row_bytes = prepared_heap_bytes(&row);
         if !batch.is_empty() && exceeds_heap_limit(heap_bytes, row_bytes, max_heap_bytes) {

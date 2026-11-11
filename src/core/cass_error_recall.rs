@@ -31,7 +31,7 @@ use crate::core::error_diagnosis::{ErrorRepairLinkRecording, persist_error_repai
 use crate::core::error_recall::{
     CanonicalDiagnostic, from_cargo, from_ee_error, from_rch_blocker, from_rustc,
 };
-use crate::db::{DbConnection, Result, StoredEvidenceSpan, StoredSession};
+use crate::db::{DbConnection, DbOperation, Result, StoredEvidenceSpan, StoredSession};
 
 #[path = "cass_error_recall_outcome.rs"]
 mod outcome;
@@ -117,8 +117,18 @@ pub fn record_session_error_recall(
     workspace_id: &str,
     session_id: &str,
 ) -> Result<CassErrorRecallReport> {
+    crate::db::sleep_retry_delay_or_cancel(
+        DbOperation::BeginTransaction,
+        std::time::Duration::ZERO,
+    )?;
     connection.with_transaction(|| {
-        record_session_error_recall_in_current_snapshot(connection, workspace_id, session_id)
+        let report =
+            record_session_error_recall_in_current_snapshot(connection, workspace_id, session_id)?;
+        crate::db::sleep_retry_delay_or_cancel(
+            DbOperation::CommitTransaction,
+            std::time::Duration::ZERO,
+        )?;
+        Ok(report)
     })
 }
 
@@ -147,6 +157,7 @@ fn record_session_error_recall_in_current_snapshot(
     let card_sources =
         (arcs.len() > 1).then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
     for arc in &arcs {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Query, std::time::Duration::ZERO)?;
         report.failures_seen = report.failures_seen.saturating_add(1);
         if arc.resolution.is_some() {
             report.resolved_failures = report.resolved_failures.saturating_add(1);

@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use super::process::CASS_STDOUT_LINE_MAX_BYTES;
-use super::process::{CASS_VIEW_STDOUT_LINE_MAX_BYTES, CassStreamError};
+use super::process::{CASS_VIEW_STDOUT_LINE_MAX_BYTES, CassStreamError, cass_request_checkpoint};
 use super::{
     CassAgent, CassClient, CassError, CassExitClass, CassRole, CassSessionInfo, CassSpanKind,
     ImportCursor,
@@ -493,6 +493,7 @@ fn bounded_public_cass_text(value: &str, max_chars: usize) -> String {
 /// Error produced by CASS import.
 #[derive(Debug)]
 pub enum CassImportError {
+    Cancelled(asupersync::CancelReason),
     Cass(CassError),
     CassCommand {
         command: String,
@@ -524,6 +525,7 @@ impl CassImportError {
     #[must_use]
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
+            Self::Cancelled(_) => Some("rerun the import to resume committed sessions"),
             Self::Cass(error) => error.repair_hint(),
             Self::CassCommand { .. } => Some("run cass health --json"),
             Self::InvalidJson { .. } => Some("run cass api-version --json and cass doctor --json"),
@@ -564,11 +566,24 @@ impl CassImportError {
             _ => None,
         }
     }
+
+    /// Preserve the request's exact cause on the CLI cancellation surface.
+    #[must_use]
+    pub const fn cancellation_reason(&self) -> Option<&asupersync::CancelReason> {
+        match self {
+            Self::Cancelled(reason) | Self::Cass(CassError::Cancelled(reason)) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for CassImportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled(reason) => formatter.write_str(&bounded_public_cass_text(
+                &crate::core::outcome::cancel_message(reason),
+                2_048,
+            )),
             Self::Cass(error) => {
                 formatter.write_str(&bounded_public_cass_text(&error.to_string(), 2_048))
             }
@@ -610,12 +625,27 @@ impl std::error::Error for CassImportError {}
 
 impl From<CassError> for CassImportError {
     fn from(error: CassError) -> Self {
-        Self::Cass(error)
+        match error {
+            CassError::Cancelled(reason) => Self::Cancelled(reason),
+            error => Self::Cass(error),
+        }
     }
 }
 
 impl From<DbError> for CassImportError {
     fn from(error: DbError) -> Self {
+        if let DbError::SqlModel { source, .. } = &error
+            && (matches!(source.as_ref(), sqlmodel_core::Error::Cancelled)
+                || matches!(source.as_ref(), sqlmodel_core::Error::Query(query)
+                    if query.kind == sqlmodel_core::error::QueryErrorKind::Cancelled))
+        {
+            let reason = asupersync::Cx::current()
+                .and_then(|cx| cx.cancel_reason())
+                .unwrap_or_else(|| {
+                    asupersync::CancelReason::user("CASS import storage operation cancelled")
+                });
+            return Self::Cancelled(reason);
+        }
         Self::Storage(error)
     }
 }
@@ -821,6 +851,7 @@ pub fn import_cass_sessions(
     client: &CassClient,
     options: &CassImportOptions,
 ) -> Result<CassImportReport, CassImportError> {
+    cass_request_checkpoint()?;
     let workspace_path = normalize_path(&options.workspace_path);
     let since_cutoff = options.since.map(format_since_cutoff);
     let source_id = source_id(&workspace_path, options.limit, since_cutoff.as_deref());
@@ -828,6 +859,7 @@ pub fn import_cass_sessions(
         discover_sessions(client, &workspace_path, options.limit)?,
         options.since,
     )?;
+    cass_request_checkpoint()?;
 
     if options.dry_run {
         return Ok(dry_run_report(
@@ -846,6 +878,9 @@ pub fn import_cass_sessions(
     let ledger_id = ensure_running_ledger(&connection, &workspace_id, &source_id)?;
 
     let mut cursor = ImportCursor::new();
+    // Discovery already returned the complete selection. A cancellation
+    // between sessions must not describe the committed prefix as complete.
+    cursor.sessions_discovered = saturating_len(sessions.len());
     let mut session_reports = Vec::with_capacity(sessions.len());
     let mut imported = 0_u32;
     let mut skipped = 0_u32;
@@ -856,7 +891,7 @@ pub fn import_cass_sessions(
 
     let import_result: Result<(), CassImportError> = (|| {
         for session in sessions {
-            cursor.record_discovered();
+            cass_request_checkpoint()?;
             let spans = if options.include_spans {
                 match view_session_spans(client, &session.source_path) {
                     Ok(spans) => spans,
@@ -882,6 +917,7 @@ pub fn import_cass_sessions(
             } else {
                 Vec::new()
             };
+            cass_request_checkpoint()?;
 
             // CASS subprocesses run before this bounded key lease. Keep one
             // durable key window through the session transaction so rotation
@@ -957,16 +993,9 @@ pub fn import_cass_sessions(
                             &session_id,
                         )?
                     };
-                    // A recovered derivation can add searchable evidence after
-                    // the source snapshot's job has already completed. Prefer
-                    // its publication obligation; the coalesced publisher also
-                    // drains any pending source jobs for this session.
-                    let index_job_id =
-                        derive_session_error_recall(&connection, &workspace_id, &session_id)
-                            .or(index_job_id);
-                    if index_job_id.is_some() {
-                        index_jobs_queued = index_jobs_queued.saturating_add(1);
-                    }
+                    // These source changes have committed independently of
+                    // optional derivation. Save their progress before the next
+                    // checkpoint so resume cannot lose or double count them.
                     if changed {
                         cursor.record_imported(&session.source_path);
                         imported = imported.saturating_add(1);
@@ -974,6 +1003,18 @@ pub fn import_cass_sessions(
                     } else {
                         cursor.record_skipped();
                         skipped = skipped.saturating_add(1);
+                    }
+                    cass_request_checkpoint()?;
+                    // A recovered derivation can add searchable evidence after
+                    // the source snapshot's job has already completed. Prefer
+                    // its publication obligation; the coalesced publisher also
+                    // drains any pending source jobs for this session.
+                    let index_job_id =
+                        derive_session_error_recall(&connection, &workspace_id, &session_id)
+                            .or(index_job_id);
+                    cass_request_checkpoint()?;
+                    if index_job_id.is_some() {
+                        index_jobs_queued = index_jobs_queued.saturating_add(1);
                     }
                     session_reports.push(ImportedCassSession {
                         source_path: session.source_path,
@@ -1002,12 +1043,14 @@ pub fn import_cass_sessions(
                     }
                     let session_spans = saturating_len(spans.len());
                     spans_imported = spans_imported.saturating_add(session_spans);
+                    cursor.record_imported(&session.source_path);
+                    imported = imported.saturating_add(1);
+                    cass_request_checkpoint()?;
                     let index_job_id =
                         derive_session_error_recall(&connection, &workspace_id, &session_id)
                             .unwrap_or(index_job_id);
+                    cass_request_checkpoint()?;
 
-                    cursor.record_imported(&session.source_path);
-                    imported = imported.saturating_add(1);
                     index_jobs_queued = index_jobs_queued.saturating_add(1);
                     session_reports.push(ImportedCassSession {
                         source_path: session.source_path,
@@ -1021,18 +1064,31 @@ pub fn import_cass_sessions(
                 }
             }
         }
+        cass_request_checkpoint()?;
         Ok(())
     })();
 
     if let Err(error) = import_result {
-        complete_ledger(
+        let finalized = complete_ledger(
             &connection,
             &ledger_id,
             &cursor,
             imported,
             spans_imported,
             Some(&error),
-        )?;
+        );
+        if let Err(finalization_error) = finalized {
+            if error.cancellation_reason().is_none() {
+                return Err(finalization_error.into());
+            }
+            // Cleanup failure must not replace the caller's cancellation.
+            // Source transactions and pending publication jobs stay durable.
+            tracing::warn!(
+                ledger_id,
+                error = %finalization_error,
+                "could not finalize the cancelled CASS import ledger"
+            );
+        }
         return Err(error);
     }
 
@@ -1068,6 +1124,22 @@ pub fn import_cass_sessions(
         sessions: session_reports,
         evidence_admission,
     })
+}
+
+/// Import under the caller's request budget, preserving that context through
+/// subprocess supervision, storage retries, and derived evidence writes.
+///
+/// # Errors
+///
+/// Returns the same failures as [`import_cass_sessions`], including the exact
+/// caller cancellation reason. Completed session transactions remain durable.
+pub fn import_cass_sessions_with_cx(
+    cx: &asupersync::Cx,
+    client: &CassClient,
+    options: &CassImportOptions,
+) -> Result<CassImportReport, CassImportError> {
+    let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+    import_cass_sessions(client, options)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1141,10 +1213,15 @@ fn with_import_session_transaction<T>(
     let mut last_retryable_error = None;
 
     for attempt in 0..MAX_ATTEMPTS {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::BeginTransaction, Duration::ZERO)?;
         // Keep the database writer fence for the entire read/check/write
         // transaction. Locking individual statements lets a competing importer
         // exhaust its busy retries while the first transaction is still open.
-        match connection.with_transaction(&mut operation) {
+        match connection.with_transaction(|| {
+            let result = operation()?;
+            crate::db::sleep_retry_delay_or_cancel(DbOperation::CommitTransaction, Duration::ZERO)?;
+            Ok(result)
+        }) {
             Ok(result) => return Ok(result),
             Err(error) if import_session_transaction_error_is_retryable(&error) => {
                 last_retryable_error = Some(error);
@@ -1153,7 +1230,10 @@ fn with_import_session_transaction<T>(
         }
 
         if attempt + 1 < MAX_ATTEMPTS {
-            std::thread::sleep(import_session_transaction_retry_delay(attempt));
+            crate::db::sleep_retry_delay_or_cancel(
+                DbOperation::BeginTransaction,
+                import_session_transaction_retry_delay(attempt),
+            )?;
         }
     }
 
@@ -2298,6 +2378,35 @@ fn complete_ledger(
     imported_spans: u32,
     error: Option<&CassImportError>,
 ) -> Result<(), DbError> {
+    let finalize = || {
+        complete_ledger_unmasked(
+            connection,
+            ledger_id,
+            cursor,
+            imported_sessions,
+            imported_spans,
+            error,
+        )
+    };
+    // Only this final, bounded metadata write ignores cancellation. Source
+    // import and derivation transactions never enter the masked region.
+    match asupersync::Cx::current() {
+        Some(cx) => cx.masked(|| {
+            let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+            finalize()
+        }),
+        None => finalize(),
+    }
+}
+
+fn complete_ledger_unmasked(
+    connection: &DbConnection,
+    ledger_id: &str,
+    cursor: &ImportCursor,
+    imported_sessions: u32,
+    imported_spans: u32,
+    error: Option<&CassImportError>,
+) -> Result<(), DbError> {
     let status = if error.is_some() {
         "failed"
     } else {
@@ -2343,6 +2452,9 @@ fn import_cursor_json(cursor: &ImportCursor, error: Option<&CassImportError>) ->
 
 fn error_code(error: &CassImportError) -> &'static str {
     match error {
+        CassImportError::Cancelled(_) | CassImportError::Cass(CassError::Cancelled(_)) => {
+            "cancelled"
+        }
         CassImportError::Cass(_) => "cass",
         CassImportError::CassCommand { .. } => "cass_command",
         CassImportError::InvalidJson { .. } => "invalid_json",
@@ -6097,6 +6209,82 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn cancelled_import_transaction_rolls_back_before_commit_and_retry() -> TestResult {
+        use sqlmodel_core::error::{QueryError, QueryErrorKind};
+
+        for retryable_failure in [false, true] {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let connection = DbConnection::open_file(root.path().join("import.db"))
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw("CREATE TABLE import_cancel_probe (id INTEGER PRIMARY KEY)")
+                .map_err(|error| error.to_string())?;
+            let cx = asupersync::Cx::for_testing();
+            let reason = asupersync::CancelReason::user("stop the current import transaction");
+            let mut attempts = 0;
+            let cancelled = {
+                let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+                with_import_session_transaction(&connection, || {
+                    attempts += 1;
+                    connection.execute_raw("INSERT INTO import_cancel_probe (id) VALUES (1)")?;
+                    cx.set_cancel_reason(reason.clone());
+                    if retryable_failure {
+                        return Err(DbError::SqlModel {
+                            operation: DbOperation::Execute,
+                            source: Box::new(sqlmodel_core::Error::Query(QueryError {
+                                kind: QueryErrorKind::Timeout,
+                                sql: None,
+                                sqlstate: None,
+                                message: "database is busy".to_owned(),
+                                detail: None,
+                                hint: None,
+                                position: None,
+                                source: None,
+                            })),
+                        });
+                    }
+                    Ok(())
+                })
+                .map_err(CassImportError::from)
+            };
+            let error = cancelled.expect_err("cancellation must stop commit and retry");
+            assert_eq!(error.cancellation_reason(), Some(&reason));
+            assert_eq!(attempts, 1, "a cancelled transaction must not be retried");
+
+            // Reusing the primary key proves rollback and that this real
+            // connection can accept the next import attempt immediately.
+            with_import_session_transaction(&connection, || {
+                connection.execute_raw("INSERT INTO import_cancel_probe (id) VALUES (1)")
+            })
+            .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expired_import_request_budget_stops_before_discovery_or_store_creation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = CassImportOptions::new(root.path().join("uncreated-workspace"));
+        let database_path = database_path(&options);
+        // An invalid binary would fail discovery if the request checkpoint
+        // were absent; no subprocess or database is needed to expire a budget.
+        let client = CassClient::with_binary(root.path().join("missing-cass"));
+        let result = crate::core::run_cli_with_cx(Duration::ZERO, |cx| async move {
+            import_cass_sessions_with_cx(&cx, &client, &options)
+        })
+        .map_err(|error| error.to_string())?;
+        let error = result.expect_err("an expired request must stop before work starts");
+        assert_eq!(
+            error.cancellation_reason().map(|reason| reason.kind),
+            Some(asupersync::CancelKind::Deadline)
+        );
+        assert!(!database_path.exists());
+        assert!(!root.path().join("uncreated-workspace").exists());
+        Ok(())
     }
 
     #[cfg(unix)]

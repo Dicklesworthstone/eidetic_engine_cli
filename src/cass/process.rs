@@ -357,6 +357,7 @@ impl CassInvocation {
     /// reports `NotFound`, or [`CassError::Io`] for any other spawn
     /// failure.
     pub fn run(&self) -> Result<CassOutcome, CassError> {
+        cass_request_checkpoint()?;
         let spawn_target = self.validated_spawn_target()?;
         let started = Instant::now();
         let mut command = spawn_target.command();
@@ -420,6 +421,7 @@ impl CassInvocation {
     where
         F: FnMut(String) -> Result<(), E>,
     {
+        cass_request_checkpoint().map_err(CassStreamError::Cass)?;
         let spawn_target = self
             .validated_spawn_target()
             .map_err(CassStreamError::Cass)?;
@@ -436,8 +438,8 @@ impl CassInvocation {
         #[cfg(unix)]
         command.process_group(0);
 
-        let mut child = retry_cass_spawn(|| command.spawn())
-            .map_err(|error| CassStreamError::Cass(cass_spawn_error(self, error)))?;
+        let mut child =
+            retry_cass_spawn(self, || command.spawn()).map_err(CassStreamError::Cass)?;
         #[cfg(unix)]
         let child_group = Pid::from_child(&child);
 
@@ -472,6 +474,43 @@ impl CassInvocation {
         let mut pending_stdout_line = None;
 
         loop {
+            if let Err(cancelled) = cass_request_checkpoint() {
+                // Cancellation is the primary result. Cleanup still owns the
+                // child and the bounded readers, including inherited pipes.
+                #[cfg(unix)]
+                let cleanup = terminate_cass_child_after_reader_error(
+                    &mut child,
+                    child_group,
+                    &mut child_status,
+                    "request cancellation",
+                );
+                #[cfg(not(unix))]
+                let cleanup = terminate_cass_child_after_reader_error(
+                    &mut child,
+                    &mut child_status,
+                    "request cancellation",
+                );
+                if let Err(error) = cleanup {
+                    tracing::warn!(%error, "failed to reap cancelled CASS subprocess");
+                }
+                let _ = drain_stdout_line_reader_after_stop(
+                    &stdout_rx,
+                    &mut stdout_done,
+                    &mut stdout_line_count,
+                    &mut stdout_bytes_seen,
+                    &mut peak_stdout_line_bytes,
+                );
+                let _ = join_finished_stdout_line_reader_after_timeout(&mut stdout_thread);
+                let mut absent_stdout_thread = None;
+                let mut empty_stdout_bytes = Some(Vec::new());
+                let _ = drain_pipe_readers_after_timeout(
+                    &mut absent_stdout_thread,
+                    &mut stderr_thread,
+                    &mut empty_stdout_bytes,
+                    &mut stderr_bytes,
+                );
+                return Err(CassStreamError::Cass(cancelled));
+            }
             let stdout_batch_full = drain_available_stdout_lines(
                 &stdout_rx,
                 &mut stdout_done,
@@ -648,8 +687,7 @@ impl CassInvocation {
         #[cfg(unix)]
         command.process_group(0);
 
-        let mut child =
-            retry_cass_spawn(|| command.spawn()).map_err(|error| cass_spawn_error(self, error))?;
+        let mut child = retry_cass_spawn(self, || command.spawn())?;
         #[cfg(unix)]
         let child_group = Pid::from_child(&child);
 
@@ -673,6 +711,31 @@ impl CassInvocation {
         let mut stderr_bytes = None;
 
         loop {
+            if let Err(cancelled) = cass_request_checkpoint() {
+                #[cfg(unix)]
+                let cleanup = terminate_cass_child_after_reader_error(
+                    &mut child,
+                    child_group,
+                    &mut child_status,
+                    "request cancellation",
+                );
+                #[cfg(not(unix))]
+                let cleanup = terminate_cass_child_after_reader_error(
+                    &mut child,
+                    &mut child_status,
+                    "request cancellation",
+                );
+                if let Err(error) = cleanup {
+                    tracing::warn!(%error, "failed to reap cancelled CASS subprocess");
+                }
+                let _ = drain_pipe_readers_after_timeout(
+                    &mut stdout_thread,
+                    &mut stderr_thread,
+                    &mut stdout_bytes,
+                    &mut stderr_bytes,
+                );
+                return Err(cancelled);
+            }
             if child_status.is_none() {
                 child_status = child.try_wait().map_err(CassError::from)?;
             }
@@ -831,26 +894,52 @@ fn resolve_path_lookup_cass_binary(inherited_path: Option<&OsStr>) -> Result<Pat
     })
 }
 
-fn retry_cass_spawn<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+/// Observe the context installed by the owning synchronous request. This is a
+/// checkpoint only; it never mints a fresh budget or replaces caller authority.
+pub(crate) fn cass_request_checkpoint() -> Result<(), CassError> {
+    let Some(cx) = asupersync::Cx::current() else {
+        return Ok(());
+    };
+    cx.checkpoint().map_err(|_| {
+        CassError::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+            crate::core::outcome::attributed_cancel_reason(
+                &cx,
+                asupersync::CancelKind::User,
+                "CASS request cancelled without a recorded reason",
+            )
+        }))
+    })
+}
+
+fn retry_cass_spawn<T>(
+    invocation: &CassInvocation,
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> Result<T, CassError> {
     let mut last_retryable_error = None;
     for attempt in 0..SPAWN_RETRY_ATTEMPTS {
+        cass_request_checkpoint()?;
         match spawn() {
             Ok(result) => return Ok(result),
             Err(error) if cass_spawn_error_is_retryable(&error) => {
                 last_retryable_error = Some(error);
                 if attempt + 1 < SPAWN_RETRY_ATTEMPTS {
-                    thread::sleep(cass_spawn_retry_delay(attempt));
+                    let deadline = Instant::now() + cass_spawn_retry_delay(attempt);
+                    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                        cass_request_checkpoint()?;
+                        thread::sleep(remaining.min(TIMEOUT_POLL_INTERVAL));
+                    }
+                    cass_request_checkpoint()?;
                 }
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(cass_spawn_error(invocation, error)),
         }
     }
 
     match last_retryable_error {
-        Some(error) => Err(error),
-        None => Err(std::io::Error::other(
-            "CASS spawn retry loop exhausted without a retryable error",
-        )),
+        Some(error) => Err(cass_spawn_error(invocation, error)),
+        None => Err(CassError::Io {
+            message: "CASS spawn retry loop exhausted without a retryable error".to_owned(),
+        }),
     }
 }
 
@@ -1800,6 +1889,103 @@ mod tests {
         assert!(outcome.timed_out());
         assert_eq!(outcome.class(), CassExitClass::Failure);
         assert!(outcome.elapsed() >= Duration::from_millis(20));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_request_cancellation_terminates_child_and_preserves_reason() -> Result<(), String> {
+        let dir = unique_test_dir("stream-cancel-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' \"$$\"\nexec sleep 30\n",
+            0o755,
+        )?;
+        let cx = asupersync::Cx::for_testing();
+        let reason = asupersync::CancelReason::user("stop streamed CASS capture");
+        let mut child_pid = None;
+        let started = Instant::now();
+        let result = {
+            let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+            CassInvocation::new(binary, ["view", "session.jsonl", "--json"])
+                .with_timeout(Duration::from_secs(20))
+                .run_stdout_lines(|line| {
+                    child_pid = Some(
+                        line.trim()
+                            .parse::<u32>()
+                            .map_err(|error| error.to_string())?,
+                    );
+                    cx.set_cancel_reason(reason.clone());
+                    Ok::<_, String>(())
+                })
+        };
+        assert!(
+            matches!(result, Err(super::CassStreamError::Cass(super::CassError::Cancelled(actual))) if actual == reason)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid = child_pid.ok_or("child did not announce its PID")?;
+        #[cfg(target_os = "linux")]
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "cancelled child must be reaped"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buffered_request_cancellation_reaps_child_even_without_output() -> Result<(), String> {
+        let dir = unique_test_dir("buffered-cancel-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        let pid_file = dir.join("child.pid");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nexec sleep 30\n",
+            0o755,
+        )?;
+        let cx = asupersync::Cx::for_testing();
+        let reason = asupersync::CancelReason::deadline().with_message("stop blocked CASS capture");
+        let cancellation_cx = cx.clone();
+        let cancellation_reason = reason.clone();
+        let pid_probe = pid_file.clone();
+        let canceller = thread::spawn(move || -> Result<u32, String> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(pid) = fs::read_to_string(&pid_probe)
+                    && let Ok(pid) = pid.parse::<u32>()
+                {
+                    cancellation_cx.set_cancel_reason(cancellation_reason);
+                    return Ok(pid);
+                }
+                if Instant::now() >= deadline {
+                    cancellation_cx.set_cancel_reason(cancellation_reason);
+                    return Err("CASS child did not start before the test deadline".to_owned());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let started = Instant::now();
+        let result = {
+            let _ambient = asupersync::Cx::set_current(Some(cx));
+            CassInvocation::new(binary, [pid_file.as_os_str()])
+                .with_timeout(Duration::from_secs(20))
+                .run()
+        };
+        let pid = canceller.join().map_err(|_| "canceller panicked")??;
+        assert!(matches!(result, Err(super::CassError::Cancelled(actual)) if actual == reason));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        #[cfg(target_os = "linux")]
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "cancelled child must be reaped"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
         Ok(())
     }
 

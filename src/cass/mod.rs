@@ -53,8 +53,8 @@ pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
 pub use import::{
     CassHistoryRefusal, CassImportDegradation, CassImportError, CassImportOptions,
     CassImportParseSummary, CassImportReport, ImportSessionStatus, ImportedCassSession,
-    import_cass_sessions, parse_import_since_duration, parse_sessions_json_summary,
-    parse_view_json_summary,
+    import_cass_sessions, import_cass_sessions_with_cx, parse_import_since_duration,
+    parse_sessions_json_summary, parse_view_json_summary,
 };
 pub use import_discovery::discover_import_binary;
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};

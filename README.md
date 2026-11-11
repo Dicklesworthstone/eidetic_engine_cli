@@ -2374,6 +2374,22 @@ ee curate apply <candidate-id> --workspace . --json
 ee index rebuild --workspace .
 ```
 
+An import has one request budget covering discovery, evidence capture, derivation,
+and index publication. Set `--timeout-ms` to a positive number of milliseconds
+to choose that total budget, for example
+`ee import cass --workspace . --limit 50 --timeout-ms 7200000 --json` for two
+hours. The default is `max(CASS subprocess timeout, 5 minutes) × (--limit + 1)`
+plus the existing index rebuild allowance (`EE_INDEX_REBUILD_TIMEOUT_SECONDS`).
+The per-CASS subprocess timeout remains a separate limit on each individual call.
+
+On Unix, Ctrl-C (`SIGINT`) and `SIGTERM` stop the import cooperatively. Request
+cancellation or expiry returns exit code **130** and an `ee.error.v2` envelope
+with `error.code: "cancelled"` in JSON mode. The active session transaction rolls
+back; earlier committed sessions, their evidence, and queued index work remain
+durable. The import ledger records that committed progress. Rerun the same import
+to finish remaining sessions and recover pending derivation/publication without
+counting the committed evidence twice.
+
 Fresh imported spans have no memory link, but remain searchable and directly
 packable when their live source row passes current admission. In JSON packs
 they are typed as `entityKind: "evidence_span"`, retain their exact session and
