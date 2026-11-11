@@ -550,3 +550,7 @@ emit_event "test_pass" \
 
 echo "event_log=$EVENT_LOG"
 echo "perf_summary=$PERF_SUMMARY"
+PASS_EVENT_COUNT="$(grep -c '"event":"assert_pass"\|"event":"test_pass"\|"event":"step_end"' "$EVENT_LOG" || true)"
+FAIL_EVENT_COUNT="$(grep -c '"event":"assert_fail"' "$EVENT_LOG" || true)"
+printf '[harness] diag_contention: %s pass, %s fail, writers=%s, readers=%s, storm_ms=%s -> PASS\n' \
+  "$PASS_EVENT_COUNT" "$FAIL_EVENT_COUNT" "$WRITERS" "$READERS" "$storm_elapsed_ms" >&2

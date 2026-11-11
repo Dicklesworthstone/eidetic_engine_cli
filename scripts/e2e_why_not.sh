@@ -324,9 +324,52 @@ assert_nonzero_exit "$missing_exit" "why-not missing memory fails closed"
 assert_json "$missing_output" '.schema' "ee.error.v2" "why-not missing emits error envelope"
 assert_jq "$missing_output" '.error.message | contains("not found")' "why-not missing names not found"
 
+step "rule id and invalid entity id contract (bd-reality-core-convergence-1azkt.52)"
+rule_add_output=""
+run_ee_capture rule_add_output \
+    "rule add fixture" \
+    rule add \
+    --workspace "$workspace" \
+    --maturity validated \
+    --json \
+    "Run checksum verification on every release artifact."
+rule_id="$(json_value "$rule_add_output" '.data.ruleId // .data.rule.id // .data.id // empty' "rule add id")" || rule_id=""
+assert_nonempty "$rule_id" "rule add returned rule id"
+
+rule_whynot_output=""
+run_ee_capture rule_whynot_output \
+    "why-not rule id" \
+    why-not "$rule_id" \
+    --task "prepare release verification" \
+    --workspace "$workspace" \
+    --candidate-pool 20 \
+    --max-tokens 1000 \
+    --json
+assert_json "$rule_whynot_output" '.schema' "ee.response.v2" "why-not rule envelope"
+assert_json "$rule_whynot_output" '.success' "true" "why-not rule succeeds"
+assert_json "$rule_whynot_output" '.data.schema' "ee.why_not_selected.v2" "why-not rule data schema"
+assert_json "$rule_whynot_output" '.data.entity.id' "$rule_id" "why-not rule entity id"
+assert_json "$rule_whynot_output" '.data.entity.kind' "rule" "why-not rule entity kind"
+
+invalid_entity_output=""
+invalid_entity_exit=0
+run_ee_capture_status invalid_entity_output invalid_entity_exit \
+    why-not "unknown_303" \
+    --task "prepare release verification" \
+    --workspace "$workspace" \
+    --json
+assert_nonzero_exit "$invalid_entity_exit" "why-not invalid entity prefix fails closed"
+assert_json "$invalid_entity_output" '.schema' "ee.error.v2" "why-not invalid entity emits error envelope"
+assert_jq "$invalid_entity_output" '(.error.message | contains("mem_")) and (.error.message | contains("rule_")) and (.error.message | contains("ev_"))' "why-not invalid entity names accepted id kinds"
+
+log_event "note" \
+    "phase" "native_entity_contract_coverage" \
+    "ruleId" "$rule_id" \
+    "acceptedPrefixes" "mem_,rule_,ev_"
+
 log_event "note" \
     "phase" "selector_contract_coverage" \
-    "realBinaryReasons" "selected,omitted_by_score_floor,missing_memory_id" \
+    "realBinaryReasons" "selected,omitted_by_score_floor,missing_memory_id,rule_entity,invalid_entity_prefix" \
     "libraryPinnedReasons" "omitted_by_token_budget,not_retrieved,excluded_by_scope,excluded_by_redaction,excluded_by_validity_window,not_retrieved_due_to_degraded_index"
 
 end_temp_workspace

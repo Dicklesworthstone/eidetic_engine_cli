@@ -245,13 +245,30 @@ e2e_orphans() {
         #     orphan 13 covered scripts -- growing a baseline with fiction,
         #     which is the worse direction. A shape predicate needs multi-line
         #     or per-language analysis, not a regex.
-        if ! rg --no-require-git --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
-            --glob '!target' --glob '!.git' --glob "!scripts/$base" \
-            --glob '!**/tests/fixtures/**' \
-            --glob '!**/scripts/check-*.py' \
-            --glob '!**/scripts/audit-*.py' \
-            --glob '!**/*.md' --glob '!**/docs/**' 2>/dev/null \
-            | awk 'BEGIN { found = 0 }
+        # (g) ALLOW-LIST THE INVOCATION ORIGINS (`scripts/`, `tests/`, `.github/`)
+        #     AND ANCHOR TO `$root` VIA `cd "$root"` (bd-coik3).
+        #     Searching the whole tree with a deny-list required anticipating every
+        #     location where prose or data could name a script (`.beads/`, `src/`,
+        #     root scratch files, `tests/closure_lint_defer_v2_fixtures/`) while
+        #     simultaneously missing `.github/workflows/` because ripgrep skips
+        #     hidden directories by default. Running `rg --hidden` from `$root`
+        #     with positive globs `--glob 'scripts/**' --glob 'tests/**'
+        #     --glob '.github/**'` restricts the search to the three trees where
+        #     e2e invocations legitimately originate, closes the `.github/` blind
+        #     spot, and anchors `/` globs to `$root` in both production and
+        #     `--self-test` without traversing nested checkouts outside those trees.
+        if ! (
+            cd "$root" && rg --hidden --no-require-git --no-heading -N \
+                "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" . \
+                --glob 'scripts/**' \
+                --glob 'tests/**' \
+                --glob '.github/**' \
+                --glob "!scripts/$base" \
+                --glob '!**/tests/fixtures/**' \
+                --glob '!**/scripts/check-*.py' \
+                --glob '!**/scripts/audit-*.py' \
+                --glob '!**/*.md' 2>/dev/null
+        ) | awk 'BEGIN { found = 0 }
                    { body = $0; sub(/^[^:]*:/, "", body)
                      if (body !~ /^[[:space:]]*\/\//) { found = 1 } }
                    END { exit(found ? 0 : 1) }'; then
@@ -440,6 +457,32 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # bd-coik3 allow-list twin arms: `.github/workflows/` IS an allowed invoker
+    # origin (closing the hidden-dir blind spot), while `.beads/` and `src/` are
+    # outside the allow-list and never count as invokers.
+    mkdir -p "$tmp/fixture/.github/workflows" "$tmp/fixture/.beads" "$tmp/fixture/src"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_workflow_invoked.sh"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_bead_mentioned.sh"
+    printf 'jobs:\n  e2e:\n    run: ./scripts/e2e_workflow_invoked.sh\n' \
+        >"$tmp/fixture/.github/workflows/e2e.yml"
+    printf '{"id":"bd-1","title":"see scripts/e2e_bead_mentioned.sh"}\n' \
+        >"$tmp/fixture/.beads/issues.jsonl"
+    printf 'pub const NOTE: &str = "scripts/e2e_bead_mentioned.sh";\n' \
+        >"$tmp/fixture/src/lib.rs"
+    got_allowlist="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_allowlist" != *"e2e_workflow_invoked.sh"* ]]; then
+        echo "ok   - a script invoked from .github/workflows is NOT an orphan"
+    else
+        echo "FAIL - .github/workflows reference missed by allow-list, got '$got_allowlist'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_allowlist" == *"e2e_bead_mentioned.sh"* ]]; then
+        echo "ok   - a script mentioned only in .beads/ or src/ is still an orphan"
+    else
+        echo "FAIL - mention outside allow-list (.beads/ or src/) counted as invocation, got '$got_allowlist'"
+        failures=$((failures + 1))
+    fi
+
     # Direction 1: a new orphan against an empty baseline must fail.
     printf '# empty\n' >"$tmp/baseline_empty.txt"
     new_orphans="$(comm -23 <(printf 'e2e_lonely.sh\n') <(read_baseline "$tmp/baseline_empty.txt"))"
@@ -516,7 +559,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((17 - failures))/17 passed"
+    echo "self-test: $((19 - failures))/19 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
