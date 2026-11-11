@@ -338,10 +338,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-GLOBAL-STORE-NO-DATABASE",
         "src/core/global_store.rs",
         // bd-amhns key repair, BOTH halves of the key. The function gained an
-        // `_at` as-of parameter, and the existence check moved from `.exists()`
-        // to `.try_exists().map_err(global_read_error)?`, so neither the old
-        // function name nor the old fragment survives at the site.
-        "read_global_store_memories_at",
+        // `_at` as-of parameter and `_filtered_at` helper, and the existence
+        // check moved from `.exists()` to `.try_exists().map_err(global_read_error)?`.
+        "read_global_store_memories_filtered_at",
         ".try_exists()",
         "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason. The refactor STRENGTHENED this justification rather than weakening it: `.exists()` returned false on an IO error, collapsing \"cannot tell\" into \"absent\", whereas `try_exists` now propagates that error with `?`.",
     ),
@@ -533,13 +532,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "args.invite.clone().unwrap_or_default()",
         "Immediately guarded: `if invite_code.is_empty() { return write_domain_error(..) }`. A missing invite becomes an empty string only long enough to be rejected with a structured error on the next line.",
     ),
-    allowed_in(
-        "NSF-CORE-GRAPH-DIFF-ABSENT-ARRAYS",
-        "src/core/graph_diff.rs",
-        "parse_snapshot_graph",
-        ".and_then(serde_json::Value::as_array)",
-        "Two sites, multiplicity 2: nodes and edges. A snapshot that carries no nodes array and no edges array describes a graph with no nodes and no edges, and the diff over two explicit snapshot inputs is entitled to say so. Both lookups already try two spellings (`nodes` and `/graph/nodes`) before defaulting, so a differently-shaped snapshot is accommodated rather than silently emptied.",
-    ),
+    // RETIRED (2bad70949): NSF-CORE-GRAPH-DIFF-ABSENT-ARRAYS — parse_snapshot_graph now uses snapshot_array(&metrics, "nodes" | "edges")? instead of .unwrap_or_default().
     allowed_in(
         "NSF-CORE-ASK-MISS-EMPTY-RESULTS",
         "src/core/ask.rs",
@@ -696,7 +689,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/backup.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
-        "Backup import/export records should distinguish absent message, next action, and audit target fields.",
+        "Backup import/export/verify/restore records should distinguish absent message, next action, audit target, manifest workspace id, and restore degradation fields.",
     ),
     must_fix(
         "NSF-CORE-CLAIMS-INPUT",
@@ -728,12 +721,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "unwrap_or_default()",
         "CASS importer defaults here are parser policy for empty spans, unknown line types, optional counts, or fallback content hashes; malformed required JSON still errors.",
     ),
-    allowed(
-        "NSF-CLI-WORKSPACE-CWD",
-        "src/cli/mod.rs",
-        "std::env::current_dir().unwrap_or_default()",
-        "CLI workspace fallback is the existing documented relative-workspace behavior; it does not convert parsed machine data to success.",
-    ),
+    // RETIRED (edbfa30bf): NSF-CLI-WORKSPACE-CWD — std::env::current_dir().unwrap_or_default() removed when binding commands to one physical workspace root.
     allowed(
         "NSF-CLI-EVAL-NO-EXPECTATIONS",
         "src/cli/mod.rs",
@@ -1852,12 +1840,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".checked_sub(self.record_write + self.item_writes + self.omission_writes)",
         "Persistence overhead timing saturates to zero on underflow; it is advisory timing telemetry, not pack data.",
     ),
-    allowed(
-        "NSF-CONTEXT-MEMORY-TAGS-OPTIONAL",
-        "src/core/context.rs",
-        ".get_memory_tags(&target_memory.id)",
-        "Tag lookups for related-memory expansion default to no tags; tags only widen candidate discovery and never alter stored memories.",
-    ),
+    // RETIRED (4fe0fe5b5): NSF-CONTEXT-MEMORY-TAGS-OPTIONAL — get_memory_tags now propagates storage_error in context_why_not.rs.
     allowed(
         "NSF-CONTEXT-L2-DIRECTORY-OPTIONAL",
         "src/core/context.rs",
@@ -3333,7 +3316,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-PACK-CACHED-EMBED-BACKEND",
         "src/pack/mod.rs",
-        "cached_context_embed_backend",
+        "from_cached_json_with_command",
         ".unwrap_or_default()",
         "A cached context whose payload carries no embed_backend, or one that does not parse as a known backend, reports the default backend. The `.parse().ok()` does discard a parse failure, which is why this is worth stating: the value is a descriptive label on a CACHED response and nothing selects an embedder from it -- the live path reads its backend from configuration, not from the cache.",
     ),
@@ -3392,7 +3375,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-SUBSCRIBE-DELTA-TAGS",
         "src/core/subscribe_poll.rs",
-        "hydrate_tags",
+        "hydrate_tags_observed",
         "delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();",
         "An Option from a map lookup, not a swallowed failure. get_memory_tags_batch's own error is propagated by `.map_err(storage_error)?` two lines above, so by this point the batch read has SUCCEEDED and a missing key means the memory genuinely carries no tags. The bulk reader returns rows only for memories that have tags, so absence is the ordinary case for an untagged memory and the empty Vec is its correct value rather than a fabricated one. Same construct and same reasoning as the already-accepted NSF-CORE-RESUME-ADMISSION-TAGS.",
     ),
@@ -3434,17 +3417,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-PACK-EVIDENCE-SECTION-NOT-REQUESTED",
         "src/core/context.rs",
-        "collect_direct_evidence_pack_candidates",
+        "collect_direct_evidence_pack_candidates_with_probe",
         "if !request.sections.is_empty() && !request.sections.contains(&PackSection::Evidence) {",
         "Not a fallback at all: this honors an EXPLICIT caller filter that excluded the Evidence section, and returning evidence candidates here would violate the request. The empty-sections case is deliberately excluded from the condition, so \"no sections named\" still means \"all sections\". As above, a malformed relevance floor errors out with `?` before this point.",
     ),
-    allowed_in(
-        "NSF-CORE-PACK-EVIDENCE-BULK-HYDRATION",
-        "src/core/context.rs",
-        "collect_direct_evidence_pack_candidates",
-        ".map(|row| (row.span.id.clone(), row))",
-        "The default is NOT the final answer, which is the whole justification. A missing entry routes to the None arm below, which performs a per-span connection.get_evidence_span read, and THAT failure is counted into rejected_live_admission. So the bulk read is a batching optimization whose failure degrades to individual reads, and no evidence is dropped uncounted. I initially mis-called this a defect before reading the None arm. What IS genuinely lost is the bulk error's REASON, plus the performance cliff of N queries replacing one at exactly the moment the database is unhealthy; filed as bd-p42mq, which also names the positive control -- NSF-CORE-GLOBAL-FALLBACK-ADMISSION below does this correctly through the degraded channel.",
-    ),
+    // RETIRED (bd-p42mq): NSF-CORE-PACK-EVIDENCE-BULK-HYDRATION — get_evidence_spans_with_sessions failure now pushes context_evidence_hit_unhydrated degradation instead of .unwrap_or_default().
     allowed_in(
         "NSF-CORE-PACK-EVIDENCE-PROVENANCE-CLAUSE",
         "src/core/context.rs",
@@ -4446,6 +4423,54 @@ fn ignore_span_ends_at_the_real_close_not_at_a_brace_in_a_literal() -> TestResul
     }
 }
 
+/// bd-at4i5: `enclosing_functions` must share the literal-safe per-line brace
+/// deltas produced by `scan_code_and_brace_deltas`, so an unbalanced brace in a
+/// string literal or comment inside a function body cannot pop the function off
+/// the stack early or hold it open late.
+#[test]
+fn enclosing_functions_ignores_braces_in_literals_and_comments() -> TestResult {
+    let planted = concat!(
+        "fn outer_fn() {\n",
+        "    let closing_in_string = \"}\";\n",
+        "    let closing_in_raw = r#\"}\"#;\n",
+        "    // }\n",
+        "    let x = y.unwrap_or_default();\n",
+        "}\n",
+        "let outside = z.unwrap_or_default();\n",
+    );
+    let lines = planted.lines().collect::<Vec<_>>();
+    let (_, scanned_deltas) = scan_code_and_brace_deltas(planted);
+    let naive_deltas = lines.iter().copied().map(brace_delta).collect::<Vec<_>>();
+
+    // Negative control: feeding the naive per-line brace deltas pops `outer_fn`
+    // at line 1 (`let closing_in_string = "}";`) and misattributes line 4 (`let x = ...`)
+    // to `None`.
+    let naive_attributed = enclosing_functions(&lines, &naive_deltas);
+    if naive_attributed[4].is_some() {
+        return Err(format!(
+            "NEGATIVE CONTROL FAILED: naive brace deltas should have popped outer_fn before line 5, got {:?}",
+            naive_attributed
+        ));
+    }
+
+    // Positive arm: feeding the literal-safe deltas keeps `outer_fn` on the stack
+    // for line 4 and pops it at line 5 (`}`).
+    let attributed = enclosing_functions(&lines, &scanned_deltas);
+    if attributed[4].as_deref() != Some("outer_fn") {
+        return Err(format!(
+            "expected line 5 inside outer_fn to attribute to Some(\"outer_fn\"), got {:?}",
+            attributed[4]
+        ));
+    }
+    if attributed[6].is_some() {
+        return Err(format!(
+            "expected line 7 after outer_fn closing brace to attribute to None, got {:?}",
+            attributed[6]
+        ));
+    }
+    Ok(())
+}
+
 /// bd-nar12: the BYTE raw-string forms `br"` and `br#"` must open a raw string.
 ///
 /// The boundary check rejected them because the `b` sits where an identifier
@@ -4621,7 +4646,7 @@ fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
 /// the naive version left 339 of 597 findings with no resolvable function, 57%,
 /// and this codebase uses long parameter lists heavily. With the pending state,
 /// 0 of 597 are unresolved.
-fn enclosing_functions(lines: &[&str]) -> Vec<Option<String>> {
+fn enclosing_functions(lines: &[&str], deltas: &[i32]) -> Vec<Option<String>> {
     let mut out = vec![None; lines.len()];
     let mut stack: Vec<(i32, String, bool)> = Vec::new();
     let mut depth = 0_i32;
@@ -4632,7 +4657,7 @@ fn enclosing_functions(lines: &[&str]) -> Vec<Option<String>> {
         }
         out[index] = stack.last().map(|(_, name, _)| name.clone());
 
-        depth += brace_delta(line);
+        depth += deltas.get(index).copied().unwrap_or(0);
         if let Some(top) = stack.last_mut() {
             if !top.2 && depth > top.0 {
                 top.2 = true;
@@ -4698,13 +4723,11 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
         let (code, brace_deltas) = scan_code_and_brace_deltas(&source);
         let ignored = ignored_test_module_lines(&code, &brace_deltas);
         let lines = source.lines().collect::<Vec<_>>();
-        // DELIBERATELY still raw lines. `enclosing_functions` shares the old
-        // `brace_delta` weakness, but its output is an INVENTORY MATCH KEY --
-        // `allowed_in(rule, file, FUNCTION, text)` -- so changing how functions
-        // resolve can unclassify already-justified findings and fail the ratchet
-        // for a reason unrelated to this fix. Different blast radius, so it moves
-        // separately and with its own measurement.
-        let functions = enclosing_functions(&lines);
+        // bd-at4i5: `enclosing_functions` reads raw lines for `function_name`
+        // detection and shares the literal-safe `brace_deltas` produced by
+        // `scan_code_and_brace_deltas` so unbalanced braces in strings/comments
+        // cannot desync function attribution.
+        let functions = enclosing_functions(&lines, &brace_deltas);
 
         for (index, line) in lines.iter().enumerate() {
             let detectable = code.get(index).map_or(*line, String::as_str);
