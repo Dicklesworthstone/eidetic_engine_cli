@@ -5765,11 +5765,11 @@ ee status --json
 
 **Severity:** warning
 
-**Surfaces:** search, context
+**Surfaces:** search, context, index status, status, doctor
 
 **Introduced by:** bd-3qs2i.4.1 (epic F4)
 
-**Trigger.** The default semantic path is neural-local via Frankensearch Model2Vec (potion-multilingual-128M). This degradation occurs when that bundled model cannot be loaded or downloaded, when EE_EMBED_MODEL_PATH explicitly points at a missing fault-injection path, or in the rare deterministic-hash fallback posture where the active embedder reports semantic=false while lexical fallback remains available.
+**Trigger.** The default semantic path is neural-local via Frankensearch Model2Vec (potion-multilingual-128M). This degradation occurs when that bundled model cannot be loaded or downloaded, when EE_EMBED_MODEL_PATH explicitly points at a missing fault-injection path, or when the active embedder has fallen back to deterministic hash while lexical retrieval remains available. Ready-index diagnostics in index status, status, and doctor share this code without marking the usable lexical index unhealthy; their repair restores the configured remote endpoint or fetches the local model before rebuilding. Pending downloads, unprobed remote dimensions, and unconfirmed local activation do not establish model unavailability. The expected emission below pins the search invocation.
 
 **Setup.**
 
@@ -15371,29 +15371,21 @@ ee search 'any query' --workspace . --json
 
 **Severity:** medium
 
-**Surfaces:** status
+**Surfaces:** index status, status, doctor
 
 **Introduced by:** bd-status-search-lexical-honesty-ejdpo (epic J)
 
-**Trigger.** The workspace search index is healthy (IndexHealth::Ready), but the active embedder reports semantic=false — the deterministic-hash fallback — or a semantic embedder is active over a non-empty corpus with zero embedded vectors. Either way every retrieval is served by the lexical arm alone, which under-recalls paraphrases and synonyms of indexed content. Before this code existed, `ee status` reported `search: ok` in exactly this state. The two causes differ in weight and repair (bd-rzfov): with zero embedded vectors the search row is degraded_recoverable and `ee index rebuild` embeds the corpus; under the hash fallback the search row stays ok (ADR 0081 D1: an honest hash fallback must not degrade the top-line), the code is still reported here, and the repair is to fetch the model before rebuilding, because a rebuild alone re-embeds with the same hash embedder.
-
-**Setup.**
-
-```bash
-ee init --workspace .
-ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json
-export EE_EMBED_DOWNLOAD=off
-```
+**Trigger.** The workspace search index is healthy (IndexHealth::Ready) and a confirmed semantic embedder is active, but a non-empty corpus has zero embedded vectors. Retrieval therefore uses only the lexical arm and under-recalls paraphrases and synonyms. The status search row is degraded_recoverable; index storage health remains ready and doctor keeps semantic capability advisory. A rebuild embeds the corpus. The fixture requires a ready lexical index with semantic=true and vector_coverage={embedded:0,total:3}; ready_index_and_workspace_status_agree_on_semantic_degradations constructs this state deterministically without downloads. There is no portable CLI-only setup for this incomplete-vector state. Missing-model hash fallback is instead reported as embed_model_unavailable and requires restoring or fetching the model first. Pending or unconfirmed probes emit neither code.
 
 **Invocation.**
 
 ```bash
-EE_EMBED_DOWNLOAD=off ee status --workspace . --json
+ee status --workspace . --json
 ```
 
 **Expected emission.** Message contains: `semantic retrieval is unavailable ... lexical fallback`
 
-**Repair hint.** Run `ee model fetch`, then `ee index rebuild --workspace .`.
+**Repair hint.** Run `ee index rebuild --workspace .`.
 
 **Fixture.** [`tests/fixtures/failure_modes/search_lexical_only.json`](../tests/fixtures/failure_modes/search_lexical_only.json)
 
@@ -19156,5 +19148,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:91bdd2205dbcbee618bc293fe1d4281edac6f3f0cd7cebb5f226c2ce54715777 -->
-<!-- degraded-codes-fingerprint body=sha256:3b0acadf0e4d5ce5a59390493d658e6f5b1036cc12801ffa921c958701322e4c -->
+<!-- degraded-codes-fingerprint inputs=sha256:5b35bcc6327a6890ad86851c66db6e608f89139da64545e75f6124baa363c48a -->
+<!-- degraded-codes-fingerprint body=sha256:3ea62b004c9bdba1a35142ec64b88298baff2f0b6391e0c05d77720c3efbd4e2 -->

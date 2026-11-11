@@ -59,8 +59,9 @@ use super::derived_asset_freshness::{
     plan_derived_asset_freshness,
 };
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, get_index_status,
-    get_index_status_in_current_snapshot, prepare_index_status_embedder_for_workspace,
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, SemanticReadiness,
+    SemanticReadinessDegradation, get_index_status, get_index_status_in_current_snapshot,
+    prepare_index_status_embedder_for_workspace,
 };
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::source_run::SourceRunKind;
@@ -124,7 +125,7 @@ pub const WAL_GROWTH_EXCEEDS_THRESHOLD_CODE: &str = "wal_growth_exceeds_threshol
 pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
 /// A healthy index that can only serve lexical evidence
 /// (bd-status-search-lexical-honesty-ejdpo).
-pub const SEARCH_LEXICAL_ONLY_CODE: &str = "search_lexical_only";
+pub const SEARCH_LEXICAL_ONLY_CODE: &str = super::index::SEARCH_LEXICAL_ONLY_CODE;
 /// Posture reason emitted alongside [`SEARCH_LEXICAL_ONLY_CODE`].
 pub const SEARCH_LEXICAL_ONLY_REASON: &str = "lexical_only";
 /// The bundled embedding model is present but its `.verified` receipt is
@@ -136,12 +137,12 @@ pub const EMBED_MODEL_RECEIPT_STALE_REPAIR: &str =
 /// Repair command for [`SEARCH_LEXICAL_ONLY_CODE`] when a semantic embedder is
 /// active but nothing is embedded yet: a rebuild embeds the corpus.
 pub const SEARCH_LEXICAL_ONLY_REPAIR: &str = "ee index rebuild --workspace .";
-/// Repair for [`SEARCH_LEXICAL_ONLY_CODE`] under the deterministic-hash
+/// Repair for `embed_model_unavailable` under the deterministic-hash
 /// fallback. A rebuild alone re-embeds with the same hash embedder and changes
 /// nothing (bd-rzfov); the model has to be fetched first. Matches doctor's
 /// `embedding_posture` repair.
 pub const SEARCH_LEXICAL_ONLY_HASH_FALLBACK_REPAIR: &str =
-    "Run `ee model fetch`, then `ee index rebuild --workspace .`.";
+    super::index::SEMANTIC_MODEL_UNAVAILABLE_REPAIR;
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1276,8 +1277,9 @@ pub enum SearchSemanticPosture {
     /// degrade the top-line; it stays visible in `degraded[]` with the repair
     /// that actually changes it (fetch the model, then rebuild).
     HashFallback,
-    /// Embedding posture was not probed for this call, so semantic
-    /// availability is unknown. Unknown is never reported as lexical-only:
+    /// Embedding posture was not probed, is pending, or could not yet be
+    /// confirmed, so semantic availability is unknown. Unknown is never
+    /// reported as lexical-only:
     /// an unprobed workspace has no evidence of under-recall, and inventing
     /// a degradation from missing evidence is its own dishonesty.
     NotProbed,
@@ -1288,7 +1290,7 @@ pub enum SearchSemanticPosture {
 /// Deliberately conservative, so `search: degraded` always means something an
 /// agent can act on:
 ///
-/// - `semantic == false` is the deterministic-hash fallback. No amount of
+/// - A measured unavailable backend is the deterministic-hash fallback. No amount of
 ///   corpus growth or rebuilding produces semantic evidence, so this is
 ///   [`HashFallback`], kept distinct because its repair and its top-line weight
 ///   differ (ADR 0081 D1, bd-rzfov).
@@ -1300,6 +1302,8 @@ pub enum SearchSemanticPosture {
 ///   arm does contribute, and index lag is already reported by
 ///   `search_index_stale` / `search_index_large_gap` rather than being
 ///   double-counted here.
+/// - Pending downloads, unprobed remote dimensions, and unconfirmed local
+///   models remain unknown; they are not evidence of model unavailability.
 ///
 /// [`Available`]: SearchSemanticPosture::Available
 /// [`HashFallback`]: SearchSemanticPosture::HashFallback
@@ -1311,17 +1315,17 @@ fn search_semantic_posture_from_index_status(
             report
                 .embedding
                 .as_ref()
-                .map_or(SearchSemanticPosture::NotProbed, |embedding| {
-                    if !embedding.semantic {
-                        SearchSemanticPosture::HashFallback
-                    } else if embedding.vector_coverage.total > 0
-                        && embedding.vector_coverage.embedded == 0
-                    {
-                        SearchSemanticPosture::LexicalOnly
-                    } else {
-                        SearchSemanticPosture::Available
-                    }
-                })
+                .map_or(
+                    SearchSemanticPosture::NotProbed,
+                    |embedding| match embedding.semantic_readiness() {
+                        SemanticReadiness::Available => SearchSemanticPosture::Available,
+                        SemanticReadiness::LexicalOnly => SearchSemanticPosture::LexicalOnly,
+                        SemanticReadiness::ModelUnavailable => SearchSemanticPosture::HashFallback,
+                        SemanticReadiness::Pending | SemanticReadiness::Unconfirmed => {
+                            SearchSemanticPosture::NotProbed
+                        }
+                    },
+                )
         }
         Some(Err(())) | None => SearchSemanticPosture::NotProbed,
     }
@@ -1868,6 +1872,17 @@ pub struct DegradationReport {
     pub severity: &'static str,
     pub message: &'static str,
     pub repair: &'static str,
+}
+
+impl From<SemanticReadinessDegradation> for DegradationReport {
+    fn from(entry: SemanticReadinessDegradation) -> Self {
+        Self {
+            code: entry.code,
+            severity: entry.severity,
+            message: entry.message,
+            repair: entry.repair,
+        }
+    }
 }
 
 /// Redaction-safe mesh persistence posture for status surfaces.
@@ -4584,27 +4599,18 @@ fn push_search_capability_degradation(
         // A healthy index still under-recalls when the semantic arm cannot
         // run. This is the only place `ee status` can say so
         // (bd-status-search-lexical-honesty-ejdpo).
-        CapabilityStatus::Ready => match semantic {
-            SearchSemanticPosture::LexicalOnly => {
-                degradations.push(DegradationReport {
-                    code: SEARCH_LEXICAL_ONLY_CODE,
-                    severity: "medium",
-                    message: "Search index is healthy but semantic retrieval is unavailable; every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content.",
-                    repair: "Run `ee index rebuild --workspace .`.",
-                });
+        CapabilityStatus::Ready => {
+            let readiness = match semantic {
+                SearchSemanticPosture::LexicalOnly => Some(SemanticReadiness::LexicalOnly),
+                // Visible but not top-line (ADR 0081 D1/D4). Fetch or restore
+                // the model first: a rebuild alone does not change this state.
+                SearchSemanticPosture::HashFallback => Some(SemanticReadiness::ModelUnavailable),
+                SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => None,
+            };
+            if let Some(entry) = readiness.and_then(SemanticReadiness::degradation) {
+                degradations.push(entry.into());
             }
-            // Visible but not top-line (ADR 0081 D1/D4). The repair must be
-            // one that changes the verdict: a rebuild alone does not (bd-rzfov).
-            SearchSemanticPosture::HashFallback => {
-                degradations.push(DegradationReport {
-                    code: SEARCH_LEXICAL_ONLY_CODE,
-                    severity: "medium",
-                    message: "Search index is healthy but semantic retrieval is unavailable: the embedder is the deterministic-hash fallback, so every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content. Memory still works; this does not degrade the overall posture.",
-                    repair: SEARCH_LEXICAL_ONLY_HASH_FALLBACK_REPAIR,
-                });
-            }
-            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => {}
-        },
+        }
         CapabilityStatus::Pending if workspace_path.is_none() => {
             degradations.push(DegradationReport {
                 code: "search_not_inspected",
@@ -8619,7 +8625,7 @@ mod tests {
                 .iter()
                 .map(|degradation| degradation.code)
                 .collect::<Vec<_>>(),
-            vec![SEARCH_LEXICAL_ONLY_CODE],
+            vec![super::super::index::EMBED_MODEL_UNAVAILABLE_CODE],
             "hash fallback stays visible in degraded[]",
         )?;
         let repair = degradations
@@ -8697,6 +8703,159 @@ mod tests {
             SearchSemanticPosture::NotProbed,
             "index status without an embedding posture",
         )
+    }
+
+    #[test]
+    fn ready_index_and_workspace_status_agree_on_semantic_degradations() {
+        for (semantic, embedded, total, expected_code, expected_severity) in [
+            (
+                false,
+                0,
+                3,
+                Some("embed_model_unavailable"),
+                Some("warning"),
+            ),
+            // Hash vectors do not provide semantic retrieval, even with full coverage.
+            (
+                false,
+                3,
+                3,
+                Some("embed_model_unavailable"),
+                Some("warning"),
+            ),
+            (true, 0, 3, Some("search_lexical_only"), Some("medium")),
+            (true, 3, 3, None, None),
+            (true, 1, 3, None, None),
+            (true, 0, 0, None, None),
+        ] {
+            let report =
+                index_report_with_embedding(Some(embedding_posture(semantic, embedded, total)));
+            let posture = search_semantic_posture_from_index_status(Some(&Ok(report.clone())));
+            let mut status_degraded = Vec::new();
+            push_search_capability_degradation(
+                &mut status_degraded,
+                CapabilityStatus::Ready,
+                Some(Path::new(".")),
+                posture,
+            );
+            let data = report.data_json();
+            assert_eq!(
+                data["health"], "ready",
+                "lexical index health remains ready"
+            );
+            assert_eq!(data["degradationCode"].as_str(), expected_code);
+            assert_eq!(data["degraded"][0]["severity"].as_str(), expected_severity);
+            assert_eq!(
+                status_degraded.first().map(|entry| entry.code),
+                expected_code
+            );
+            assert_eq!(
+                data["degraded"],
+                serde_json::json!(
+                    status_degraded
+                        .iter()
+                        .map(|entry| {
+                            serde_json::json!({
+                                "code": entry.code,
+                                "severity": entry.severity,
+                                "message": entry.message,
+                                "repair": entry.repair,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                ),
+                "both diagnostics describe the same measured retrieval capability",
+            );
+            if let Some(code) = expected_code {
+                let repair = data["degraded"][0]["repair"]
+                    .as_str()
+                    .expect("repair is present");
+                assert!(repair.contains("ee index rebuild"));
+                assert_eq!(
+                    repair.contains("ee model fetch"),
+                    code == "embed_model_unavailable"
+                );
+                assert!(report.human_summary().contains(repair));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_or_unconfirmed_models_are_not_reported_as_unavailable() {
+        for (mode, source, semantic) in [
+            (
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
+                "ee_model2vec_download_pending",
+                false,
+            ),
+            (
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
+                "remote_dimension_unprobed",
+                false,
+            ),
+            (
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+                "neural_local_unconfirmed",
+                true,
+            ),
+        ] {
+            let mut embedding = embedding_posture(semantic, 0, 3);
+            embedding.mode = mode;
+            embedding.source = source.to_owned();
+            let report = index_report_with_embedding(Some(embedding));
+            assert_eq!(
+                search_semantic_posture_from_index_status(Some(&Ok(report.clone()))),
+                SearchSemanticPosture::NotProbed,
+                "{mode}",
+            );
+            assert_eq!(
+                report.data_json()["degraded"],
+                serde_json::json!([]),
+                "{mode}"
+            );
+            assert!(report.data_json()["degradationCode"].is_null(), "{mode}");
+        }
+        let unmeasured = index_report_with_embedding(None).data_json();
+        assert_eq!(unmeasured["degraded"], serde_json::json!([]));
+        assert!(unmeasured["degradationCode"].is_null());
+    }
+
+    #[test]
+    fn structural_index_failures_keep_their_repair_before_semantic_readiness() {
+        for (health, expected_code) in [
+            (IndexHealth::Missing, "index_missing"),
+            (IndexHealth::Stale, "index_stale"),
+            (IndexHealth::Corrupt, "index_corrupt"),
+        ] {
+            let mut report = index_report_with_embedding(Some(embedding_posture(false, 0, 3)));
+            report.health = health;
+            let data = report.data_json();
+            assert_eq!(data["health"], health.as_str());
+            assert_eq!(data["degradationCode"], expected_code);
+            assert_eq!(
+                data["degraded"]
+                    .as_array()
+                    .expect("degradation array")
+                    .len(),
+                1
+            );
+            assert_eq!(data["degraded"][0]["code"], expected_code);
+            assert_eq!(
+                data["degraded"][0]["repair"],
+                "ee index rebuild --workspace ."
+            );
+            assert!(
+                report
+                    .human_summary()
+                    .contains("Semantic retrieval: not assessed (index needs repair)")
+            );
+            report.embedding = Some(embedding_posture(true, 3, 3));
+            assert!(
+                !report
+                    .human_summary()
+                    .contains("Semantic retrieval: available")
+            );
+        }
     }
 
     #[test]

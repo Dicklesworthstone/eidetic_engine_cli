@@ -391,6 +391,7 @@ mod tests {
             (check(&captured_drift_error()), "database_migration_drift"),
         ] {
             let report = DoctorReport {
+                semantic_readiness: None,
                 version: "test",
                 overall_healthy: false,
                 posture: Posture::Blocked,

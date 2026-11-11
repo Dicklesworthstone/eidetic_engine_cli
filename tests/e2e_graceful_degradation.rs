@@ -1586,6 +1586,13 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
     assert_success(&status, "explicit status")?;
     let doctor = run_ee_json_no_model(&workspace, &model_dir, ["doctor"], "explicit doctor")?;
     assert_success(&doctor, "explicit doctor")?;
+    let index_status = run_ee_json_no_model(
+        &workspace,
+        &model_dir,
+        ["index", "status"],
+        "explicit index status",
+    )?;
+    assert_success(&index_status, "explicit index status")?;
     let health = run_ee_json_no_model(&workspace, &model_dir, ["health"], "explicit health")?;
     assert_success(&health, "explicit health")?;
     eprintln!(
@@ -1639,30 +1646,51 @@ fn fresh_explicit_store_posture_agrees_across_status_doctor_health() -> TestResu
         &Some("ok"),
         "doctor posture on the same store",
     )?;
-    // The cause beside the label: the hash fallback really is active, and
-    // it is still reported, with a repair that fetches the model.
-    let lexical = status
-        .json
-        .pointer("/degraded")
-        .and_then(Value::as_array)
-        .and_then(|entries| {
-            entries.iter().find(|entry| {
-                entry.get("code").and_then(Value::as_str) == Some("search_lexical_only")
-            })
-        })
-        .ok_or_else(|| {
-            format!(
-                "status must still report search_lexical_only under the hash fallback: {}",
-                status.stdout
-            )
-        })?;
-    ensure(
-        lexical
-            .get("repair")
-            .and_then(Value::as_str)
-            .is_some_and(|repair| repair.contains("ee model fetch")),
-        format!("hash-fallback repair must fetch the model: {lexical}"),
+    // All diagnostic surfaces disclose the same unavailable semantic model
+    // while preserving the health of working lexical storage.
+    ensure_equal(
+        &index_status
+            .json
+            .pointer("/data/health")
+            .and_then(Value::as_str),
+        &Some("ready"),
+        "index storage remains ready without a semantic model",
     )?;
+    for (label, response) in [
+        ("status", &status),
+        ("doctor", &doctor),
+        ("index status", &index_status),
+    ] {
+        let missing_model = response
+            .json
+            .pointer("/degraded")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("code").and_then(Value::as_str) == Some("embed_model_unavailable")
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{label} must report embed_model_unavailable under the hash fallback: {}",
+                    response.stdout
+                )
+            })?;
+        ensure_equal(
+            &missing_model.get("severity").and_then(Value::as_str),
+            &Some("warning"),
+            &format!("{label} model unavailability is advisory"),
+        )?;
+        ensure(
+            missing_model
+                .get("repair")
+                .and_then(Value::as_str)
+                .is_some_and(|repair| {
+                    repair.contains("ee model fetch") && repair.contains("ee index rebuild")
+                }),
+            format!("{label} repair must fetch the model before rebuilding: {missing_model}"),
+        )?;
+    }
 
     // Control: tombstone 6 of the 8. Live rows are still attested, but the
     // active ratio and tombstone penalty must still degrade memory health.

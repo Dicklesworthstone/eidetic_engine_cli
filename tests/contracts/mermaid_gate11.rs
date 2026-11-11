@@ -193,6 +193,7 @@ fn why_fixture() -> WhyReport {
 
 fn doctor_fixture() -> DoctorReport {
     DoctorReport {
+        semantic_readiness: None,
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,

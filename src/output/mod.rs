@@ -6137,7 +6137,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
     // System state is in `data.posture` (canonical, 5-state enum) and `data.healthy`
     // (deprecated boolean kept for v0.1→v0.2 transition).
     b.field_bool("success", true);
-    b.field_raw("degraded", "[]");
+    render_doctor_degradations_json(&mut b, report);
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
         d.field_str("version", report.version);
@@ -6190,7 +6190,7 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
     let mut b = JsonBuilder::with_capacity(384);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
-    b.field_raw("degraded", "[]");
+    render_doctor_degradations_json(&mut b, report);
     b.field_str("fields", "doctor_concise");
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -6234,7 +6234,7 @@ pub fn render_doctor_selected_json(report: &DoctorReport, checks: &[&CheckResult
     let mut b = JsonBuilder::with_capacity(384);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
-    b.field_raw("degraded", "[]");
+    render_doctor_degradations_json(&mut b, report);
     b.field_str("fields", "doctor_filtered");
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -6345,6 +6345,13 @@ fn render_doctor_advisories_json(
             obj.field_bool("permanent", true);
         }
     });
+}
+
+fn render_doctor_degradations_json(parent: &mut JsonBuilder, report: &DoctorReport) {
+    // Field selection narrows the displayed checks, not the workspace-wide
+    // retrieval assessment. Keep its limitations visible even in minimal JSON.
+    let degraded = aggregate_status_degradations("doctor", &report.retrieval_degradations());
+    parent.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
 }
 
 fn doctor_advisory_is_permanent(check: &CheckResult) -> bool {
@@ -16493,7 +16500,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical) and `data.healthy` (deprecated alias).
     b.field_bool("success", true);
-    b.field_raw("degraded", "[]");
+    render_doctor_degradations_json(&mut b, report);
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -26041,13 +26048,18 @@ mod tests {
 
     #[test]
     fn json_toon_parity_doctor_decodes_to_same_json() -> TestResult {
-        let report = DoctorReport::gather();
+        let mut report = DoctorReport::gather();
+        report.semantic_readiness = Some(crate::core::index::SemanticReadiness::ModelUnavailable);
         let json = render_doctor_json(&report);
         let toon = render_doctor_toon(&report);
 
         let expected_json = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor JSON should parse: {error}"))?;
-        ensure_empty_top_level_degraded(&expected_json, "doctor JSON envelope")?;
+        ensure_equal(
+            &expected_json["degraded"][0]["code"],
+            &serde_json::json!("embed_model_unavailable"),
+            "doctor JSON exposes the measured model limitation",
+        )?;
         let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
         let decoded = toon::try_decode(&toon, None)
             .map_err(|error| format!("doctor TOON should decode: {error}"))?;
@@ -26058,13 +26070,18 @@ mod tests {
 
     #[test]
     fn json_toon_parity_doctor_concise_decodes_to_same_json() -> TestResult {
-        let report = DoctorReport::gather();
+        let mut report = DoctorReport::gather();
+        report.semantic_readiness = Some(crate::core::index::SemanticReadiness::LexicalOnly);
         let json = render_doctor_concise_json(&report);
         let toon = render_doctor_concise_toon(&report);
 
         let expected_json = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
-        ensure_empty_top_level_degraded(&expected_json, "doctor concise JSON envelope")?;
+        ensure_equal(
+            &expected_json["degraded"][0]["code"],
+            &serde_json::json!("search_lexical_only"),
+            "concise doctor JSON exposes the measured vector limitation",
+        )?;
         let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
         let decoded = toon::try_decode(&toon, None)
             .map_err(|error| format!("doctor concise TOON should decode: {error}"))?;
@@ -26080,6 +26097,7 @@ mod tests {
     #[test]
     fn render_doctor_concise_json_omits_diagnostic_firehose() -> TestResult {
         let mut report = DoctorReport::gather();
+        report.semantic_readiness = None;
         report.overall_healthy = false;
         report.posture = Posture::DegradedRecoverable;
         report.checks = vec![
@@ -26235,6 +26253,7 @@ mod tests {
     #[test]
     fn render_doctor_concise_json_handles_empty_check_set() -> TestResult {
         let mut report = DoctorReport::gather();
+        report.semantic_readiness = None;
         report.overall_healthy = true;
         report.posture = Posture::Ok;
         report.checks.clear();
@@ -26265,6 +26284,93 @@ mod tests {
             "advisories: none",
             "empty advisory summary",
         )
+    }
+
+    #[test]
+    fn doctor_retrieval_degradation_survives_every_json_projection() -> TestResult {
+        use crate::core::index::SemanticReadiness;
+
+        let mut report = DoctorReport::gather();
+        report.overall_healthy = true;
+        report.posture = Posture::Ok;
+        report.checks = vec![CheckResult::ok("database", "database ready")];
+
+        for (readiness, code) in [
+            (
+                SemanticReadiness::ModelUnavailable,
+                "embed_model_unavailable",
+            ),
+            (SemanticReadiness::LexicalOnly, "search_lexical_only"),
+        ] {
+            report.semantic_readiness = Some(readiness);
+            let selected = vec![&report.checks[0]];
+            let mut projections = vec![
+                render_doctor_json(&report),
+                render_doctor_concise_json(&report),
+                super::render_doctor_selected_json(&report, &selected),
+            ];
+            for profile in [
+                FieldProfile::Minimal,
+                FieldProfile::Summary,
+                FieldProfile::Standard,
+                FieldProfile::Full,
+            ] {
+                projections.push(render_doctor_json_filtered(&report, profile));
+            }
+            for rendered in projections {
+                let value: serde_json::Value = serde_json::from_str(&rendered)
+                    .map_err(|error| format!("doctor readiness JSON should parse: {error}"))?;
+                ensure_equal(
+                    &value["degraded"].as_array().map(Vec::len),
+                    &Some(1),
+                    "retrieval limitation remains visible when checks are filtered",
+                )?;
+                ensure_equal(
+                    &value["degraded"][0]["code"],
+                    &serde_json::json!(code),
+                    "doctor shares the index retrieval-readiness code",
+                )?;
+                ensure(
+                    value["degraded"][0]["repair"]
+                        .as_str()
+                        .is_some_and(|repair| !repair.is_empty()),
+                    "retrieval limitation retains actionable recovery guidance",
+                )?;
+                ensure_equal(
+                    &value["data"]["posture"],
+                    &serde_json::json!("ok"),
+                    "working lexical retrieval does not make the store unhealthy",
+                )?;
+                ensure_equal(
+                    &value["success"],
+                    &serde_json::json!(true),
+                    "doctor completed successfully",
+                )?;
+            }
+        }
+
+        for readiness in [
+            None,
+            Some(SemanticReadiness::Available),
+            Some(SemanticReadiness::Pending),
+            Some(SemanticReadiness::Unconfirmed),
+        ] {
+            report.semantic_readiness = readiness;
+            for rendered in [
+                render_doctor_json(&report),
+                render_doctor_concise_json(&report),
+                super::render_doctor_selected_json(&report, &[]),
+                render_doctor_json_filtered(&report, FieldProfile::Minimal),
+            ] {
+                let value: serde_json::Value = serde_json::from_str(&rendered)
+                    .map_err(|error| format!("doctor readiness control should parse: {error}"))?;
+                ensure_empty_top_level_degraded(
+                    &value,
+                    "available, pending and unmeasured states do not claim model absence",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -26321,6 +26427,7 @@ mod tests {
     #[test]
     fn render_doctor_json_exposes_check_tier_and_advisory_summary() -> TestResult {
         let mut report = DoctorReport::gather();
+        report.semantic_readiness = None;
         report.overall_healthy = true;
         report.posture = Posture::Ok;
         report.checks = vec![

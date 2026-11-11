@@ -2923,6 +2923,7 @@ fn status_degradation_projection(report: &StatusReport) -> Result<String, String
 
 fn doctor_missing_db_report() -> DoctorReport {
     DoctorReport {
+        semantic_readiness: None,
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
@@ -2967,6 +2968,7 @@ fn doctor_missing_db_report() -> DoctorReport {
 
 fn doctor_pending_migration_report() -> DoctorReport {
     DoctorReport {
+        semantic_readiness: None,
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::Blocked,

@@ -1272,6 +1272,61 @@ pub struct EmbeddingPosture {
     pub vector_coverage: EmbeddingVectorCoverage,
 }
 
+/// Semantic capability is independent of the health of the lexical index.
+/// Pending or unconfirmed probes must not be reported as an unavailable model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticReadiness {
+    Available,
+    LexicalOnly,
+    ModelUnavailable,
+    Pending,
+    Unconfirmed,
+}
+
+pub const EMBED_MODEL_UNAVAILABLE_CODE: &str = "embed_model_unavailable";
+pub const SEARCH_LEXICAL_ONLY_CODE: &str = "search_lexical_only";
+pub const SEMANTIC_MODEL_UNAVAILABLE_REPAIR: &str = "Inspect the active backend with `ee model status`; restore a configured remote endpoint or run `ee model fetch`, then `ee index rebuild --workspace .`.";
+
+/// Shared diagnostic for index status, workspace status, and doctor. Keeping
+/// the projection here prevents each surface from guessing at model readiness.
+pub(crate) struct SemanticReadinessDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+impl SemanticReadiness {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::LexicalOnly => "lexical_only",
+            Self::ModelUnavailable => "model_unavailable",
+            Self::Pending => "pending",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+
+    pub(crate) const fn degradation(self) -> Option<SemanticReadinessDegradation> {
+        match self {
+            Self::ModelUnavailable => Some(SemanticReadinessDegradation {
+                code: EMBED_MODEL_UNAVAILABLE_CODE,
+                severity: "warning",
+                message: "Embedding model unavailable: semantic retrieval is unavailable on the deterministic-hash fallback, so results use the lexical fallback. The search index remains healthy and memory retrieval continues to work.",
+                repair: SEMANTIC_MODEL_UNAVAILABLE_REPAIR,
+            }),
+            Self::LexicalOnly => Some(SemanticReadinessDegradation {
+                code: SEARCH_LEXICAL_ONLY_CODE,
+                severity: "medium",
+                message: "Search index is healthy but semantic retrieval is unavailable: a semantic embedder is active but the non-empty corpus has no embedded vectors, so results use the lexical fallback, which under-recalls paraphrases and synonyms of indexed content.",
+                repair: "Run `ee index rebuild --workspace .`.",
+            }),
+            Self::Available | Self::Pending | Self::Unconfirmed => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmbeddingPostureRegistryModel {
     pub id: String,
@@ -1596,6 +1651,21 @@ impl EmbeddingPosture {
         self.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
             || (self.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED
                 && self.source == "remote_dimension_unprobed")
+    }
+
+    #[must_use]
+    pub fn semantic_readiness(&self) -> SemanticReadiness {
+        if self.semantic_pending() {
+            SemanticReadiness::Pending
+        } else if self.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED {
+            SemanticReadiness::Unconfirmed
+        } else if !self.semantic {
+            SemanticReadiness::ModelUnavailable
+        } else if self.vector_coverage.total > 0 && self.vector_coverage.embedded == 0 {
+            SemanticReadiness::LexicalOnly
+        } else {
+            SemanticReadiness::Available
+        }
     }
 }
 
@@ -10987,6 +11057,18 @@ impl IndexStatusReport {
         output.push_str(status_line);
 
         output.push_str(&format!(
+            "  Semantic retrieval: {}\n",
+            if self.health == IndexHealth::Ready {
+                self.embedding
+                    .as_ref()
+                    .map(|embedding| embedding.semantic_readiness().as_str())
+                    .unwrap_or("not inspected")
+            } else {
+                "not assessed (index needs repair)"
+            }
+        ));
+
+        output.push_str(&format!(
             "  Index directory: {}\n",
             self.index_dir.display()
         ));
@@ -11038,7 +11120,12 @@ impl IndexStatusReport {
 
         output.push_str(&format!("  Elapsed: {:.1}ms\n", self.elapsed_ms));
 
-        if let Some(hint) = self.repair_hint {
+        if let Some(degradation) = self.degraded() {
+            output.push_str(&format!(
+                "\n{}\nNext:\n  {}\n",
+                degradation.message, degradation.repair
+            ));
+        } else if let Some(hint) = self.repair_hint {
             output.push_str(&format!("\nNext:\n  {hint}\n"));
         }
 
@@ -11047,15 +11134,16 @@ impl IndexStatusReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
-        let degraded = self
-            .degraded()
+        let degradation = self.degraded();
+        let degradation_code = degradation.as_ref().map(|entry| entry.code);
+        let degraded = degradation
             .into_iter()
             .map(IndexStatusDegradation::data_json)
             .collect::<Vec<_>>();
         serde_json::json!({
             "command": "index_status",
             "health": self.health.as_str(),
-            "degradationCode": self.health.degradation_code(),
+            "degradationCode": degradation_code,
             "degraded": degraded,
             "indexDir": self.index_dir.to_string_lossy(),
             "databasePath": self.database_path.to_string_lossy(),
@@ -11090,7 +11178,16 @@ impl IndexStatusReport {
             .unwrap_or("ee index rebuild --workspace .")
             .to_owned();
         match self.health {
-            IndexHealth::Ready => None,
+            IndexHealth::Ready => self
+                .embedding
+                .as_ref()
+                .and_then(|embedding| embedding.semantic_readiness().degradation())
+                .map(|entry| IndexStatusDegradation {
+                    code: entry.code,
+                    severity: entry.severity,
+                    message: entry.message,
+                    repair: entry.repair.to_owned(),
+                }),
             IndexHealth::Stale => Some(IndexStatusDegradation {
                 code: "index_stale",
                 severity: "high",
@@ -13050,6 +13147,83 @@ mod tests {
             available_model_count: 0,
             selected_registry_model: None,
             vector_coverage: EmbeddingVectorCoverage::new(0, 10),
+        }
+    }
+
+    #[test]
+    fn semantic_readiness_distinguishes_missing_models_from_pending_probes() {
+        for (mode, source, semantic, embedded, total, expected) in [
+            (
+                EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
+                "frankensearch_hash_fallback",
+                false,
+                3,
+                3,
+                SemanticReadiness::ModelUnavailable,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE,
+                "remote_endpoint_unavailable",
+                false,
+                0,
+                3,
+                SemanticReadiness::ModelUnavailable,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
+                "ee_model2vec_download_pending",
+                false,
+                0,
+                3,
+                SemanticReadiness::Pending,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
+                "remote_dimension_unprobed",
+                false,
+                0,
+                3,
+                SemanticReadiness::Pending,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+                "neural_local_unconfirmed",
+                true,
+                3,
+                3,
+                SemanticReadiness::Unconfirmed,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+                "registry_observed",
+                true,
+                0,
+                3,
+                SemanticReadiness::LexicalOnly,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+                "registry_observed",
+                true,
+                1,
+                3,
+                SemanticReadiness::Available,
+            ),
+            (
+                EMBEDDING_POSTURE_MODE_NEURAL_REMOTE,
+                "remote_endpoint",
+                true,
+                0,
+                0,
+                SemanticReadiness::Available,
+            ),
+        ] {
+            let mut posture = fixture_hash_embedding_posture();
+            posture.mode = mode;
+            posture.source = source.to_owned();
+            posture.semantic = semantic;
+            posture.vector_coverage = EmbeddingVectorCoverage::new(embedded, total);
+            assert_eq!(posture.semantic_readiness(), expected, "{mode}/{source}");
         }
     }
 

@@ -47,13 +47,16 @@ use super::budget_delta_recommender::{
 };
 use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
-use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
+use super::index::{
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, SemanticReadiness, get_index_status,
+};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::search::{RegisteredRerankerResolution, resolve_registered_reranker};
 use super::singleflight::singleflight_posture_report;
 use super::status::{
-    FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
-    gather_rch_verify_ledger_status, gather_rch_worker_pressure, probe_cass_capability,
+    DegradationReport, FlightRecorderStatusReport, default_workspace_path,
+    gather_flight_recorder_status, gather_rch_verify_ledger_status, gather_rch_worker_pressure,
+    probe_cass_capability,
 };
 use super::swarm_brief::RchWorkerPressureReport;
 use super::tailscale_probe::{
@@ -308,10 +311,24 @@ pub struct DoctorReport {
     pub host_calibration: Option<HostCalibrationPostureReport>,
     /// Redaction-safe command flight-recorder posture.
     pub flight_recorder: FlightRecorderStatusReport,
+    /// Measured semantic capability of a usable index, independently of
+    /// storage health. `None` means no usable index posture was measured.
+    pub semantic_readiness: Option<SemanticReadiness>,
     pub checks: Vec<CheckResult>,
 }
 
 impl DoctorReport {
+    /// Workspace-wide retrieval diagnostics are independent of check filtering
+    /// and output verbosity. Unknown or pending readiness emits no failure.
+    #[must_use]
+    pub fn retrieval_degradations(&self) -> Vec<DegradationReport> {
+        self.semantic_readiness
+            .and_then(SemanticReadiness::degradation)
+            .into_iter()
+            .map(DegradationReport::from)
+            .collect()
+    }
+
     /// Select report checks by stable name or an error code present in this
     /// report. Selection preserves report order and never changes workspace
     /// health: hiding a failing check must not turn the overall verdict green.
@@ -379,6 +396,7 @@ impl DoctorReport {
         let verification_ledger = gather_rch_verify_ledger_status(workspace_path);
         let host_calibration = gather_host_calibration_status(workspace_path);
         let flight_recorder = gather_flight_recorder_status(workspace_path);
+        let (embedding_check, semantic_readiness) = check_embedding_posture(workspace_path);
         // CORE vs ADVISORY tiering (ADR 0081, bd-1et0v.12). CORE checks
         // (runtime / workspace / database / search index) answer the single
         // question "can ee store and retrieve memory right now?" and drive the
@@ -398,7 +416,7 @@ impl DoctorReport {
         let checks = vec![
             check_runtime(),
             check_ee_install_path(),
-            check_embedding_posture(workspace_path),
+            embedding_check,
             check_remote_embedding_endpoint(),
             check_reranker_posture(workspace_path),
             check_workspace(workspace_path),
@@ -435,6 +453,7 @@ impl DoctorReport {
             verification_ledger,
             host_calibration,
             flight_recorder,
+            semantic_readiness,
             checks,
         }
     }
@@ -3154,7 +3173,7 @@ fn embedding_env_trap_note(trap_present: &[&str], mode: &str) -> Option<String> 
 /// doctor-health tiering leaf, bd-1et0v.12). Semantic-ready is `Ok` (info);
 /// hash fallback and pending first-use downloads are `Warning` (still advisory).
 fn embedding_posture_check_result(
-    semantic: bool,
+    readiness: SemanticReadiness,
     mode: &str,
     fast_model_id: &str,
     fast_dimension: usize,
@@ -3162,24 +3181,30 @@ fn embedding_posture_check_result(
     trap_present: &[&str],
 ) -> CheckResult {
     let trap_note = embedding_env_trap_note(trap_present, mode);
-    let check = if semantic {
+    let mut check = if let Some(degradation) = readiness.degradation() {
+        CheckResult {
+            name: "embedding_posture",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "{} Active embedding mode: {mode} ({fast_model_id}, {fast_dimension}d). Degraded code: {}.",
+                degradation.message, degradation.code
+            ),
+            error_code: None,
+            repair: Some(degradation.repair),
+            tier: CheckTier::Advisory,
+        }
+    } else if readiness == SemanticReadiness::Available {
         let determinism = if deterministic { ", deterministic" } else { "" };
-        let mut message = format!(
+        let message = format!(
             "Semantic retrieval: ready ({mode}, {fast_model_id}, {fast_dimension}d{determinism}). Inspect the active mode with `ee model status` / `ee index status`."
         );
-        if let Some(note) = trap_note {
-            message.push(' ');
-            message.push_str(&note);
-        }
         CheckResult::ok("embedding_posture", message)
-    } else if mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING {
-        let mut message = format!(
+    } else if readiness == SemanticReadiness::Pending
+        && mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
+    {
+        let message = format!(
             "Semantic retrieval: bundled neural model pending first-use download (mode={mode}, {fast_model_id}, {fast_dimension}d). This is degraded-but-improving and is not deterministic-hash fallback."
         );
-        if let Some(note) = trap_note {
-            message.push(' ');
-            message.push_str(&note);
-        }
         CheckResult {
             name: "embedding_posture",
             severity: CheckSeverity::Warning,
@@ -3190,25 +3215,31 @@ fn embedding_posture_check_result(
             ),
             tier: CheckTier::Advisory,
         }
-    } else {
-        let mut message = format!(
-            "Semantic retrieval: deterministic-hash fallback (non-semantic) — the bundled neural model is not active (mode={mode}, {fast_model_id}, {fast_dimension}d). Degraded code: embed_model_unavailable."
-        );
-        if let Some(note) = trap_note {
-            message.push(' ');
-            message.push_str(&note);
-        }
+    } else if readiness == SemanticReadiness::Pending {
         CheckResult {
             name: "embedding_posture",
             severity: CheckSeverity::Warning,
-            message,
+            message: format!(
+                "Semantic retrieval: remote model dimensions have not been probed (mode={mode}, {fast_model_id}). Model availability is pending inspection."
+            ),
             error_code: None,
             repair: Some(
-                "Inspect with `ee model status`; pre-download the bundled model with `ee model fetch`; then `ee index rebuild` to re-embed. Memory still works on the deterministic-hash tier meanwhile.",
+                "Inspect the remote endpoint with `ee model status`, then run `ee index rebuild --workspace .` to probe dimensions and embed the corpus.",
             ),
             tier: CheckTier::Advisory,
         }
+    } else {
+        CheckResult::ok(
+            "embedding_posture",
+            format!(
+                "Semantic retrieval: local model activation is unconfirmed (mode={mode}, {fast_model_id}, {fast_dimension}d). Inspect with `ee model status` / `ee index status`."
+            ),
+        )
     };
+    if let Some(note) = trap_note {
+        check.message.push(' ');
+        check.message.push_str(&note);
+    }
     // Belt-and-suspenders: this check never participates in top-line health.
     check.advisory()
 }
@@ -3295,18 +3326,26 @@ fn embedding_posture_unavailable_check(trap_present: &[&str], reason: &str) -> C
 /// `EMBEDDING_MODEL` / `OPENAI_API_KEY` is set that ee silently ignores.
 /// Reuses the bd-1et0v.6 `EmbeddingPosture` helper (one source of truth) via
 /// [`get_index_status`]. Never flips top-line health.
-fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
+fn check_embedding_posture(
+    workspace_path: Option<&Path>,
+) -> (CheckResult, Option<SemanticReadiness>) {
     let trap_present = present_embedding_trap_env_vars();
     let Some(workspace_path) = workspace_path else {
-        return embedding_posture_unavailable_check(&trap_present, "no workspace path");
+        return (
+            embedding_posture_unavailable_check(&trap_present, "no workspace path"),
+            None,
+        );
     };
     // bd-xa6ud / bd-wswg0: get_index_status opens the store read-write; this
     // check runs before check_database, so on an empty or unreadable store it
     // would write to it first. Report the posture as unavailable instead.
     if let Some((_, reason)) = database_unreadable(workspace_path) {
-        return embedding_posture_unavailable_check(
-            &trap_present,
-            &format!("{reason}; see the database check"),
+        return (
+            embedding_posture_unavailable_check(
+                &trap_present,
+                &format!("{reason}; see the database check"),
+            ),
+            None,
         );
     }
     let options = IndexStatusOptions {
@@ -3315,30 +3354,48 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
         index_dir: None,
     };
     match get_index_status(&options) {
-        Ok(report) => match &report.embedding {
-            Some(posture) => with_semantic_weight_lint_advisory(
-                with_model_receipt_stale_advisory(
-                    embedding_posture_check_result(
-                        posture.semantic,
-                        posture.mode,
-                        &posture.fast_model_id,
-                        posture.fast_dimension,
-                        posture.deterministic,
-                        &trap_present,
-                    ),
-                    !super::index::stale_receipt_potion_model_dirs().is_empty(),
-                ),
-                workspace_path,
-                posture.deterministic,
-            ),
-            None => embedding_posture_unavailable_check(
+        Ok(report) if report.health != IndexHealth::Ready => (
+            embedding_posture_unavailable_check(
                 &trap_present,
-                "index has no embedding posture yet (run `ee index rebuild`)",
+                &format!(
+                    "search index is {}; see the search_index check",
+                    report.health.as_str()
+                ),
+            ),
+            None,
+        ),
+        Ok(report) => match &report.embedding {
+            Some(posture) => {
+                let readiness = posture.semantic_readiness();
+                let check = with_semantic_weight_lint_advisory(
+                    with_model_receipt_stale_advisory(
+                        embedding_posture_check_result(
+                            readiness,
+                            posture.mode,
+                            &posture.fast_model_id,
+                            posture.fast_dimension,
+                            posture.deterministic,
+                            &trap_present,
+                        ),
+                        !super::index::stale_receipt_potion_model_dirs().is_empty(),
+                    ),
+                    workspace_path,
+                    posture.deterministic,
+                );
+                (check, Some(readiness))
+            }
+            None => (
+                embedding_posture_unavailable_check(
+                    &trap_present,
+                    "index has no embedding posture yet (run `ee index rebuild`)",
+                ),
+                None,
             ),
         },
-        Err(error) => {
-            embedding_posture_unavailable_check(&trap_present, &format!("index status: {error}"))
-        }
+        Err(error) => (
+            embedding_posture_unavailable_check(&trap_present, &format!("index status: {error}")),
+            None,
+        ),
     }
 }
 
@@ -6412,6 +6469,7 @@ mod tests {
     #[test]
     fn doctor_only_selects_names_and_codes_without_changing_health() -> TestResult {
         let report = DoctorReport {
+            semantic_readiness: None,
             version: "0.18.0",
             overall_healthy: false,
             posture: Posture::Blocked,
@@ -6490,6 +6548,7 @@ mod tests {
     #[test]
     fn fix_plan_is_empty_when_all_healthy() -> TestResult {
         let report = DoctorReport {
+            semantic_readiness: None,
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
@@ -6517,6 +6576,7 @@ mod tests {
     #[test]
     fn fix_plan_default_guidance_defers_agent_root_inspection() -> TestResult {
         let report = DoctorReport {
+            semantic_readiness: None,
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
@@ -6562,6 +6622,7 @@ mod tests {
             version: "0.1.0",
             overall_healthy: false,
             posture: Posture::DegradedRecoverable,
+            semantic_readiness: None,
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
@@ -7274,6 +7335,7 @@ mod tests {
     fn doctor_report_struct_carries_posture_alongside_overall_healthy() {
         // Regression: the new `posture` field is wired into the report.
         let report = DoctorReport {
+            semantic_readiness: None,
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
@@ -7295,7 +7357,7 @@ mod tests {
     #[test]
     fn embedding_posture_semantic_is_info_advisory_and_topline_healthy() {
         let check = embedding_posture_check_result(
-            true,
+            SemanticReadiness::Available,
             "neural_local",
             "potion-multilingual-128M",
             256,
@@ -7316,7 +7378,7 @@ mod tests {
     fn stale_model_receipt_is_an_advisory_warning_with_the_fetch_repair() {
         let ready = || {
             embedding_posture_check_result(
-                true,
+                SemanticReadiness::Available,
                 "neural_local",
                 "potion-multilingual-128M",
                 256,
@@ -7350,7 +7412,7 @@ mod tests {
     #[test]
     fn embedding_posture_hash_fallback_is_advisory_warning_but_never_flips_health() {
         let check = embedding_posture_check_result(
-            false,
+            SemanticReadiness::ModelUnavailable,
             "deterministic_hash",
             "fnv1a-256",
             256,
@@ -7369,7 +7431,7 @@ mod tests {
     #[test]
     fn embedding_posture_pending_download_is_advisory_warning_not_hash_fallback() {
         let check = embedding_posture_check_result(
-            false,
+            SemanticReadiness::Pending,
             EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING,
             "potion-multilingual-128M",
             256,
@@ -7390,9 +7452,57 @@ mod tests {
     }
 
     #[test]
+    fn embedding_posture_with_zero_vectors_discloses_lexical_only_retrieval() {
+        let check = embedding_posture_check_result(
+            SemanticReadiness::LexicalOnly,
+            "neural_local",
+            "potion-multilingual-128M",
+            256,
+            true,
+            &[],
+        );
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("search_lexical_only"));
+        assert!(check.message.contains("no embedded vectors"));
+        assert!(!check.message.contains("Semantic retrieval: ready"));
+        assert!(!check.message.contains("embed_model_unavailable"));
+        assert_eq!(check.repair, Some("Run `ee index rebuild --workspace .`."));
+    }
+
+    #[test]
+    fn embedding_posture_unknown_activation_never_claims_ready_or_unavailable() {
+        for (readiness, mode, expected_message) in [
+            (
+                SemanticReadiness::Pending,
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED,
+                "remote model dimensions have not been probed",
+            ),
+            (
+                SemanticReadiness::Unconfirmed,
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+                "local model activation is unconfirmed",
+            ),
+        ] {
+            let check =
+                embedding_posture_check_result(readiness, mode, "test-model", 256, true, &[]);
+            assert_eq!(check.tier, CheckTier::Advisory);
+            assert!(check.is_topline_healthy());
+            assert!(check.message.contains(expected_message));
+            assert!(!check.message.contains("Semantic retrieval: ready"));
+            assert!(!check.message.contains("embed_model_unavailable"));
+            assert!(!check.message.contains("search_lexical_only"));
+        }
+        let (check, readiness) = check_embedding_posture(None);
+        assert!(check.is_topline_healthy());
+        assert!(readiness.is_none());
+    }
+
+    #[test]
     fn embedding_posture_discloses_the_env_trap() {
         let check = embedding_posture_check_result(
-            true,
+            SemanticReadiness::Available,
             "neural_local",
             "potion-multilingual-128M",
             256,

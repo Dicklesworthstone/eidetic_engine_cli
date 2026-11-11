@@ -5,24 +5,20 @@
     "bead": "bd-status-search-lexical-honesty-ejdpo",
     "epic_letter": "J"
   },
-  "surfaces": ["status"],
+  "surfaces": ["index status", "status", "doctor"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The workspace search index is healthy (IndexHealth::Ready), but the active embedder reports semantic=false — the deterministic-hash fallback — or a semantic embedder is active over a non-empty corpus with zero embedded vectors. Either way every retrieval is served by the lexical arm alone, which under-recalls paraphrases and synonyms of indexed content. Before this code existed, `ee status` reported `search: ok` in exactly this state. The two causes differ in weight and repair (bd-rzfov): with zero embedded vectors the search row is degraded_recoverable and `ee index rebuild` embeds the corpus; under the hash fallback the search row stays ok (ADR 0081 D1: an honest hash fallback must not degrade the top-line), the code is still reported here, and the repair is to fetch the model before rebuilding, because a rebuild alone re-embeds with the same hash embedder.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json",
-      "export EE_EMBED_DOWNLOAD=off"
-    ],
-    "invocation": "EE_EMBED_DOWNLOAD=off ee status --workspace . --json"
+    "description": "The workspace search index is healthy (IndexHealth::Ready) and a confirmed semantic embedder is active, but a non-empty corpus has zero embedded vectors. Retrieval therefore uses only the lexical arm and under-recalls paraphrases and synonyms. The status search row is degraded_recoverable; index storage health remains ready and doctor keeps semantic capability advisory. A rebuild embeds the corpus. The fixture requires a ready lexical index with semantic=true and vector_coverage={embedded:0,total:3}; ready_index_and_workspace_status_agree_on_semantic_degradations constructs this state deterministically without downloads. There is no portable CLI-only setup for this incomplete-vector state. Missing-model hash fallback is instead reported as embed_model_unavailable and requires restoring or fetching the model first. Pending or unconfirmed probes emit neither code.",
+    "setup_commands": [],
+    "invocation": "ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "search_lexical_only",
     "severity": "medium",
     "message_contains": ["semantic retrieval is unavailable", "lexical fallback"],
-    "repair_contains": "ee model fetch",
-    "repair_string": "Run `ee model fetch`, then `ee index rebuild --workspace .`.",
+    "repair_contains": "ee index rebuild --workspace .",
+    "repair_string": "Run `ee index rebuild --workspace .`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

@@ -5,11 +5,11 @@
     "bead": "bd-3qs2i.4.1",
     "epic_letter": "F4"
   },
-  "surfaces": ["search", "context"],
+  "surfaces": ["search", "context", "index status", "status", "doctor"],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "The default semantic path is neural-local via Frankensearch Model2Vec (potion-multilingual-128M). This degradation occurs when that bundled model cannot be loaded or downloaded, when EE_EMBED_MODEL_PATH explicitly points at a missing fault-injection path, or in the rare deterministic-hash fallback posture where the active embedder reports semantic=false while lexical fallback remains available.",
+    "description": "The default semantic path is neural-local via Frankensearch Model2Vec (potion-multilingual-128M). This degradation occurs when that bundled model cannot be loaded or downloaded, when EE_EMBED_MODEL_PATH explicitly points at a missing fault-injection path, or when the active embedder has fallen back to deterministic hash while lexical retrieval remains available. Ready-index diagnostics in index status, status, and doctor share this code without marking the usable lexical index unhealthy; their repair restores the configured remote endpoint or fetches the local model before rebuilding. Pending downloads, unprobed remote dimensions, and unconfirmed local activation do not establish model unavailability. The expected emission below pins the search invocation.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json",

@@ -145,10 +145,10 @@ suite_environment_line() {
 # Arm: bd-status-search-lexical-honesty-ejdpo
 #
 # A healthy index whose embedder fell back to the deterministic hash backend
-# serves every result from the lexical arm alone. Before e91c115fc, `ee status`
-# reported that state as `search: ok` — silent under-recall behind a green
-# banner. Trigger and expected emission are taken from the bead's own fixture
-# at tests/fixtures/failure_modes/search_lexical_only.json.
+# serves every result from the lexical arm alone. Core memory health stays ok
+# (ADR 0081 D1), while a structured warning discloses the missing semantic
+# capability. The model fault trigger is documented in
+# tests/fixtures/failure_modes/embed_model_unavailable.json.
 # ---------------------------------------------------------------------------
 arm_status_lexical_honesty() {
     local bead="bd-status-search-lexical-honesty-ejdpo"
@@ -156,7 +156,7 @@ arm_status_lexical_honesty() {
     ws="$(arm_workspace "$bead" status_lexical_honesty)"
     started="$(now_ms)"
 
-    step "[$bead] status reports lexical-only retrieval, not a green search banner"
+    step "[$bead] status discloses the unavailable semantic model while lexical retrieval stays usable"
     ee_in "$ws" init --json >/dev/null
     ee_in "$ws" remember "Cargo workspace uses Rust nightly." \
         --level semantic --kind fact --json >/dev/null
@@ -165,27 +165,34 @@ arm_status_lexical_honesty() {
     # FUNCTION call persists after the call returns, which would silently leak
     # EE_EMBED_DOWNLOAD=off into every later arm and change what they measure.
     local status_json
-    status_json="$( export EE_EMBED_DOWNLOAD=off; ee_in "$ws" status --json )"
+    status_json="$(
+        export EE_EMBED_DOWNLOAD=off
+        export EE_EMBED_MODEL_PATH="$ws/missing-model"
+        ee_in "$ws" index rebuild --json >/dev/null
+        ee_in "$ws" status --json
+    )"
 
     log_event arm_act bead_id "$bead" phase act check status_probe \
         workspace "$ws" host "$SUITE_HOST"
 
     assert_jq "$status_json" \
-        '[.degraded[]? | select(.code == "search_lexical_only")] | length == 1' \
-        "$bead: status emits search_lexical_only exactly once"
+        '[.degraded[]? | select(.code == "embed_model_unavailable")] | length == 1' \
+        "$bead: status emits embed_model_unavailable exactly once"
     assert_jq "$status_json" \
-        '[.degraded[]? | select(.code == "search_lexical_only" and .severity == "medium")] | length == 1' \
-        "$bead: search_lexical_only carries medium severity"
+        '[.degraded[]? | select(.code == "embed_model_unavailable" and .severity == "warning")] | length == 1' \
+        "$bead: embed_model_unavailable carries warning severity"
     assert_jq "$status_json" \
-        '[.degraded[]? | select(.code == "search_lexical_only")
+        '[.degraded[]? | select(.code == "embed_model_unavailable")
+          | select(.repair | tostring | test("ee model fetch"))
           | select(.repair | tostring | test("ee index rebuild"))] | length == 1' \
-        "$bead: search_lexical_only carries an actionable repair"
+        "$bead: embed_model_unavailable fetches the model before rebuilding"
 
-    # The honesty half: the banner must not simultaneously claim plain readiness.
+    # The reduced capability is explicit without marking usable lexical search unhealthy.
     assert_jq "$status_json" \
-        '([.degraded[]? | select(.code == "search_lexical_only")] | length == 1)
+        '([.degraded[]? | select(.code == "embed_model_unavailable")] | length == 1)
+         and ([.data.posture.subsystems[]? | select(.id == "search" and .status == "ok")] | length == 1)
          and (.success == true)' \
-        "$bead: lexical-only is reported as a degradation on a successful read"
+        "$bead: semantic fallback is advisory on a successful read with healthy lexical search"
 
     log_event arm_done bead_id "$bead" phase assert check status_lexical_honesty \
         verdict recorded workspace "$ws" host "$SUITE_HOST" \

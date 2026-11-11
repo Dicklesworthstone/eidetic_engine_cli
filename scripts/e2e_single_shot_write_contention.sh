@@ -239,8 +239,18 @@ if [[ "${index_rc}" -eq 0 ]] && jq -e --argjson expected_memories "${expected_me
     and (.data.actualCorpusRevision | type) == "string"
     and (.data.expectedCorpusRevision | type) == "string"
     and .data.actualCorpusRevision == .data.expectedCorpusRevision
-    and .data.degradationCode == null
-    and .data.degraded == []
+    and (
+        .data.degradationCode == null
+        or (.data.degradationCode == "embed_model_unavailable"
+            and .data.embedding.semantic == false)
+        or (.data.degradationCode == "search_lexical_only"
+            and .data.embedding.semantic == true
+            and .data.embedding.vector_coverage.total > 0
+            and .data.embedding.vector_coverage.embedded == 0)
+    )
+    and (.data.degraded | type) == "array"
+    and ([.data.degraded[].code]
+        == (if .data.degradationCode == null then [] else [.data.degradationCode] end))
     and .data.repairHint == null
     and .data.lastCheckError == null
 ' <<<"${index_json}" >/dev/null; then
