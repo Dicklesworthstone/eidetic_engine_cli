@@ -514,6 +514,72 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ./scripts/release_binary_probe.sh --self-test
 
+      # bd-reality-core-convergence-1azkt.74: wire the seven pure-Python static
+      # gates (each with its --self-test prerequisite step) so local dsr/act
+      # executions of ci-static.yml and scripts/verify.sh stay in lockstep.
+      - name: ADR evidence citations --self-test
+        id: adr_citations_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-adr-evidence-citations.py --self-test
+
+      - name: ADR evidence citations
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.adr_citations_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-adr-evidence-citations.py
+
+      - name: Boundary inventory coverage --self-test
+        id: boundary_inventory_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-boundary-inventory-coverage.py --self-test
+
+      - name: Boundary inventory coverage
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.boundary_inventory_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-boundary-inventory-coverage.py
+
+      - name: Dead exit-code handlers --self-test
+        id: dead_handlers_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-dead-exit-code-handlers.py --self-test
+
+      - name: Dead exit-code handlers
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.dead_handlers_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-dead-exit-code-handlers.py
+
+      - name: Deleted symbol orphans --self-test
+        id: deleted_symbols_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-deleted-symbol-orphans.py --self-test
+
+      - name: Deleted symbol orphans
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.deleted_symbols_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-deleted-symbol-orphans.py
+
+      - name: E2E execution coverage --self-test
+        id: e2e_exec_coverage_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-e2e-execution-coverage.py --self-test
+
+      - name: E2E execution coverage
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.e2e_exec_coverage_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-e2e-execution-coverage.py
+
+      - name: Freshness vocabulary --self-test
+        id: freshness_vocab_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-freshness-vocabulary.py --self-test
+
+      - name: Freshness vocabulary
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.freshness_vocab_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-freshness-vocabulary.py
+
+      - name: Open-coded success baseline --self-test
+        id: open_coded_baseline_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-open-coded-success-baseline.py --self-test
+
+      - name: Open-coded success baseline
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.open_coded_baseline_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-open-coded-success-baseline.py
+
   # bd-ci-static-covers-no-cargo. Operator decision 2026-09-26: "Add clippy to
   # CI Static". The job above is cargo-free, and ci.yml is disabled_manually,
   # so NOTHING hosted compiled main. In the 24 hours before this job, three

@@ -1,0 +1,53 @@
+{
+  "absent_surface_cases": {
+    "absent": {
+      "reason": "evidence admission absent from this ee's import response; looked for evidence_admission, evidenceAdmission",
+      "status": "unavailable"
+    },
+    "present": {
+      "admitted": 988,
+      "quarantined": 3021
+    },
+    "zero_preserved": 0
+  },
+  "bead": "bd-reality-core-convergence-1azkt.67",
+  "describe_envelope_cases": {
+    "error_envelope_with_degraded": "code=index_incompatible; message=index generation does not match schema; repair=run `ee index rebuild`; degraded=lexical_only_fallback",
+    "no_json_stdout": "no JSON on stdout",
+    "no_json_stdout_with_stderr": "no JSON on stdout; stderr=fatal panic"
+  },
+  "provisioning_refusal_code": "real_corpus_cass_unavailable",
+  "registered_env_vars": {
+    "download": "EE_EMBED_DOWNLOAD",
+    "model_dir": "EE_EMBED_MODEL_DIR",
+    "model_env_both": {
+      "EE_EMBED_DOWNLOAD": "off",
+      "EE_EMBED_MODEL_DIR": "/m"
+    },
+    "model_env_none": {}
+  },
+  "schema": "ee.real_corpus_probe.fail_closed_contract.v1",
+  "zero_guard_cases": {
+    "empty_corpus": "empty world: corpus holds 0 records and 40 judged queries, so no metric computed from it is a measurement",
+    "healthy": null,
+    "packed_items_zero_without_degraded": "packed items measured 0 on a corpus of 4009 records and 40 judged queries, which must not be empty; publishing it as a metric would make a harness failure indistinguishable from a product failure. no degraded codes were reported, so look at the harness first",
+    "scale_recall_zero_allowed": null,
+    "scenario_hit_zero_with_degraded": "scenario_hit_at_5 measured 0.0 on a corpus of 4009 records and 40 judged queries, which must not be empty; publishing it as a metric would make a harness failure indistinguishable from a product failure. degraded codes observed: index_incompatible",
+    "utr_null_without_degraded": "UTR measured None on a corpus of 4009 records and 40 judged queries, which must not be empty; publishing it as a metric would make a harness failure indistinguishable from a product failure. no degraded codes were reported, so look at the harness first",
+    "zero_judged_queries": "empty world: corpus holds 4009 records and 0 judged queries, so no metric computed from it is a measurement"
+  },
+  "zero_guarded_metrics": [
+    {
+      "label": "scenario_hit_at_5",
+      "path": "scenario_hit_at_5.value"
+    },
+    {
+      "label": "packed items",
+      "path": "FAR.packed_items"
+    },
+    {
+      "label": "UTR",
+      "path": "UTR.value"
+    }
+  ]
+}

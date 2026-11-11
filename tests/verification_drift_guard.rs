@@ -1887,7 +1887,7 @@ fn drift_guard_recognizes_open_closure_lint_tracking_bead() {
     .expect("write closure report");
     fs::write(
         temp.path().join(".beads/issues.jsonl"),
-        r#"{"id":"bd-track","title":"closure-lint verifier blocker","status":"open","labels":["verify"],"description":"Tracks closure linter violations until remediation lands."}"#,
+        r#"{"id":"bd-track","title":"closure-lint verifier blocker","status":"open","labels":["verify"],"description":"Tracks closure linter violations on closed-demo (surface demo) until remediation lands."}"#,
     )
     .expect("write beads fixture");
 
@@ -1903,6 +1903,49 @@ fn drift_guard_recognizes_open_closure_lint_tracking_bead() {
     let parsed: serde_json::Value = serde_json::from_str(&report).expect("parse drift report");
     assert_eq!(parsed["status"], "pass", "tracked closure-lint report");
     assert_eq!(parsed["count"], 0, "tracked closure-lint drift count");
+}
+
+#[test]
+fn drift_guard_refuses_untracked_closure_lint_violation_even_when_unrelated_open_bead_mentions_closure_lint()
+ {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".beads")).expect("create .beads");
+    fs::write(
+        temp.path().join(".closure-lint-report.json"),
+        r#"{"violations":[{"bead":"closed-demo","label":"implements-surface","surface":"demo","reason":"missing demo.snap"},{"bead":"closed-untracked","label":"implements-surface","surface":"untracked-surf","reason":"missing untracked-surf.snap"}],"count":2,"status":"fail"}"#,
+    )
+    .expect("write closure report");
+    fs::write(
+        temp.path().join(".beads/issues.jsonl"),
+        concat!(
+            r#"{"id":"bd-track","title":"closure-lint verifier blocker","status":"open","labels":["verify"],"description":"Tracks closure linter violations on closed-demo until remediation lands."}"#,
+            "\n",
+            r#"{"id":"bd-unrelated","title":"Unify readiness across status and doctor","status":"open","labels":["status"],"description":"Verification gates: run closure lint and drift guard on closed-untracked."}"#,
+            "\n"
+        ),
+    )
+    .expect("write beads fixture");
+
+    let output = run_drift_guard_at(temp.path(), &["--gate=closure-lint", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "untracked closure-lint violation must fail drift guard even when another violation is tracked or an unrelated bead mentions closure lint in description\n{}",
+        output_excerpt(&output)
+    );
+
+    let report_path = temp.path().join(".verification-drift-report.json");
+    let report = fs::read_to_string(&report_path).expect("read drift report");
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("parse drift report");
+    assert_eq!(parsed["status"], "fail", "untracked closure-lint report");
+    assert_eq!(parsed["count"], 1, "untracked closure-lint drift count");
+    let reason = parsed["driftViolations"][0]["reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.contains("closed-untracked"),
+        "drift reason must name the untracked violating bead: {reason}"
+    );
 }
 
 /// An unrecognized `--gate` name must be REFUSED, never reported clean.

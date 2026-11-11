@@ -1905,8 +1905,8 @@ run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 # Gate 2: Closure Discipline
 run_stage "Closure Linter" "closure_lint_or_tracked_drift"
 
-# Gate 2.5: Drift Guard (ensures red gates have tracking beads)
-run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verification-drift-guard.sh --json"
+# Gate 2.5: Drift Guard (ensures red gates have tracking beads, self-tested first)
+run_stage "Verification Drift Guard" "./scripts/verification-drift-guard.sh --self-test && with_beads_read_locks ./scripts/verification-drift-guard.sh --json"
 
 # Gate 3: Snapshot Proposal Guard
 run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
@@ -2166,7 +2166,7 @@ run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation
 # it would red 111 surfaces in a gate that blocks -- it enforces a FLOOR on the
 # number read, so the two that are load-bearing cannot be deleted silently.
 # bd-qzr0v owns what each unread artifact should become.
-run_stage "Golden Consumption Floor (bd-qzr0v)" "python3 scripts/check-golden-consumption.py"
+run_stage "Golden Consumption Floor (bd-qzr0v)" "python3 scripts/check-golden-consumption.py --self-test && python3 scripts/check-golden-consumption.py"
 # This repository is PUBLIC and its one disclosure control could not be run by
 # the person about to publish. `tests/fleet_identifier_guard.rs` ends in
 # `assert!(total_violations == 0)` and was RED at HEAD on 1173 carrying lines
@@ -2212,6 +2212,19 @@ run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remedia
 run_stage "Real-Shape Probe Fail-Closed Contract (1azkt.67)" "python3 scripts/real_shape_corpus/probe.py --self-test"
 run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
 run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
+
+# Gate 3.90505: the seven pure-Python static gates that were committed without
+# a caller in verify.sh or ci-static.yml (bd-reality-core-convergence-1azkt.74).
+# Each stage runs its deterministic `--self-test` first and then evaluates the
+# live repository, and `check-e2e-execution-coverage.py` now enforces that no
+# executable `scripts/check-*.py` gate can sit omitted from `scripts/verify.sh`.
+run_stage "ADR Evidence Citations Contract" "python3 scripts/check-adr-evidence-citations.py --self-test && python3 scripts/check-adr-evidence-citations.py"
+run_stage "Boundary Inventory Coverage Contract" "python3 scripts/check-boundary-inventory-coverage.py --self-test && python3 scripts/check-boundary-inventory-coverage.py"
+run_stage "Dead Exit-Code Handlers Contract" "python3 scripts/check-dead-exit-code-handlers.py --self-test && python3 scripts/check-dead-exit-code-handlers.py"
+run_stage "Deleted Symbol Orphans Contract" "python3 scripts/check-deleted-symbol-orphans.py --self-test && python3 scripts/check-deleted-symbol-orphans.py"
+run_stage "E2E Execution Coverage Contract" "python3 scripts/check-e2e-execution-coverage.py --self-test && python3 scripts/check-e2e-execution-coverage.py"
+run_stage "Freshness Vocabulary Contract" "python3 scripts/check-freshness-vocabulary.py --self-test && python3 scripts/check-freshness-vocabulary.py"
+run_stage "Open-Coded Success Baseline Contract" "python3 scripts/check-open-coded-success-baseline.py --self-test && python3 scripts/check-open-coded-success-baseline.py"
 
 # Gate 3.9051: jq `//` and negation vacuity (bd-9h1z5, class fixed under bd-o8e1n).
 #

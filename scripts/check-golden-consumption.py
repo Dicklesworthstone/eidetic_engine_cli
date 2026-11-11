@@ -92,10 +92,11 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: The floor. Raise it in the same commit that adds a consumer; never lower it.
 #:
-#: 2 on 2026-10-28, the measured count. This is NOT a target -- 113 would be the
-#: wrong target, since most of these artifacts are declarations. It is a tripwire
-#: against losing the two that are real.
-READ_FLOOR = 2
+#: 2 on 2026-10-28, raised to 3 on 2026-11-11 when probe.py --self-test wired
+#: consumption of tests/golden/probe-fail-closed.snap (bd-qzr0v / .67). This is
+#: NOT a target -- 114 would be the wrong target, since most of these artifacts
+#: are declarations. It is a tripwire against losing the three that are real.
+READ_FLOOR = 3
 
 #: Directories searched for consumers. Kept explicit rather than "the whole
 #: repo": a mention in docs/ or in a bead is not a consumer, and counting one
@@ -292,9 +293,10 @@ def self_test() -> int:
     # THE FLOOR, BOTH POLARITIES. Without the failing arm the floor could be
     # removed and every run would still pass.
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap", "b.snap"], {
+        root = tree(tmp, ["a.snap", "b.snap", "c.snap"], {
             "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
-                        'include_str!("../tests/golden/b.snap");\n',
+                        'include_str!("../tests/golden/b.snap");\n'
+                        'include_str!("../tests/golden/c.snap");\n',
         })
         code, text = report(root)
         arm("meeting the floor exactly exits 0",
@@ -304,16 +306,20 @@ def self_test() -> int:
     # a run that MET the floor, so the arm failed on correct code -- the test was
     # wrong, not the gate.
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap", "b.snap", "c.snap"], {
+        root = tree(tmp, ["a.snap", "b.snap", "c.snap", "d.snap"], {
             "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
                         'include_str!("../tests/golden/b.snap");\n'
-                        'include_str!("../tests/golden/c.snap");\n',
+                        'include_str!("../tests/golden/c.snap");\n'
+                        'include_str!("../tests/golden/d.snap");\n',
         })
         code, text = report(root)
         arm("exceeding the floor says the floor is STALE and still exits 0",
             code == 0 and "floor is STALE" in text)
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap"], {"src/x.rs": "fn main() {}\n"})
+        root = tree(tmp, ["a.snap", "b.snap"], {
+            "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
+                        'include_str!("../tests/golden/b.snap");\n',
+        })
         code, text = report(root)
         arm("falling BELOW the floor exits 1", code == 1)
         arm("the failure names the floor and says it only rises",
@@ -332,8 +338,12 @@ def self_test() -> int:
     live = census(REPO_ROOT)
     arm("the live tree reports a non-empty denominator",
         len(live["artifacts"]) > 50)
-    arm("the live tree's read set is exactly the two measured consumers",
-        sorted(live["read"]) == ["plan-decisioning.snap", "skyline.snap"])
+    arm("the live tree's read set is exactly the three measured consumers",
+        sorted(live["read"]) == [
+            "plan-decisioning.snap",
+            "probe-fail-closed.snap",
+            "skyline.snap",
+        ])
 
     failed = arms.count(False)
     print()

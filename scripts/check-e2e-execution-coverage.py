@@ -640,12 +640,65 @@ def evaluate(root: pathlib.Path) -> dict:
 
     return {
         "root": root,
+        "tracked": tracked,
         "population": pop,
         "sites": sites,
         "verdicts": verdicts,
         "scanned_rust": scanned_rust,
         "scanned_other": scanned_other,
     }
+
+
+def check_python_gate_wiring(root: pathlib.Path, tracked: list[str]) -> list[str]:
+    """Ensure every executable scripts/check-*.py gate is invoked by scripts/verify.sh.
+
+    bd-reality-core-convergence-1azkt.74. Seven scripts/check-*.py gates were
+    committed with zero callers in scripts/verify.sh or .github/workflows/ci-static.yml.
+    A file under scripts/check-*.py carries a Python shebang when it is a
+    standalone gate (excluding synthetic non-shebang fixture files in self-test).
+    """
+    verify_path = root / "scripts/verify.sh"
+    if not verify_path.exists():
+        return []
+    verify_text = verify_path.read_text(errors="replace")
+    py_gates: list[str] = []
+    for rel in sorted(tracked):
+        if not re.fullmatch(r"scripts/check-[^/]*\.py\Z", rel):
+            continue
+        p = root / rel
+        try:
+            first_line = p.read_text(errors="replace").splitlines()[0]
+        except (OSError, IndexError):
+            continue
+        if first_line.startswith("#!") and "python" in first_line:
+            py_gates.append(rel)
+
+    if not py_gates:
+        return []
+
+    needles = {gate: needle_for(gate) for gate in py_gates}
+    executed: set[str] = set()
+    for raw in verify_text.splitlines():
+        if ".py" not in raw:
+            continue
+        line = strip_shell_comment(raw)
+        if not line.strip():
+            continue
+        for gate, needle in needles.items():
+            for match in needle.finditer(line):
+                if not is_message_context(line, match.start()):
+                    executed.add(gate)
+                    break
+
+    problems: list[str] = []
+    for gate in py_gates:
+        if gate not in executed:
+            problems.append(
+                f"{gate}: executable Python static gate is not invoked by "
+                "scripts/verify.sh (bd-reality-core-convergence-1azkt.74); "
+                "wire it into scripts/verify.sh and scripts/verify-budget.toml"
+            )
+    return problems
 
 
 def run(root: pathlib.Path, verbose: bool = True) -> int:
@@ -775,6 +828,8 @@ def run(root: pathlib.Path, verbose: bool = True) -> int:
             f"{REGISTRY_REL} with the test that covers its text and what that "
             "leaves unproven"
         )
+
+    failures.extend(check_python_gate_wiring(data["root"], data["tracked"]))
 
     if verbose and declared_scripts:
         say(f"declared text-conformance-only ({len(declared_scripts)}):")
@@ -1422,6 +1477,51 @@ def self_test() -> int:
             "an empty population is CANNOT ANSWER, not a vacuous pass",
             root,
             EXIT_CANNOT,
+        )
+
+        # ---- executable scripts/check-*.py wiring into scripts/verify.sh (1azkt.74) ----
+        root = case(
+            {
+                "scripts/check-unwired.py": "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n",
+            }
+        )
+        failed += not _arm(
+            "an executable scripts/check-*.py gate omitted from scripts/verify.sh is RED",
+            root,
+            EXIT_RED,
+        )
+
+        root = case(
+            {
+                "scripts/check-unwired.py": "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n",
+                "scripts/verify.sh": (
+                    "#!/usr/bin/env bash\n"
+                    'run_stage "Control" "./scripts/e2e_control_shell.sh"\n'
+                    "# python3 scripts/check-unwired.py is commented out\n"
+                    'echo "skipping scripts/check-unwired.py"\n'
+                ),
+            }
+        )
+        failed += not _arm(
+            "a scripts/check-*.py gate named only in a comment or echo in verify.sh is RED",
+            root,
+            EXIT_RED,
+        )
+
+        root = case(
+            {
+                "scripts/check-unwired.py": "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n",
+                "scripts/verify.sh": (
+                    "#!/usr/bin/env bash\n"
+                    'run_stage "Control" "./scripts/e2e_control_shell.sh"\n'
+                    'run_stage "Unwired Contract" "python3 scripts/check-unwired.py"\n'
+                ),
+            }
+        )
+        failed += not _arm(
+            "an executable scripts/check-*.py gate invoked by scripts/verify.sh is OK",
+            root,
+            EXIT_OK,
         )
 
     print()

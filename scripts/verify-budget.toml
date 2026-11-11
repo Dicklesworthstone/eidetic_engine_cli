@@ -378,7 +378,11 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Closure Linter"
-expected_seconds_p50 = 12
+# RE-MEASURED from 12 to 5 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 3.920, 3.907, 3.905, 3.877, 3.934s
+# (median 3.907s, max 3.934s). Declaring 5s puts the hard-fail line at 15s
+# (~3.8x the slowest observed sample) while freeing 7s of over-declared budget.
+expected_seconds_p50 = 5
 regression_factor = 1.5
 
 [[stage]]
@@ -445,7 +449,10 @@ regression_factor = 1.5
 
 [[stage]]
 name = "E2E Event Contract Radar Contract"
-expected_seconds_p50 = 3
+# RE-MEASURED from 3 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.120, 0.109, 0.109, 0.109, 0.109s
+# (median 0.109s, max 0.120s). Declares 1s (hard-fail 3s, 25x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
@@ -460,12 +467,18 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Agent Mail Snapshot Contract"
-expected_seconds_p50 = 3
+# RE-MEASURED from 3 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.164, 0.093, 0.098, 0.094, 0.094s
+# (median 0.094s, max 0.164s). Declares 1s (hard-fail 3s, >18x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
 name = "Panic Helper Radar Contract"
-expected_seconds_p50 = 3
+# RE-MEASURED from 3 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.202, 0.181, 0.179, 0.178, 0.178s
+# (median 0.179s, max 0.202s). Declares 1s (hard-fail 3s, >14x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
@@ -495,7 +508,10 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Release Provenance Contract"
-expected_seconds_p50 = 5
+# RE-MEASURED from 5 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.055, 0.045, 0.047, 0.045, 0.046s
+# (median 0.046s, max 0.055s). Declares 1s (hard-fail 3s, >54x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
@@ -737,6 +753,55 @@ name = "Step Assertion Isolation Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+# Seven previously orphaned pure-Python static gates wired into verify.sh on
+# 2026-11-11 (bd-reality-core-convergence-1azkt.74). Each stage runs its
+# `--self-test` arm followed by the live repository scan. Timed over three
+# consecutive runs on mac-dev-1; funded by re-measuring seven over-declared
+# no-Cargo local stages above and below (605 -> 584 -> 602 against the 608
+# ceiling, leaving 6s of headroom).
+
+[[stage]]
+name = "ADR Evidence Citations Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=1.040,0.800,0.816 median_s=0.816 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Boundary Inventory Coverage Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=0.063,0.062,0.061 median_s=0.062 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Dead Exit-Code Handlers Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=0.784,0.787,0.787 median_s=0.787 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Deleted Symbol Orphans Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=0.105,0.105,0.095 median_s=0.105 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "E2E Execution Coverage Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=7.710,7.753,8.102 median_s=7.753 declared_p50_s=8
+expected_seconds_p50 = 8
+regression_factor = 1.5
+
+[[stage]]
+name = "Freshness Vocabulary Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=4.862,4.650,4.602 median_s=4.650 declared_p50_s=5
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Open-Coded Success Baseline Contract"
+# P50_PROVENANCE measured=2026-11-11 host=mac-dev-1 load=2.10 samples_s=0.137,0.137,0.138 median_s=0.137 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 # The two jq-vacuity stages (bd-9h1z5, 2026-10-22). Two seconds declared for a
 # pair of scans measured at 0.08s and 0.11s, following the convention of the
 # group above: a sub-second static check declares 1s.
@@ -780,12 +845,18 @@ regression_factor = 1.5
 
 [[stage]]
 name = "RCH Portability Diagnostic Contract"
-expected_seconds_p50 = 3
+# RE-MEASURED from 3 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.057, 0.052, 0.052, 0.052, 0.052s
+# (median 0.052s, max 0.057s). Declares 1s (hard-fail 3s, >52x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
 name = "Package Artifact Leak Contract"
-expected_seconds_p50 = 3
+# RE-MEASURED from 3 to 1 on 2026-11-11 (bd-reality-core-convergence-1azkt.74):
+# 5 consecutive runs on mac-dev-1 took 0.127, 0.129, 0.122, 0.121, 0.122s
+# (median 0.122s, max 0.129s). Declares 1s (hard-fail 3s, >23x max).
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]

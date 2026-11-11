@@ -8,13 +8,14 @@
 #   ./scripts/verification-drift-guard.sh                # Check all gates
 #   ./scripts/verification-drift-guard.sh --json         # Write JSON report
 #   ./scripts/verification-drift-guard.sh --gate <name>  # Check specific gate
+#   ./scripts/verification-drift-guard.sh --self-test    # Run deterministic self-test arms
 #
 # Gates tracked:
 #   - closure-lint: closure discipline violations
 #   - cargo-test: test suite failures
 #   - forbidden-deps: banned dependency violations
 #
-# Exit codes: 0=pass (all red gates have beads), 1=drift detected
+# Exit codes: 0=pass (all red gates have beads), 1=drift detected, 2=input error
 
 set -eu
 
@@ -24,13 +25,15 @@ CLOSURE_REPORT=".closure-lint-report.json"
 
 JSON_OUTPUT=false
 CHECK_GATE=""
+SELF_TEST=false
 
 for arg in "$@"; do
     case "$arg" in
         --json) JSON_OUTPUT=true ;;
         --gate=*) CHECK_GATE="${arg#--gate=}" ;;
+        --self-test) SELF_TEST=true ;;
         --help|-h)
-            sed -n '2,16p' "$0" | sed 's/^# //' | sed 's/^#//'
+            sed -n '2,17p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
     esac
@@ -112,20 +115,64 @@ write_drift_report() {
     fi
 }
 
-# Check if an open bead exists matching keywords
+# Check if an open bead exists matching keywords in title or labels.
+#
+# bd-reality-core-convergence-1azkt.73: deliberately excludes `.description`
+# prose so an unrelated bead that mentions a gate name in passing (for example
+# "run closure lint and drift guard") cannot become a blanket excuse for a
+# failing gate.
 has_open_bead_for() {
     local keywords="$1"
     if [ ! -f "$BEADS_FILE" ]; then
         return 1
     fi
 
-    # Build jq filter for keywords (case-insensitive match in title or labels)
     jq -e --arg kw "$keywords" '
         select(.status != "closed")
         | select(
-            (.title | ascii_downcase | test($kw | ascii_downcase))
+            ((.title // "") | ascii_downcase | test($kw | ascii_downcase))
             or ((.labels // []) | any(. | ascii_downcase | test($kw | ascii_downcase)))
-            or ((.description // "") | ascii_downcase | test($kw | ascii_downcase))
+          )
+    ' "$BEADS_FILE" >/dev/null 2>&1
+}
+
+# Check if an open closure-lint tracking bead explicitly tracks a specific
+# violating bead ID or surface (bd-reality-core-convergence-1azkt.73).
+has_open_closure_lint_bead_for_violation() {
+    local target_bead="$1"
+    local target_surface="$2"
+    if [ ! -f "$BEADS_FILE" ]; then
+        return 1
+    fi
+
+    jq -e \
+        --arg kw "closure[-_ ]?lint|lint.*closure|closure.*violat" \
+        --arg target_bead "$target_bead" \
+        --arg target_surface "$target_surface" '
+        select(.status != "closed")
+        | select(
+            ((.title // "") | ascii_downcase | test($kw))
+            or ((.labels // []) | any(. | ascii_downcase | test($kw)))
+          )
+        | select(
+            (
+                ($target_bead != "")
+                and (
+                    ((.title // "") | contains($target_bead))
+                    or ((.description // "") | contains($target_bead))
+                    or ((.acceptance_criteria // "") | contains($target_bead))
+                    or ((.notes // "") | contains($target_bead))
+                )
+            )
+            or (
+                ($target_surface != "")
+                and (
+                    ((.title // "") | contains($target_surface))
+                    or ((.description // "") | contains($target_surface))
+                    or ((.acceptance_criteria // "") | contains($target_surface))
+                    or ((.notes // "") | contains($target_surface))
+                )
+            )
           )
     ' "$BEADS_FILE" >/dev/null 2>&1
 }
@@ -153,8 +200,41 @@ check_closure_lint_drift() {
     violation_count="$JSON_METRIC"
 
     if [ "$violation_count" -gt 0 ]; then
-        if ! has_open_bead_for "closure.*lint|lint.*closure|closure.*violat"; then
-            add_drift "closure-lint" "Gate has $violation_count violations but no open bead tracking them"
+        local array_len
+        read_json_metric "$CLOSURE_REPORT" '(.violations // []) | length' "closure-lint.violations"
+        array_len="$JSON_METRIC"
+        if [ "$array_len" -lt "$violation_count" ]; then
+            add_drift "closure-lint" "Gate reports count=$violation_count but .violations array holds only $array_len entry/entries"
+            return 0
+        fi
+
+        local untracked_list=""
+        local untracked_count=0
+        local row=""
+        while IFS= read -r row; do
+            [ -n "$row" ] || continue
+            local v_bead="" v_surface=""
+            v_bead=$(printf '%s' "$row" | jq -r '.bead // ""')
+            v_surface=$(printf '%s' "$row" | jq -r '.surface // ""')
+            if [ -z "$v_bead" ] && [ -z "$v_surface" ]; then
+                untracked_count=$((untracked_count + 1))
+                untracked_list="${untracked_list:+${untracked_list}, }<anonymous-violation>"
+                continue
+            fi
+            if ! has_open_closure_lint_bead_for_violation "$v_bead" "$v_surface"; then
+                untracked_count=$((untracked_count + 1))
+                local label="${v_bead:-$v_surface}"
+                if [ -n "$v_bead" ] && [ -n "$v_surface" ]; then
+                    label="${v_bead} (${v_surface})"
+                fi
+                untracked_list="${untracked_list:+${untracked_list}, }${label}"
+            fi
+        done <<EOF
+$(jq -c '(.violations // [])[]' "$CLOSURE_REPORT")
+EOF
+
+        if [ "$untracked_count" -gt 0 ]; then
+            add_drift "closure-lint" "Gate has $untracked_count untracked violation(s) of $violation_count total (${untracked_list}) with no open closure-lint bead naming them"
         fi
     fi
 }
@@ -215,6 +295,116 @@ check_forbidden_deps_drift() {
         fi
     fi
 }
+
+run_self_test() {
+    local script_path
+    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local tmp_base="${TMPDIR:-/tmp}"
+    if [ -d /Volumes/USBNVME16TB/temp_agent_space ]; then
+        tmp_base="/Volumes/USBNVME16TB/temp_agent_space"
+    fi
+    local scratch
+    scratch=$(mktemp -d "${tmp_base%/}/ee-drift-guard-selftest.XXXXXX")
+    trap 'rm -rf "$scratch"' EXIT
+
+    local total=0
+    local failed=0
+    arm() {
+        local label="$1"
+        local ok="$2"
+        total=$((total + 1))
+        if [ "$ok" = "true" ]; then
+            printf '  [ok  ] %s\n' "$label"
+        else
+            printf '  [FAIL] %s\n' "$label" >&2
+            failed=$((failed + 1))
+        fi
+    }
+
+    # Arm 1 (Positive): open closure-lint tracking bead that explicitly names the violating bead passes.
+    mkdir -p "$scratch/a1/.beads"
+    cat >"$scratch/a1/.closure-lint-report.json" <<'EOF'
+{"violations":[{"bead":"closed-demo","label":"implements-surface","surface":"demo","reason":"missing tests/golden/demo.snap"}],"count":1,"status":"fail"}
+EOF
+    cat >"$scratch/a1/.beads/issues.jsonl" <<'EOF'
+{"id":"bd-track","title":"closure-lint verifier blocker","status":"open","labels":["verify"],"description":"Tracks closure linter violations on closed-demo until remediation lands."}
+EOF
+    local rc=0
+    (cd "$scratch/a1" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    local status_a1=""
+    status_a1=$(jq -r '.status // ""' "$scratch/a1/.verification-drift-report.json" 2>/dev/null || true)
+    if [ "$rc" -eq 0 ] && [ "$status_a1" = "pass" ]; then
+        arm "tracked closure-lint violation with explicit bead reference exits 0 (pass)" "true"
+    else
+        arm "tracked closure-lint violation with explicit bead reference exits 0 (pass) (got rc=$rc status=$status_a1)" "false"
+    fi
+
+    # Arm 2 (Negative Twin): unrelated open bead mentioning 'closure lint' only in description is REFUSED.
+    mkdir -p "$scratch/a2/.beads"
+    cp "$scratch/a1/.closure-lint-report.json" "$scratch/a2/.closure-lint-report.json"
+    cat >"$scratch/a2/.beads/issues.jsonl" <<'EOF'
+{"id":"bd-unrelated","title":"Unify readiness across status and doctor","status":"open","labels":["status"],"description":"Verification gates: run closure lint and drift guard on closed-demo."}
+EOF
+    rc=0
+    (cd "$scratch/a2" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    local status_a2=""
+    status_a2=$(jq -r '.status // ""' "$scratch/a2/.verification-drift-report.json" 2>/dev/null || true)
+    if [ "$rc" -eq 1 ] && [ "$status_a2" = "fail" ]; then
+        arm "TWIN: unrelated open bead mentioning 'closure lint' only in description exits 1 (fail)" "true"
+    else
+        arm "TWIN: unrelated open bead mentioning 'closure lint' only in description exits 1 (fail) (got rc=$rc status=$status_a2)" "false"
+    fi
+
+    # Arm 3 (Negative Twin): open closure-lint bead tracking bead-A does NOT excuse untracked bead-B.
+    mkdir -p "$scratch/a3/.beads"
+    cat >"$scratch/a3/.closure-lint-report.json" <<'EOF'
+{"violations":[{"bead":"closed-demo","label":"implements-surface","surface":"demo","reason":"missing demo.snap"},{"bead":"closed-untracked","label":"implements-surface","surface":"untracked-surf","reason":"missing untracked-surf.snap"}],"count":2,"status":"fail"}
+EOF
+    cp "$scratch/a1/.beads/issues.jsonl" "$scratch/a3/.beads/issues.jsonl"
+    rc=0
+    (cd "$scratch/a3" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    local reason_a3=""
+    reason_a3=$(jq -r '.driftViolations[0].reason // ""' "$scratch/a3/.verification-drift-report.json" 2>/dev/null || true)
+    if [ "$rc" -eq 1 ] && printf '%s' "$reason_a3" | grep -q 'closed-untracked'; then
+        arm "TWIN: open closure-lint bead for closed-demo does not excuse closed-untracked" "true"
+    else
+        arm "TWIN: open closure-lint bead for closed-demo does not excuse closed-untracked (got rc=$rc reason=$reason_a3)" "false"
+    fi
+
+    # Arm 4 (Negative Twin): count > 0 with empty .violations array fails closed.
+    mkdir -p "$scratch/a4/.beads"
+    cat >"$scratch/a4/.closure-lint-report.json" <<'EOF'
+{"violations":[],"count":1,"status":"fail"}
+EOF
+    cp "$scratch/a1/.beads/issues.jsonl" "$scratch/a4/.beads/issues.jsonl"
+    rc=0
+    (cd "$scratch/a4" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        arm "TWIN: count=1 with empty .violations array fails closed (rc=1)" "true"
+    else
+        arm "TWIN: count=1 with empty .violations array fails closed (got rc=$rc)" "false"
+    fi
+
+    # Arm 5 (Input Error Twin): unknown --gate name exits 2 without writing a report.
+    mkdir -p "$scratch/a5"
+    rc=0
+    (cd "$scratch/a5" && "$script_path" --gate=closure_lint --json >/dev/null 2>&1) || rc=$?
+    if [ "$rc" -eq 2 ] && [ ! -f "$scratch/a5/.verification-drift-report.json" ]; then
+        arm "TWIN: unknown --gate=closure_lint exits 2 and writes no verdict report" "true"
+    else
+        arm "TWIN: unknown --gate=closure_lint exits 2 and writes no verdict report (got rc=$rc)" "false"
+    fi
+
+    echo "[verification-drift-guard] self-test: $((total - failed))/$total arms passed"
+    if [ "$failed" -gt 0 ]; then
+        exit 1
+    fi
+    exit 0
+}
+
+if [ "$SELF_TEST" = true ]; then
+    run_self_test
+fi
 
 # Main
 if [ "$JSON_OUTPUT" != true ]; then

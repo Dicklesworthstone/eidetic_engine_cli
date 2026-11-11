@@ -270,6 +270,92 @@ def registered_env_names(path=None):
     return set(re.findall(r'"(EE_[A-Z0-9_]+)"', source))
 
 
+def read_to_string(rel_path):
+    """Read a repo-relative file as UTF-8 text (tracked by check-golden-consumption.py)."""
+    path = os.path.join(REPO_ROOT, rel_path)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def fail_closed_contract_snapshot():
+    """Produce the canonical fail-closed contract pinned by tests/golden/probe-fail-closed.snap."""
+    healthy = {
+        "scenario_hit_at_5": {"value": 0.925},
+        "recall_at_5": {"mean": 0.0375},
+        "FAR": {"packed_items": 29},
+        "UTR": {"value": 1.0},
+    }
+    return {
+        "schema": "ee.real_corpus_probe.fail_closed_contract.v1",
+        "bead": "bd-reality-core-convergence-1azkt.67",
+        "registered_env_vars": {
+            "model_dir": MODEL_DIR_ENV,
+            "download": DOWNLOAD_ENV,
+            "model_env_both": model_env("/m", "off"),
+            "model_env_none": model_env(None),
+        },
+        "zero_guarded_metrics": [
+            {"path": path, "label": label} for path, label in ZERO_GUARDED
+        ],
+        "zero_guard_cases": {
+            "healthy": zero_guard(healthy, [], 4009, 40),
+            "scale_recall_zero_allowed": zero_guard(
+                dict(healthy, recall_at_5={"mean": 0.0}), [], 12009, 20
+            ),
+            "scenario_hit_zero_with_degraded": zero_guard(
+                dict(healthy, scenario_hit_at_5={"value": 0.0}),
+                [{"pack_degraded": ["index_incompatible"]}],
+                4009,
+                40,
+            ),
+            "packed_items_zero_without_degraded": zero_guard(
+                dict(healthy, FAR={"packed_items": 0}), [], 4009, 40
+            ),
+            "utr_null_without_degraded": zero_guard(
+                dict(healthy, UTR={"value": None}), [], 4009, 40
+            ),
+            "empty_corpus": zero_guard(healthy, [], 0, 40),
+            "zero_judged_queries": zero_guard(healthy, [], 4009, 0),
+        },
+        "describe_envelope_cases": {
+            "error_envelope_with_degraded": describe_envelope(
+                {
+                    "error": {
+                        "code": "index_incompatible",
+                        "message": "index generation does not match schema",
+                        "repair": "run `ee index rebuild`",
+                    },
+                    "degraded": [{"code": "lexical_only_fallback"}],
+                },
+                "",
+            ),
+            "no_json_stdout": describe_envelope(None, ""),
+            "no_json_stdout_with_stderr": describe_envelope(None, "fatal panic\n"),
+        },
+        "absent_surface_cases": {
+            "present": surface_or_unavailable(
+                {"data": {"evidenceAdmission": {"admitted": 988, "quarantined": 3021}}},
+                "evidence_admission",
+                "evidenceAdmission",
+                surface="evidence admission",
+            ),
+            "absent": surface_or_unavailable(
+                {"data": {"spansImported": 7}},
+                "evidence_admission",
+                "evidenceAdmission",
+                surface="evidence admission",
+            ),
+            "zero_preserved": surface_or_unavailable(
+                {"data": {"spansImported": 0}},
+                "spans_imported",
+                "spansImported",
+                surface="imported-span count",
+            ),
+        },
+        "provisioning_refusal_code": CASS_UNAVAILABLE,
+    }
+
+
 def run_ee(ee, args, env, cwd, timeout=900):
     started = time.monotonic()
     proc = subprocess.run([ee, *args], env=env, cwd=cwd, capture_output=True, text=True, timeout=timeout)
@@ -895,6 +981,18 @@ def self_test(ee=None):
             f"({len(problems)} problem(s) after removing {removed})", bool(problems))
         arm("the refusal names the missing envelope fields, not a metric value",
             any("missing envelope fields" in problem for problem in problems))
+
+        print("GOLDEN-CONTRACT arms -- tests/golden/probe-fail-closed.snap is consumed and enforced:")
+        golden_raw = read_to_string("tests/golden/probe-fail-closed.snap")
+        golden_contract = json.loads(golden_raw)
+        live_contract = fail_closed_contract_snapshot()
+        arm("tests/golden/probe-fail-closed.snap parses as ee.real_corpus_probe.fail_closed_contract.v1",
+            golden_contract.get("schema") == "ee.real_corpus_probe.fail_closed_contract.v1")
+        arm("live fail-closed contract matches tests/golden/probe-fail-closed.snap",
+            live_contract == golden_contract)
+        mutated_contract = dict(live_contract, provisioning_refusal_code="mutated_code")
+        arm("TWIN: a mutated fail-closed contract does NOT match tests/golden/probe-fail-closed.snap",
+            mutated_contract != golden_contract)
 
         if ee:
             print(f"END-TO-END controls against {ee}:")

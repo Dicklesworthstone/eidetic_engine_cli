@@ -283,5 +283,17 @@ assert_json_filter "$LAST_JSON" \
     '.schema == "ee.response.v2" and .success == true and .data.report.fixture_id == "ask_v1" and .data.report.fixture_family == "ask" and .data.report.status == "passed" and (.data.report.metrics.queries_evaluated > 0)' \
     "ask_v1 quality gate reports passing fixture metrics"
 
+step "eval list outside repo workspace exits zero with empty posture and fails closed on explicit missing fixture dir (bd-reality-core-convergence-1azkt.53)"
+run_json "16-eval-list-non-repo" --workspace "$WS" --json eval list
+assert_rc 0 "eval list in non-repo workspace exits zero"
+assert_json_filter "$LAST_JSON" \
+    '.schema == "ee.response.v2" and .success == true and .data.command == "eval list" and .data.fixtureCount == 0 and (.data.fixtures | length == 0) and (.data.message | contains("No evaluation scenarios configured"))' \
+    "eval list in non-repo workspace reports explicit empty posture"
+run_json "16b-eval-list-explicit-missing" --workspace "$WS" --json eval list --fixture-dir "$WS/missing-eval-fixtures"
+assert_rc 2 "eval list with explicit missing fixture dir exits 2"
+assert_json_filter "$LAST_JSON" \
+    '.schema == "ee.error.v2" and .error.code == "configuration"' \
+    "eval list with explicit missing fixture dir fails closed with configuration error"
+
 e2e_log_note "ask_e2e_workspace_retained=$WS"
 finish 0
