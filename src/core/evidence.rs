@@ -6,6 +6,9 @@ use serde::Serialize;
 
 use crate::db::{CassEvidenceWithdrawal, CassEvidenceWithdrawalError, DbConnection, DbError};
 use crate::models::{DomainError, EvidenceId};
+use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
+
+pub use crate::db::EvidenceSecurityRescreenReport;
 
 #[path = "evidence_session.rs"]
 mod session;
@@ -24,6 +27,61 @@ pub struct EvidenceWithdrawOptions<'a> {
     pub reason: &'a str,
     pub actor: Option<&'a str>,
     pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct EvidenceRescreenOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub limit: u32,
+    pub actor: Option<&'a str>,
+    pub apply: bool,
+}
+
+/// Re-evaluate one bounded batch of retained evidence under current policy.
+/// Preview uses a read-only source snapshot. Applying holds the existing
+/// workspace key lease through the transaction; missing or unusable keys leave
+/// keyed sources retryable instead of creating a replacement authentication root.
+pub fn rescreen_imported_evidence(
+    options: &EvidenceRescreenOptions<'_>,
+) -> Result<EvidenceSecurityRescreenReport, DomainError> {
+    if !(1..=crate::db::EVIDENCE_SECURITY_RESCREEN_MAX_BATCH).contains(&options.limit) {
+        return Err(DomainError::Usage {
+            message: "Evidence re-screening requires a limit between 1 and 500.".to_owned(),
+            repair: Some("Pass --limit with a bounded batch size.".to_owned()),
+        });
+    }
+    // Only the addressed workspace selects this protected path. Evidence
+    // metadata may identify a key, but may never redirect key discovery.
+    let keys = workspace_keys_dir(options.workspace_path);
+    let preview_key = if options.apply {
+        None
+    } else {
+        StoreAuthRoot::open(&keys).ok()
+    };
+    let applying_key = if options.apply && StoreAuthRoot::open(&keys).is_ok() {
+        StoreAuthRoot::open_read_locked(&keys).ok()
+    } else {
+        None
+    };
+    let source_key = preview_key.as_ref().or_else(|| applying_key.as_deref());
+    with_evidence_store(
+        options.workspace_path,
+        options.database_path,
+        !options.apply,
+        EvidenceWriteBoundary::OwnerFence,
+        |connection, workspace_id| {
+            connection
+                .rescreen_evidence_for_workspace_with_source_key(
+                    workspace_id,
+                    options.limit,
+                    options.apply,
+                    options.actor,
+                    source_key,
+                )
+                .map_err(storage_error)
+        },
+    )
 }
 
 /// Metadata only. Eligibility describes the requested final posture; the
@@ -97,7 +155,7 @@ fn storage_error(error: DbError) -> DomainError {
     // REPAIR differs between the two branches: when `is_storage_panic()`,
     // `db_failure_or_storage_panic` substitutes STORAGE_PANIC_REPAIR for the
     // caller's. Same shape as memory_debt.rs:1376 and journal.rs:2683.
-    let message = format!("Failed to withdraw imported evidence: {error}");
+    let message = format!("Failed to access imported evidence: {error}");
     super::db_failure_or_storage_panic(
         &error,
         message.clone(),
@@ -205,6 +263,29 @@ fn with_withdrawal_store<T>(
     dry_run: bool,
     apply: impl Fn(&DbConnection, &str) -> Result<T, DomainError>,
 ) -> Result<T, DomainError> {
+    with_evidence_store(
+        workspace_path,
+        database_path,
+        dry_run,
+        EvidenceWriteBoundary::Transaction,
+        apply,
+    )
+}
+
+enum EvidenceWriteBoundary {
+    Transaction,
+    // The bounded rescreen API owns its SQL transaction. Keep schema and
+    // workspace admission under the same writer fence without nesting BEGIN.
+    OwnerFence,
+}
+
+fn with_evidence_store<T>(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    dry_run: bool,
+    write_boundary: EvidenceWriteBoundary,
+    apply: impl Fn(&DbConnection, &str) -> Result<T, DomainError>,
+) -> Result<T, DomainError> {
     let database_path = database_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee/ee.db"));
@@ -221,7 +302,7 @@ fn with_withdrawal_store<T>(
             Ok(false) => {}
             Ok(true) => {
                 return Err(DomainError::MigrationRequired {
-                    message: "Migrate the existing database before withdrawing evidence. The store was not changed.".to_owned(),
+                    message: "Migrate the existing database before updating imported evidence. The store was not changed.".to_owned(),
                     repair: Some(format!(
                         "ee migrate run --workspace {} --database {} --json",
                         super::shell_quote_repair_arg(&workspace_path.to_string_lossy()),
@@ -262,9 +343,14 @@ fn with_withdrawal_store<T>(
             }
         }
     } else {
-        connection
-            .with_transaction_error(|| decide().map_err(WithdrawalTransactionError))
-            .map_err(|error: WithdrawalTransactionError| error.0)
+        match write_boundary {
+            EvidenceWriteBoundary::Transaction => connection
+                .with_transaction_error(|| decide().map_err(WithdrawalTransactionError))
+                .map_err(|error: WithdrawalTransactionError| error.0),
+            EvidenceWriteBoundary::OwnerFence => {
+                connection.with_write_owner_fence(storage_error, decide)
+            }
+        }
     }
 }
 

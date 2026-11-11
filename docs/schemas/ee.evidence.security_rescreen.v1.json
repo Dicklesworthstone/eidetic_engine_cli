@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.evidence.security_rescreen.v1.json",
+  "title": "ee.evidence.security_rescreen.v1",
+  "description": "Metadata-only data payload of ee evidence rescreen, inside the ee.response.v2 envelope. The default previews a bounded batch without writes. Explicit --apply records authenticated screening decisions and audits; indexRebuildRequired reports subsequent publication work, not completed indexing. Retained sources may require original CASS source or authentication-key recovery.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "workspaceId", "limit", "pendingBefore", "selected", "updated",
+    "pendingAfter", "complete", "dryRun", "durableMutation", "indexRebuildRequired",
+    "rebuildWouldBeRequired", "redactedCount", "byProducer", "items", "auditIds"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.evidence.security_rescreen.v1" },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+    "pendingBefore": { "$ref": "#/$defs/count" },
+    "selected": { "type": "integer", "minimum": 0, "maximum": 500 },
+    "updated": { "type": "integer", "minimum": 0, "maximum": 500, "description": "Source rows whose security envelope was committed; always zero in a preview." },
+    "pendingAfter": { "$ref": "#/$defs/count", "description": "Rows still pending after this invocation. A preview leaves the count unchanged; missing-key decisions remain retryable." },
+    "complete": { "type": "boolean", "description": "Whether this batch left no pending decisions; retained refusals are not admissions." },
+    "dryRun": { "type": "boolean" },
+    "durableMutation": { "type": "boolean", "description": "True when an apply invocation committed an upgrade or a retained-source refusal receipt." },
+    "indexRebuildRequired": { "type": "boolean", "description": "Whether committed source changes require ee index rebuild; this receipt does not assert index publication." },
+    "rebuildWouldBeRequired": { "type": "boolean", "description": "Whether applying the selected decisions changes indexable source state, including during preview." },
+    "redactedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+    "byProducer": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/admissionCounts" }
+    },
+    "items": {
+      "type": "array", "maxItems": 500,
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "auditIds": { "type": "array", "maxItems": 500, "items": { "type": "string", "minLength": 1 } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "dryRun": { "const": true } } },
+      "then": {
+        "properties": {
+          "updated": { "const": 0 },
+          "durableMutation": { "const": false },
+          "indexRebuildRequired": { "const": false },
+          "auditIds": { "maxItems": 0 },
+          "items": { "items": { "properties": { "auditId": { "type": "null" } } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "complete": { "const": true } } },
+      "then": { "properties": { "pendingAfter": { "const": 0 } } },
+      "else": { "properties": { "pendingAfter": { "minimum": 1 } } }
+    }
+  ],
+  "field_presets": {
+    "minimal": ["schema", "selected", "updated", "pendingAfter", "complete", "dryRun", "durableMutation", "indexRebuildRequired", "rebuildWouldBeRequired"],
+    "summary": ["schema", "workspaceId", "limit", "pendingBefore", "selected", "updated", "pendingAfter", "complete", "dryRun", "durableMutation", "indexRebuildRequired", "rebuildWouldBeRequired", "redactedCount", "byProducer"],
+    "standard": ["schema", "workspaceId", "limit", "pendingBefore", "selected", "updated", "pendingAfter", "complete", "dryRun", "durableMutation", "indexRebuildRequired", "rebuildWouldBeRequired", "redactedCount", "byProducer", "items", "auditIds"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "admissionCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["admitted", "quarantined", "denied"],
+      "properties": {
+        "admitted": { "$ref": "#/$defs/count" },
+        "quarantined": { "$ref": "#/$defs/count" },
+        "denied": { "$ref": "#/$defs/count" }
+      }
+    },
+    "item": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidenceId", "producerKind", "disposition", "reasonCodes", "redacted", "auditId"],
+      "properties": {
+        "evidenceId": { "type": "string", "minLength": 1 },
+        "producerKind": { "type": "string", "minLength": 1 },
+        "disposition": { "type": "string", "enum": ["admitted", "quarantined", "denied", "retained"] },
+        "reasonCodes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "redacted": { "type": "boolean" },
+        "auditId": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.evidence.security_rescreen.v1", "workspaceId": "wsp_01234567890123456789012345",
+      "limit": 100, "pendingBefore": 1, "selected": 1, "updated": 0, "pendingAfter": 1,
+      "complete": false, "dryRun": true, "durableMutation": false, "indexRebuildRequired": false,
+      "rebuildWouldBeRequired": true, "redactedCount": 0,
+      "byProducer": { "cass_import": { "admitted": 1, "quarantined": 0, "denied": 0 } },
+      "items": [{ "evidenceId": "ev_00000000000000000000000001", "producerKind": "cass_import", "disposition": "admitted", "reasonCodes": [], "redacted": false, "auditId": null }],
+      "auditIds": []
+    },
+    {
+      "schema": "ee.evidence.security_rescreen.v1", "workspaceId": "wsp_01234567890123456789012345",
+      "limit": 100, "pendingBefore": 1, "selected": 1, "updated": 1, "pendingAfter": 0,
+      "complete": true, "dryRun": false, "durableMutation": true, "indexRebuildRequired": true,
+      "rebuildWouldBeRequired": true, "redactedCount": 0,
+      "byProducer": { "cass_import": { "admitted": 1, "quarantined": 0, "denied": 0 } },
+      "items": [{ "evidenceId": "ev_00000000000000000000000001", "producerKind": "cass_import", "disposition": "admitted", "reasonCodes": [], "redacted": false, "auditId": "audit_example" }],
+      "auditIds": ["audit_example"]
+    }
+  ]
+}

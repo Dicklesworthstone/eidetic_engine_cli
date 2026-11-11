@@ -390,7 +390,7 @@ const HELP_PRELUDE_SUFFIX: &str = concat!(
     "  Mesh consent:   mesh preview-grant <peer-id> --lane <lane> [--issue-approval-token]; mesh grant <peer-id> --lane <lane> --preview-token-stdin; mesh revoke-lane <peer-id> --lane <lane>\n",
     "  Curate:         capture, curate (candidates|validate|apply), outcome harvest, reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
-    "  Maintenance:    maintenance, job, index, daemon\n",
+    "  Maintenance:    maintenance, job, index, daemon, evidence rescreen\n",
     "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup\n",
     "  Diagnostics:    diag, eval, db, analyze, audit, migrate\n",
     "  Configuration:  install, completion, mcp, serve, agent\n",
@@ -71395,6 +71395,9 @@ impl NormalizedInvocation {
                 },
                 Command::Evidence(evidence::EvidenceCommand::Withdraw(_)) => {
                     "evidence withdraw".to_string()
+                }
+                Command::Evidence(evidence::EvidenceCommand::Rescreen(_)) => {
+                    "evidence rescreen".to_string()
                 }
                 Command::Migrate(migrate) => match migrate {
                     MigrateCommand::Status(_) => "migrate status".to_string(),

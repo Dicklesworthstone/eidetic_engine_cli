@@ -1219,6 +1219,7 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "decide record",
     "demo run",
     "diag pack-record",
+    "evidence rescreen",
     "evidence withdraw",
     "export",
     "export agentsmd",
@@ -2979,6 +2980,35 @@ impl EffectManifest {
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Expire a memory through an audited tombstone without deleting data",
             ),
+            {
+                let mut rescreen = CommandEffect::durable_write(
+                    "evidence rescreen",
+                    vec![
+                        "evidence_spans",
+                        "evidence_admission_verdicts",
+                        "evidence_reader_projections",
+                        "evidence_admission_counts",
+                        "evidence_admission_count_state",
+                        "workspace_generations",
+                        "audit_log",
+                    ],
+                    "Preview a bounded batch of retained evidence by default; --apply records authenticated screening upgrades and source-bound refusal receipts",
+                )
+                .with_read_snapshot();
+                rescreen.mutation_contract.transaction_scope = Some(
+                    "existing-store write-owner fence; source decisions, reader projections, admission verdicts and audits commit in one transaction",
+                );
+                rescreen.mutation_contract.idempotency_key = Some(
+                    "source security state plus policy epoch; repeated batches advance through pending rows without repeating completed decisions",
+                );
+                rescreen.mutation_contract.db_generation_effect = "advances only on source-envelope upgrades; unchanged by refusal-only receipts, missing-key batches, previews or completed repeats";
+                rescreen.mutation_contract.index_generation_effect = "reports required index rebuild after source upgrades; does not claim or perform index publication";
+                rescreen.mutation_contract.dry_run_behavior = Some(
+                    "default preview or --dry-run reads one existing-store snapshot; no key creation, migrations, evidence updates, audit rows or index writes",
+                );
+                rescreen.mutation_contract.recovery_behavior = "missing authentication keys leave sources pending; restore the original key and retry, or reimport authenticated complete CASS source for omitted bytes";
+                rescreen
+            },
             {
                 let mut withdrawal = CommandEffect::durable_write(
                     "evidence withdraw",

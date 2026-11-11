@@ -1658,6 +1658,7 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.decide.list.v1" => "decide list".to_string(),
         "ee.decide.revisit.v1" => "decide revisit".to_string(),
         "ee.evidence.withdraw.v1" => "evidence withdraw".to_string(),
+        "ee.evidence.security_rescreen.v1" => "evidence rescreen".to_string(),
         "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
         "ee.ask.v1" => "ask".to_string(),
         "ee.recall.v1" => "recall".to_string(),
@@ -1825,6 +1826,54 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "fallbacks",
                 "refusals",
                 "ledgerSummary",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "evidence rescreen" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "selected",
+                "updated",
+                "pendingAfter",
+                "complete",
+                "dryRun",
+                "durableMutation",
+                "indexRebuildRequired",
+                "rebuildWouldBeRequired",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspaceId",
+                "limit",
+                "pendingBefore",
+                "selected",
+                "updated",
+                "pendingAfter",
+                "complete",
+                "dryRun",
+                "durableMutation",
+                "indexRebuildRequired",
+                "rebuildWouldBeRequired",
+                "redactedCount",
+                "byProducer",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "workspaceId",
+                "limit",
+                "pendingBefore",
+                "selected",
+                "updated",
+                "pendingAfter",
+                "complete",
+                "dryRun",
+                "durableMutation",
+                "indexRebuildRequired",
+                "rebuildWouldBeRequired",
+                "redactedCount",
+                "byProducer",
+                "items",
+                "auditIds",
             ],
             FieldProfile::Full => &["*"],
         },
@@ -12362,6 +12411,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: evidence_withdraw_schema_definition,
         },
         SchemaEntry {
+            id: crate::db::EVIDENCE_SECURITY_RESCREEN_REPORT_SCHEMA_V1,
+            version: "1",
+            description: "Bounded, metadata-only preview or audited application of evidence screening upgrades; index rebuild requirements are reported separately from database changes.",
+            category: "memory",
+            definition: evidence_rescreen_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::decide::DECIDE_LIST_SCHEMA_V1,
             version: "1",
             description: "Data payload emitted by ee decide list under the standard ee.response.v2 envelope.",
@@ -12593,6 +12649,10 @@ fn decide_record_schema_definition() -> String {
 
 fn evidence_withdraw_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.evidence.withdraw.v1.json").to_string()
+}
+
+fn evidence_rescreen_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.evidence.security_rescreen.v1.json").to_string()
 }
 
 fn decide_list_schema_definition() -> String {
@@ -27012,6 +27072,7 @@ mod tests {
             crate::steward::MAINTENANCE_JOB_SHOW_SCHEMA_V1,
             crate::steward::MAINTENANCE_JOB_ROW_SCHEMA_V1,
             crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1,
+            crate::db::EVIDENCE_SECURITY_RESCREEN_REPORT_SCHEMA_V1,
         ];
 
         for schema_id in emitted_schema_ids {

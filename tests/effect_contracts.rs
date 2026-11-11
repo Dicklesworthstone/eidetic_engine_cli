@@ -21,13 +21,14 @@ const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
 /// same way after `config explain`, `index backfill-anchors`, `memory anchors`
 /// and `workspace rebind` landed, and at 460 after `curate candidates
 /// --propose` and `evidence withdraw`.
+/// Re-measured at 463 across the complete parser inventory with `evidence rescreen`.
 ///
 /// It sat at 416 from `c097d4da9` until now while the real inventory grew to
 /// 453. The drift is how this constant is normally wrong: an author adds one
 /// command and increments by one without re-measuring, so every count someone
 /// else forgot compounds silently. When this fails, re-measure the inventory;
 /// do not add the delta of your own change to the old number.
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 460;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 463;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
