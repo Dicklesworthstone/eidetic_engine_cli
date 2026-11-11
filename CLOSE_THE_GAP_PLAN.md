@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22, 2026-10-31)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22, 2026-10-31, 2026-11-05, 2026-11-10)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -9,7 +9,44 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-10-31 / 2026-11-01 audit (§19, read this first).** The shipped offline memory loop
+> **2026-11-10 end-to-end reality check (§21, read this first).** Both external
+> volumes (`/Volumes/USBNVME16TB` and `/Volumes/EERCHExport` APFS) and the
+> pinned nightly toolchain are mounted, every local non-Cargo gate in
+> `verify.sh` / `ci-static.yml` passes (including `build_degraded_codes_doc.sh --check`
+> in `0.25s`, 34/34 wired Python `--self-test` suites, and 14/14 shell/fixture
+> suites), and a runnable native `aarch64-apple-darwin` debug binary built at
+> `a1e0a079b` (`2026-11-05`, 1,389 commits ahead of `v0.18.0`, 92 commits behind
+> `HEAD` `f56c48099`) exists on disk at
+> `/Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug/ee`. Black-box
+> probing against `a1e0a079b` proves that `probe.py --self-test --ee` passes
+> **39/39 arms** (including E2E positive/negative controls at `recall_at_5 = 0.70`,
+> `UTR = 0.9995`), `bd-sxalp` source-commit refusal works live (`a1e0a079b != f56c48099`),
+> `.52` (`why-not` across `MemoryId`, `RuleId`, `EvidenceId` + non-selection
+> prose `f25f546c7`), `.54` (`hits_profiles=false` on `ee status`), `.69` (`cass`
+> `missing-db` hint), and `.13` (`backup_evidence_admission_reduced` +
+> `rowCountBasis` + `source`/`exported` admission histograms prior to rule
+> packing) are all working in executable code. However, four critical new gaps
+> were uncovered and filed as `.71`–`.74`:
+> 1. **`.71` (P0 product bug):** `StoredPackHistory::rebind_recovery_ledger`
+>    (`src/db/mod.rs:36558-36572`) omits `rule_inputs()`, causing `ee backup create`
+>    to fail hard with exit 5 (`"rebound selection has no stored item"`) on any
+>    workspace after a pack selects a procedural rule (`rule_`).
+> 2. **`.72` (P1 policy/blocker contradiction):** `AGENTS.md` (`3b79854c9`,
+>    2026-11-01) permanently banned GitHub Actions in favor of `dsr` / `act`,
+>    yet `bd-actions-disabled-repo-wide-33mfm` remained the #1 `bv --robot-triage`
+>    pick and §11/§15 still demanded hosted Actions CI.
+> 3. **`.73` (P1 `bd-2phcw` constant-green gate defect):**
+>    `verification-drift-guard.sh --gate=closure-lint` regex-matches
+>    `closure.*lint` across open bead descriptions rather than checking
+>    `.closure-lint-report.json` violating bead IDs, causing `verify.sh` to
+>    silently excuse unbaselined `closure-lint.sh --audit` failures (such as `.67`).
+> 4. **`.74` (P1 unwired static gate fleet):** 7 of 19 `scripts/check-*.py`
+>    gates (156 self-test arms, ~2s runtime, including `check-e2e-execution-coverage.py`
+>    and `check-adr-evidence-citations.py` whose beads closed without runner
+>    wiring) have zero callers in `verify.sh` / `ci-static.yml` because
+>    `verify-budget.toml` is at `605/608` integer seconds (`Option<u64>` 1s floor).
+>
+> **2026-10-31 / 2026-11-01 audit (§19; see also §20 2026-11-05 local pass).** The shipped offline memory loop
 > works in a small isolated workspace. Current source has substantial recovery
 > and identity improvements, but there is no complete green proof for one
 > candidate. A fresh shape-corpus run finds relevant scenarios but packs much
@@ -1354,7 +1391,8 @@ abstention, OR assertions, ignored tripwires, and file presence cannot pass.
 1. Close current red contract/lib/doctor/security/platform prerequisites named
    by `.19` and run the canonical manifest on one clean immutable main SHA.
 2. Produce and independently verify the content-addressed green candidate
-   capsule `.19`; hosted CI and pinned RCH must agree.
+   capsule `.19`; local `dsr` / `act` workflow execution (per `AGENTS.md`
+   *Standing Policy: DSR Only — Never GitHub Actions*) and pinned RCH must agree.
 3. Use that exact returned binary for `.6` on the claimed M3 host. Retain
    correctness digests with latency/resource samples, then generate or remove
    public rows according to the T0 decision.
@@ -1533,7 +1571,10 @@ The bridge may archive only when all of the following are simultaneously true:
 - One immutable current SHA is green for format, clippy `-D warnings`, complete
   required tests, exact North Stars, representative E2Es, dependency audit,
   and the canonical readiness manifest.
-- Hosted CI and the release dry-run agree with that same verdict.
+- Local `dsr` / `act` workflow verification (under `AGENTS.md` *Standing Policy:
+  DSR Only — Never GitHub Actions*; hosted GitHub Actions is permanently
+  prohibited as of `3b79854c9`, 2026-11-01) and the `dsr` release dry-run agree
+  with that same pinned-RCH verdict (`.72`).
 - README performance/release/Windows/Homebrew/crates.io/mesh claims match
   retained evidence.
 - Active Beads have no dependency cycles and every remaining vision promise
@@ -3594,5 +3635,189 @@ Unchanged from §19's work order, now with measurements behind the ranking:
    pass were invisible locally for exactly one reason: their only enforcement was
    a Rust assertion behind a dispatch. The exit-code gate demonstrates the
    alternative at 56ms.
+
+---
+
+## 21. Comprehensive reality check — 2026-11-10
+
+> **Baseline:** `HEAD = f56c48099627170f956ae3e489124e3c05d8efa1` on `main`
+> (111 commits since the 2026-11-05 §20 baseline `59aa07a13`, including 49
+> `src/` product commits; 92 commits since the 2026-11-05 native macOS debug
+> binary `a1e0a079b`).
+> **Mount & toolchain state:** `/Volumes/USBNVME16TB` (ExFAT) mounted;
+> `/Volumes/EERCHExport` (APFS sparseimage) mounted (`bd-w4sb2` closed);
+> `~/.rustup/toolchains/nightly-2026-08-31-aarch64-apple-darwin` mounted.
+
+### 21.1 Executive verdict — the five reality-check questions
+
+1. **What specifically IS working right now?**
+   - **Every local non-Cargo verification rail in `scripts/verify.sh` and `.github/workflows/ci-static.yml` is green at `f56c48099`:**
+     - `cargo fmt --check` (`EXIT=0`), `./scripts/check-format.sh --self-test` (`7/7`), `./scripts/check-include-fmt.sh` (`7/7 include!-only files`).
+     - `./scripts/check-forbidden-deps.sh` (`EXIT=0` across root `Cargo.toml` and `fuzz/Cargo.toml`; `wasm-bindgen-futures` capped at `0.4.45`).
+     - `./scripts/vision-coverage.sh --json` (`status: "pass"`, `147/147` documented commands implemented, `0` stubbed, `0` missing; `141/147` behaviorally exercised, `6` baselined).
+     - `./scripts/contract-drift-radar.sh --quiet` (`EXIT=0`: 250 schemas, 43 docs, 30 examples, 617 documented degraded codes vs 617 fixtures, 0 violations).
+     - `./scripts/build_degraded_codes_doc.sh --check` (`EXIT=0` in `0.25s` via the `bd-i4tv6` fixture fingerprint header; down from ~84s in §20).
+     - **34/34** wired Python gates and `--self-test` suites in `scripts/verify.sh`, **14/14** shell/golden/fixture suites in `verify.sh` / `ci-static.yml`, and **7/7** currently unwired `scripts/check-*.py` scripts (156 additional `--self-test` arms) pass with `0` failures.
+   - **A runnable native `aarch64-apple-darwin` `ee` binary built at `a1e0a079b` (`2026-11-05`, `v0.18.0-1389-ga1e0a079b`, `gitDirty: false`, `state: "clean"`, migrations `1..133`) is present at `/Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug/ee`.** Every reality check from §17 through §20 had only the `v0.18.0` binary (`969f0cbf`, 2026-10-14, 1,389 commits older) to execute locally on macOS. Running black-box probes against `a1e0a079b` on an APFS workspace (`/Volumes/EERCHExport`) proves that major post-`v0.18.0` fixes work in executable code:
+     - **`probe.py --self-test --ee .../debug/ee` (`bd-reality-core-convergence-1azkt.67`):** **39/39 arms pass (`EXIT=0`)**, including the 5 end-to-end positive and negative controls against the real binary (`recall_at_5 mean = 0.70`, `UTR = 0.9995`, negative control exits `2` with `scenario_hit_at_5 measured 0.0 ... must not be empty`).
+     - **Current-binary source-commit guard (`bd-sxalp`):** `ee_require_current_binary` in `scripts/lib/ee_binary_resolution.sh` refuses `a1e0a079b` against `HEAD` `f56c48099` with exit 1 (`expected_source_commit=f56c48099... binary_source_commit=a1e0a079b... refusing source identity: binary commit does not match the independently expected source commit`) even though both report `version = "0.18.0"`. The same-version stale-binary loophole identified in §19.5 is closed and proven live.
+     - **`ee why-not` across `MemoryId`, `RuleId`, and `EvidenceId` (`.52`) and non-selection prose (`f25f546c7`):** On `v0.18.0`, `why-not` rejected `rule_` and `ev_` IDs with `invalid_id` and printed `"selected for context pack"` when `selected: false`. On `a1e0a079b`, `why-not` accepts all three entity families (`rc=0`) and returns truthful exclusion reasons: at `--max-tokens 15`, `MemoryId` returns `selected: false`, `retrievalStageReached: "selection"`, `primaryReason: "omitted_by_token_budget"` (`increase maxTokens by at least 61`); `RuleId` returns `selected: false`, `retrievalStageReached: "selection"`, `primaryReason: "omitted_by_token_budget"`, `reasonCodes: ["context_filtered_results"]`, `message: "The target could not fit the shared budget while retaining higher-priority selected items."`; `EvidenceId` returns `selected: false`, `retrievalStageReached: "retrieval"`, `primaryReason: "not_retrieved"`.
+     - **Backup evidence-withholding disclosure and dual histograms (`.13` / §18.8.1) prior to rule packing:** On a 123-span CASS workspace before any rule is selected into a pack, `ee backup create --redaction minimal --json` exits `0`, emits `degraded: ["backup_evidence_admission_reduced"]`, and populates `recoveryInventory` (`ee.backup.recovery_inventory.v2`) with `rowCountBasis: "source_snapshot"` and explicit `evidenceAdmission` dual histograms (`sourceSearch: {admitted: 46, quarantined: 77, denied: 0}` vs `exportedSearch: {admitted: 43, quarantined: 0, denied: 80}`), while `--redaction none` emits `degraded: []` and preserves all `46` admitted + `77` quarantined spans (`exportedSearch == sourceSearch`).
+     - **`ee import cass` `missing-db` hint classification (`.69`):** When `cass` exits `0` with `{"hits": [], "count": 0, "error": {"code": 3, "kind": "search-db-missing", "hint": "missing-db", ...}}`, `ee import cass --json` on `a1e0a079b` exits `0` cleanly (`error: null`, `degraded: []`).
+     - **`ee status` with `graph.feature.hits_profiles.enabled = false` (`.54`):** `ee status --json` no longer emits `graph_hits_profiles_disabled` (`degraded: ["graph_skyline_disabled", "search_lexical_only"]`).
+
+2. **What is NOT working or not yet implemented?**
+   - **NEW P0 Product Bug (`.71`): `ee backup create` crashes with exit 5 (`"rebound selection has no stored item"`) on any workspace where `ee pack` has selected a procedural rule (`rule_`).**
+     - In `src/db/mod.rs:36440-36446`, `StoredPackHistory::validate` constructs `expected` by chaining `items`, `rules` (`pack_ledger_selected_rule_item`), and `evidence`.
+     - In `src/db/mod.rs:36558-36568`, `StoredPackHistory::rebind_recovery_ledger` constructs `rows` from `self.item_inputs()` and `self.evidence_inputs()` only — omitting `.chain(self.rule_inputs().iter().map(pack_ledger_selected_rule_item))` even though lines `36591-36595` inside the same loop inspect `self.rule_items`.
+     - Measured black-box on `a1e0a079b` (`2026-11-10`): on the same workspace where `ee backup create` succeeded with `rc=0`, running `ee rule add "WHEN cutting a release..."` followed by `ee pack "How should we verify and cut a release?"` (which selects the rule into `pack_rule_items`) causes every subsequent `ee backup create` to fail hard with exit 5:
+       `{"code": "import", "message": "could not recover workspace work history: database execute returned malformed row: rebound selection has no stored item"}`.
+   - **Three-way readiness coherence split (`.66`) still reproduces on `a1e0a079b` (and in `src/` at `f56c48099`), now in a post-`v0.18.0` shape:**
+     - On a populated 123-span CASS workspace with `EE_EMBED_DOWNLOAD=off` (`embedding.mode = "deterministic_hash"`, `semantic = false`):
+       - `ee index status --json` reports `health: "ready"`, `degradationCode: null`, **`degraded: []`** (even though `embedding.semantic == false` and `available_model_count == 0`).
+       - `ee status --json` reports **`degraded: ["graph_skyline_disabled", "search_lexical_only"]`**.
+       - `ee doctor --full --json` reports top-level **`degraded: []`**, while `checks[embedding_posture]` emits a warning whose prose names **`embed_model_unavailable`**.
+       - `ee pack --json` reports **`degraded: ["embed_model_unavailable", ...]`**.
+     - Three health surfaces (`index status`, `status`, `doctor --full`) plus `pack` still give four different degraded-code answers for the same workspace and embedder state.
+   - **Previously cataloged open product defects still reproduced on `a1e0a079b`:**
+     - **`.53`:** `ee eval list --json` invoked outside the repository root (`/Volumes/EERCHExport/...`) still exits `2` (`Fixture directory does not exist: tests/fixtures/eval`).
+     - **`.55`:** `~/.local/share/ee/models/` still contains **414** orphaned `.potion-multilingual-128M-download-*` directories.
+     - **`.56`:** `ee pack` on a 123-span workspace with `EE_EMBED_DOWNLOAD=off` still emits `pack_assembly_elapsed_over_budget` (`554ms` vs `500ms` threshold).
+   - **Local verification defects at `HEAD` (`f56c48099`):**
+     - **`./scripts/closure-lint.sh --audit --json` exits 1** on closed `.67` (`implements-surface:probe-fail-closed` missing `tests/golden/probe-fail-closed.snap`; owned by `bd-qzr0v`).
+     - **`scripts/verification-drift-guard.sh --gate=closure-lint` has a `bd-2phcw` constant-green excuse defect (`.73`):** `check_closure_lint_drift()` (`scripts/verification-drift-guard.sh:116-159`) does not check whether `.closure-lint-report.json` `violations[].bead` has an open tracking bead; instead it runs `has_open_bead_for "closure.*lint|lint.*closure|closure.*violat"`, which regex-matches `.description` across all non-closed beads. Because 5 open beads (`bd-1vhpw`, `bd-coik3`, `bd-ncbi0`, `bd-qzr0v`, `.66`) mention `"closure"` and `"lint"` on the same line, `closure_lint_or_tracked_drift()` in `scripts/verify.sh:1725` silently excuses any unbaselined `closure-lint.sh --audit` failure forever.
+     - **7 of 19 `scripts/check-*.py` static gates (37% of the Python gate fleet, 156 self-test arms) are unwired from `verify.sh` and `ci-static.yml` (`.74`):** `check-adr-evidence-citations.py` (`bd-2cdum` closed!), `check-boundary-inventory-coverage.py`, `check-dead-exit-code-handlers.py`, `check-deleted-symbol-orphans.py`, `check-e2e-execution-coverage.py` (`bd-e2d1q` closed on 2026-11-09!), `check-freshness-vocabulary.py` (`bd-6zxuu`), and `check-open-coded-success-baseline.py` (`bd-mv9j7`), plus `build_degraded_codes_doc.sh --self-test` (18 arms), have zero callers in `verify.sh` or `ci-static.yml` because `scripts/verify-budget.toml` is at `605/608` integer seconds (`expected_seconds_p50: Option<u64>` floor of 1s per stage) and `24/24` unmeasured stages.
+
+3. **What is blocking us from getting there?**
+   - **Blocker 1 — Unreconciled Policy Contradiction (`.72`): `AGENTS.md` Standing Policy "DSR Only — Never GitHub Actions" (`3b79854c9`, 2026-11-01) vs `bd-actions-disabled-repo-wide-33mfm`:**
+     - `AGENTS.md` permanently prohibits GitHub Actions for any purpose and mandates `dsr` / local `act` execution of workflow YAML. Both `dsr` (`0.1.0`) and `act` (`0.2.89`) are installed on this Mac.
+     - Yet `bd-actions-disabled-repo-wide-33mfm` remained the #1 top pick in `bv --robot-triage` (score `1.30`, blocking `bd-fy92m`, `bd-g3obb`, `bd-up1hk`, and transitively `.22`), instructing agents to re-enable hosted GitHub Actions. Reconciling `bd-actions-disabled-repo-wide-33mfm` and `.5` / `.7` / `.19` / `.41` / `.58` to local `dsr` / `act` + pinned RCH removes an impossible-by-policy blocker.
+   - **Blocker 2 — Source-matched binary & dispatched test execution for `a1e0a079b..f56c48099` (92 commits):**
+     - The native debug binary on disk is at `a1e0a079b` (`2026-11-05`); `HEAD` is `f56c48099` (`2026-11-09`, 92 commits newer, including `.11` lexical/score-domain landings `8ec0a2715`, `e2319ba58`, `beed1555b`, `0c4d37fb6`, pack v6 policy binding `1a2a9ca37`, and reflect procedure/conflict drafts `f56c48099`). Because `ee_require_current_binary` (`bd-sxalp`) rightly enforces exact `gitCommit == HEAD`, running `scripts/verify.sh` end-to-end and regenerating `search_deterministic_golden` requires a pinned-Franken-stack RCH build/test run at `HEAD`.
+   - **Blocker 3 — Open product & verification blockers on the critical path to `.22`:**
+     - `.71` (backup crash after rule pack), `.66` (readiness coherence across `index status` / `status` / `doctor`), `.11` / `.12` (North Star 1 release-advice pack ranking & retrieval quality proof at `HEAD`), `.57` (incremental index publication), `.64` (evidence read-path single-scan hydration), `bd-qzr0v` + `.73` (closure-lint golden contract & drift-guard fix), and `.74` (wiring the 7 orphaned Python static gates into `verify.sh` and `verify-budget.toml`).
+
+4. **If we were to implement all open and in-progress beads, would we close the gap completely? Why or why not?**
+   - **Before this audit: NO**, for four concrete reasons:
+     1. **`.71` (`NO_BEAD`):** No bead tracked `StoredPackHistory::rebind_recovery_ledger` omitting `rule_inputs()` (`src/db/mod.rs:36558-36572`). Every open bead could have closed while `ee backup create` still crashed with exit 5 on any workspace that ever packed a procedural rule.
+     2. **`.72` (`Policy Contradiction`):** Implementing `bd-actions-disabled-repo-wide-33mfm` and `.5` / `.7` / `.19` / `.58` as written ("re-enable hosted GitHub Actions and pass hosted CI") directly violated `AGENTS.md` §"Standing Policy: DSR Only — Never GitHub Actions", creating a permanent deadlock where closing the tracker required breaking repository law.
+     3. **`.73` (`NO_BEAD`):** No bead tracked the `bd-2phcw` constant-green regex in `scripts/verification-drift-guard.sh` (`check_closure_lint_drift`), leaving `verify.sh` blind to unbaselined `closure-lint.sh --audit` failures.
+     4. **`.74` (`NO_BEAD`):** Two beads (`bd-2cdum` and `bd-e2d1q`) were closed after writing `scripts/check-adr-evidence-citations.py` and `scripts/check-e2e-execution-coverage.py` without wiring either script (or 5 sibling `scripts/check-*.py` scripts) into `scripts/verify.sh` or `.github/workflows/ci-static.yml` because `scripts/verify-budget.toml` hit its `605/608` integer-second ceiling.
+   - **After filing `.71`–`.74` and reconciling `bd-actions-disabled-repo-wide-33mfm` and §11/§15 in this pass: YES.** Every vision requirement, durability invariant, verification rail, and release gate now has an explicit, policy-consistent bead on the `.22` dependency graph.
+
+5. **What goals from the vision are NOT covered by ANY existing bead (`NO_BEAD` gaps)?**
+   - All four `NO_BEAD` / policy-deadlock gaps discovered in this audit are now captured and wired into `bd-reality-core-convergence-1azkt` and `.22`:
+     - **`bd-reality-core-convergence-1azkt.71` (P0):** Fix `StoredPackHistory::rebind_recovery_ledger` (`src/db/mod.rs:36558-36572`) omitting `rule_inputs()` so `ee backup create` and `ee backup restore` round-trip workspaces whose pack history includes selected procedural rules (`StoredPackRuleItem`).
+     - **`bd-reality-core-convergence-1azkt.72` (P1):** Reconcile `.5`, `.7`, `.19`, `.41`, `.58`, `bd-actions-disabled-repo-wide-33mfm`, `bd-fy92m`, `bd-g3obb`, and `bd-up1hk` with `AGENTS.md` *Standing Policy: DSR Only — Never GitHub Actions* (`dsr` + local `act` workflow verification + pinned RCH).
+     - **`bd-reality-core-convergence-1azkt.73` (P1):** Fix `scripts/verification-drift-guard.sh` (`check_closure_lint_drift`) so `--gate=closure-lint` checks `.closure-lint-report.json` (`violations[].bead`) for per-bead tracking (or fails closed on unbaselined violations) instead of matching `closure.*lint` across open bead descriptions.
+     - **`bd-reality-core-convergence-1azkt.74` (P1):** Resolve the `scripts/verify-budget.toml` integer-second (`Option<u64>`) floor deadlock, wire all 7 orphaned `scripts/check-*.py` static gates + `build_degraded_codes_doc.sh --self-test` into `scripts/verify.sh` and `.github/workflows/ci-static.yml`, and enforce in `check-e2e-execution-coverage.py` that every `scripts/check-*` script has an active caller in `verify.sh`.
+
+---
+
+### 21.2 Empirical local gate & static-fleet scorecard at `HEAD` (`f56c48099`, 2026-11-10)
+
+| Gate / Suite | Command | Exit | Measured Output / Notes |
+| --- | --- | --- | --- |
+| Mount & toolchain precheck | `/sbin/mount \| grep -E 'USBNVME16TB\|EERCHExport'` | `0` | Both volumes mounted (`/Volumes/USBNVME16TB` ExFAT, `/Volumes/EERCHExport` APFS); `nightly-2026-08-31` active |
+| Rustfmt gate | `cargo fmt --check` | `0` | Clean across workspace |
+| Format wrapper self-test | `./scripts/check-format.sh --self-test` | `0` | `7 of 7 arms passed` |
+| Include-fragment rustfmt | `./scripts/check-include-fmt.sh` | `0` | `7 include!-only file(s) formatted` |
+| Forbidden dependencies | `./scripts/check-forbidden-deps.sh` | `0` | Root and `fuzz` clean; `wasm-bindgen-futures` capped at `0.4.45` |
+| Vision coverage | `./scripts/vision-coverage.sh --json` | `0` | `147/147` documented commands implemented (`0` stubbed, `0` missing); `141/147` behaviorally exercised (`6` baselined, `4.08%`) |
+| Contract drift radar | `./scripts/contract-drift-radar.sh --quiet` | `0` | 250 schemas, 43 docs, 30 examples, 617 degraded codes vs 617 fixtures, 0 violations |
+| Degraded-codes doc check | `./scripts/build_degraded_codes_doc.sh --check` | `0` | `0.25s` via `bd-i4tv6` fixture fingerprint header (`617` fixtures) |
+| Degraded-codes doc self-test | `./scripts/build_degraded_codes_doc.sh --self-test` | `0` | `18/18 arms ok` (currently unwired from `verify.sh`; tracked in `.74`) |
+| Closure linter (direct) | `CLOSURE_LINT_AUTO_REOPEN_EXPIRED=false ./scripts/closure-lint.sh --audit --json` | **`1`** | `count: 1` unbaselined violation on `.67` (`missing tests/golden/probe-fail-closed.snap`; 232 audited, 122 baselined) |
+| Verification drift guard | `./scripts/verification-drift-guard.sh --json` | `0` | `status: "pass"`, `untracked_drifts: 0` — **false green on `closure-lint`** due to `has_open_bead_for "closure.*lint"` matching 5 open bead descriptions (`.73`) |
+| Wired Python gates & `--self-test` in `verify.sh` | All 34 `python3` stages in `scripts/verify.sh` | `0` | **34/34 PASS** (including `check-exit-code-docs.py` 9/9, `check-env-var-docs.py`, `check-cli-flag-docs.py`, `check-readme-Commands-table.py`, `check-fleet-identifier-census.py`, `probe.py --self-test` 34/34 binary-free) |
+| Wired shell/golden/fixture suites in `verify.sh` & `ci-static.yml` | All 14 shell/static suites | `0` | **14/14 PASS** (`e2e_repo_hygiene.sh` 9/9, `e2e_event_contract_radar_golden.sh`, `panic_helper_radar_golden.sh`, `ci_proof_lane_snapshot_fixture_test.sh`, `ci_proof_lane_hygiene.sh`, `e2e_release_provenance.sh --static` 8/8, `beads_export_repair.sh --fixture-suite` 4/4, `test_fake_tailscale.sh`, `e2e_invocation_audit.sh` 52/212 + 17/17 self-test, `check-toolchain-pins.sh` 4/4, `check-migration-registry.sh` 1..133, `bead-obsolescence.sh` 9/9, `check-pinned-definitions.sh` 25/25, `bead-evidence-triage.py` 13/13) |
+| **Unwired** `scripts/check-*.py` fleet (7 scripts, `.74`) | All 7 unwired `scripts/check-*.py` + `--self-test` | `0` | **7/7 PASS (156/156 self-test arms in ~2.0s):** `check-adr-evidence-citations.py` (16/16), `check-boundary-inventory-coverage.py` (8/8), `check-dead-exit-code-handlers.py` (28/28), `check-deleted-symbol-orphans.py` (21/21), `check-e2e-execution-coverage.py` (38/38), `check-freshness-vocabulary.py` (31/31), `check-open-coded-success-baseline.py` (14/14) |
+
+---
+
+### 21.3 Native `aarch64-apple-darwin` black-box re-baseline (`a1e0a079b`, 2026-11-05)
+
+Unlike §17–§20, which could only execute `v0.18.0` (`969f0cbf`, 2026-10-14) locally on macOS, this pass discovered and probed `/Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug/ee`:
+- **Binary provenance (`ee version --json`):** Mach-O 64-bit arm64 executable, `version: "0.18.0"`, `gitCommit: "a1e0a079b86d9f8802c8a919445fdeca66602ee3"`, `gitTag: "v0.18.0-1389-ga1e0a079b"`, `gitDirty: false`, `state: "clean"`, `supportedMigrationRange: 1..133`.
+- **Operational note on macOS scratch filesystems:** `ee init` on `/Volumes/USBNVME16TB` (ExFAT) exits `3` with `Store-authentication key store I/O failed at .../.ee/keys/store_auth_root.json: Operation not supported (os error 45)` because ExFAT does not support the POSIX file operations required by the key store. All local macOS black-box probes must allocate workspaces on APFS (`/Volumes/EERCHExport` or `os.path.realpath(tempfile.mkdtemp())` when `TMPDIR` is unset).
+
+| Surface / Bead | `v0.18.0` (`969f0cbf`, 2026-10-14) | Native `debug/ee` (`a1e0a079b`, 2026-11-05) | Verdict & Remaining Gap |
+| --- | --- | --- | --- |
+| `bd-sxalp` (`ee_require_current_binary`) | Passed stale `v0.18.0` binary because `0.18.0 == 0.18.0` (§19.5) | **Refuses `a1e0a079b` at `HEAD` `f56c48099` with exit 1** (`binary commit does not match the independently expected source commit`) | **FIXED & PROVEN LIVE.** Needs RCH test closure on `bd-sxalp`. |
+| `.67` (`probe.py --self-test --ee`) | Died on macOS `/var` symlink; `EE_MODEL_DIR` unregistered; empty error reason | **39/39 arms pass (`EXIT=0`)**, including E2E positive (`recall_at_5 = 0.70`, `UTR = 0.9995`) and negative (`exit = 2`, `zero_guard` fires) controls | **PROBE FIXED & PROVEN LIVE.** Only `.67`'s `closure-lint` golden annotation (`bd-qzr0v` / `.73`) remains. |
+| `.52` & `f25f546c7` (`ee why-not` on `mem_`, `rule_`, `ev_`) | Rejected `rule_` and `ev_` with exit 1 `invalid_id`; printed `"selected for context pack"` when `selected: false` | **Accepts `MemoryId`, `RuleId`, and `EvidenceId` (`rc=0`)**; at `--max-tokens 15`, excluded `MemoryId` and `RuleId` report `selected: false`, `primaryReason: "omitted_by_token_budget"`, and truthful non-selection prose/hints; excluded `EvidenceId` reports `selected: false`, `primaryReason: "not_retrieved"` | **FIXED & PROVEN LIVE ON `a1e0a079b`.** Needs dispatched test verdict at `HEAD` to close `.52`. |
+| `.13` (`ee backup create` evidence withholding & histograms) | Silent 75.7% evidence drop at `minimal` (`degraded: []`, single histogram) | Before rule packing: `--redaction minimal` exits `0`, emits **`degraded: ["backup_evidence_admission_reduced"]`**, `rowCountBasis: "source_snapshot"`, `sourceSearch: {46, 77, 0}` vs `exportedSearch: {43, 0, 80}`; `--redaction none` exits `0`, `degraded: []`, `exportedSearch: {46, 77, 0}` | **`.13` DISCLOSURE FIXED, BUT `.71` DISCOVERED:** once a pack selects a `rule_`, `ee backup create` crashes with exit 5 (`"rebound selection has no stored item"`). |
+| **`.71` (NEW P0):** `ee backup create` after `ee pack` selects a `rule_` | Untested in §17–§20 | **Exits 5 (`code: "import"`):** `"could not recover workspace work history: database execute returned malformed row: rebound selection has no stored item"` (`src/db/mod.rs:36558-36572`) | **OPEN P0 BUG (`.71`).** `StoredPackHistory::rebind_recovery_ledger` omits `self.rule_inputs().iter().map(pack_ledger_selected_rule_item)`. |
+| `.69` (`ee import cass` with `missing-db` hint) | Treated `cass` `missing-db` hint as generic failure / dropped repair hint | **Exits `0` cleanly** (`degraded: []`, `error: null`) when `cass` returns `error.hint == "missing-db"` | **FIXED ON `a1e0a079b`.** Verify remaining non-zero stderr hint propagation in `.69` before closing. |
+| `.54` (`ee status` with `hits_profiles.enabled = false`) | Emitted `graph_hits_profiles_disabled` on `ee status` | `ee status --json` emits only `["graph_skyline_disabled", "search_lexical_only"]` (no `graph_hits_profiles_disabled`) | **FIXED ON `a1e0a079b`.** (Note: `why-not` still surfaces `graph_hits_profiles_disabled` inside `counterfactualHints` from `pack`). |
+| `.66` (Readiness coherence across `index status`, `status`, `doctor`) | All three reported green while search failed (`index_incompatible`) | On 123-span store with `EE_EMBED_DOWNLOAD=off` (`deterministic_hash`): `index status` → `degraded: []`; `status` → `["search_lexical_only"]`; `doctor --full` → `degraded: []` + check warning prose `embed_model_unavailable`; `pack` → `["embed_model_unavailable"]` | **STILL OPEN (`.66`).** Four different degraded vocabularies across the four surfaces for one embedder posture. |
+| `.53` (`ee eval list --json` outside repo root) | Exited `2` (`Fixture directory does not exist: tests/fixtures/eval`) | **Still exits `2`** with the same relative-path error when invoked outside the repo root | **STILL OPEN (`.53`).** |
+| `.55` (Model download temp-dir leak) | 414 orphaned `.potion-multilingual-128M-download-*` dirs in `~/.local/share/ee/models/` | **Still 414 orphaned dirs** (and `src/` at `HEAD` has not yet added stale temp-dir sweeping) | **STILL OPEN (`.55`).** |
+| `.56` (`pack_assembly_elapsed_over_budget`) | Fired on cold pack (`565ms` vs `500ms`) | **Still fires** on 123-span pack (`554ms` vs `500ms` threshold on debug binary) | **STILL IN PROGRESS (`.56`).** |
+
+---
+
+### 21.4 Newly discovered gaps (`NO_BEAD` / policy deadlocks) & tracker reconciliation
+
+1. **`bd-reality-core-convergence-1azkt.71` (`[reality-check][P0] Backup recovery ledger rebind omits procedural rule items: ee backup create fails with exit 5 after any pack selects a rule`):**
+   - **Root cause:** `StoredPackHistory::rebind_recovery_ledger` (`src/db/mod.rs:36558-36568`) builds `rows` from `self.item_inputs()` and `self.evidence_inputs()` without `.chain(self.rule_inputs().iter().map(pack_ledger_selected_rule_item))`, unlike `StoredPackHistory::validate` (`src/db/mod.rs:36440-36446`).
+   - **Fix:** Chain `self.rule_inputs().iter().map(pack_ledger_selected_rule_item)` into `rows` in `rebind_recovery_ledger` (and verify `entity_id`, `entity_kind`, `entity_revision`, `why`, and `provenance` rebinding for `StoredPackRuleItem`), plus add unit and end-to-end backup/restore round-trip tests on a workspace whose pack history contains selected memory, rule, and evidence items simultaneously.
+
+2. **`bd-reality-core-convergence-1azkt.72` (`[reality-check][P1] Reconcile CLOSE_THE_GAP_PLAN and release/CI beads with AGENTS.md permanent DSR-Only Standing Policy`):**
+   - **Root cause:** Commit `3b79854c9` (`2026-11-01`) added `## Standing Policy: DSR Only — Never GitHub Actions` to `AGENTS.md`, permanently forbidding GitHub Actions for any purpose and mandating `dsr` and local `act`. However, `bd-actions-disabled-repo-wide-33mfm` remained open as a P0 blocker asking to re-enable GitHub Actions in repo settings (ranking #1 in `bv --robot-triage` at score `1.30`), and `.5`, `.7`, `.19`, `.41`, `.58`, `bd-fy92m`, `bd-g3obb`, and `bd-up1hk` still required hosted Actions runs.
+   - **Fix:** Re-scope `bd-actions-disabled-repo-wide-33mfm` and dependent CI/release beads so local workflow definitions in `.github/workflows/*.yml` are verified via `dsr` / `act` + pinned RCH without ever enabling or invoking the GitHub Actions service.
+
+3. **`bd-reality-core-convergence-1azkt.73` (`[reality-check][P1] Fix verification-drift-guard.sh constant-green excuse defect on closure-lint`):**
+   - **Root cause:** `check_closure_lint_drift()` in `scripts/verification-drift-guard.sh:116-159` calls `has_open_bead_for "closure.*lint|lint.*closure|closure.*violat"`, which searches `.description` across all non-closed beads in `.beads/issues.jsonl`. Because 5 open beads (`bd-1vhpw`, `bd-coik3`, `bd-ncbi0`, `bd-qzr0v`, `.66`) contain `"closure"` and `"lint"` on the same line, `verify.sh`'s `closure_lint_or_tracked_drift()` (`scripts/verify.sh:1725`) always exits `0`, masking `.67`'s unbaselined `closure-lint.sh --audit` failure (and any future closure-lint violation).
+   - **Fix:** Parse `.closure-lint-report.json` (`violations[].bead`) in `check_closure_lint_drift()` and require every violating closed bead ID to be explicitly referenced in an open tracking bead's `title` or structured metadata (or remove the drift-guard excuse wrapper around `closure-lint.sh --audit` since `tests/fixtures/closure_lint/audit_baseline.json` already baselines historical violations), with positive/negative `--self-test` twin arms.
+
+4. **`bd-reality-core-convergence-1azkt.74` (`[reality-check][P1] Wire the 7 orphaned scripts/check-*.py static gates into verify.sh & ci-static.yml and resolve verify-budget.toml 1s integer floor deadlock`):**
+   - **Root cause:** `scripts/verify-budget.toml` is at `605/608` integer seconds (`expected_seconds_p50: Option<u64>`) and `24/24` unmeasured stages. Because every new stage in `verify.sh` must declare at least `1` full second in `verify-budget.toml`, 7 Python static gates created between 2026-10-27 and 2026-11-09 (`check-adr-evidence-citations.py`, `check-boundary-inventory-coverage.py`, `check-dead-exit-code-handlers.py`, `check-deleted-symbol-orphans.py`, `check-e2e-execution-coverage.py`, `check-freshness-vocabulary.py`, `check-open-coded-success-baseline.py`) plus `build_degraded_codes_doc.sh --self-test` were left with zero callers in `verify.sh` and `ci-static.yml`.
+   - **Fix:** Add sub-second budget support (or a consolidated `Static Python Contract Gates` stage with sub-stage timing) to `scripts/verify-budget.toml` and `tests/verify_budget_contract.rs`, wire all 7 `scripts/check-*.py` scripts (and their `--self-test` arms + `build_degraded_codes_doc.sh --self-test`) into `scripts/verify.sh` and `.github/workflows/ci-static.yml`, and extend `scripts/check-e2e-execution-coverage.py` so any `scripts/check-*` file not invoked by `verify.sh` fails closed.
+
+---
+
+### 21.5 Ambition rounds (× 3) & Plan-space refinement passes (× 5)
+
+#### Phase 4 — Three Ambition Rounds
+
+- **Ambition Round 1 (From point-fix bug patching to structural invariants across entity families):**
+  - *Observation:* Both `.52` (`why-not` originally handling only `MemoryId` and rejecting `RuleId`/`EvidenceId`) and `.71` (`StoredPackHistory::rebind_recovery_ledger` handling `items` and `evidence_items` while omitting `rule_items`) are instances of the exact same structural anti-pattern: open-coded `Memory` + `Evidence` dispatch that forgets `Rule` (the third packable entity family introduced under ADR 0085).
+  - *Upgrade incorporated into `.71` and §13.3:* Audit every `StoredPackHistory`, `PackSelectionLedger`, `why-not`, `outcome`, and `backup` consumer for exhaustive 3-family coverage (`MemoryId`, `RuleId`, `EvidenceId`) so no consumer can compile or pass unit tests while handling only 2 of the 3 pack entity kinds.
+
+- **Ambition Round 2 (From writing static gates to self-enforcing gate-runner closure):**
+  - *Observation:* In `bd-e2d1q`, an agent wrote `scripts/check-e2e-execution-coverage.py` (38 self-test arms) specifically to prevent tests from existing in-tree without an executing runner — and then closed `bd-e2d1q` without adding `check-e2e-execution-coverage.py` to any runner! Six other `scripts/check-*.py` scripts suffered the same fate because `verify-budget.toml` forces a 1-second minimum budget per stage (`605/608s`).
+  - *Upgrade incorporated into `.74`:* `check-e2e-execution-coverage.py` must audit `scripts/check-*` itself (refusing any `scripts/check-*` script that is not wired into `scripts/verify.sh`), and `verify-budget.toml` must support sub-second millisecond budgets (`expected_ms_p50` or consolidated static-gate accounting) so adding a 50ms Python gate never deadlocks on integer-second rounding.
+
+- **Ambition Round 3 (From prose-grepping drift guards to structured, per-violation accountability under DSR-Only verification):**
+  - *Observation:* `scripts/verification-drift-guard.sh` (`check_closure_lint_drift`) used a broad regex (`closure.*lint`) over `.description` across 300 open beads, creating a `bd-2phcw` constant-green gate that silently excused `.67`'s unbaselined violation. Meanwhile, `bd-actions-disabled-repo-wide-33mfm` kept hosted GitHub Actions at the top of `bv --robot-triage` ten days after `AGENTS.md` permanently banned GitHub Actions.
+  - *Upgrade incorporated into `.72` and `.73`:* Drift guards may only excuse a failing gate when the exact structured violation identifier (`violations[].bead` in `.closure-lint-report.json`) is bound to an active owner bead, proven by twin positive/negative `--self-test` arms; and all CI/release verification beads (`bd-actions-disabled-repo-wide-33mfm`, `.5`, `.7`, `.19`, `.58`) now target local `dsr` / `act` + pinned RCH exclusively.
+
+#### Phase 5 — Five Plan-Space Refinement Passes
+
+- **Refinement Pass 1 (Cross-cutting gap check — `GAP-ANALYSIS.md`):**
+  - Checked CLI → Core → Storage → Index → Output → Error handling → Config → Security/Redaction → Tests across all five jobs. Verified that the ExFAT `store_auth_root.json` `os error 45` behavior on macOS scratch paths is documented in §21.3 so future agents never misdiagnose an ExFAT scratch workspace failure as a product regression.
+- **Refinement Pass 2 (Dependency & blocker hygiene — `br dep cycles` & `.22` rollup reachability):**
+  - Wired `.71` → `.13`, `.14`, `.22`; `.72` → `.5`, `.7`, `.19`, `.58`, `.22`; `.73` → `.5`, `.22`; `.74` → `.5`, `.22`. Confirmed `0` active dependency cycles via `./scripts/br_retry.sh dep cycles --json`.
+- **Refinement Pass 3 (Verification & twin-arm rigor — `bd-2phcw` compliance):**
+  - Every new bead (`.71`–`.74`) specifies both a positive arm and a negative twin arm that must fail when the guarded invariant is broken, plus namespace-prefixed control markers (`EE_GRADE_RC=`).
+- **Refinement Pass 4 (Tracker vs source truth alignment):**
+  - Recorded dated `2026-11-10` empirical measurements on `.11`, `.13`, `.52`, `.53`, `.54`, `.55`, `.56`, `.66`, `.67`, `.69`, `bd-sxalp`, and `bd-actions-disabled-repo-wide-33mfm` so no agent re-investigates already-proven `a1e0a079b` behaviors from scratch.
+- **Refinement Pass 5 (Static & hygiene audit of plan + tracker edits):**
+  - Re-ran `contract-drift-radar.sh --quiet`, `vision-coverage.sh --json`, `check-fleet-identifier-census.py`, `br dep cycles --json`, and `bv --robot-triage` after all edits to confirm zero regressions and zero private fleet identifiers.
+
+---
+
+### 21.6 Updated critical path to Part III convergence
+
+1. **Fix `.71` (`StoredPackHistory::rebind_recovery_ledger` missing `rule_inputs()` in `src/db/mod.rs:36558-36572`)** so `ee backup create` and `ee backup restore` round-trip workspaces that have packed procedural rules.
+2. **Fix `.73` (`verification-drift-guard.sh` constant-green `closure-lint` regex) and `bd-qzr0v` (`.67` `probe-fail-closed` golden/taxonomy contract)** so `closure-lint.sh --audit` exits `0` without a drift-guard excuse.
+3. **Fix `.74` (`verify-budget.toml` sub-second accounting + wire the 7 orphaned `scripts/check-*.py` scripts and `build_degraded_codes_doc.sh --self-test` into `verify.sh` and `ci-static.yml`)** so 100% of the static Python gate fleet actually executes in `verify.sh`.
+4. **Build and test `HEAD` via the pinned-Franken-stack RCH lane (`scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD`)** to:
+   - Regenerate `tests/golden/cli/search_deterministic_golden.json` (`provenanceChainHashVersion`) and close `bd-sxalp`.
+   - Verify the `2026-11-05..2026-11-09` `.11` lexical/score-domain commits (`8ec0a2715`, `e2319ba58`, `beed1555b`, `0c4d37fb6`) against North Star 1 and the `.43` real-shape corpus.
+   - Close `.52` (already proven working black-box on `a1e0a079b`) with a current-SHA test verdict.
+5. **Close `.66` (unify `index status`, `status`, `doctor --full`, and `pack` degraded codes under `deterministic_hash` / `embed_model_unavailable`), `.53` (`eval list` outside repo root), `.55` (model temp-dir sweep), and `.56` (`pack_assembly_elapsed_over_budget` timer scope).**
+6. **Execute local `dsr` / `act` workflow verification (`.72`, `bd-actions-disabled-repo-wide-33mfm`) + `.19` green candidate capsule + `.50` enforce-mode real-corpus gate** to reach `.22` Part III rollup.
 
 Part III remains active under §15.
