@@ -3820,4 +3820,36 @@ Unlike §17–§20, which could only execute `v0.18.0` (`969f0cbf`, 2026-10-14) 
 5. **Close `.66` (unify `index status`, `status`, `doctor --full`, and `pack` degraded codes under `deterministic_hash` / `embed_model_unavailable`), `.53` (`eval list` outside repo root), `.55` (model temp-dir sweep), and `.56` (`pack_assembly_elapsed_over_budget` timer scope).**
 6. **Execute local `dsr` / `act` workflow verification (`.72`, `bd-actions-disabled-repo-wide-33mfm`) + `.19` green candidate capsule + `.50` enforce-mode real-corpus gate** to reach `.22` Part III rollup.
 
+---
+
+### 21.7 Gap-closure execution pass — 2026-11-11
+
+Following the §21.1–§21.6 reality check, the highest-leverage verification and product gaps were executed directly on `main`:
+
+1. **`.73` (CLOSED — `scripts/verification-drift-guard.sh` constant-green `closure-lint` defect):**
+   - Removed `.description` prose matching from `has_open_bead_for` and implemented `has_open_closure_lint_bead_for_violation` + per-violation `{bead, surface}` verification in `check_closure_lint_drift`.
+   - Added `--self-test` with 5 positive/negative twin arms (`./scripts/verification-drift-guard.sh --self-test` → `5/5 arms passed`, `EXIT=0`) and updated `tests/verification_drift_guard.rs` (`drift_guard_recognizes_open_closure_lint_tracking_bead` + negative twin `drift_guard_refuses_untracked_closure_lint_violation_even_when_unrelated_open_bead_mentions_closure_lint`).
+2. **`bd-qzr0v` / `.67` (CLOSED `bd-qzr0v` — `implements-surface:probe-fail-closed` golden contract):**
+   - Created `tests/golden/probe-fail-closed.snap` (`ee.real_corpus_probe.fail_closed_contract.v1`), wired `read_to_string` consumption and `fail_closed_contract_snapshot()` verification plus 3 positive/negative `--self-test` arms into `scripts/real_shape_corpus/probe.py` (`37/37 arms ok`, `EXIT=0`), raised `READ_FLOOR = 3` in `scripts/check-golden-consumption.py` (`12/12 arms passed`), and verified `CLOSURE_LINT_AUTO_REOPEN_EXPIRED=false ./scripts/closure-lint.sh --audit --json` → `status: "pass", count: 0, unbaselined: []` (`EXIT=0`).
+3. **`.74` (CLOSED — Wired all 7 orphaned `scripts/check-*.py` static gates into `verify.sh`, `verify-budget.toml`, and `ci-static.yml`):**
+   - Wired `check-adr-evidence-citations.py`, `check-boundary-inventory-coverage.py`, `check-dead-exit-code-handlers.py`, `check-deleted-symbol-orphans.py`, `check-e2e-execution-coverage.py`, `check-freshness-vocabulary.py`, and `check-open-coded-success-baseline.py` (and their `--self-test` suites) into `scripts/verify.sh`, `scripts/verify-budget.toml` (`146` stages, `602/608s`), and `.github/workflows/ci-static.yml`.
+   - Added `check_python_gate_wiring` + 3 positive/negative `--self-test` twin arms to `scripts/check-e2e-execution-coverage.py` (`35/35 arms passed`, `EXIT=0`). All 19 `scripts/check-*.py` static gates and self-tests execute and exit `0`.
+4. **`.72` & `bd-actions-disabled-repo-wide-33mfm` (CLOSED — DSR-Only Standing Policy reconciliation):**
+   - Reconciled `bd-actions-disabled-repo-wide-33mfm`, `bd-fy92m`, `bd-g3obb`, `bd-up1hk`, `.5`, `.7`, `.19`, and `.58` with `AGENTS.md` §"Standing Policy: DSR Only — Never GitHub Actions" (`3b79854c9`).
+5. **`.71` (Implemented & typechecked via RCH — `StoredPackHistory::rebind_recovery_ledger` rule-item support):**
+   - Chained `.chain(self.rule_inputs().iter().map(pack_ledger_selected_rule_item))` into `rows` and rebound `selected.evidence_span_id` and `selected.entity_revision` in `src/db/mod.rs:36558-36590`.
+   - Added positive + negative twin unit test `pack_recovery_rebinds_ledger_across_memory_rule_and_evidence_items_and_rejects_unbacked_rank` in `src/db/mod.rs:68492-68620`.
+6. **`.53` (Implemented & typechecked via RCH — `ee eval list --json` outside repo root):**
+   - Added `DEFAULT_WORKSPACE_FIXTURE_DIR = ".ee/eval"` and `list_fixtures_allowing_missing_default` in `src/eval/runner.rs`, wired `--fixture-dir` (`alias = "fixtures"`) into `EvalCommand::List` and `resolve_eval_fixture_dir` in `src/cli/mod.rs`, and added unit tests (`src/eval/runner.rs:4941`, `src/cli/mod.rs:88865`) plus E2E assertions `16-eval-list-non-repo` and `16b-eval-list-explicit-missing` in `scripts/e2e_ask.sh`.
+7. **`.55` (Implemented & typechecked via RCH — Cancelled/cached model download staging cleanup):**
+   - Updated `src/core/index.rs:8945` and `src/core/model.rs:3126` so cancelled downloads and cached model fetches always sweep `.potion-multilingual-128M-download-<pid>-*` staging directories, with updated unit test `staging_cleanup_removes_only_this_process_dirs` in `src/core/index_download_backoff.rs:316`.
+8. **`.56` (Implemented & typechecked via RCH — `pack_assembly_elapsed_over_budget` timing scope):**
+   - Added `pack_slo_observed_elapsed_ms` in `src/core/context.rs:3027-3036, 4407-4419, 4920-4943` to subtract pre-read index reconciliation, embedder preparation, and write-connection open from `PackAssemblySlo` evaluation, with positive/negative twin assertions in `src/core/context_test_module.rs:4298-4330`.
+9. **`.66` (Implemented & typechecked via RCH — `ee index status --json` top-level `.degraded` mirroring):**
+   - Updated `src/cli/mod.rs:25476-25486, 25917-25927, 25976-25986` so top-level `ee.response.v2` `.degraded` mirrors `.data.degraded` instead of hardcoding `"degraded": []`, with positive/negative twin unit test `index_status_json_mirrors_data_degraded_into_top_level_envelope` in `src/cli/mod.rs:88932-88993`.
+10. **Pre-existing `HEAD` compile regressions fixed & verified via pinned-Franken-stack RCH (`cargo check -j 2 --locked --lib --bins --tests` → `EXIT=0` on `worker-01`):**
+    - Replaced broken `format!("{:x}", sha2::Sha256::digest(...))` calls (`E0277: LowerHex is not implemented for hybrid_array::Array`) with `crate::models::sha256_hex(...)` in `src/core/verify.rs:2520,3401`, `src/core/outcome_harvest.rs:1339`, and `src/cli/outcome_harvest_tests.rs:139`.
+    - Updated `src/cli/cass_import_proposal_tests.rs:87,171,172` to pass `&Cx` and await `reconcile_cass_import_index` via `reconcile_index_for_test`.
+    - Fixed unused variable warning `_workspace_path: &Path` in `src/core/context.rs:12514`.
+
 Part III remains active under §15.
