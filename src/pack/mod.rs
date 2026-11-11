@@ -4592,7 +4592,12 @@ fn subject_summary(item: &PackDraftItem) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if summary.len() > 120 {
-        summary.truncate(120);
+        let mut end = 120;
+        // The byte limit can fall inside a multibyte source character.
+        while !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        summary.truncate(end);
     }
     summary
 }
@@ -13584,6 +13589,123 @@ mod tests {
             &draft.items.get(1).map(|item| item.rank),
             &Some(2),
             "second rank",
+        )
+    }
+
+    #[test]
+    fn subject_summary_truncates_at_utf8_boundaries() -> TestResult {
+        let mut item = PackDraftItem::from_selected_candidate(
+            1,
+            candidate_with_content(1, 0.8, 0.5, 10, "short multilingual résumé")?,
+            Vec::new(),
+            PackSelectionPhase::StrictMmr,
+        );
+        ensure_equal(
+            &super::subject_summary(&item),
+            &item.content,
+            "short Unicode summary is unchanged",
+        )?;
+        for character in ['é', '界', '🦀'] {
+            for remaining in 1..character.len_utf8() {
+                let prefix = "a".repeat(120 - remaining);
+                item.content = format!("{prefix}{character} trailing text");
+                ensure_equal(
+                    &super::subject_summary(&item),
+                    &prefix,
+                    "character crossing the byte limit is excluded",
+                )?;
+            }
+            let prefix = format!("{}{character}", "a".repeat(120 - character.len_utf8()));
+            item.content = format!("{prefix} trailing text");
+            ensure_equal(
+                &super::subject_summary(&item),
+                &prefix,
+                "character ending at the byte limit is preserved",
+            )?;
+        }
+        item.content = "a".repeat(121);
+        ensure_equal(
+            &super::subject_summary(&item),
+            &"a".repeat(120),
+            "ASCII summary keeps the existing byte limit",
+        )?;
+        item.content = "word ".repeat(17);
+        ensure_equal(
+            &super::subject_summary(&item),
+            &"word ".repeat(16).trim_end().to_string(),
+            "summary keeps the existing word limit",
+        )
+    }
+
+    #[test]
+    fn unicode_consensus_and_conflicts_render_without_truncating_source_content() -> TestResult {
+        let lead = "Run cargo fmt before release ";
+        let summary = format!("{lead}{}", "a".repeat(119 - lead.len()));
+        let content = format!("{summary}é. Keep release notes.");
+        let draft = draft_from_candidates(vec![
+            candidate_with_content(3, 0.8, 0.5, 10, &content)?
+                .with_diversity_key("release-format"),
+            candidate_with_content(1, 0.8, 0.5, 10, &content)?
+                .with_diversity_key("release-format"),
+            candidate_with_content(4, 0.8, 0.5, 10, "Always publish release notes for café.")?
+                .with_diversity_key("release-notes"),
+            candidate_with_content(2, 0.8, 0.5, 10, "Never publish release notes for café.")?
+                .with_diversity_key("release-notes"),
+        ])?;
+        let report = super::analyze_pack_consensus_conflicts(&draft);
+        ensure_equal(&report.consensus.len(), &1, "Unicode consensus group")?;
+        ensure_equal(&report.conflicts.len(), &1, "Unicode conflict group")?;
+        ensure_equal(
+            &report.consensus[0].subject_summary,
+            &summary,
+            "consensus summary ends before the split character",
+        )?;
+        ensure_equal(
+            &report.consensus[0].member_memory_ids,
+            &vec![memory_id(1), memory_id(3)],
+            "Unicode consensus retains both source memories",
+        )?;
+        ensure_equal(
+            &report.conflicts[0].conflicting_memory_ids,
+            &vec![memory_id(2), memory_id(4)],
+            "Unicode conflict retains both source memories",
+        )?;
+
+        let mut request = ContextRequest::from_query(draft.query.clone())
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        request.budget = draft.budget;
+        let mut response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+        response.data.consensus = report.consensus;
+        response.data.conflicts = report.conflicts;
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json(&response))
+                .map_err(|error| format!("response JSON rejected: {error}"))?;
+        ensure_equal(
+            &json
+                .pointer("/data/consensus/0/subjectSummary")
+                .and_then(serde_json::Value::as_str),
+            &Some(summary.as_str()),
+            "JSON emits the valid UTF-8 consensus summary",
+        )?;
+        let markdown = crate::output::render_context_response_markdown(&response);
+        ensure_contains(
+            &markdown,
+            &format!("**Consensus:** {summary}"),
+            "rendered consensus",
+        )?;
+        ensure_contains(&markdown, "**Conflict:**", "rendered conflict")?;
+        ensure_contains(
+            &markdown,
+            &content,
+            "rendered source retains full Unicode content",
+        )?;
+        ensure_equal(
+            &json
+                .pointer("/data/pack/text")
+                .and_then(serde_json::Value::as_str),
+            &Some(markdown.as_str()),
+            "JSON pack text and Markdown retain Unicode render parity",
         )
     }
 
