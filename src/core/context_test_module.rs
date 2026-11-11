@@ -2633,6 +2633,165 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "graph")]
+    fn refresh_hits_fixture(fixture: &PprContextFixture) -> TestResult {
+        let report = crate::graph::refresh_graph_snapshot(
+            &fixture.connection,
+            &WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string(),
+            &crate::graph::CentralityRefreshOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(report.snapshot.is_some());
+        assert!(
+            report
+                .centrality
+                .scores
+                .iter()
+                .any(|score| score.authority > 0.0)
+        );
+        Ok(())
+    }
+
+    fn hits_fixture_candidates(fixture: &PprContextFixture) -> Result<Vec<PackCandidate>, String> {
+        Ok(vec![
+            ppr_candidate(fixture.seed, 0.8)?,
+            ppr_candidate(fixture.neighbor, 0.2)?,
+            ppr_candidate(fixture.orphan, 0.6)?,
+        ])
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn context_hits_revalidates_equal_count_link_edits_and_resumes_after_refresh() -> TestResult {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        refresh_hits_fixture(&fixture)?;
+        let mut candidates = hits_fixture_candidates(&fixture)?;
+        let mut degraded = Vec::new();
+        let applied = super::apply_context_profile_hits_boost(
+            &fixture.connection,
+            &fixture.workspace_path,
+            ContextPackProfile::Grounding,
+            &mut candidates,
+            &Ok(true),
+            &mut degraded,
+        );
+        assert_eq!(applied.boosted_candidates, 2);
+        assert!(candidates[1].relevance.into_inner() > 0.2);
+        assert!(degraded.is_empty(), "fresh source: {degraded:?}");
+
+        // The stored status and source row count stay unchanged. Only a source
+        // projection comparison can observe the old authority losing its edge.
+        fixture
+            .connection
+            .execute_raw(&format!(
+                "UPDATE memory_links SET dst_memory_id = '{}'",
+                fixture.orphan
+            ))
+            .map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string();
+        let snapshot = fixture
+            .connection
+            .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+            .map_err(|error| error.to_string())?
+            .ok_or("missing snapshot")?;
+        assert_eq!(snapshot.status, crate::db::GraphSnapshotStatus::Valid);
+        assert_eq!(snapshot.source_generation, 1);
+        let mut stale_candidates = hits_fixture_candidates(&fixture)?;
+        degraded.clear();
+        let refused = super::apply_context_profile_hits_boost(
+            &fixture.connection,
+            &fixture.workspace_path,
+            ContextPackProfile::Grounding,
+            &mut stale_candidates,
+            &Ok(true),
+            &mut degraded,
+        );
+        assert_eq!(refused.boosted_candidates, 0);
+        assert_eq!(
+            stale_candidates
+                .iter()
+                .map(|item| item.relevance.into_inner())
+                .collect::<Vec<_>>(),
+            vec![0.8, 0.2, 0.6]
+        );
+        assert!(
+            stale_candidates
+                .iter()
+                .all(|item| !item.why.contains("HITS boost"))
+        );
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_graph_snapshot_not_current" && entry.message.contains("stale")
+        }));
+
+        refresh_hits_fixture(&fixture)?;
+        degraded.clear();
+        let resumed = super::apply_context_profile_hits_boost(
+            &fixture.connection,
+            &fixture.workspace_path,
+            ContextPackProfile::Grounding,
+            &mut stale_candidates,
+            &Ok(true),
+            &mut degraded,
+        );
+        assert_eq!(resumed.boosted_candidates, 2);
+        assert_eq!(stale_candidates[1].relevance.into_inner(), 0.2);
+        assert!(stale_candidates[2].relevance.into_inner() > 0.6);
+        assert!(degraded.is_empty(), "refreshed source: {degraded:?}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn context_hits_refuses_tampered_snapshot_bytes_without_changing_candidates() -> TestResult {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        refresh_hits_fixture(&fixture)?;
+        fixture
+            .connection
+            .execute_raw("UPDATE graph_snapshots SET content_hash = 'blake3:tampered' WHERE status = 'valid'")
+            .map_err(|error| error.to_string())?;
+        let mut candidates = hits_fixture_candidates(&fixture)?;
+        let mut degraded = Vec::new();
+        let metrics = super::apply_context_profile_hits_boost(
+            &fixture.connection,
+            &fixture.workspace_path,
+            ContextPackProfile::Balanced,
+            &mut candidates,
+            &Ok(true),
+            &mut degraded,
+        );
+        assert_eq!(metrics.boosted_candidates, 0);
+        assert_eq!(candidates[0].relevance.into_inner(), 0.8);
+        assert_eq!(candidates[1].relevance.into_inner(), 0.2);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.message.contains("hash_mismatch"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_hits_refuses_legacy_snapshot_with_unknown_source_selection() -> TestResult {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = hits_fixture_candidates(&fixture)?;
+        let mut degraded = Vec::new();
+        let metrics = super::apply_context_profile_hits_boost(
+            &fixture.connection,
+            &fixture.workspace_path,
+            ContextPackProfile::Balanced,
+            &mut candidates,
+            &Ok(true),
+            &mut degraded,
+        );
+        assert_eq!(metrics.boosted_candidates, 0);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.message.contains("source_selection_unknown"))
+        );
+        Ok(())
+    }
+
     fn symbol_candidate(
         memory_id: MemoryId,
         relevance: f32,

@@ -5950,6 +5950,25 @@ pub(crate) fn inspect_memory_link_snapshot(
     let snapshot = conn
         .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
         .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?;
+    inspect_stored_memory_link_snapshot(conn, workspace_id, snapshot.as_ref())
+}
+
+/// Validate the exact snapshot a consumer will use, without selecting it again.
+/// Callers keep the snapshot and its source projection in one read transaction.
+/// A persisted `valid` status alone cannot detect subsequent link edits.
+pub(crate) fn inspect_stored_memory_link_snapshot(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshot: Option<&StoredGraphSnapshot>,
+) -> GraphResult<MemoryLinkSnapshotInspection> {
+    if snapshot.is_some_and(|snapshot| {
+        snapshot.workspace_id != workspace_id
+            || snapshot.graph_type != GraphSnapshotType::MemoryLinks
+    }) {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "graph snapshot does not belong to the requested workspace and projection",
+        ));
+    }
     let mut options = SnapshotValidationOptions {
         workspace_id: workspace_id.to_owned(),
         graph_type: GraphSnapshotType::MemoryLinks,
@@ -5957,7 +5976,6 @@ pub(crate) fn inspect_memory_link_snapshot(
         ..SnapshotValidationOptions::default()
     };
     let metrics = snapshot
-        .as_ref()
         .map(|snapshot| serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json))
         .transpose()
         .map_err(|error| GraphError::json("read graph snapshot projection", error))?;
@@ -5980,7 +5998,7 @@ pub(crate) fn inspect_memory_link_snapshot(
         ));
     }
 
-    if let Some(snapshot) = snapshot.as_ref()
+    if let Some(snapshot) = snapshot
         && projection.is_none()
     {
         // Do not assume that a legacy snapshot used today's default filters.
@@ -6008,7 +6026,7 @@ pub(crate) fn inspect_memory_link_snapshot(
             field: "source link count",
             value: links.len().to_string(),
         })?;
-    let mut validation = validate_stored_snapshot(snapshot.as_ref(), &options);
+    let mut validation = validate_stored_snapshot(snapshot, &options);
     if validation.result == SnapshotValidationResult::Valid
         && let Some(metrics) = metrics.as_ref()
     {

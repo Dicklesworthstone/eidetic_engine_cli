@@ -3537,7 +3537,14 @@ async fn run_context_pack_attempt(
     .iter()
     .all(|setting| setting.is_ok())
         && selection_settings.ppr_weight_error.is_none();
-    let l2_cache_context = if l2_cache_eligible && selection_config_available {
+    // Link edits need not publish a new graph snapshot. The snapshot generation
+    // in the L2 key therefore cannot attest live HITS inputs; validate them on
+    // every request that asks graph scores to influence selection.
+    let hits_weights = request.profile.hits_boost_weights();
+    let live_hits_ranking = selection_settings.hits_profiles.as_ref() == Ok(&true)
+        && hits_weights.authority + hits_weights.hub > 0.0;
+    let l2_cache_context = if l2_cache_eligible && selection_config_available && !live_hits_ranking
+    {
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         let l2_context = context_pack_l2_prepare(
             options,
@@ -12314,8 +12321,43 @@ fn apply_context_profile_hits_boost(
             .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
         {
             Ok(Some(found)) if found.status == crate::db::GraphSnapshotStatus::Valid => {
-                snapshot = Some(found);
-                break;
+                match crate::graph::inspect_stored_memory_link_snapshot(
+                    connection,
+                    workspace_id,
+                    Some(&found),
+                ) {
+                    Ok(inspection)
+                        if inspection.source_selection_known
+                            && inspection.validation.is_usable() =>
+                    {
+                        snapshot = Some(found);
+                        break;
+                    }
+                    Ok(inspection) => {
+                        let posture = if inspection.source_selection_known {
+                            inspection.validation.result.as_str()
+                        } else {
+                            "source_selection_unknown"
+                        };
+                        push_degradation(
+                            degraded,
+                            "context_graph_snapshot_not_current",
+                            ContextResponseSeverity::Low,
+                            format!(
+                                "Context profile HITS boost skipped because graph snapshot {} is {posture}; stored status alone does not establish current source links.",
+                                found.id
+                            ),
+                            Some("ee graph centrality-refresh".to_owned()),
+                        );
+                    }
+                    Err(_) => push_degradation(
+                        degraded,
+                        "context_graph_snapshot_unavailable",
+                        ContextResponseSeverity::Low,
+                        "Context profile HITS boost skipped because graph snapshot integrity and source links could not be verified.",
+                        Some("ee graph centrality-refresh".to_owned()),
+                    ),
+                }
             }
             Ok(_) => {}
             Err(error) => push_degradation(
