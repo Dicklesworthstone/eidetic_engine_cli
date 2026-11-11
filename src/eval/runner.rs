@@ -47,6 +47,10 @@ pub const SEMANTIC_RECALL_REPORT_SCHEMA_V1: &str = "ee.eval.semantic_recall_repo
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
 
+/// Default user-authored fixture directory relative to a workspace root when
+/// running outside an `ee` repository checkout (`bd-reality-core-convergence-1azkt.53`).
+pub const DEFAULT_WORKSPACE_FIXTURE_DIR: &str = ".ee/eval";
+
 const EVAL_FIXTURE_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A discovered fixture with its metadata.
@@ -741,7 +745,10 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
                 "Fixture directory does not exist: {}",
                 fixture_dir.display()
             ),
-            repair: Some("Ensure tests/fixtures/eval/ exists".into()),
+            repair: Some(format!(
+                "Add evaluation fixtures under {} (<scenario>/scenario.json and source_memory.json) or pass --fixture-dir <path>.",
+                fixture_dir.display()
+            )),
         });
     }
 
@@ -2206,6 +2213,20 @@ fn eval_fixture_symlink_error(
 
 /// List all available fixtures with metadata.
 pub fn list_fixtures(fixture_dir: &Path) -> Result<Vec<FixtureListEntry>, DomainError> {
+    list_fixtures_allowing_missing_default(fixture_dir, false)
+}
+
+/// List all available fixtures with metadata, returning an empty list when
+/// `allow_missing_default` is true and the unconfigured default workspace
+/// fixture directory does not exist yet (`bd-reality-core-convergence-1azkt.53`).
+pub fn list_fixtures_allowing_missing_default(
+    fixture_dir: &Path,
+    allow_missing_default: bool,
+) -> Result<Vec<FixtureListEntry>, DomainError> {
+    ensure_eval_fixture_path_has_no_symlink_components(fixture_dir, "read fixture directory")?;
+    if allow_missing_default && !fixture_dir.exists() {
+        return Ok(Vec::new());
+    }
     let discovered = discover_fixtures(fixture_dir)?;
     let mut entries = Vec::with_capacity(discovered.len());
 
@@ -4914,6 +4935,34 @@ mod retrieval_diagnostic_tests {
         assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&pure)?);
         assert_eq!(actual.precision_at_1, 1.0);
         assert_eq!(actual.retrieval_degradations.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn list_fixtures_allowing_missing_default_returns_empty_for_unconfigured_workspace_and_rejects_explicit_missing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        let missing = tempdir.path().join(".ee").join("eval");
+        let entries = list_fixtures_allowing_missing_default(&missing, true)?;
+        assert!(
+            entries.is_empty(),
+            "missing default workspace fixture dir returns empty list"
+        );
+
+        let err = list_fixtures_allowing_missing_default(&missing, false)
+            .expect_err("explicit missing fixture dir must fail closed");
+        assert!(
+            err.message().contains("Fixture directory does not exist"),
+            "explicit missing fixture dir message: {}",
+            err.message()
+        );
+        assert!(
+            err.repair()
+                .unwrap_or_default()
+                .contains("--fixture-dir <path>"),
+            "explicit missing fixture dir repair hint: {:?}",
+            err.repair()
+        );
         Ok(())
     }
 }

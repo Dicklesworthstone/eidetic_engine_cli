@@ -2492,8 +2492,6 @@ fn harvest_verification_command_identity(
     record: &VerificationEvidenceRecord,
     authority: VerificationEvidenceAuthority,
 ) -> Result<String, String> {
-    use sha2::Digest;
-
     let digest = canonical_harvest_command_digest(&record.command_hash)?;
     if authority == VerificationEvidenceAuthority::ValidatedRunRecord {
         // A run's optional command_hash override may hash raw text or another
@@ -2516,8 +2514,8 @@ fn harvest_verification_command_identity(
         return canonical_harvest_command_digest(argv);
     }
     let sha256 = format!(
-        "sha256:{:x}",
-        sha2::Sha256::digest(record.command.as_bytes())
+        "sha256:{}",
+        crate::models::sha256_hex(record.command.as_bytes())
     );
     if digest != sha256 && digest != crate::models::command_hash(&record.command) {
         return Err("Pack verification command hash does not match".to_owned());
@@ -3393,12 +3391,10 @@ mod harvest_proof_tests {
     }
 
     fn evidence(command: &str) -> Result<VerificationEvidenceRecord, String> {
-        use sha2::Digest;
-
         crate::models::verification_evidence_record_from_rch_verify(&serde_json::json!({
             "schema": RCH_VERIFY_SCHEMA_V1,
             "command_text": command,
-            "command_hash": format!("{:x}", sha2::Sha256::digest(command.as_bytes())),
+            "command_hash": crate::models::sha256_hex(command.as_bytes()),
             "command_kind": "cargo_test",
             "status": "remote_pass",
             "exit_code": 0,

@@ -316,6 +316,11 @@ mod tests {
         for dir in [&own, &other, &installed] {
             std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
         }
+        std::fs::write(
+            own.join("model.safetensors.part"),
+            b"partial-cancelled-bytes",
+        )
+        .map_err(|error| error.to_string())?;
         assert_eq!(remove_own_staging_dirs(root.path(), model), 1);
         assert!(!own.exists());
         assert!(other.exists());

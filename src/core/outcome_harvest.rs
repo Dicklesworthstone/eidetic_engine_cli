@@ -1222,7 +1222,6 @@ mod tests {
     use crate::db::{
         CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     };
-    use sha2::Digest;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const PACKED_AT: &str = "2026-01-01T00:00:00Z";
@@ -1336,7 +1335,7 @@ mod tests {
         ) -> TestResult {
             let evidence = crate::models::verification_evidence_record_from_rch_verify(&json!({
                 "schema": crate::models::RCH_VERIFY_SCHEMA_V1, "command_text": command,
-                "command_hash": format!("{:x}", sha2::Sha256::digest(command.as_bytes())),
+                "command_hash": crate::models::sha256_hex(command.as_bytes()),
                 "command_kind": "cargo_test", "status": "remote_pass", "exit_code": 0,
                 "worker_id": "retained-proof-worker", "remote_required": true,
                 "started_at": start, "finished_at": finish,

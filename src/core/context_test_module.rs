@@ -19,9 +19,10 @@ mod tests {
         CommandContext, ContextPagination, ContextPerformanceTrace, PackPersistenceSubspans,
         PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace, apply_pagination,
         candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
-        open_pack_slot_lock_file, pack_assembly_slo_for_run, probe_pack_slot_admission,
-        push_evidence_freshness_degradation, push_pack_budget_too_small_degradation,
-        push_search_degradations, try_acquire_pack_slot, unit_score,
+        open_pack_slot_lock_file, pack_assembly_slo_for_run, pack_slo_observed_elapsed_ms,
+        probe_pack_slot_admission, push_evidence_freshness_degradation,
+        push_pack_budget_too_small_degradation, push_search_degradations, try_acquire_pack_slot,
+        unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::{BudgetDimension, RequestBudget};
@@ -4292,6 +4293,40 @@ pub fn unrelated_context() -> u64 {{
         assert_ne!(
             slow.elapsed_status, fast.elapsed_status,
             "elapsed classification must depend on the supplied elapsed, not the trace"
+        );
+
+        // bd-reality-core-convergence-1azkt.56: cold model preparation, pre-read
+        // index reconciliation, and persistence writer connection setup are
+        // subtracted before classifying pack assembly SLO elapsed_ms, while real
+        // assembly latency still trips warning/failure.
+        let cold_but_fast_assembly = pack_slo_observed_elapsed_ms(
+            Duration::from_millis(504),
+            Duration::from_millis(310),
+            Some(Duration::from_millis(120)),
+            None,
+            true,
+            Duration::from_millis(50),
+        );
+        assert_eq!(cold_but_fast_assembly, 24);
+        assert_eq!(
+            reported(cold_but_fast_assembly).elapsed_status,
+            crate::pack::PackAssemblySloStatus::WithinBudget,
+            "cold setup must not falsely trip pack_assembly_elapsed_over_budget when assembly is 24ms"
+        );
+
+        let genuinely_slow_assembly = pack_slo_observed_elapsed_ms(
+            Duration::from_millis(1_150),
+            Duration::from_millis(100),
+            Some(Duration::from_millis(350)),
+            None,
+            true,
+            Duration::from_millis(50),
+        );
+        assert_eq!(genuinely_slow_assembly, 650);
+        assert_eq!(
+            reported(genuinely_slow_assembly).elapsed_status,
+            crate::pack::PackAssemblySloStatus::Warning,
+            "650ms of real assembly work after subtracting setup must still trip warning"
         );
         Ok(())
     }

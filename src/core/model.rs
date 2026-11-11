@@ -3123,6 +3123,7 @@ fn fetch_registered_embedding_model(
     let cached = load_model2vec_model(&stored_path, model).ok();
     let was_cached = cached.is_some();
     let loaded = if let Some(loaded) = cached {
+        crate::core::index::reclaim_model_staging_dirs(&stored_path);
         loaded
     } else {
         download_embedding_manifest(manifest, &stored_path)?;

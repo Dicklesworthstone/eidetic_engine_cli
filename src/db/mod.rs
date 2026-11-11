@@ -36560,6 +36560,11 @@ impl StoredPackHistory {
             .iter()
             .map(pack_ledger_selected_item)
             .chain(
+                self.rule_inputs()
+                    .iter()
+                    .map(pack_ledger_selected_rule_item),
+            )
+            .chain(
                 self.evidence_inputs()
                     .iter()
                     .map(pack_ledger_selected_evidence_item),
@@ -36571,6 +36576,7 @@ impl StoredPackHistory {
                 .get(&selected.rank)
                 .ok_or_else(|| pack_recovery_error("rebound selection has no stored item"))?;
             selected.memory_id.clone_from(&row.memory_id);
+            selected.evidence_span_id.clone_from(&row.evidence_span_id);
             // Older ledgers identify memory selections through memory_id alone.
             // Preserve that representation when no entity field was recorded.
             if !selected.entity_id.is_empty() {
@@ -36579,6 +36585,7 @@ impl StoredPackHistory {
             if !selected.entity_kind.is_empty() {
                 selected.entity_kind.clone_from(&row.entity_kind);
             }
+            selected.entity_revision.clone_from(&row.entity_revision);
             selected.diversity_key.clone_from(&row.diversity_key);
             selected.trust_subclass.clone_from(&row.trust_subclass);
             if selected.why.hash != row.why.hash {
@@ -68479,6 +68486,136 @@ UPDATE memories
             &target.get_pack_history_for_recovery(id)?,
             &original,
             "legacy ledger survives real storage recovery",
+        )
+    }
+
+    #[test]
+    fn pack_recovery_rebinds_ledger_across_memory_rule_and_evidence_items_and_rejects_unbacked_rank()
+    -> TestResult {
+        let workspace_id = "wsp_01234567890123456789012345";
+        let pack_id = "pack_000000000000000000000pack2";
+        let memory_id = "mem_00000000000000000000pack01";
+        let rule_id = "rul_00000000000000000000pack01";
+        let session_id = "ses_00000000000000000000pack01";
+        let evidence_id = "ev_000000000000000000000pack01";
+
+        let setup_entities = |conn: &DbConnection| -> TestResult {
+            setup_pack_test_memory(conn)?;
+            conn.insert_procedural_rule(
+                rule_id,
+                &super::CreateProceduralRuleInput {
+                    workspace_id: workspace_id.to_owned(),
+                    content: "Always run cargo fmt before committing.".to_owned(),
+                    confidence: 0.9,
+                    utility: 0.85,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: vec!["cargo".to_owned()],
+                },
+            )?;
+            conn.insert_session(session_id, &session_input("cass-pack-recovery-native"))?;
+            conn.insert_evidence_span(
+                evidence_id,
+                &evidence_span_input(session_id, "span-pack-recovery-native", 1),
+            )?;
+            Ok(())
+        };
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_entities(&connection)?;
+        let rule_rev = super::blake3_text_hash("rule-rev-1");
+        let evidence_rev = super::blake3_text_hash("evidence-rev-1");
+        let provenance = r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project rule"}]}"#;
+        connection.insert_pack_record_with_native_items(
+            pack_id,
+            &super::CreatePackRecordInput {
+                task_paths: Vec::new(),
+                workspace_id: workspace_id.to_owned(),
+                query: "native rule and evidence recovery".to_owned(),
+                profile: "balanced".to_owned(),
+                max_tokens: 4000,
+                used_tokens: 150,
+                item_count: 3,
+                omitted_count: 0,
+                pack_hash: pack_test_hash("native-rule-evidence-recovery"),
+                degraded_json: None,
+                created_by: Some("context_pack".to_owned()),
+            },
+            &[pack_item_input(pack_id, memory_id, 1)],
+            &[super::CreatePackRuleItemInput {
+                pack_id: pack_id.to_owned(),
+                rule_id: rule_id.to_owned(),
+                entity_revision: rule_rev,
+                rank: 2,
+                section: "procedural_rules".to_owned(),
+                estimated_tokens: 50,
+                relevance: 0.92,
+                utility: 0.84,
+                why: "Selected procedural rule 2 for formatting".to_owned(),
+                provenance_json: provenance.to_owned(),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("project-rule".to_owned()),
+            }],
+            &[super::CreatePackEvidenceItemInput {
+                pack_id: pack_id.to_owned(),
+                evidence_id: evidence_id.to_owned(),
+                entity_revision: evidence_rev,
+                rank: 3,
+                section: "supporting_evidence".to_owned(),
+                estimated_tokens: 50,
+                relevance: 0.88,
+                utility: 0.79,
+                why: "Selected evidence span 3 for formatting".to_owned(),
+                provenance_json: provenance.to_owned(),
+                trust_class: "observed_session".to_owned(),
+                trust_subclass: Some("cass-span".to_owned()),
+            }],
+            &[],
+            None,
+        )?;
+
+        let original = connection.get_pack_history_for_recovery(pack_id)?;
+        let mut redacted = original.clone();
+        redacted.record.query = "[REDACTED]".to_owned();
+        for item in &mut redacted.items {
+            item.why = "[REDACTED why 1]".to_owned();
+        }
+        for item in &mut redacted.rule_items {
+            item.why = "[REDACTED why 2]".to_owned();
+        }
+        for item in &mut redacted.evidence_items {
+            item.why = "[REDACTED why 3]".to_owned();
+        }
+        redacted.rebind_recovery_ledger(&original, |_| "[REDACTED]".to_owned())?;
+        redacted.validate()?;
+
+        let target = DbConnection::open_memory()?;
+        target.migrate()?;
+        setup_entities(&target)?;
+        target.insert_pack_histories_for_recovery([&redacted])?;
+        ensure_equal(
+            &target.get_pack_history_for_recovery(pack_id)?,
+            &redacted,
+            "redacted pack with memory + rule + evidence items survives recovery",
+        )?;
+
+        // Negative twin arm: removing the backing rule_item while the ledger still selects rank 2
+        // must fail closed with "rebound selection has no stored item".
+        let mut unbacked = original.clone();
+        unbacked.rule_items.clear();
+        let err = unbacked
+            .rebind_recovery_ledger(&original, str::to_owned)
+            .expect_err("missing backing rule item must fail closed");
+        ensure(
+            err.to_string()
+                .contains("rebound selection has no stored item"),
+            "unbacked rank error message",
         )
     }
 

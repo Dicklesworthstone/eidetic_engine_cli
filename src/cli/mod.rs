@@ -11764,8 +11764,8 @@ pub enum EvalCommand {
         /// Fixture ID or family to run. Omit for all fixtures.
         #[arg(value_name = "FIXTURE_OR_FAMILY")]
         scenario_id: Option<String>,
-        /// Path to fixture directory (defaults to tests/fixtures/eval/).
-        #[arg(long, value_name = "PATH")]
+        /// Path to fixture directory (defaults to tests/fixtures/eval/ in-repo or .ee/eval/ in a workspace).
+        #[arg(long, alias = "fixtures", value_name = "PATH")]
         fixture_dir: Option<std::path::PathBuf>,
         /// Run the pack-quality evaluator over fixture expectations.
         #[arg(long = "pack-quality", action = ArgAction::SetTrue)]
@@ -11785,12 +11785,16 @@ pub enum EvalCommand {
         /// Fixture ID or family to report. Omit for all fixtures.
         #[arg(value_name = "FIXTURE_OR_FAMILY")]
         scenario_id: Option<String>,
-        /// Path to fixture directory (defaults to tests/fixtures/eval/).
-        #[arg(long, value_name = "PATH")]
+        /// Path to fixture directory (defaults to tests/fixtures/eval/ in-repo or .ee/eval/ in a workspace).
+        #[arg(long, alias = "fixtures", value_name = "PATH")]
         fixture_dir: Option<std::path::PathBuf>,
     },
     /// List available evaluation scenarios.
-    List,
+    List {
+        /// Path to fixture directory (defaults to tests/fixtures/eval/ in-repo or .ee/eval/ in a workspace).
+        #[arg(long, alias = "fixtures", value_name = "PATH")]
+        fixture_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Subcommands for `ee focus`.
@@ -15079,7 +15083,9 @@ where
                     )
                 }
             }
-            EvalCommand::List => handle_eval_list(&cli, None, stdout, stderr),
+            EvalCommand::List { fixture_dir } => {
+                handle_eval_list(&cli, fixture_dir.as_deref(), stdout, stderr)
+            }
             EvalCommand::Report {
                 scenario_id,
                 fixture_dir,
@@ -16942,6 +16948,36 @@ fn mcp_validate_human(report: &serde_json::Value) -> String {
     output
 }
 
+fn resolve_eval_fixture_dir(
+    cli: &Cli,
+    fixture_dir: Option<&std::path::Path>,
+) -> (std::path::PathBuf, bool) {
+    if let Some(explicit) = fixture_dir {
+        return (explicit.to_path_buf(), true);
+    }
+    if cli.workspace.is_some() {
+        let ws = cli.resolve_workspace();
+        let ws_repo_dir = ws.join(crate::eval::DEFAULT_FIXTURE_DIR);
+        if ws_repo_dir.exists() {
+            return (ws_repo_dir, false);
+        }
+        return (ws.join(crate::eval::DEFAULT_WORKSPACE_FIXTURE_DIR), false);
+    }
+    let repo_default = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    if repo_default.exists() {
+        return (repo_default, false);
+    }
+    let ws = cli.resolve_workspace();
+    let ws_repo_dir = ws.join(crate::eval::DEFAULT_FIXTURE_DIR);
+    if ws_repo_dir.exists() {
+        return (ws_repo_dir, false);
+    }
+    (
+        std::path::PathBuf::from(crate::eval::DEFAULT_WORKSPACE_FIXTURE_DIR),
+        false,
+    )
+}
+
 fn handle_eval_list<W, E>(
     cli: &Cli,
     fixture_dir: Option<&std::path::Path>,
@@ -16952,25 +16988,39 @@ where
     W: Write,
     E: Write,
 {
-    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
-    let dir = fixture_dir.unwrap_or(&default_dir);
+    let (resolved_dir, is_explicit) = resolve_eval_fixture_dir(cli, fixture_dir);
+    let dir = resolved_dir.as_path();
 
-    match crate::eval::list_fixtures(dir) {
+    match crate::eval::list_fixtures_allowing_missing_default(dir, !is_explicit) {
         Ok(entries) => {
             if cli.wants_json() {
+                let mut data = serde_json::json!({
+                    "command": "eval list",
+                    "fixtures": entries,
+                    "fixtureCount": entries.len(),
+                    "fixtureDir": dir.display().to_string()
+                });
+                if entries.is_empty() {
+                    data["message"] = serde_json::Value::String(format!(
+                        "No evaluation scenarios configured. Add fixtures to {} or pass --fixture-dir <path>.",
+                        dir.display()
+                    ));
+                }
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": {
-                        "command": "eval list",
-                        "fixtures": entries,
-                        "fixtureCount": entries.len(),
-                        "fixtureDir": dir.display().to_string()
-                    },
+                    "data": data,
                     "degraded": [],
                 });
                 let _ = stdout.write_all(json.to_string().as_bytes());
                 let _ = stdout.write_all(b"\n");
+            } else if entries.is_empty() {
+                let _ = writeln!(
+                    stdout,
+                    "No evaluation scenarios configured in {}.\nAdd fixtures (<scenario>/scenario.json and source_memory.json) to {} or pass --fixture-dir <path>.",
+                    dir.display(),
+                    dir.display()
+                );
             } else {
                 let _ = writeln!(
                     stdout,
@@ -17094,8 +17144,8 @@ where
     W: Write,
     E: Write,
 {
-    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
-    let dir = fixture_dir.unwrap_or(&default_dir);
+    let (resolved_dir, _) = resolve_eval_fixture_dir(cli, fixture_dir);
+    let dir = resolved_dir.as_path();
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
         Err(CancellationAwareCliError::Cancelled(reason)) => {
@@ -17194,8 +17244,8 @@ where
     W: Write,
     E: Write,
 {
-    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
-    let dir = fixture_dir.unwrap_or(&default_dir);
+    let (resolved_dir, _) = resolve_eval_fixture_dir(cli, fixture_dir);
+    let dir = resolved_dir.as_path();
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
         Err(CancellationAwareCliError::Cancelled(reason)) => {
@@ -17413,8 +17463,8 @@ where
     W: Write,
     E: Write,
 {
-    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
-    let dir = fixture_dir.unwrap_or(&default_dir);
+    let (resolved_dir, _) = resolve_eval_fixture_dir(cli, fixture_dir);
+    let dir = resolved_dir.as_path();
 
     let fixtures = match crate::eval::discover_fixtures(dir) {
         Ok(fixtures) => fixtures,
@@ -25423,11 +25473,16 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let data = report.data_json();
+                let degraded = data
+                    .get("degraded")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
+                    "degraded": degraded,
+                    "data": data,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -25859,11 +25914,16 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let data = report.data_json();
+                let degraded = data
+                    .get("degraded")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
+                    "degraded": degraded,
+                    "data": data,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -25952,11 +26012,16 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let data = report.data_json();
+                let degraded = data
+                    .get("degraded")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
+                    "degraded": degraded,
+                    "data": data,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -71405,7 +71470,7 @@ impl NormalizedInvocation {
                 Command::Eval(eval) => match eval {
                     EvalCommand::Run { .. } => "eval run".to_string(),
                     EvalCommand::Report { .. } => "eval report".to_string(),
-                    EvalCommand::List => "eval list".to_string(),
+                    EvalCommand::List { .. } => "eval list".to_string(),
                 },
                 Command::Export(export) => match &export.subcommand {
                     Some(ExportSubcommand::Agentsmd(_)) => "export agentsmd".to_string(),
@@ -88793,6 +88858,137 @@ mod tests {
             &value["data"]["command"],
             &serde_json::json!("eval list"),
             "command",
+        )
+    }
+
+    #[test]
+    fn eval_list_json_outside_repo_workspace_exits_zero_with_empty_posture_and_rejects_explicit_missing_dir()
+    -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ws = tempdir.path().to_str().ok_or("utf-8 temp workspace")?;
+        let (exit, stdout, stderr) = invoke(&["ee", "--workspace", ws, "--json", "eval", "list"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "eval list outside repo exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "eval list outside repo JSON stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("eval list"),
+            "command",
+        )?;
+        ensure_equal(
+            &value["data"]["fixtureCount"],
+            &serde_json::json!(0),
+            "empty fixtureCount",
+        )?;
+        ensure_equal(
+            &value["data"]["fixtures"],
+            &serde_json::json!([]),
+            "empty fixtures array",
+        )?;
+        ensure(
+            value["data"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No evaluation scenarios configured"),
+            "empty posture message",
+        )?;
+
+        // Negative twin arm: an explicit missing --fixture-dir must still fail closed.
+        let missing = tempdir.path().join("explicit-missing-fixtures");
+        let missing_str = missing.to_str().ok_or("utf-8 missing path")?;
+        let (bad_exit, bad_stdout, _bad_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            ws,
+            "--json",
+            "eval",
+            "list",
+            "--fixture-dir",
+            missing_str,
+        ]);
+        ensure_equal(
+            &bad_exit,
+            &ProcessExitCode::Configuration,
+            "explicit missing fixture-dir fails closed with Configuration exit",
+        )?;
+        let bad_value: serde_json::Value =
+            serde_json::from_str(&bad_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &bad_value["error"]["code"],
+            &serde_json::json!("configuration"),
+            "explicit missing fixture-dir error code",
+        )
+    }
+
+    #[test]
+    fn index_status_json_mirrors_data_degraded_into_top_level_envelope() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ws = tempdir.path().to_str().ok_or("utf-8 workspace path")?;
+
+        let (init_exit, _init_out, init_err) = invoke(&["ee", "--workspace", ws, "--json", "init"]);
+        ensure(
+            init_exit == ProcessExitCode::Success,
+            format!("init failed: {init_err}"),
+        )?;
+
+        let (rebuild_exit, _rebuild_out, rebuild_err) =
+            invoke(&["ee", "--workspace", ws, "--json", "index", "rebuild"]);
+        ensure(
+            rebuild_exit == ProcessExitCode::Success,
+            format!("index rebuild failed: {rebuild_err}"),
+        )?;
+
+        // Positive healthy arm: top-level .degraded and .data.degraded are both [].
+        let (ok_exit, ok_stdout, ok_stderr) =
+            invoke(&["ee", "--workspace", ws, "--json", "index", "status"]);
+        ensure(
+            ok_exit == ProcessExitCode::Success,
+            format!("healthy index status failed: {ok_stderr}"),
+        )?;
+        let ok_value: serde_json::Value =
+            serde_json::from_str(&ok_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &ok_value["degraded"],
+            &serde_json::json!([]),
+            "healthy top-level degraded is empty",
+        )?;
+        ensure_equal(
+            &ok_value["data"]["degraded"],
+            &serde_json::json!([]),
+            "healthy data.degraded is empty",
+        )?;
+
+        // Negative degraded arm: corrupt index meta.json and verify top-level .degraded mirrors .data.degraded.
+        let meta_path = tempdir.path().join(".ee/index/meta.json");
+        std::fs::write(&meta_path, b"{corrupt-json").map_err(|error| error.to_string())?;
+        let (deg_exit, deg_stdout, deg_stderr) =
+            invoke(&["ee", "--workspace", ws, "--json", "index", "status"]);
+        ensure(
+            deg_exit == ProcessExitCode::Success,
+            format!("degraded index status failed: {deg_stderr}"),
+        )?;
+        let deg_value: serde_json::Value =
+            serde_json::from_str(&deg_stdout).map_err(|error| error.to_string())?;
+        let data_degraded = deg_value["data"]["degraded"]
+            .as_array()
+            .ok_or("data.degraded array")?;
+        ensure(
+            !data_degraded.is_empty(),
+            "corrupted meta.json must produce non-empty data.degraded",
+        )?;
+        ensure_equal(
+            &deg_value["degraded"],
+            &deg_value["data"]["degraded"],
+            "top-level .degraded must mirror .data.degraded",
         )
     }
 

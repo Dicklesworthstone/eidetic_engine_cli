@@ -8942,9 +8942,7 @@ impl EeLazyModel2VecEmbedder {
                 ),
             ))),
         };
-        if !matches!(downloaded, Err(SearchError::Cancelled { .. })) {
-            reclaim_model_staging_dirs(&destination);
-        }
+        reclaim_model_staging_dirs(&destination);
         let backup = match downloaded {
             Ok(backup) => {
                 download_backoff::clear(staging_root, POTION_MODEL_NAME);

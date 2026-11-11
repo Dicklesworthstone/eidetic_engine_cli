@@ -3024,9 +3024,15 @@ async fn run_context_pack_attempt(
     } else {
         None
     };
-    if remote_search.is_none() && options.persist_pack {
+    let index_reconcile_elapsed = if remote_search.is_none() && options.persist_pack {
+        let reconcile_start = Instant::now();
         reconcile_search_index_before_read_with_cx(control.cx, &search_options, true).await;
-    }
+        reconcile_start.elapsed()
+    } else {
+        Duration::ZERO
+    };
+    let embedder_resolved_after_reconcile =
+        embedder_resolved_before || crate::core::index::default_search_embedder_resolved();
     let (read_pool_config, pin_snapshot) =
         context_read_pool_config(&options.workspace_path, &mut degraded);
     let read_pool = registered_process_read_pool(
@@ -4398,17 +4404,19 @@ async fn run_context_pack_attempt(
     // `trace.elapsed_ms("total")`: the `"total"` span is not recorded until
     // after this point, and `elapsed_ms` answers 0 for an unknown span, so the
     // by-name form would silently restore the same false `within_budget`.
-    let observed_elapsed_ms = duration_millis_u64(total_start.elapsed());
-    // bd-reality-core-convergence-1azkt.56: the one-time model load is a
-    // process cold-start cost, not pack assembly. Charging it made
-    // `pack_assembly_elapsed_over_budget` fire on every CLI pack. Everything
+    // bd-reality-core-convergence-1azkt.56: one-time model load, pre-read
+    // index reconciliation, and opening the persistence writer connection are
+    // cold-start/storage setup costs, not pack assembly. Charging them made
+    // `pack_assembly_elapsed_over_budget` fire on ordinary CLI packs. Everything
     // else the caller waited for still counts.
-    let model_load_ms = if embedder_resolved_before {
-        0
-    } else {
-        crate::core::index::default_search_embedder_load_duration().map_or(0, duration_millis_u64)
-    };
-    let observed_elapsed_ms = observed_elapsed_ms.saturating_sub(model_load_ms);
+    let observed_elapsed_ms = pack_slo_observed_elapsed_ms(
+        total_start.elapsed(),
+        index_reconcile_elapsed,
+        embedder_preparation.as_ref().map(|prep| prep.elapsed),
+        crate::core::index::default_search_embedder_load_duration(),
+        embedder_resolved_after_reconcile,
+        context_write_connection_open,
+    );
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
         let actuals = PackAssemblySloActuals::from_pack_run(
             &draft,
@@ -4909,6 +4917,30 @@ fn context_performance_json(
 /// does not hold, so a by-name lookup here would report a comfortable
 /// `within_budget` for a request that had in fact blown its budget
 /// (GH49 / bd-jikgj).
+pub(crate) fn pack_slo_observed_elapsed_ms(
+    total_elapsed: Duration,
+    index_reconcile_elapsed: Duration,
+    embedder_prepare_elapsed: Option<Duration>,
+    default_embedder_load_elapsed: Option<Duration>,
+    embedder_resolved_after_reconcile: bool,
+    write_connection_open_elapsed: Duration,
+) -> u64 {
+    let observed_elapsed_ms = duration_millis_u64(total_elapsed);
+    let index_reconcile_ms = duration_millis_u64(index_reconcile_elapsed);
+    let embedder_prepare_ms = embedder_prepare_elapsed.map_or(0, duration_millis_u64);
+    let default_load_ms = if embedder_resolved_after_reconcile {
+        0
+    } else {
+        default_embedder_load_elapsed.map_or(0, duration_millis_u64)
+    };
+    let model_load_ms = embedder_prepare_ms.max(default_load_ms);
+    let write_conn_open_ms = duration_millis_u64(write_connection_open_elapsed);
+    let setup_ms = index_reconcile_ms
+        .saturating_add(model_load_ms)
+        .saturating_add(write_conn_open_ms);
+    observed_elapsed_ms.saturating_sub(setup_ms)
+}
+
 fn pack_assembly_slo_for_run(
     profile: PackResourceProfile,
     draft: &crate::pack::PackDraft,
@@ -12479,7 +12511,7 @@ fn normalize_hits_score(value: f64, max_value: f64) -> f32 {
 
 fn apply_proximity_to_seed_scores(
     connection: &DbConnection,
-    workspace_path: &Path,
+    _workspace_path: &Path,
     search_report: &SearchReport,
     candidates: &mut [PackCandidate],
     feature_enabled: &Result<bool, String>,

@@ -49,6 +49,23 @@ fn session(number: u128, status: ImportSessionStatus) -> ImportedCassSession {
     }
 }
 
+fn reconcile_index_for_test(
+    report: &mut CassImportReport,
+    proposal_mutation: bool,
+) -> Result<Option<super::CassImportDegradation>, String> {
+    let mut owned = report.clone();
+    let (updated, degradation) =
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            let degradation = reconcile_cass_import_index(&cx, &mut owned, proposal_mutation)
+                .await
+                .map_err(|reason| format!("{reason:?}"))?;
+            Ok::<_, String>((owned, degradation))
+        })
+        .map_err(|error| error.to_string())??;
+    *report = updated;
+    Ok(degradation)
+}
+
 #[test]
 fn cass_import_proposals_are_explicit_and_require_captured_spans() -> TestResult {
     for (argv, propose, dry_run) in [
@@ -84,7 +101,7 @@ fn cass_import_proposal_preview_preserves_absent_store_and_standard_receipt() ->
     assert_eq!(review.sessions_planned, 1);
     assert!(!review.durable_mutation);
     // Even a caller claiming proposal mutation cannot open a store in dry-run.
-    assert!(reconcile_cass_import_index(&mut report, true).is_none());
+    assert!(reconcile_index_for_test(&mut report, true)?.is_none());
     let response = cass_import_response_v2(&report, None, Some(&review));
     let standard = apply_field_selector_to_json(&response.to_string(), &FieldSelector::standard())
         .map_err(|error| error.to_string())?;
@@ -168,8 +185,8 @@ fn proposal_backfill_does_not_skip_index_verification_without_import_jobs() -> T
         .map_err(|error| error.to_string())?;
     connection.close().map_err(|error| error.to_string())?;
 
-    assert!(reconcile_cass_import_index(&mut report, false).is_none());
-    let degradation = reconcile_cass_import_index(&mut report, true)
+    assert!(reconcile_index_for_test(&mut report, false)?.is_none());
+    let degradation = reconcile_index_for_test(&mut report, true)?
         .ok_or_else(|| "a proposal-only backfill must verify its unbuilt index".to_owned())?;
     assert_eq!(degradation.code, "cass_import_index_publish_failed");
     assert_eq!(report.index_jobs_queued, 0);

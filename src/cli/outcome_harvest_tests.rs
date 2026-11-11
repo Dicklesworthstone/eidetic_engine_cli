@@ -41,7 +41,6 @@ impl HarvestFixture {
             CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
             DbConnection,
         };
-        use sha2::Digest;
 
         let temporary = tempfile::tempdir()?;
         let workspace = temporary.path().canonicalize()?;
@@ -136,7 +135,7 @@ impl HarvestFixture {
                 crate::models::verification_evidence_record_from_rch_verify(&serde_json::json!({
                     "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
                     "command_text": command,
-                    "command_hash": format!("{:x}", sha2::Sha256::digest(command.as_bytes())),
+                    "command_hash": crate::models::sha256_hex(command.as_bytes()),
                     "command_kind": "cargo_test",
                     "status": "remote_pass",
                     "exit_code": 0,
