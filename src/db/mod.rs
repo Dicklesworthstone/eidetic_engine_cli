@@ -36554,6 +36554,17 @@ impl StoredPackHistory {
             core.request.query =
                 recovered_pack_ledger_text(&core.request.query, &self.record.query);
         }
+        // Task targets live only in the ledger, so the backup row projection
+        // cannot redact them. Transform the visible representation here while
+        // preserving exact historical bytes when the export leaves it intact.
+        for target in &mut core.request.task_paths {
+            if let Some(text) = target.text.as_deref().or(target.redacted_text.as_deref()) {
+                let recovered = redact(text);
+                if recovered != text {
+                    *target = recovered_pack_ledger_text(target, &recovered);
+                }
+            }
+        }
         core.degraded = pack_ledger_degradations(self.record.degraded_json.as_deref())?;
         let rows = self
             .item_inputs()
@@ -68495,9 +68506,9 @@ UPDATE memories
         let workspace_id = "wsp_01234567890123456789012345";
         let pack_id = "pack_000000000000000000000pack2";
         let memory_id = "mem_00000000000000000000pack01";
-        let rule_id = "rul_00000000000000000000pack01";
-        let session_id = "ses_00000000000000000000pack01";
-        let evidence_id = "ev_000000000000000000000pack01";
+        let rule_id = "rule_00000000000000000000pack01";
+        let session_id = "sess_00000000000000000000pack01";
+        let evidence_id = "ev_00000000000000000000pack01";
 
         let setup_entities = |conn: &DbConnection| -> TestResult {
             setup_pack_test_memory(conn)?;
@@ -68535,7 +68546,10 @@ UPDATE memories
         connection.insert_pack_record_with_native_items(
             pack_id,
             &super::CreatePackRecordInput {
-                task_paths: Vec::new(),
+                task_paths: vec![
+                    "src/private_ledger_target.rs".to_owned(),
+                    "src/private_partial_target.rs?api_key=ledger-target-secret-canary".to_owned(),
+                ],
                 workspace_id: workspace_id.to_owned(),
                 query: "native rule and evidence recovery".to_owned(),
                 profile: "balanced".to_owned(),
@@ -68560,20 +68574,20 @@ UPDATE memories
                 why: "Selected procedural rule 2 for formatting".to_owned(),
                 provenance_json: provenance.to_owned(),
                 trust_class: "human_explicit".to_owned(),
-                trust_subclass: Some("project-rule".to_owned()),
+                trust_subclass: Some("procedural_rule".to_owned()),
             }],
             &[super::CreatePackEvidenceItemInput {
                 pack_id: pack_id.to_owned(),
                 evidence_id: evidence_id.to_owned(),
                 entity_revision: evidence_rev,
                 rank: 3,
-                section: "supporting_evidence".to_owned(),
+                section: "evidence".to_owned(),
                 estimated_tokens: 50,
                 relevance: 0.88,
                 utility: 0.79,
                 why: "Selected evidence span 3 for formatting".to_owned(),
                 provenance_json: provenance.to_owned(),
-                trust_class: "observed_session".to_owned(),
+                trust_class: "cass_evidence".to_owned(),
                 trust_subclass: Some("cass-span".to_owned()),
             }],
             &[],
@@ -68581,6 +68595,33 @@ UPDATE memories
         )?;
 
         let original = connection.get_pack_history_for_recovery(pack_id)?;
+        let original_parsed = super::parse_stored_pack_ledger(&original.record);
+        let original_ledger = original_parsed
+            .available_ledger()
+            .ok_or_else(|| TestFailure::new("original replay must be available"))?;
+        let partial_target = &original_ledger["request"]["taskPaths"][1];
+        ensure_equal(
+            &partial_target["redacted"],
+            &serde_json::json!(true),
+            "secret-bearing task target is already redacted at capture",
+        )?;
+        ensure(
+            partial_target["text"].is_null()
+                && partial_target["redactedText"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("private_partial_target"))
+                && !partial_target
+                    .to_string()
+                    .contains("ledger-target-secret-canary"),
+            "partial redaction withholds the secret but still exposes the private target",
+        )?;
+        let mut unchanged = original.clone();
+        unchanged.rebind_recovery_ledger(&original, str::to_owned)?;
+        ensure_equal(
+            &unchanged,
+            &original,
+            "unredacted recovery preserves all three entity families and task targets",
+        )?;
         let mut redacted = original.clone();
         redacted.record.query = "[REDACTED]".to_owned();
         for item in &mut redacted.items {
@@ -68594,6 +68635,47 @@ UPDATE memories
         }
         redacted.rebind_recovery_ledger(&original, |_| "[REDACTED]".to_owned())?;
         redacted.validate()?;
+        let parsed = super::parse_stored_pack_ledger(&redacted.record);
+        let ledger = parsed
+            .available_ledger()
+            .ok_or_else(|| TestFailure::new("redacted replay must remain available"))?;
+        ensure_equal(
+            &ledger["request"]["taskPaths"][0]["redactedText"],
+            &serde_json::json!("[REDACTED]"),
+            "ledger-only task target obeys recovery redaction",
+        )?;
+        ensure(
+            !ledger.to_string().contains("private_ledger_target"),
+            "redacted replay must not retain original task-path text",
+        )?;
+        let strengthened = &ledger["request"]["taskPaths"][1];
+        ensure_equal(
+            &strengthened["redactedText"],
+            &serde_json::json!("[REDACTED]"),
+            "stronger recovery redaction also sanitizes already-redacted task text",
+        )?;
+        ensure(
+            strengthened["text"].is_null()
+                && strengthened["redactionReasons"]
+                    .as_array()
+                    .is_some_and(|reasons| {
+                        reasons.contains(&serde_json::json!("api_key"))
+                            && reasons.contains(&serde_json::json!("backup_redaction"))
+                    })
+                && !ledger.to_string().contains("private_partial_target"),
+            "strengthening preserves prior redaction reasons without retaining private text",
+        )?;
+        ensure(
+            redacted.record.ledger_hash != original.record.ledger_hash,
+            "changed task targets and recovered prose update the verified ledger hash",
+        )?;
+        let mut repeated = redacted.clone();
+        repeated.rebind_recovery_ledger(&redacted, |_| "[REDACTED]".to_owned())?;
+        ensure_equal(
+            &repeated,
+            &redacted,
+            "repeating the same redaction preserves exact ledger bytes and hash",
+        )?;
 
         let target = DbConnection::open_memory()?;
         target.migrate()?;

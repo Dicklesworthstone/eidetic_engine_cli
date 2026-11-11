@@ -18808,7 +18808,7 @@ mod tests {
         let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
         let pack_id = crate::models::PackId::from_uuid(Uuid::from_u128(n)).to_string();
         let input = crate::db::CreatePackRecordInput {
-            task_paths: Vec::new(),
+            task_paths: vec!["src/private-pack-target.rs".to_owned()],
             workspace_id: workspace_id.clone(),
             query: "release api_key=pack-secret-canary".to_owned(),
             profile: "balanced".to_owned(),
@@ -19457,6 +19457,28 @@ mod tests {
             )?;
             let chunk: BackupPackHistory =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let archived_ledger = crate::db::parse_stored_pack_ledger(&chunk.history.record);
+            let archived_replay = archived_ledger
+                .available_ledger()
+                .ok_or("archived replay unavailable")?;
+            if matches!(redaction, RedactionLevel::Paranoid | RedactionLevel::Full) {
+                ensure(
+                    !String::from_utf8_lossy(&bytes).contains("private-pack-target")
+                        && !archived_replay.to_string().contains("private-pack-target"),
+                    "redacted backup artifact and decoded ledger withhold task paths before restore",
+                )?;
+                ensure_equal(
+                    archived_replay["request"]["taskPaths"][0]["redactedText"].clone(),
+                    json!("[REDACTED]"),
+                    "archived task target carries the stronger redaction",
+                )?;
+            } else if redaction == RedactionLevel::None {
+                ensure_equal(
+                    archived_replay["request"]["taskPaths"][0]["text"].clone(),
+                    json!("src/private-pack-target.rs"),
+                    "unredacted archive provides the task-path negative control",
+                )?;
+            }
             ensure(
                 chunk.authentication.is_some(),
                 "pack history is source authenticated",
@@ -19526,6 +19548,23 @@ mod tests {
             let replay = ledger
                 .available_ledger()
                 .ok_or("restored replay unavailable")?;
+            if matches!(redaction, RedactionLevel::Paranoid | RedactionLevel::Full) {
+                ensure(
+                    !replay.to_string().contains("private-pack-target"),
+                    "fully redacted recovery must withhold ledger-only task paths",
+                )?;
+                ensure_equal(
+                    replay["request"]["taskPaths"][0]["redacted"].clone(),
+                    json!(true),
+                    "recovered task target records the redaction",
+                )?;
+            } else if redaction == RedactionLevel::None {
+                ensure_equal(
+                    replay["request"]["taskPaths"][0]["text"].clone(),
+                    json!("src/private-pack-target.rs"),
+                    "unredacted recovery retains historical task targets",
+                )?;
+            }
             ensure_equal(
                 replay["taskLens"]["version"].clone(),
                 json!(3),
