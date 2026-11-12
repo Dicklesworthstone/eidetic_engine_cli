@@ -332,6 +332,8 @@ impl FakeLocalApi {
         self_tailnet: Option<&str>,
         current_tailnet: Option<&str>,
     ) -> TestResult<Self> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure fake localapi dir: {error}"))?;
         let socket_path = dir.join("tailscaled.sock");
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| format!("bind fake localapi: {error}"))?;
