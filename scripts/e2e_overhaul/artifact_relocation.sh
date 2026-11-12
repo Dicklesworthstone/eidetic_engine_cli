@@ -8,6 +8,169 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+run_self_test() {
+    local st_root
+    st_root="$(mktemp -d "${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space}/ee-artifact-relocation-selftest.XXXXXX")"
+    local stub_bin="${st_root}/ee-stub"
+    cat > "${stub_bin}" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="plan"
+from_path=""
+to_path=""
+manifest_path=""
+force_explicit="false"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --workspace) shift 2 ;;
+        artifact|relocate) shift ;;
+        --from) from_path="$2"; shift 2 ;;
+        --to) to_path="$2"; shift 2 ;;
+        --manifest) manifest_path="$2"; shift 2 ;;
+        --apply) mode="apply"; shift ;;
+        --restore) mode="restore"; shift ;;
+        --force-with-explicit-path) force_explicit="true"; shift ;;
+        --actor) shift 2 ;;
+        --json) shift ;;
+        *) shift ;;
+    esac
+done
+
+if [ "${EE_STUB_FAIL_STDOUT_ONLY:-0}" = "1" ]; then
+    printf '{"schema":"ee.error.v2","error":{"code":"storage","message":"simulated stdout-only error envelope"}}\n'
+    exit 10
+fi
+
+if [ "$mode" = "restore" ]; then
+    entry_blake3="$(jq -r '.entries[0].blake3 // empty' "$manifest_path")"
+    dest_path="$(jq -r '.entries[0].destinationPath' "$manifest_path")"
+    orig_path="$(jq -r '.entries[0].originalPath' "$manifest_path")"
+    if [ -z "$entry_blake3" ] || [ "$entry_blake3" = "null" ]; then
+        jq -n --arg dest "$dest_path" '{
+            schema: "ee.error.v2",
+            error: {
+                code: "usage",
+                message: ("relocation manifest entry for " + $dest + " is missing required blake3 hash."),
+                repair: "Use a relocation manifest created by `ee artifact relocate --apply`."
+            }
+        }'
+        exit 2
+    fi
+    mkdir -p "$(dirname "$orig_path")"
+    cp "$dest_path" "$orig_path"
+    jq -n --slurpfile m "$manifest_path" '{
+        schema: "ee.response.v2",
+        success: true,
+        data: {
+            schema: "ee.artifact.relocation.v1",
+            mode: "restore",
+            applied: false,
+            restored: true,
+            manifestHash: "blake3:stub-manifest-hash",
+            sourceAllowed: true,
+            preservationPolicy: "copy_preserve_no_delete_no_overwrite",
+            manifest: $m[0]
+        }
+    }'
+    exit 0
+fi
+
+dest_file="${to_path}/ee-relocated-artifacts/target/debug/sample.o"
+status_val="planned"
+applied_bool="false"
+manifest_hash="null"
+if [ "$mode" = "apply" ]; then
+    mkdir -p "$(dirname "$dest_file")" "$(dirname "$manifest_path")"
+    cp "$from_path" "$dest_file"
+    status_val="copied"
+    applied_bool="true"
+    manifest_hash='"blake3:stub-apply-manifest"'
+    jq -n --arg orig "$from_path" --arg dest "$dest_file" '{
+        schema: "ee.artifact.relocation.v1",
+        entries: [{
+            originalPath: $orig,
+            destinationPath: $dest,
+            kind: "file",
+            sizeBytes: 24,
+            blake3: "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            status: "copied"
+        }]
+    }' > "$manifest_path"
+fi
+
+jq -n \
+    --arg mode "$mode" \
+    --arg status "$status_val" \
+    --argjson applied "$applied_bool" \
+    --argjson mhash "$manifest_hash" \
+    '{
+        schema: "ee.response.v2",
+        success: true,
+        data: {
+            schema: "ee.artifact.relocation.v1",
+            mode: $mode,
+            applied: $applied,
+            restored: false,
+            manifestHash: $mhash,
+            sourceAllowed: true,
+            preservationPolicy: "copy_preserve_no_delete_no_overwrite",
+            manifest: {
+                entries: [{
+                    originalPath: "[REDACTED_PATH]",
+                    destinationPath: "[REDACTED_PATH]",
+                    kind: "file",
+                    sizeBytes: 24,
+                    blake3: "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+                    status: $status
+                }]
+            }
+        }
+    }'
+STUB
+    chmod +x "${stub_bin}"
+
+    # Arm 1 (negative): stdout-only ee.error.v2 envelope is surfaced to stderr on failure.
+    local fail_err="${st_root}/fail.err"
+    local rc=0
+    TMPDIR="${st_root}" EE_BIN="${stub_bin}" EE_STUB_FAIL_STDOUT_ONLY=1 \
+        bash "${BASH_SOURCE[0]}" >/dev/null 2>"${fail_err}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        echo "self-test FAIL: expected non-zero exit when EE_STUB_FAIL_STDOUT_ONLY=1" >&2
+        return 1
+    fi
+    if ! grep -Fq "simulated stdout-only error envelope" "${fail_err}"; then
+        echo "self-test FAIL: expected stderr to include swallowed stdout ee.error.v2 payload" >&2
+        cat "${fail_err}" >&2
+        return 1
+    fi
+
+    # Arm 2 (positive): full plan + apply + hashless-restore-refusal + hashed-restore round-trip passes.
+    local pass_out="${st_root}/pass.json"
+    local pass_err="${st_root}/pass.err"
+    rc=0
+    TMPDIR="${st_root}" EE_BIN="${stub_bin}" \
+        bash "${BASH_SOURCE[0]}" >"${pass_out}" 2>"${pass_err}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        echo "self-test FAIL: expected full harness pass against stub ee (rc=${rc})" >&2
+        cat "${pass_err}" >&2
+        return 1
+    fi
+    if ! jq -e '.schema == "ee.artifact_relocation.e2e.v1" and .success == true' "${pass_out}" >/dev/null; then
+        echo "self-test FAIL: unexpected final report payload" >&2
+        cat "${pass_out}" >&2
+        return 1
+    fi
+
+    echo "artifact_relocation.sh --self-test: PASS (2/2 arms)"
+    return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    run_self_test
+    exit $?
+fi
+
 SCRATCH_ROOT="${TMPDIR:-/tmp}/ee-artifact-relocation-e2e"
 RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 WORKSPACE="$SCRATCH_ROOT/$RUN_ID/workspace"
@@ -277,6 +440,7 @@ restore_destination="$DESTINATION/ee-relocated-artifacts/target/restored/missing
 mkdir -p "$(dirname "$restore_destination")"
 printf 'restored artifact bytes\n' > "$restore_destination"
 
+RESTORE_MISSING_HASH_MANIFEST="$MANIFEST_DIR/restore-missing-hash.json"
 jq -n \
     --arg schema "ee.artifact.relocation.v1" \
     --arg version "p2-e2e" \
@@ -285,7 +449,7 @@ jq -n \
     --arg workspace "$WORKSPACE" \
     --arg source "$WORKSPACE/target/restored" \
     --arg destination_root "$DESTINATION" \
-    --arg restore_command "ee artifact relocate --restore --manifest $RESTORE_MANIFEST --json" \
+    --arg restore_command "ee artifact relocate --restore --manifest $RESTORE_MISSING_HASH_MANIFEST --json" \
     --arg original "$restore_original" \
     --arg destination "$restore_destination" \
     '{
@@ -306,6 +470,69 @@ jq -n \
         mtimeUnixSeconds: null,
         blake3: null,
         status: "planned"
+      }]
+    }' > "$RESTORE_MISSING_HASH_MANIFEST"
+
+missing_hash_rc=0
+missing_hash_report="$(run_ee artifact relocate --restore --manifest "$RESTORE_MISSING_HASH_MANIFEST" --json)" || missing_hash_rc=$?
+if [ "$missing_hash_rc" -eq 0 ]; then
+    echo "artifact_relocation: restore mode unexpectedly accepted a manifest with blake3: null" >&2
+    exit 1
+fi
+assert_json "restore mode refuses missing blake3 hash" "$missing_hash_report" '
+      .schema == "ee.error.v2"
+      and .error.code == "usage"
+      and (.error.message | contains("missing required blake3 hash"))
+    '
+if [ -e "$restore_original" ]; then
+    echo "artifact_relocation: restore mode wrote original despite missing blake3 hash" >&2
+    exit 1
+fi
+
+restore_hash_probe_report="$(capture_ee "restore hash probe" artifact relocate \
+    --from "$restore_destination" \
+    --to "$DESTINATION/hash-probe" \
+    --manifest "$MANIFEST_DIR/hash-probe.json" \
+    --force-with-explicit-path \
+    --json)"
+restore_blake3=""
+restore_blake3_rc=0
+restore_blake3="$(printf '%s\n' "$restore_hash_probe_report" | jq -er '.data.manifest.entries[0].blake3')" || restore_blake3_rc=$?
+if [ "$restore_blake3_rc" -ne 0 ] || [[ "$restore_blake3" != blake3:* ]]; then
+    echo "artifact_relocation: failed to extract blake3 digest from restore hash probe (rc=$restore_blake3_rc, value=$restore_blake3)" >&2
+    exit 1
+fi
+
+jq -n \
+    --arg schema "ee.artifact.relocation.v1" \
+    --arg version "p2-e2e" \
+    --arg actor "p2-e2e" \
+    --arg created_at "2026-05-13T00:00:00Z" \
+    --arg workspace "$WORKSPACE" \
+    --arg source "$WORKSPACE/target/restored" \
+    --arg destination_root "$DESTINATION" \
+    --arg restore_command "ee artifact relocate --restore --manifest $RESTORE_MANIFEST --json" \
+    --arg original "$restore_original" \
+    --arg destination "$restore_destination" \
+    --arg blake3 "$restore_blake3" \
+    '{
+      schema: $schema,
+      commandVersion: $version,
+      actor: $actor,
+      createdAt: $created_at,
+      workspacePath: $workspace,
+      sourcePath: $source,
+      destinationRoot: $destination_root,
+      restorationCommand: $restore_command,
+      forceWithExplicitPath: false,
+      entries: [{
+        originalPath: $original,
+        destinationPath: $destination,
+        kind: "file",
+        sizeBytes: 24,
+        mtimeUnixSeconds: null,
+        blake3: $blake3,
+        status: "copied"
       }]
     }' > "$RESTORE_MANIFEST"
 
