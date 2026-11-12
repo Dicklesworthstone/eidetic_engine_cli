@@ -3240,6 +3240,52 @@ mod tests {
             &hit.source,
             &ScoreSource::Lexical,
             "fallback hits stay lexical-sourced",
+        )?;
+
+        let search_options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(db_path),
+            index_dir: None,
+            query: "How should I hedge exposures?".to_owned(),
+            limit: 10,
+            speed: crate::config::SearchSpeed::Fast,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::default(),
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+        let (quality_hits, _policy_hash) = super::quality_scored_lexical_memory_fallback_hits(
+            &connection,
+            &search_options,
+            Vec::new(),
+            &mut degraded,
+        )
+        .map_err(|error| error.to_string())?;
+        let quality_hit = quality_hits
+            .iter()
+            .find(|candidate| candidate.doc_id == memory_id)
+            .ok_or_else(|| {
+                format!(
+                    "expected quality-scored fallback hit for {memory_id}, got {quality_hits:?}"
+                )
+            })?;
+        ensure_equal(
+            &quality_hit.lexical_score,
+            &None,
+            "quality-scored index-free fallback hits must also leave lexical_score unset",
+        )?;
+        ensure_equal(
+            &quality_hit.source,
+            &ScoreSource::Lexical,
+            "quality-scored fallback hits stay lexical-sourced",
         )
     }
 
