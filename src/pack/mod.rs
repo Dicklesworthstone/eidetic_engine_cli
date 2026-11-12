@@ -13643,10 +13643,8 @@ mod tests {
         let summary = format!("{lead}{}", "a".repeat(119 - lead.len()));
         let content = format!("{summary}é. Keep release notes.");
         let draft = draft_from_candidates(vec![
-            candidate_with_content(3, 0.8, 0.5, 10, &content)?
-                .with_diversity_key("release-format"),
-            candidate_with_content(1, 0.8, 0.5, 10, &content)?
-                .with_diversity_key("release-format"),
+            candidate_with_content(3, 0.8, 0.5, 10, &content)?.with_diversity_key("release-format"),
+            candidate_with_content(1, 0.8, 0.5, 10, &content)?.with_diversity_key("release-format"),
             candidate_with_content(4, 0.8, 0.5, 10, "Always publish release notes for café.")?
                 .with_diversity_key("release-notes"),
             candidate_with_content(2, 0.8, 0.5, 10, "Never publish release notes for café.")?
