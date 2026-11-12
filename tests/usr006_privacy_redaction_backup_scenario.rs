@@ -362,23 +362,19 @@ fn redaction_level_paranoid_hashes_identifiers_and_tags() -> TestResult {
 }
 
 #[test]
-fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
+fn strict_memory_redaction_truncates_content_and_hashes_exported_body() -> TestResult {
     use ee::models::{ExportMemoryRecord, RedactionLevel};
     use ee::output::jsonl_export::redact_memory_record;
 
     let content = "strict-redaction-fixture ".repeat(16);
-    // The memory body is deliberately NOT canonicalized. It bypasses
-    // `required_string` and keeps its exact bytes precisely so the attached
-    // digest verifies what was stored — see the comment at
-    // src/models/jsonl.rs:1292. Hash the raw builder input, as the paranoid
-    // sibling below already does.
-    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let exported_body: String = content.chars().take(200).collect();
+    let expected_hash = format!("blake3:{}", blake3::hash(exported_body.as_bytes()).to_hex());
     let memory = ExportMemoryRecord::builder()
         .memory_id("mem-strict-001234567890")
         .workspace_id("ws-test")
         .level("procedural")
         .kind("rule")
-        .content(content.clone())
+        .content(content)
         .created_at("2026-05-03T00:00:00Z")
         .build()
         .expect("memory has required fields");
@@ -393,22 +389,25 @@ fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
         ),
     )?;
     ensure(
-        redacted.content == content.chars().take(200).collect::<String>(),
+        redacted.content == exported_body,
         "strict should retain only the first 200 chars of non-secret content",
     )?;
     ensure(
         redacted.content_hash.as_deref() == Some(expected_hash.as_str()),
-        "strict should attach a BLAKE3 hash of the original full body",
+        "strict should attach a BLAKE3 hash of only the exported body",
     )
 }
 
 #[test]
-fn paranoid_memory_redaction_replaces_content_and_adds_hash() -> TestResult {
+fn paranoid_memory_redaction_hashes_only_public_placeholder() -> TestResult {
     use ee::models::{ExportMemoryRecord, RedactionLevel};
     use ee::output::jsonl_export::{REDACTED_PLACEHOLDER, redact_memory_record};
 
-    let content = "private memory body with enough detail to require a digest";
-    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let content = "private memory body that must not leave a guessing oracle";
+    let expected_hash = format!(
+        "blake3:{}",
+        blake3::hash(REDACTED_PLACEHOLDER.as_bytes()).to_hex()
+    );
     let memory = ExportMemoryRecord::builder()
         .memory_id("mem-paranoid-001234567890")
         .workspace_id("ws-test")
@@ -426,7 +425,7 @@ fn paranoid_memory_redaction_replaces_content_and_adds_hash() -> TestResult {
     )?;
     ensure(
         redacted.content_hash.as_deref() == Some(expected_hash.as_str()),
-        "paranoid should attach a BLAKE3 hash of the original full body",
+        "paranoid should attach a BLAKE3 hash of only the public placeholder",
     )?;
     ensure(
         !redacted.content.contains("private memory body"),
@@ -685,30 +684,20 @@ fn audit_details_redaction_matches_level_matrix() -> TestResult {
         RedactionLevel::Minimal,
         RedactionLevel::Standard,
         RedactionLevel::Strict,
+        RedactionLevel::Paranoid,
+        RedactionLevel::Full,
     ] {
         let redacted = redact_audit_record(audit_record(), level);
-        let details = redacted
-            .details
-            .ok_or_else(|| format!("{level}: audit details should be hash-only"))?;
-        let hash = details
-            .get("hash")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| format!("{level}: audit details missing hash"))?;
         ensure(
-            hash.starts_with("blake3:"),
-            format!("{level}: audit hash should carry blake3 prefix"),
+            redacted.details.is_none(),
+            format!("{level}: audit details must omit both the payload and any guessing oracle"),
         )?;
         ensure(
-            !details.to_string().contains("sk-secret-12345-test"),
-            format!("{level}: audit details must not expose original secret"),
+            redacted.operation == "memory.update"
+                && redacted.target_type.as_deref() == Some("memory"),
+            format!("{level}: audit event and target type should remain available"),
         )?;
     }
-
-    let paranoid = redact_audit_record(audit_record(), RedactionLevel::Paranoid);
-    ensure(
-        paranoid.details.is_none(),
-        "paranoid should omit audit details",
-    )?;
 
     Ok(())
 }

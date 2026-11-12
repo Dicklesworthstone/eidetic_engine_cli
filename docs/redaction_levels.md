@@ -34,10 +34,10 @@ hyphen-variants, no synonyms). The
 | Level     | Secrets (api_key, jwt, password, etc.) | High-entropy tokens                 | Memory content body                          | Tags         | Audit details |
 |-----------|----------------------------------------|-------------------------------------|----------------------------------------------|--------------|----------------|
 | `none`    | passthrough                            | passthrough                          | passthrough                                  | passthrough  | passthrough    |
-| `minimal` | redacted with `[REDACTED:<class>]`     | passthrough                          | passthrough                                  | passthrough  | hash only      |
-| `standard`| redacted                                | redacted if entropy ≥ 4.0 bits/byte  | passthrough                                  | passthrough  | hash only      |
-| `strict`  | redacted                                | redacted if entropy ≥ 3.5 bits/byte  | truncated to 200 chars + BLAKE3 of full body | passthrough  | hash only      |
-| `paranoid`| redacted                                | redacted always                      | replaced with `content_hash` + `[REDACTED]`  | hashed       | omitted        |
+| `minimal` | redacted with `[REDACTED:<class>]`     | passthrough                          | screened body + exported-body hash           | passthrough  | omitted        |
+| `standard`| redacted                                | redacted if entropy ≥ 4.0 bits/byte  | screened body + exported-body hash           | passthrough  | omitted        |
+| `strict`  | redacted                                | redacted if entropy ≥ 3.5 bits/byte  | truncated to 200 chars + exported-body hash   | passthrough  | omitted        |
+| `paranoid`| redacted                                | redacted always                      | `[REDACTED]` + placeholder hash              | hashed       | omitted        |
 
 Notes on the matrix:
 
@@ -60,13 +60,23 @@ Notes on the matrix:
   `ee.redaction.event.v1` records and the recorder payload-class
   surface so support bundles and pack-ledger summaries record which
   classes contributed to a redacted payload.
-- **"hash only"** for audit details means the `audit.details` JSON
-  field is replaced with `{"hash": "blake3:<16-hex>"}` covering the
-  canonical-JSON serialization of the original details.
-- **Memory content `+ BLAKE3 of full body`** at `strict` lands as
-  a sibling field `content_hash` rather than mutating the truncated
-  text, so a downstream tool can verify "what was this memory" without
-  the body.
+- **Audit details omitted** means `audit.details` becomes `null` at
+  every redacted level. The event's operation, timestamp and target linkage
+  remain subject to the selected identifier policy. No digest, length or
+  original-payload presence marker survives; the exported event does not
+  authenticate the discarded details or reconstruct their original audit chain.
+- **Memory content hashes** at every redacted level bind the exact emitted
+  body, including truncated text or the public sealed-memory placeholder.
+  They replace any incoming digest of withheld content. Metadata-only exports
+  hash the emitted empty body even with `--redaction none`; unredacted exports
+  that include the body preserve the supplied hash. Public hashes of discarded
+  bodies or audit details permit offline guessing of short secrets and are
+  therefore not redaction markers.
+- **Scope of this protection:** existing historical exports and immutable
+  source commitments are not rewritten. Artifact hashes retain their separate
+  whole-file identity contract. This behavior protects JSONL memory-body and
+  audit-detail projections; it does not claim to remove every historical
+  content commitment.
 - **Tags hashed** at `paranoid` replaces each tag string with
   `tag_<blake3-prefix>` so the cardinality is still observable but
   the literal labels are unreadable.
@@ -162,17 +172,15 @@ callers should prefer the `redaction.level_applied` and
 1. **Non-redacted fields are byte-identical** to the original
    workspace. The export → import round trip is lossless for any
    field that wasn't classified for redaction at the chosen level.
-2. **Redacted fields carry `redaction_markers[]`** in the imported
-   memory's metadata. Each marker is
-   `{ class: "api_key|...", level: "minimal|...", emitted_at: "<rfc3339>", original_hash: "blake3:..." }`.
-   The marker records what was redacted without preserving the original
-   content. A future un-redaction step (e.g., from a separately-stored
-   key vault) could in principle restore the original, but un-redaction
-   itself is OUT OF SCOPE for v0.2.
-3. **Audit chain shows `redaction.apply` rows** for every redaction
-   event. The audit row carries `level`, `surface`, `class`,
-   `memory_id`, and `redaction_marker_id` so the imported workspace's
-   audit history is complete.
+2. **Redacted memories retain their redaction status.** JSONL records
+   carry `redacted` and `redaction_reason`; import includes those values
+   in its audit details. The optional `content_hash` in a redacted export
+   describes the exported body. Neither it nor any `redaction_markers[]`
+   should expose a public digest of the original withheld content.
+3. **Audit chain shows import activity.** Imported records receive local
+   import audit rows. Redacted source audit events preserve their public
+   event metadata and target linkage, but omit details; they cannot prove
+   the original payload or reconstruct its original audit chain.
 
 This property holds for ALL 5 levels (including `none` — trivially —
 and `paranoid` — where re-import is still possible, just with all the

@@ -656,6 +656,9 @@ fn validate_code_anchor_records(record: &ExportMemoryRecord) -> io::Result<()> {
 }
 
 /// Apply redaction to an export memory record.
+///
+/// At redacted levels, the content hash describes only the exported body.
+/// A digest of withheld content would let recipients test guesses about it.
 #[must_use]
 pub fn redact_memory_record(
     mut record: ExportMemoryRecord,
@@ -675,19 +678,15 @@ pub fn redact_memory_record(
         return record;
     }
 
-    let original_content = record.content.clone();
-    if matches!(
-        level,
-        RedactionLevel::Strict | RedactionLevel::Paranoid | RedactionLevel::Full
-    ) {
-        record.content_hash = Some(blake3_digest(&original_content));
-    }
     // This public marker is structural state: search and packing use it to
     // exclude content that has not been revealed. Redacting it would turn a
     // sealed memory into an ordinary (redacted) search document on import.
-    if original_content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-        record.content = redact_content(&original_content, level);
+    if record.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        record.content = redact_content(&record.content, level);
     }
+    // Replace any incoming commitment as well: it may describe content that
+    // has already been withheld, including the original body of a sealed row.
+    record.content_hash = Some(blake3_digest(&record.content));
     if let Some(reason) = record.tombstoned_reason.as_ref() {
         record.tombstoned_reason = Some(redact_content(reason, level));
     }
@@ -829,19 +828,11 @@ pub fn redact_audit_record(
         }
     }
 
-    match level {
-        RedactionLevel::Minimal | RedactionLevel::Standard | RedactionLevel::Strict => {
-            if let Some(details) = record.details.as_ref() {
-                record.details = Some(serde_json::json!({
-                    "hash": format!("blake3:{}", blake3_prefix(&canonical_json(details), 16)),
-                }));
-            }
-        }
-        RedactionLevel::Paranoid | RedactionLevel::Full => {
-            record.details = None;
-        }
-        RedactionLevel::None => {}
-    }
+    // Keep the event's operation and target linkage, but do not publish a
+    // digest or length of discarded details. Either would let recipients test
+    // low-entropy guesses about private payloads. The redacted event makes no
+    // claim to authenticate the original details.
+    record.details = None;
 
     record
 }
@@ -1054,10 +1045,6 @@ fn blake3_digest(input: &str) -> String {
     format!("blake3:{}", blake3::hash(input.as_bytes()).to_hex())
 }
 
-fn canonical_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-}
-
 /// JSONL export writer.
 pub struct JsonlExporter<W: Write> {
     writer: W,
@@ -1167,6 +1154,9 @@ impl<W: Write> JsonlExporter<W> {
         let json = if self.export_scope == ExportScope::MetadataOnly {
             let mut meta_only = redacted;
             meta_only.content = String::new();
+            // Scope can withhold a body even when redaction is disabled. Its
+            // commitment must describe the emitted empty body in that case too.
+            meta_only.content_hash = Some(blake3_digest(&meta_only.content));
             // Typed fields contain body-equivalent prose and commands. They
             // must not bypass an explicitly metadata-only export scope.
             meta_only.typed_fields = None;
@@ -2224,6 +2214,144 @@ mod tests {
             original, edited,
             "editing a memory body must change the root"
         );
+    }
+
+    #[test]
+    fn memory_export_commitments_and_roots_bind_only_emitted_content() {
+        let originals = [secret_assignment("1"), secret_assignment("654321")];
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            for scope in [ExportScope::All, ExportScope::MetadataOnly] {
+                let mut projections = Vec::new();
+                for original in &originals {
+                    let original_hash = blake3_digest(original);
+                    let mut memory = export_memory("mem-twin-001", original);
+                    memory.content_hash = Some(original_hash.clone());
+                    let mut output = Vec::new();
+                    let (root, count) = {
+                        let mut exporter = JsonlExporter::new(&mut output, level, scope);
+                        exporter.write_memory(memory.clone()).expect("write memory");
+                        exporter.finalize_records_root()
+                    };
+                    let written = std::str::from_utf8(&output).expect("JSONL is UTF-8");
+                    let line = written.strip_suffix('\n').expect("one complete record");
+                    let emitted: ExportMemoryRecord =
+                        serde_json::from_str(line).expect("exported memory parses");
+                    let expected_hash =
+                        format!("blake3:{}", blake3::hash(emitted.content.as_bytes()).to_hex());
+                    assert_eq!(emitted.content_hash.as_deref(), Some(expected_hash.as_str()));
+                    assert_eq!(count, 1);
+                    let mut replay = RecordsRootBuilder::new();
+                    replay.push(&emitted.memory_id, &canonical_record_hash(line.as_bytes()));
+                    assert_eq!(root, replay.finalize(), "root must authenticate emitted bytes");
+
+                    if scope == ExportScope::MetadataOnly {
+                        assert!(emitted.content.is_empty());
+                        assert!(!written.contains(&original_hash));
+                    } else if level != RedactionLevel::None {
+                        assert_eq!(emitted.content, REDACTED_PLACEHOLDER);
+                        assert!(!written.contains(&original_hash));
+                    } else {
+                        assert_eq!(emitted, memory, "authorized full export stays unchanged");
+                    }
+                    projections.push((output, root));
+                }
+                if level == RedactionLevel::None && scope == ExportScope::All {
+                    assert_ne!(projections[0], projections[1]);
+                } else {
+                    assert_eq!(
+                        projections[0], projections[1],
+                        "withheld secrets share the public projection: {level}/{scope}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn memory_commitments_follow_partial_redaction_and_sealed_placeholders() {
+        let long_body = "ordinary prose ".repeat(30);
+        let withheld_hash = blake3_digest(&secret_assignment("sealed-body"));
+        for (content, level, expected) in [
+            (
+                "  public prose  \n".to_owned(),
+                RedactionLevel::Minimal,
+                "  public prose  \n".to_owned(),
+            ),
+            (
+                "open /Users/a now".to_owned(),
+                RedactionLevel::Standard,
+                format!("open {REDACTED_PATH_PLACEHOLDER} now"),
+            ),
+            (
+                long_body.clone(),
+                RedactionLevel::Strict,
+                long_body.chars().take(200).collect::<String>(),
+            ),
+            (
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+                RedactionLevel::Full,
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+            ),
+        ] {
+            let mut memory = export_memory("mem-projection-001", &content);
+            memory.content_hash = Some(withheld_hash.clone());
+            let redacted = redact_memory_record(memory, level);
+            let expected_hash = format!("blake3:{}", blake3::hash(expected.as_bytes()).to_hex());
+            assert_eq!(redacted.content, expected);
+            assert_eq!(redacted.content_hash.as_deref(), Some(expected_hash.as_str()));
+            assert_ne!(redacted.content_hash.as_deref(), Some(withheld_hash.as_str()));
+        }
+    }
+
+    #[test]
+    fn redacted_audit_details_do_not_publish_guessing_oracles() {
+        let first = ExportAuditRecord::builder()
+            .audit_id("aud-twin-001")
+            .operation("memory.update")
+            .target_type("memory")
+            .target_id("mem-twin-001")
+            .performed_at("2026-04-30T12:00:00Z")
+            .performed_by("agent-twin")
+            .details(serde_json::json!({ "value": secret_assignment("1") }))
+            .build()
+            .expect("audit has required fields");
+        let mut second = first.clone();
+        second.details = Some(serde_json::json!({ "value": secret_assignment("654321") }));
+
+        assert_eq!(redact_audit_record(first.clone(), RedactionLevel::None), first);
+        assert_eq!(redact_audit_record(second.clone(), RedactionLevel::None), second);
+        for level in [
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let redacted = redact_audit_record(first.clone(), level);
+            assert_eq!(redacted, redact_audit_record(second.clone(), level));
+            assert!(redacted.details.is_none());
+            assert_eq!(redacted.operation, first.operation);
+            assert_eq!(redacted.performed_at, first.performed_at);
+            assert_eq!(redacted.target_type, first.target_type);
+            assert_eq!(
+                redacted.target_id,
+                first.target_id.as_ref().map(|id| redact_identifier(id, level))
+            );
+            let mut absent = first.clone();
+            absent.details = None;
+            assert_eq!(
+                redacted,
+                redact_audit_record(absent, level),
+                "redacted audit details must not reveal even their original presence"
+            );
+        }
     }
 
     #[test]

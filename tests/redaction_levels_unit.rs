@@ -145,6 +145,12 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
     let secret = api_key_fixture()?;
     let long_body = "memory body fixture ".repeat(20);
     let body_hash = format!("blake3:{}", blake3::hash(long_body.as_bytes()).to_hex());
+    let truncated_body: String = long_body.chars().take(200).collect();
+    let truncated_hash = format!("blake3:{}", blake3::hash(truncated_body.as_bytes()).to_hex());
+    let placeholder_hash = format!(
+        "blake3:{}",
+        blake3::hash(REDACTED_PLACEHOLDER.as_bytes()).to_hex()
+    );
 
     for level in RedactionLevel::all() {
         let redacted_secret = redact_content(&secret, *level);
@@ -185,8 +191,8 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                     format!("{level}: should preserve non-secret memory body"),
                 )?;
                 ensure(
-                    redacted_memory.content_hash.is_none(),
-                    format!("{level}: should not hash non-secret memory body"),
+                    redacted_memory.content_hash.as_deref() == Some(body_hash.as_str()),
+                    format!("{level}: should hash the emitted non-secret memory body"),
                 )?;
                 assert_tag(&redacted_tag, |tag| {
                     ensure(
@@ -194,7 +200,7 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                         format!("{level}: should preserve tags"),
                     )
                 })?;
-                assert_hash_only_audit(&redacted_audit, *level)?;
+                assert_omitted_audit(&redacted_audit, *level)?;
             }
             RedactionLevel::Strict => {
                 ensure(
@@ -203,17 +209,17 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                 )?;
                 let redacted_long = redact_memory_record(memory_record(&long_body)?, *level);
                 ensure(
-                    redacted_long.content == long_body.chars().take(200).collect::<String>(),
+                    redacted_long.content == truncated_body,
                     "strict should truncate non-secret memory bodies to 200 chars",
                 )?;
                 ensure(
-                    redacted_long.content_hash.as_deref() == Some(body_hash.as_str()),
-                    "strict should hash the original full body including its trailing whitespace",
+                    redacted_long.content_hash.as_deref() == Some(truncated_hash.as_str()),
+                    "strict should hash only the emitted truncated body",
                 )?;
                 assert_tag(&redacted_tag, |tag| {
                     ensure(tag == "customer-secret-tag", "strict should preserve tags")
                 })?;
-                assert_hash_only_audit(&redacted_audit, *level)?;
+                assert_omitted_audit(&redacted_audit, *level)?;
             }
             RedactionLevel::Paranoid => {
                 ensure(
@@ -225,8 +231,8 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                     "paranoid should replace memory content",
                 )?;
                 ensure(
-                    redacted_memory.content_hash.as_deref() == Some(body_hash.as_str()),
-                    "paranoid should hash the original full body including its trailing whitespace",
+                    redacted_memory.content_hash.as_deref() == Some(placeholder_hash.as_str()),
+                    "paranoid should hash only the emitted public placeholder",
                 )?;
                 assert_tag(&redacted_tag, |tag| {
                     ensure(
@@ -304,21 +310,9 @@ fn audit_details_string(record: &ExportAuditRecord) -> Option<String> {
     record.details.as_ref().map(JsonValue::to_string)
 }
 
-fn assert_hash_only_audit(record: &ExportAuditRecord, level: RedactionLevel) -> TestResult {
-    let details = record
-        .details
-        .as_ref()
-        .ok_or_else(|| format!("{level}: audit details should be hash-only"))?;
-    let hash = details
-        .get("hash")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("{level}: audit details missing hash"))?;
+fn assert_omitted_audit(record: &ExportAuditRecord, level: RedactionLevel) -> TestResult {
     ensure(
-        hash.starts_with("blake3:"),
-        format!("{level}: audit detail hash should carry blake3 prefix"),
-    )?;
-    ensure(
-        !details.to_string().contains("sk-FAKEabc"),
-        format!("{level}: audit details should not expose the original secret"),
+        record.details.is_none(),
+        format!("{level}: audit details must not expose a payload or its digest"),
     )
 }
