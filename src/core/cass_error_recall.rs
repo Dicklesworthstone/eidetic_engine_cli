@@ -78,7 +78,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// V21 lets the shared Python decoder handle complete exception-group trees
 /// and mixed causal chains, using ordinary traceback keys and literal masking
 /// for grouped or stdout-prefixed reports without rewriting source evidence.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v21";
+/// V22 mines native Jest terminal failures and binds verbose retries to their
+/// complete named test inventory; aggregate-only reports never prove repairs.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v22";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1363,6 +1365,11 @@ impl ToolOutput {
             Err(()) => return self.metadata_failed(),
             Ok(None) => {}
         }
+        match test_coverage::javascript::inspect_terminal(&self.text) {
+            Ok(Some(output)) => return self.metadata_failed() || output.failed,
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
         match typescript::decode(&self.text) {
             Ok(Some(_)) => return true,
             Err(()) => return self.metadata_failed(),
@@ -1390,6 +1397,17 @@ impl ToolOutput {
                 // process completion. Codex wrappers are already decoded into
                 // exit_code; Claude supplies an explicit tool result status.
                 return decoded.output.allows_completion
+                    && (self.is_error == Some(false) || self.exit_code == Some(0))
+                    && outcome::succeeded(self);
+            }
+            Err(()) => return false,
+            Ok(None) => {}
+        }
+        match test_coverage::javascript::inspect_terminal(&self.text) {
+            Ok(Some(output)) => {
+                // Native report bodies may contain printed exit-looking text.
+                // Only the tool's decoded metadata establishes completion.
+                return output.allows_completion
                     && (self.is_error == Some(false) || self.exit_code == Some(0))
                     && outcome::succeeded(self);
             }
@@ -1612,6 +1630,11 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
+    match test_coverage::javascript::inspect_terminal(&output.text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match typescript::decode(&output.text) {
         Ok(Some(diagnostics)) => return diagnostics,
         Err(()) => return Vec::new(),
@@ -1723,6 +1746,11 @@ pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnosti
         Ok(None) => {}
     }
     match test_coverage::python::decode(text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match test_coverage::javascript::inspect_terminal(text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
         Err(()) => return Vec::new(),
         Ok(None) => {}
@@ -1966,6 +1994,16 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.symptom,
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match test_coverage::javascript::inspect_terminal(&output.text) {
+        Ok(Some(decoded)) => {
+            return decoded
+                .diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
         Err(()) => return None,
         Ok(None) => {}
     }

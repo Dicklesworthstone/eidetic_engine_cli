@@ -1,4 +1,4 @@
-//! Complete Jest-compatible JSON reports (including Vitest's JSON reporter).
+//! Complete Jest-compatible JSON reports and native Jest terminal reports.
 //!
 //! Only typed assertion failures and file-level execution errors are mined.
 //! Names, source paths, snapshots, metadata and stack frames are not diagnostic
@@ -11,6 +11,9 @@ use serde::Deserialize;
 
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 use super::compiler::CompilerOutput;
+
+#[path = "cass_error_recall_jest_terminal.rs"]
+mod terminal;
 
 const MAX_TEST_RESULTS: usize = 1024;
 
@@ -106,6 +109,14 @@ pub(in crate::core::cass_error_recall) fn inspect(
     decode(text).map(|decoded| decoded.map(|decoded| decoded.output))
 }
 
+/// Native dispatch outside the structured compiler/checker path. Keep JSON
+/// routing and its established completion semantics in that existing path.
+pub(in crate::core::cass_error_recall) fn inspect_terminal(
+    text: &str,
+) -> Result<Option<CompilerOutput>, ()> {
+    terminal::decode(text).map(|decoded| decoded.map(|decoded| decoded.output))
+}
+
 type Subject = [u8; 32];
 
 /// Transient exact source identities. Never persisted or exposed as provenance.
@@ -161,7 +172,7 @@ fn subject(parts: &[&str]) -> Subject {
 /// a probe must never erase duplicate fields or salvage a truncated document.
 pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     if !text.trim_start().starts_with('{') {
-        return Ok(None);
+        return terminal::decode(text);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return Err(());

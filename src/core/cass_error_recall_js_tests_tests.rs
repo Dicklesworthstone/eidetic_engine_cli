@@ -314,3 +314,6 @@ fn javascript_redacts_before_fingerprinting_and_enforces_the_byte_bound() {
 
 #[path = "cass_error_recall_js_coverage_tests.rs"]
 mod coverage;
+
+#[path = "cass_error_recall_jest_terminal_tests.rs"]
+mod terminal;

@@ -14,6 +14,9 @@ const FAILURE: &str =
 const NOTICE: &str = "The earlier attempt did not fix E0277.";
 const FIX: &str = "I fixed E0277 by deriving Serialize for Widget before writing the value to the store in src/widget.rs.";
 
+#[path = "curate_jest_repair_tests.rs"]
+mod jest;
+
 struct Workspace {
     _temp: tempfile::TempDir,
     path: PathBuf,

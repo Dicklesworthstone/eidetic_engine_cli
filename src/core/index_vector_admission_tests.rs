@@ -112,10 +112,14 @@ fn compacted_vector_admission_accepts_absent_empty_and_header_only_sidecars() ->
             let wal = wal_path_for(&fixture.tier(tier));
             std::fs::write(&wal, b"").map_err(|error| error.to_string())?;
             fixture.assert_ready()?;
+            let main = std::fs::read(fixture.tier(tier)).map_err(|error| error.to_string())?;
             fixture.append_replacement(tier)?;
             let bytes = std::fs::read(&wal).map_err(|error| error.to_string())?;
             // Keep the exact native legacy header, without its first batch.
+            // Appending a replacement also tombstones its original main row;
+            // restore that row so the empty-sidecar control is complete.
             std::fs::write(&wal, &bytes[..20]).map_err(|error| error.to_string())?;
+            std::fs::write(fixture.tier(tier), main).map_err(|error| error.to_string())?;
             let inspection = inspect_wal_strict(&wal).map_err(|error| error.to_string())?;
             assert!(
                 matches!(inspection, StrictWalInspection::LegacyV1(image) if image.entry_count == 0)
