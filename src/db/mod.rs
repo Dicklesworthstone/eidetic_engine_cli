@@ -17937,6 +17937,36 @@ impl DbConnection {
         Ok(self.evidence_spans_from_rows(&rows)?.into_iter().next())
     }
 
+    /// Load one evidence source and its admission inputs by primary-key lookup.
+    ///
+    /// The caller owns the read snapshot. An explicit workspace is checked
+    /// before loading session or verdict metadata; an unscoped inspection keeps
+    /// the legacy store-wide lookup. Missing or outdated verdicts retain the
+    /// existing full-validation fallback in `HydratedEvidenceSpan`.
+    pub(crate) fn get_evidence_span_with_session(
+        &self,
+        id: &str,
+        expected_workspace_id: Option<&str>,
+    ) -> Result<Option<HydratedEvidenceSpan>> {
+        let Some(span) = self.get_evidence_span(id)? else {
+            return Ok(None);
+        };
+        if expected_workspace_id.is_some_and(|workspace_id| span.workspace_id != workspace_id) {
+            return Ok(None);
+        }
+        let session = self.get_session(&span.session_id)?;
+        let recorded_verdict = if session.is_some() {
+            self.recorded_admission_verdicts(&[id])?.remove(id)
+        } else {
+            None
+        };
+        Ok(Some(HydratedEvidenceSpan {
+            span,
+            session,
+            recorded_verdict,
+        }))
+    }
+
     /// Load evidence rows and their joined sessions for many ids with one
     /// bounded `IN (...)` query per chunk instead of two point reads per id
     /// (bd-reality-core-convergence-1azkt.64).
