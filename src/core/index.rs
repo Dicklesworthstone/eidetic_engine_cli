@@ -11574,9 +11574,9 @@ pub fn get_index_vacuum_report(
         })
         .collect::<Vec<_>>();
     let lock = inspect_index_vacuum_lock(&database_path, &options.workspace_path)?;
-    let reclaimable_bytes = candidates.iter().fold(0_u64, |total, candidate| {
-        total.saturating_add(candidate.stats.size_bytes)
-    });
+    let reclaimable_bytes = retention_gc::reclaimable_bytes_for_paths(
+        candidates.iter().map(|candidate| candidate.path.as_path()),
+    );
     let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
     let degraded = index_vacuum_degradations(status_report.health, lock.held);
     let status = if lock.held {
