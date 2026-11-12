@@ -4427,6 +4427,34 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn evidence_hit_preload_skips_non_evidence_malformed_and_blocked_hits() -> TestResult {
+        // No schema exists: any accidental bulk read or workspace resolution
+        // would produce a degradation rather than this empty successful batch.
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let memory_hit = ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
+        let mut malformed = memory_hit.clone();
+        malformed.doc_id = "ev_invalid".to_owned();
+        let mut blocked = memory_hit.clone();
+        blocked.doc_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0xe719)).to_string();
+        blocked.metadata = Some(serde_json::json!({
+            "mesh": { "workspaceScopeDecision": "quarantine" }
+        }));
+        let search = ppr_search_report(vec![memory_hit, malformed, blocked]);
+        let mut degraded = Vec::new();
+        let batch = super::preload_evidence_pack_hits(
+            &connection,
+            Path::new("/tmp/evidence-hit-preload"),
+            &search,
+            &mut degraded,
+        );
+        assert!(batch.workspace_ids.is_empty());
+        assert!(batch.rows.as_ref().is_some_and(BTreeMap::is_empty));
+        assert!(degraded.is_empty(), "{degraded:?}");
+        Ok(())
+    }
+
+    #[test]
     fn direct_evidence_batch_failure_reports_fallback_and_preserves_admission() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = directory.path();
@@ -4563,6 +4591,183 @@ pub fn unrelated_context() -> u64 {{
             "healthy hydration must not report a fallback"
         );
 
+        let mut resolution_degraded = Vec::new();
+        let batch = super::preload_evidence_pack_hits(
+            &connection,
+            workspace,
+            &search,
+            &mut resolution_degraded,
+        );
+        let rows = batch
+            .rows
+            .as_ref()
+            .ok_or_else(|| "healthy evidence batch failed".to_owned())?;
+        assert_eq!(rows.len(), 3, "duplicate hits share one hydrated source row");
+        let no_source_tables = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        for hit in search
+            .results
+            .iter()
+            .filter(|hit| hit.doc_id != evidence_ids[2])
+        {
+            assert!(matches!(
+                super::resolve_evidence_pack_hit(
+                    &no_source_tables,
+                    &batch,
+                    hit,
+                    &mut resolution_degraded,
+                ),
+                Some(super::EvidencePackHitResolution::Direct)
+            ));
+        }
+        assert!(
+            resolution_degraded.is_empty(),
+            "direct evidence and duplicate hits must reuse the batch without point reads: {resolution_degraded:?}"
+        );
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &no_source_tables,
+                &batch,
+                &search.results[2],
+                &mut resolution_degraded,
+            )
+            .is_none(),
+            "the cached source must still enforce the live admission denial"
+        );
+        assert_eq!(resolution_degraded.len(), 1);
+        assert!(
+            resolution_degraded[0]
+                .message
+                .contains("live security posture is not admitted")
+        );
+        resolution_degraded.clear();
+
+        let absent_batch = super::EvidencePackHitBatch {
+            workspace_ids: batch.workspace_ids.clone(),
+            rows: Some(BTreeMap::new()),
+        };
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &absent_batch,
+                &search.results[0],
+                &mut resolution_degraded,
+            )
+            .is_none(),
+            "successful-batch absence must not rediscover the still-live source row"
+        );
+        assert!(
+            resolution_degraded
+                .iter()
+                .any(|entry| entry.message.contains("no live source row"))
+        );
+
+        let mut detached_rows = rows.clone();
+        detached_rows
+            .get_mut(&evidence_ids[0])
+            .ok_or_else(|| "fixture evidence row disappeared".to_owned())?
+            .session = None;
+        let detached_batch = super::EvidencePackHitBatch {
+            workspace_ids: batch.workspace_ids.clone(),
+            rows: Some(detached_rows),
+        };
+        resolution_degraded.clear();
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &detached_batch,
+                &search.results[0],
+                &mut resolution_degraded,
+            )
+            .is_none(),
+            "a missing batched session must not be replaced by another source read"
+        );
+        assert!(
+            resolution_degraded
+                .iter()
+                .any(|entry| entry.message.contains("session provenance is missing"))
+        );
+
+        let outside_batch = super::EvidencePackHitBatch {
+            workspace_ids: Vec::new(),
+            rows: Some(rows.clone()),
+        };
+        resolution_degraded.clear();
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &outside_batch,
+                &search.results[0],
+                &mut resolution_degraded,
+            )
+            .is_none()
+        );
+        assert!(
+            resolution_degraded
+                .iter()
+                .any(|entry| entry.message.contains("outside this pack request"))
+        );
+
+        let linked_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0xe730));
+        let mut linked_rows = rows.clone();
+        linked_rows
+            .get_mut(&evidence_ids[0])
+            .ok_or_else(|| "fixture evidence row disappeared".to_owned())?
+            .span
+            .memory_id = Some(linked_memory_id.to_string());
+        let linked_batch = super::EvidencePackHitBatch {
+            workspace_ids: batch.workspace_ids.clone(),
+            rows: Some(linked_rows),
+        };
+        resolution_degraded.clear();
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &linked_batch,
+                &search.results[0],
+                &mut resolution_degraded,
+            )
+            .is_none(),
+            "batched evidence must still revalidate its linked memory"
+        );
+        assert!(
+            resolution_degraded
+                .iter()
+                .any(|entry| entry.message.contains("memory that is no longer present"))
+        );
+        connection
+            .insert_memory(
+                &linked_memory_id.to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Release evidence has a live source memory.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.8,
+                    importance: 0.8,
+                    provenance_uri: Some("manual://evidence-batch".to_owned()),
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        resolution_degraded.clear();
+        assert!(matches!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &linked_batch,
+                &search.results[0],
+                &mut resolution_degraded,
+            ),
+            Some(super::EvidencePackHitResolution::Linked { memory_id, evidence_id })
+                if memory_id == linked_memory_id && evidence_id == evidence_ids[0]
+        ));
+        assert!(resolution_degraded.is_empty(), "{resolution_degraded:?}");
+
         // Break only the bulk path's optional cached-verdict read. The real
         // span and session reads remain usable, with admission re-derived
         // from the complete live row rather than a cached binding.
@@ -4575,6 +4780,55 @@ pub fn unrelated_context() -> u64 {{
             connection
                 .get_evidence_spans_with_sessions(&id_refs)
                 .is_err()
+        );
+        resolution_degraded.clear();
+        let fallback_batch = super::preload_evidence_pack_hits(
+            &connection,
+            workspace,
+            &search,
+            &mut resolution_degraded,
+        );
+        assert!(fallback_batch.rows.is_none());
+        for hit in search
+            .results
+            .iter()
+            .filter(|hit| hit.doc_id != evidence_ids[2])
+        {
+            assert!(matches!(
+                super::resolve_evidence_pack_hit(
+                    &connection,
+                    &fallback_batch,
+                    hit,
+                    &mut resolution_degraded,
+                ),
+                Some(super::EvidencePackHitResolution::Direct)
+            ));
+        }
+        assert_eq!(
+            resolution_degraded.len(),
+            1,
+            "only a failed batch enables point reads, with one batch diagnostic"
+        );
+        assert!(
+            resolution_degraded[0]
+                .message
+                .contains("individual source reads were used during candidate resolution")
+        );
+        assert!(
+            super::resolve_evidence_pack_hit(
+                &connection,
+                &fallback_batch,
+                &search.results[2],
+                &mut resolution_degraded,
+            )
+            .is_none(),
+            "a failed batch must not weaken the live admission denial"
+        );
+        assert_eq!(resolution_degraded.len(), 2);
+        assert!(
+            resolution_degraded[1]
+                .message
+                .contains("live security posture is not admitted")
         );
         let live_session = connection
             .get_session(&session_id)
