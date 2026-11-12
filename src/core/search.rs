@@ -10889,7 +10889,10 @@ async fn run_search_inner_with_performance(
             fast_embedder_override.as_deref(),
         )?
     };
-    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation
+        && !source_mode.unavailable_no_results
+        && source_mode.applied.uses_embeddings()
+    {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -10931,6 +10934,7 @@ async fn run_search_inner_with_performance(
     let rerank_runtime = if producer_selection_error.is_some()
         || live_snapshot_retrieval.is_some()
         || empty_generation
+        || source_mode.unavailable_no_results
     {
         SearchRerankRuntime::disabled()
     } else {
@@ -11817,7 +11821,10 @@ async fn run_diag_search_in_snapshot(
             unavailable_no_results: false,
         }
     };
-    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation
+        && !source_mode.unavailable_no_results
+        && source_mode.applied.uses_embeddings()
+    {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -11853,7 +11860,13 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(scoring_candidate_limit);
-    let mut diag_result = if empty_generation {
+    let mut diag_result = if source_mode.unavailable_no_results {
+        unavailable_diag_search_result(
+            config.rrf_k,
+            scoring_candidate_limit as usize,
+            fusion_weights,
+        )
+    } else if empty_generation {
         empty_diag_search_result(
             source_mode.applied,
             fast_embedder_override
@@ -12477,16 +12490,21 @@ fn resolve_source_mode_with_tiers(
                     unavailable_no_results: false,
                 });
             }
-            SearchSourceMode::Hybrid if options.strict_source_mode => {
+            SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly
+                if options.strict_source_mode =>
+            {
                 return Err(SearchError::SourceModeUnavailable {
                     requested,
                     reason: format!("embedding model unavailable: {reason}"),
                 });
             }
             SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly => {
-                degraded.push(SearchDegradation::search_unavailable(
-                    "the embedding model is unavailable and the lexical/BM25 arm is unavailable",
-                ));
+                let reason = if lexical_available {
+                    "the embedding model is unavailable and the requested semantic-only mode excludes lexical retrieval"
+                } else {
+                    "the embedding model is unavailable and the lexical/BM25 arm is unavailable"
+                };
+                degraded.push(SearchDegradation::search_unavailable(reason));
                 return Ok(SourceModeResolution {
                     applied: requested,
                     fallback_applied: false,
@@ -12509,6 +12527,16 @@ fn resolve_source_mode_with_tiers(
                 reason: format!("semantic similarity unavailable: {reason}"),
             });
         }
+        if !lexical_available {
+            degraded.push(SearchDegradation::search_unavailable(
+                "semantic similarity is unavailable on the deterministic hash fallback and the lexical/BM25 arm is unavailable",
+            ));
+            return Ok(SourceModeResolution {
+                applied: requested,
+                fallback_applied: false,
+                unavailable_no_results: true,
+            });
+        }
         degraded.push(SearchDegradation::embed_model_unavailable(reason));
         tracing::warn!(
             target: "ee::search::embedder_down",
@@ -12519,17 +12547,10 @@ fn resolve_source_mode_with_tiers(
             reason,
             "active embedder is deterministic hash fallback; semantic similarity unavailable"
         );
-        if lexical_available {
-            return Ok(SourceModeResolution {
-                applied: SearchSourceMode::LexicalOnly,
-                fallback_applied: true,
-                unavailable_no_results: false,
-            });
-        }
         return Ok(SourceModeResolution {
             applied: SearchSourceMode::LexicalOnly,
             fallback_applied: true,
-            unavailable_no_results: true,
+            unavailable_no_results: false,
         });
     }
 
@@ -13300,6 +13321,31 @@ fn empty_diag_search_result(
         errors: Vec::new(),
         degraded: Vec::new(),
     }
+}
+
+fn unavailable_diag_search_result(
+    rrf_k: f64,
+    limit: usize,
+    fusion_weights: SearchFusionWeights,
+) -> DiagSearchSyncResult {
+    let mut result = empty_diag_search_result(
+        SearchSourceMode::LexicalOnly,
+        false,
+        rrf_k,
+        limit,
+        fusion_weights,
+    );
+    for arm in [
+        &mut result.pre_fusion.lexical,
+        &mut result.pre_fusion.semantic_fast,
+    ] {
+        arm.available = false;
+        arm.error = Some(
+            "retrieval arm not executed because the requested search source is unavailable"
+                .to_owned(),
+        );
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -22752,6 +22798,73 @@ mod tests {
     }
 
     #[test]
+    fn strict_source_modes_reject_missing_embedder_before_fallback() -> TestResult {
+        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            for lexical_available in [false, true] {
+                let options = source_mode_test_options(source_mode, true);
+                let mut degraded = Vec::new();
+                let error = match resolve_source_mode_with_tiers(
+                    &options,
+                    &mut degraded,
+                    SearchTierState {
+                        lexical_available,
+                        embed_model_unavailable: Some("missing model fixture"),
+                        semantic_embedder_pending: None,
+                        semantic_embedder_degraded: None,
+                    },
+                ) {
+                    Ok(resolution) => {
+                        return Err(format!(
+                            "strict {source_mode:?} must reject a missing model (lexical available: {lexical_available}): {resolution:?}"
+                        ));
+                    }
+                    Err(error) => error,
+                };
+                match error {
+                    SearchError::SourceModeUnavailable { requested, reason } => {
+                        assert_eq!(requested, source_mode);
+                        assert!(reason.contains("embedding model unavailable"));
+                        assert!(reason.contains("missing model fixture"));
+                    }
+                    other => return Err(format!("unexpected source mode error: {other}")),
+                }
+                assert!(degraded.is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_only_missing_embedder_reports_excluded_lexical_arm() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::SemanticOnly, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
+        assert!(!resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "search_unavailable");
+        assert!(
+            degraded[0]
+                .message
+                .contains("semantic-only mode excludes lexical")
+        );
+        assert!(!degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+        Ok(())
+    }
+
+    #[test]
     fn emit_lexical_unavailable_when_fts5_only_down() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
         let mut degraded = Vec::new();
@@ -22831,30 +22944,40 @@ mod tests {
             "hash fallback reason should reach the degraded message: {}",
             degraded[0].message
         );
+        assert_eq!(degraded[0].data_json()["details"]["lexicalAvailable"], true);
         Ok(())
     }
 
     #[test]
-    fn hash_fallback_never_reenters_hybrid_when_lexical_is_unavailable() -> TestResult {
-        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
-        let mut degraded = Vec::new();
-        let resolution = resolve_source_mode_with_tiers(
-            &options,
-            &mut degraded,
-            SearchTierState {
-                lexical_available: false,
-                embed_model_unavailable: None,
-                semantic_embedder_pending: None,
-                semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    fn hash_fallback_without_lexical_reports_unavailable_without_claiming_fallback() -> TestResult {
+        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            let options = source_mode_test_options(source_mode, false);
+            let mut degraded = Vec::new();
+            let resolution = resolve_source_mode_with_tiers(
+                &options,
+                &mut degraded,
+                SearchTierState {
+                    lexical_available: false,
+                    embed_model_unavailable: None,
+                    semantic_embedder_pending: None,
+                    semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
+                },
+            )
+            .map_err(|error| error.to_string())?;
 
-        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
-        assert!(resolution.fallback_applied);
-        assert!(resolution.unavailable_no_results);
-        assert_eq!(degraded.len(), 1);
-        assert_eq!(degraded[0].code, "embed_model_unavailable");
+            assert_eq!(resolution.applied, source_mode);
+            assert!(!resolution.fallback_applied);
+            assert!(resolution.unavailable_no_results);
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "search_unavailable");
+            assert!(degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+            assert!(
+                degraded[0]
+                    .data_json()
+                    .pointer("/details/lexicalAvailable")
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
@@ -26720,6 +26843,94 @@ mod tests {
         assert!(!diag_json.contains(&evidence_id));
         assert!(!diag_json.contains(denied_phrase));
         assert!(diag_json.contains(memory_id));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_unavailable_sources_skip_query_embedding_and_retrieval() -> TestResult {
+        use frankensearch::core::generation::EmbeddingIdentityBundleV1;
+        use frankensearch::core::traits::ModelCategory;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingHash {
+            hash: HashEmbedder,
+            calls: AtomicUsize,
+        }
+        impl Embedder for CountingHash {
+            fn embed<'a>(
+                &'a self,
+                cx: &'a asupersync::Cx,
+                text: &'a str,
+            ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.hash.embed(cx, text)
+            }
+            fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+                self.hash.identity()
+            }
+            fn dimension(&self) -> usize {
+                self.hash.dimension()
+            }
+            fn id(&self) -> &str {
+                self.hash.id()
+            }
+            fn model_name(&self) -> &str {
+                self.hash.model_name()
+            }
+            fn is_semantic(&self) -> bool {
+                false
+            }
+            fn category(&self) -> ModelCategory {
+                self.hash.category()
+            }
+        }
+
+        let index_dir = collection_cancellation_index("diag-unavailable-sources")?;
+        write_current_index_metadata(&index_dir, 1)?;
+        assert!(!lexical_search_available(&index_dir));
+        let embedder = Arc::new(CountingHash {
+            hash: HashEmbedder::default_256(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut options = source_mode_test_options(SearchSourceMode::SemanticOnly, false);
+        options.workspace_path = index_dir.clone();
+        options.database_path = Some(index_dir.join("absent.db"));
+        options.index_dir = Some(index_dir);
+        options.query =
+            "Preserve exact caller cancellation during Frankensearch collection.".to_owned();
+        options.relevance_floor = Some(0.0);
+
+        for source_mode in [
+            SearchSourceMode::Hybrid,
+            SearchSourceMode::SemanticOnly,
+            SearchSourceMode::LexicalOnly,
+        ] {
+            options.source_mode = source_mode;
+            let selected = Arc::clone(&embedder) as Arc<dyn Embedder>;
+            let options = &options;
+            let report = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                run_diag_search_with_cx_and_workspace_embedder(&cx, options, Some(selected)).await
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            assert_eq!(embedder.calls.load(Ordering::Relaxed), 0);
+            assert!(report.final_report.results.is_empty());
+            assert!(!report.final_report.source_mode_fallback);
+            for arm in [&report.pre_fusion.lexical, &report.pre_fusion.semantic_fast] {
+                assert!(!arm.available);
+                assert!(arm.results.is_empty());
+                let error = arm.error.as_deref().ok_or("missing unavailable-arm reason")?;
+                assert!(error.contains("not executed"));
+                assert!(error.contains("requested search source is unavailable"));
+                assert!(!error.contains("generation is empty"));
+            }
+        }
+
+        // The populated vector fixture and spy must observe an executed query.
+        options.source_mode = SearchSourceMode::SemanticOnly;
+        run_diag_search_with_embedder(&options, embedder.clone())
+            .map_err(|error| error.to_string())?;
+        assert!(embedder.calls.load(Ordering::Relaxed) > 0);
         Ok(())
     }
 
