@@ -5,7 +5,7 @@ use crate::db::{
     CreateFeedbackEventInput, CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput,
 };
 use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const BODY: &str = "qualityquasar release guidance preserves the authoritative source.";
 const ANCHOR_MATCH_BODY: &str = "qualityquasar release guidance for `src/engine/cache/queue.rs` beside src/queue/cache/engine.rs.";
@@ -225,6 +225,7 @@ impl Fixture {
 struct SemanticIdentityFixture {
     hash: HashEmbedder,
     embeds: AtomicUsize,
+    fail_inference: AtomicBool,
 }
 
 impl SemanticIdentityFixture {
@@ -232,6 +233,7 @@ impl SemanticIdentityFixture {
         Self {
             hash: HashEmbedder::new(dimension, frankensearch::HashAlgorithm::FnvModular),
             embeds: AtomicUsize::new(0),
+            fail_inference: AtomicBool::new(false),
         }
     }
 }
@@ -243,6 +245,14 @@ impl Embedder for SemanticIdentityFixture {
         text: &'a str,
     ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
         self.embeds.fetch_add(1, Ordering::Relaxed);
+        if self.fail_inference.load(Ordering::Relaxed) {
+            return Box::pin(async {
+                Err(frankensearch::SearchError::EmbeddingFailed {
+                    model: "filtered-search-test-producer".to_owned(),
+                    source: Box::new(std::io::Error::other("test inference unavailable")),
+                })
+            });
+        }
         self.hash.embed(cx, text)
     }
 
@@ -1119,6 +1129,347 @@ fn published_search_filters_matching_candidates_before_top_one_and_diagnostics()
 }
 
 #[test]
+fn published_memory_filters_refill_past_the_initial_candidate_pool() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    // Short, repeated query terms rank ahead of the longer matching memory in
+    // the real lexical index. Neither the first 100 nor the first 200 hits
+    // contains the requested kind+field pair.
+    for number in 1..=240 {
+        let kind = if number <= 120 { "note" } else { "failure" };
+        let id =
+            fixture.memory_with_kind(number, 1.0, 1.0, now, "qualityquasar qualityquasar", kind);
+        if kind == "failure" {
+            fixture
+                .db
+                .set_memory_typed_fields_json(&id, Some(r#"{"family":"other-cache"}"#))
+                .unwrap();
+        }
+    }
+    let matching = fixture.memory_with_kind(241, 0.4, 1.0, now, BODY, "failure");
+    fixture
+        .db
+        .set_memory_typed_fields_json(&matching, Some(r#"{"family":"target-cache"}"#))
+        .unwrap();
+    let mut options = fixture.options();
+    options.limit = 1;
+    let _embedder = fixture.publish_index();
+    fixture.db.close().unwrap();
+
+    let rounds = |run: &SearchPerformanceRun| {
+        run.performance
+            .timings
+            .iter()
+            .filter(|timing| timing.name == "searchSync::lexicalSearch")
+            .count()
+    };
+    let unfiltered = run_search_with_performance_and_filters(&options, None, &[]).unwrap();
+    assert_eq!(unfiltered.report.results.len(), 1);
+    assert_eq!(rounds(&unfiltered), 1, "unfiltered search remains one pass");
+    assert_ne!(unfiltered.report.results[0].doc_id, matching);
+
+    let kind_only =
+        run_search_with_performance_and_filters(&options, Some("failure"), &[]).unwrap();
+    assert_eq!(kind_only.report.results.len(), 1);
+    assert_eq!(
+        kind_only.report.results[0].metadata.as_ref().unwrap()["kind"],
+        "failure"
+    );
+    assert_eq!(
+        kind_only
+            .audit_facts
+            .as_ref()
+            .unwrap()
+            .floor_counts
+            .considered,
+        quality_scoring_candidate_limit(options.limit, options.speed) as usize,
+        "refill the ranking pool, not only the one displayed result"
+    );
+    assert!(rounds(&kind_only) > 1);
+
+    let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
+    for kind in [None, Some("failure")] {
+        let run = run_search_with_performance_and_filters(&options, kind, &fields).unwrap();
+        assert_eq!(run.report.status, SearchStatus::Success);
+        assert_eq!(run.report.results.len(), 1);
+        assert_eq!(run.report.results[0].doc_id, matching);
+        assert_eq!(rounds(&run), 3);
+        assert_eq!(run.audit_facts.as_ref().unwrap().floor_counts.considered, 1);
+        assert_eq!(run.audit_facts.as_ref().unwrap().kept, 1);
+        assert!(
+            run.report
+                .degraded
+                .iter()
+                .all(|entry| { entry.code != "search_filter_candidate_budget_exhausted" })
+        );
+    }
+
+    let missing = run_search_with_performance_and_filters(&options, Some("decision"), &[]).unwrap();
+    assert_eq!(missing.report.status, SearchStatus::NoResults);
+    assert_eq!(rounds(&missing), 3);
+    assert!(
+        missing
+            .report
+            .degraded
+            .iter()
+            .all(|entry| { entry.code != "search_filter_candidate_budget_exhausted" })
+    );
+}
+
+#[test]
+fn filtered_collection_preserves_exclusion_admission_after_runtime_recovery() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let matching = fixture.memory_with_kind(121, 1.0, 1.0, now, BODY, "failure");
+    let mut documents = (1..=120)
+        .map(|number| {
+            let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            // These high-ranking index-only identities cannot authorize a
+            // source exclusion. Their removal must not imply exhaustion.
+            IndexableDocument::new(id, "qualityquasar qualityquasar")
+        })
+        .collect::<Vec<_>>();
+    documents.push(IndexableDocument::new(matching.as_str(), BODY));
+    let producer = build_filtered_candidate_test_index(&fixture, documents);
+    producer.fail_inference.store(true, Ordering::Relaxed);
+    let mut options = fixture.options();
+    options.query = "qualityquasar -excludedword".to_owned();
+    let index = options.resolve_index_dir();
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        for source_mode in [
+            SearchSourceMode::LexicalOnly,
+            SearchSourceMode::SemanticOnly,
+            SearchSourceMode::Hybrid,
+        ] {
+            producer.embeds.store(0, Ordering::Relaxed);
+            let mut trace = SearchPerformanceTrace::default();
+            let result = search_filtered_sync_with_performance(
+                &cx,
+                &index,
+                &options,
+                100,
+                source_mode,
+                Deterministic::from_seed(0),
+                SearchRerankRuntime::disabled(),
+                SearchFusionWeights::default(),
+                Some(producer.clone()),
+                Some((&options, &reader)),
+                SearchCandidateFilter::Workspace {
+                    connection: &reader,
+                    filters: SearchMemoryFilters {
+                        kind: Some("failure"),
+                        fields: &[],
+                    },
+                },
+                &mut trace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.applied, SearchSourceMode::LexicalOnly);
+            assert_eq!(result.hits.len(), 1, "{source_mode:?}");
+            assert_eq!(result.hits[0].doc_id, matching, "{source_mode:?}");
+            assert_eq!(result.raw_candidate_count, 121);
+            assert_eq!(
+                trace
+                    .timings
+                    .iter()
+                    .filter(|timing| timing.name == "searchSync::planCache")
+                    .count(),
+                2,
+                "authoritative source pruning must trigger a second round"
+            );
+            assert_eq!(
+                trace
+                    .timings
+                    .iter()
+                    .filter(|timing| timing.name == "searchSync::twoTierOpen")
+                    .count(),
+                usize::from(source_mode.uses_embeddings()),
+                "recovery must not reinitialize the semantic lane on retry"
+            );
+            assert_eq!(
+                result
+                    .degraded
+                    .iter()
+                    .filter(|entry| entry.code == "source_mode_fallback")
+                    .count(),
+                usize::from(source_mode.uses_embeddings())
+            );
+            assert!(
+                result
+                    .degraded
+                    .iter()
+                    .all(|entry| { entry.code != "search_filter_candidate_budget_exhausted" })
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[test]
+fn filtered_semantic_negations_refill_a_native_post_filter_shortage() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let mut documents = Vec::new();
+    let mut expected = BTreeSet::new();
+    for number in 1..=420 {
+        let (kind, content) = if number <= 320 {
+            ("note", "qualityquasar qualityquasar excludedword")
+        } else {
+            ("failure", BODY)
+        };
+        let id = fixture.memory_with_kind(number, 1.0, 1.0, now, content, kind);
+        documents.push(IndexableDocument::new(id.as_str(), content));
+        if kind == "failure" {
+            expected.insert(id);
+        }
+    }
+    let producer = build_filtered_candidate_test_index(&fixture, documents);
+    let mut options = fixture.options();
+    options.query = "qualityquasar -excludedword".to_owned();
+    let index = options.resolve_index_dir();
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        for source_mode in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
+            let mut trace = SearchPerformanceTrace::default();
+            let result = search_filtered_sync_with_performance(
+                &cx,
+                &index,
+                &options,
+                100,
+                source_mode,
+                Deterministic::from_seed(0),
+                SearchRerankRuntime::disabled(),
+                SearchFusionWeights::default(),
+                Some(producer.clone()),
+                Some((&options, &reader)),
+                SearchCandidateFilter::Workspace {
+                    connection: &reader,
+                    filters: SearchMemoryFilters {
+                        kind: Some("failure"),
+                        fields: &[],
+                    },
+                },
+                &mut trace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.applied, source_mode);
+            assert_eq!(
+                result
+                    .hits
+                    .iter()
+                    .map(|hit| hit.doc_id.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected,
+                "{source_mode:?} must reach matching memories below native negations"
+            );
+            assert_eq!(
+                trace
+                    .timings
+                    .iter()
+                    .filter(|timing| timing.name == "searchSync::planCache")
+                    .count(),
+                2,
+                "the initial 300 native candidates are all excluded, not exhausted"
+            );
+            assert!(result.degraded.is_empty());
+        }
+    })
+    .unwrap();
+}
+
+fn build_filtered_candidate_test_index(
+    fixture: &Fixture,
+    documents: Vec<IndexableDocument>,
+) -> Arc<SemanticIdentityFixture> {
+    let producer = Arc::new(SemanticIdentityFixture::new(256));
+    let build_producer = producer.clone();
+    let index = fixture.options().resolve_index_dir();
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        IndexBuilder::new(&index)
+            .with_embedder_stack(EmbedderStack::from_parts(build_producer, None))
+            .add_documents(documents.clone())
+            .build(&cx)
+            .await
+            .unwrap();
+        crate::core::index::build_lexical_tier(&cx, &index, &documents)
+            .await
+            .unwrap();
+    })
+    .unwrap();
+    producer
+}
+
+#[test]
+fn filtered_collection_reports_a_real_candidate_ceiling_without_claiming_absence() {
+    let fixture = Fixture::new();
+    let mut documents = (1..=FILTERED_SEARCH_CANDIDATE_CEILING)
+        .map(|number| {
+            IndexableDocument::new(
+                format!("candidate-{number:05}"),
+                if number < FILTERED_SEARCH_CANDIDATE_CEILING {
+                    "qualityquasar qualityquasar exhaustionneedle"
+                } else {
+                    "qualityquasar qualityquasar"
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let matching = "candidate-beyond-ceiling";
+    documents.push(IndexableDocument::new(matching, BODY));
+    let _producer = build_filtered_candidate_test_index(&fixture, documents);
+    let mut options = fixture.options();
+    let index = options.resolve_index_dir();
+    let admitted = BTreeSet::from([matching.to_owned()]);
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        for (query, raw_count, capped) in [
+            ("qualityquasar", 4096, true),
+            ("exhaustionneedle", 4095, false),
+        ] {
+            options.query = query.to_owned();
+            let mut trace = SearchPerformanceTrace::default();
+            let result = search_filtered_sync_with_performance(
+                &cx,
+                &index,
+                &options,
+                100,
+                SearchSourceMode::LexicalOnly,
+                Deterministic::from_seed(0),
+                SearchRerankRuntime::disabled(),
+                SearchFusionWeights::default(),
+                None,
+                None,
+                SearchCandidateFilter::Global(&admitted),
+                &mut trace,
+            )
+            .await
+            .unwrap();
+            assert!(result.hits.is_empty());
+            assert_eq!(result.raw_candidate_count, raw_count);
+            assert_eq!(result.degraded.len(), usize::from(capped));
+            if capped {
+                assert_eq!(
+                    result.degraded[0],
+                    SearchDegradation::filter_candidate_budget_exhausted("global", 4096, 0, 1)
+                );
+            }
+            assert_eq!(
+                trace
+                    .timings
+                    .iter()
+                    .filter(|timing| timing.name == "searchSync::lexicalSearch")
+                    .count(),
+                7,
+                "100, 200, 400, 800, 1600, 3200, 4096"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[test]
 fn empty_search_with_memory_filters_keeps_empty_result_diagnostics() {
     let fixture = Fixture::new();
     let options = fixture.options();
@@ -1200,6 +1551,33 @@ fn assert_global_memory_filters_use_the_global_snapshot() {
         global.set_memory_typed_fields_json(&id, fields).unwrap();
         assert!(fixture.db.get_memory(&id).unwrap().is_none());
         ids.push(id);
+    }
+    // Exercise a published index whose first candidate pool contains only
+    // excluded kinds. Filtering the admitted source rows alone is insufficient
+    // if the subsequent index search is still capped before those rows appear.
+    for number in 100..220 {
+        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        global
+            .insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.clone(),
+                    content: "qualityquasar qualityquasar".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    workflow_id: None,
+                    confidence: 1.0,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://global-typed-filters".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
     }
     let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
     let mut options = fixture.options();

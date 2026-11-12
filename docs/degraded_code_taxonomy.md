@@ -470,6 +470,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `tombstoned_in_results` | low | bd-17c65.2.8 (B8) |
 | `validity_filtered_significant_recall_drop` | warning | bd-17c65.2.10 (B11) |
 | `weak_query_recall` | low | bd-17c65.2.5 (B5) |
+| `search_filter_candidate_budget_exhausted` | warning | bd-1n0np.12.3 — typed-filter retrieval reached its bounded candidate ceiling before filling the matching ranking pool; additional workspace or global matches may exist |
 | `search_index_stale` | medium | bd-17c65.2.1 (B1) |
 | `index_incompatible` | medium | gh-37 (B): producer identity cannot authorize retrieval; rebuild with the active binary and model |
 | `ask_conflicting_evidence` | warning | bd-169v0.5 (QA) |

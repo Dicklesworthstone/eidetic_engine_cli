@@ -2852,6 +2852,47 @@ impl SearchMemoryFilters<'_> {
     }
 }
 
+/// Authoritative admission for a bounded indexed search. Both lanes use the
+/// same widening policy: the workspace predicate reads the held DB snapshot,
+/// while global membership was resolved from its own admitted source rows.
+enum SearchCandidateFilter<'a> {
+    Unfiltered,
+    Workspace {
+        connection: &'a DbConnection,
+        filters: SearchMemoryFilters<'a>,
+    },
+    Global(&'a BTreeSet<String>),
+}
+
+impl SearchCandidateFilter<'_> {
+    fn matching_limit(&self, requested: u32) -> u32 {
+        match self {
+            // The admitted global snapshot is complete. Once every eligible
+            // row has been found, widening cannot add another matching row.
+            Self::Global(ids) => requested.min(u32::try_from(ids.len()).unwrap_or(u32::MAX)),
+            Self::Unfiltered | Self::Workspace { .. } => requested,
+        }
+    }
+
+    fn lane(&self) -> &'static str {
+        match self {
+            Self::Unfiltered | Self::Workspace { .. } => "workspace",
+            Self::Global(_) => "global",
+        }
+    }
+
+    fn matches(&self, hit: &SearchHit) -> Result<bool, SearchError> {
+        match self {
+            Self::Unfiltered => Ok(true),
+            Self::Workspace {
+                connection,
+                filters,
+            } => typed_memory_hit_matches(connection, hit, filters.kind, filters.fields),
+            Self::Global(ids) => Ok(ids.contains(&hit.doc_id)),
+        }
+    }
+}
+
 pub fn apply_memory_kind_and_typed_field_filters_to_report(
     options: &SearchOptions,
     report: &mut SearchReport,
@@ -3046,6 +3087,25 @@ pub struct SearchDegradation {
 }
 
 impl SearchDegradation {
+    fn filter_candidate_budget_exhausted(
+        lane: &str,
+        budget: u32,
+        matched: usize,
+        target: u32,
+    ) -> Self {
+        Self {
+            code: "search_filter_candidate_budget_exhausted".to_owned(),
+            severity: "warning".to_owned(),
+            message: format!(
+                "Filtered search reached the {budget}-candidate ceiling in the {lane} index with {matched} of {target} requested ranking candidates; additional matching memories may exist."
+            ),
+            repair: Some(
+                "Use more specific query terms to bring matching memories into the bounded candidate pool."
+                    .to_owned(),
+            ),
+        }
+    }
+
     pub(crate) fn daemon_fallback(reason: &str) -> Self {
         Self {
             code: "daemon_search_fallback".to_owned(),
@@ -10997,6 +11057,9 @@ async fn run_search_inner_with_performance(
         });
     }
     let retrieve_start = Instant::now();
+    let indexed_retrieval = producer_selection_error.is_none()
+        && live_snapshot_retrieval.is_none()
+        && !empty_generation;
     let search_result = if let Some(error) = producer_selection_error {
         Err(error)
     } else if let Some(retrieval) = live_snapshot_retrieval {
@@ -11008,23 +11071,36 @@ async fn run_search_inner_with_performance(
         // Keep the ordinary merge, visibility, audit and reporting path below.
         Ok(runtime_fallback::Retrieval {
             hits: Vec::new(),
+            raw_candidate_count: 0,
             degraded: Vec::new(),
             applied: source_mode.applied,
         })
     } else {
-        search_sync_with_performance(
+        let candidate_filter = if memory_filters.is_empty() {
+            SearchCandidateFilter::Unfiltered
+        } else {
+            SearchCandidateFilter::Workspace {
+                connection: read_connection.ok_or_else(|| {
+                    SearchError::Index(format!(
+                        "Database not found at {}; typed memory filters require an initialized workspace",
+                        options.resolve_database_path().display()
+                    ))
+                })?,
+                filters: memory_filters,
+            }
+        };
+        search_filtered_sync_with_performance(
             cx,
             &index_dir,
-            &options.query,
-            scoring_candidate_limit as usize,
-            options.two_tier_config_for_limit(scoring_candidate_limit),
-            options.explain,
+            options,
+            scoring_candidate_limit,
             source_mode.applied,
             rerank_seed,
             rerank_runtime,
             fusion_weights,
             fast_embedder_override,
             read_connection.map(|connection| (options, connection)),
+            candidate_filter,
             &mut trace,
         )
         .await
@@ -11056,14 +11132,11 @@ async fn run_search_inner_with_performance(
                 ..
             } = retrieval;
             degraded.extend(retrieval_degraded);
-            // A result limit applies to matching memories, not to the
-            // unfiltered top-K. Filter the bounded local candidate pool using
-            // the held source snapshot before merging the independently
-            // admitted global lane. Doing this before dedupe and the floor
-            // also keeps excluded kinds/fields out of query-assist candidates
-            // and relevance-loss diagnostics. Retrieval remains bounded by
-            // scoring_candidate_limit; this is not an exhaustive corpus scan.
-            if !memory_filters.is_empty() {
+            // Indexed retrieval already refilled and filtered its candidate
+            // pool under the generation lease. Complete source snapshots have
+            // no truncated index pool to widen; filter those rows here before
+            // merging, dedupe, relevance diagnostics and query assistance.
+            if !indexed_retrieval && !memory_filters.is_empty() {
                 let memory_filter_start = Instant::now();
                 let connection = read_connection.ok_or_else(|| {
                     SearchError::Index(format!(
@@ -12953,6 +13026,7 @@ async fn stale_index_live_snapshot_retrieval(
             repair: Some("ee index rebuild --workspace .".to_owned()),
         });
         Ok(Some(runtime_fallback::Retrieval {
+            raw_candidate_count: hits.len(),
             hits,
             degraded: Vec::new(),
             applied: SearchSourceMode::LexicalOnly,
@@ -13863,11 +13937,13 @@ pub(crate) fn resolved_search_scoring_config(
     resolved_search_configuration(workspace_path).map(|(_, scoring)| scoring)
 }
 
+const FILTERED_SEARCH_CANDIDATE_CEILING: u32 = 4096;
+
 pub(crate) fn quality_scoring_candidate_limit(limit: u32, speed: SpeedMode) -> u32 {
     limit
         .saturating_mul(4)
         .max(u32::try_from(speed.candidate_limit()).unwrap_or(u32::MAX))
-        .min(4096)
+        .min(FILTERED_SEARCH_CANDIDATE_CEILING)
         .max(limit)
 }
 
@@ -14711,19 +14787,32 @@ async fn global_store_frankensearch_hits(
 
     let global_search_start = Instant::now();
     let mut global_trace = SearchPerformanceTrace::default();
-    let search_result = search_sync_with_performance(
+    let admitted_ids = if memory_filters.is_empty() {
+        None
+    } else {
+        Some(
+            memories
+                .iter()
+                .map(|memory| memory.id.clone())
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+    let candidate_filter = admitted_ids.as_ref().map_or(
+        SearchCandidateFilter::Unfiltered,
+        SearchCandidateFilter::Global,
+    );
+    let search_result = search_filtered_sync_with_performance(
         cx,
         &paths.index_dir,
-        &options.query,
-        usize::try_from(effective_limit).unwrap_or(usize::MAX),
-        global_options.two_tier_config_for_limit(effective_limit),
-        options.explain,
+        &global_options,
+        effective_limit,
         SearchSourceMode::LexicalOnly,
         Deterministic::from_seed(0).shared_child("search.global.lexical"),
         SearchRerankRuntime::disabled(),
         SearchFusionWeights::default(),
         None,
         None,
+        candidate_filter,
         &mut global_trace,
     )
     .await;
@@ -15441,6 +15530,160 @@ fn search_sync(
     .map_err(|error| error.to_string())
 }
 
+/// Refill typed-filter searches from the same leased index generation. A
+/// fixed unfiltered top-K can contain no matching memories even when many
+/// exist deeper in the index. Widen only such requests, preserving the full
+/// quality-scoring pool and bounding the work independently of corpus size.
+#[allow(clippy::too_many_arguments)]
+async fn search_filtered_sync_with_performance(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    options: &SearchOptions,
+    matching_limit: u32,
+    source_mode: SearchSourceMode,
+    rerank_seed: Deterministic<Seed>,
+    rerank_runtime: SearchRerankRuntime,
+    fusion_weights: SearchFusionWeights,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    exclusion_source: Option<(&SearchOptions, &DbConnection)>,
+    candidate_filter: SearchCandidateFilter<'_>,
+    trace: &mut SearchPerformanceTrace,
+) -> Result<runtime_fallback::Retrieval, SearchError> {
+    if matches!(candidate_filter, SearchCandidateFilter::Unfiltered) {
+        return search_sync_with_performance(
+            cx,
+            index_dir,
+            &options.query,
+            matching_limit as usize,
+            options.two_tier_config_for_limit(matching_limit),
+            options.explain,
+            source_mode,
+            rerank_seed,
+            rerank_runtime,
+            fusion_weights,
+            fast_embedder_override,
+            exclusion_source,
+            trace,
+        )
+        .await;
+    }
+
+    // The caller holds the source read snapshot and outer generation lease
+    // across every round. Reuse prepared model handles and predicate answers;
+    // neither audits nor downstream scoring run until collection finishes.
+    #[cfg(unix)]
+    let _generation_lease = pin_search_generation(cx, index_dir).await?;
+    let ceiling = FILTERED_SEARCH_CANDIDATE_CEILING.max(matching_limit);
+    let mut candidate_limit = matching_limit.max(1);
+    let matching_limit = candidate_filter.matching_limit(matching_limit);
+    let fast_embedder_override = if source_mode.uses_embeddings() {
+        Some(
+            fast_embedder_override
+                .unwrap_or_else(|| crate::core::index::default_search_embedder_stack().fast_arc()),
+        )
+    } else {
+        fast_embedder_override
+    };
+    let mut applied = source_mode;
+    let mut decisions = BTreeMap::new();
+    let mut degraded: Vec<SearchDegradation> = Vec::new();
+    let has_exclusions = search_query_has_exclusions(&options.query);
+    loop {
+        search_checkpoint(cx)?;
+        let mut retrieval = search_sync_with_performance(
+            cx,
+            index_dir,
+            &options.query,
+            candidate_limit as usize,
+            options.two_tier_config_for_limit(candidate_limit),
+            options.explain,
+            applied,
+            rerank_seed.shared_child("search.filtered_candidates"),
+            rerank_runtime.clone(),
+            fusion_weights,
+            fast_embedder_override.clone(),
+            exclusion_source,
+            trace,
+        )
+        .await?;
+        search_checkpoint(cx)?;
+        // Observe backend exhaustion before the authoritative predicate. A
+        // tiny filtered result is precisely the reason to try a larger pool.
+        let raw_count = retrieval.raw_candidate_count;
+        let strictly_withheld = retrieval
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "scope_strict_excluded_evidence");
+        let filter_start = Instant::now();
+        let mut filtered = Vec::with_capacity(retrieval.hits.len());
+        let mut admitted_ids = BTreeSet::new();
+        for (index, hit) in std::mem::take(&mut retrieval.hits).into_iter().enumerate() {
+            if index % 64 == 0 {
+                search_checkpoint(cx)?;
+            }
+            let admitted = match decisions.get(&hit.doc_id) {
+                Some(admitted) => *admitted,
+                None => {
+                    let admitted = candidate_filter.matches(&hit)?;
+                    decisions.insert(hit.doc_id.clone(), admitted);
+                    admitted
+                }
+            };
+            if admitted && admitted_ids.insert(hit.doc_id.clone()) {
+                filtered.push(hit);
+            }
+        }
+        retrieval.hits = filtered;
+        trace.record_elapsed("search::memoryFilters", filter_start);
+        for entry in std::mem::take(&mut retrieval.degraded) {
+            if let Some(previous) = degraded
+                .iter_mut()
+                .find(|previous| previous.code == entry.code)
+            {
+                *previous = entry;
+            } else {
+                degraded.push(entry);
+            }
+        }
+
+        let enough = retrieval.hits.len() >= matching_limit as usize;
+        // The native semantic searcher may apply negative clauses after its
+        // own bounded vector lookup. Its short output is then not a complete
+        // corpus scan. Lexical search applies query negatives in the engine,
+        // including after inference recovery, so its raw count remains a
+        // valid exhaustion witness before our source-admission pruning.
+        let exhausted = raw_count < candidate_limit as usize
+            && !(has_exclusions && retrieval.applied.uses_embeddings());
+        if enough || exhausted || strictly_withheld || candidate_limit >= ceiling {
+            if !enough && !exhausted && !strictly_withheld {
+                degraded.push(SearchDegradation::filter_candidate_budget_exhausted(
+                    candidate_filter.lane(),
+                    candidate_limit,
+                    retrieval.hits.len(),
+                    matching_limit,
+                ));
+            }
+            retrieval.hits.truncate(matching_limit as usize);
+            retrieval.degraded = degraded;
+            return Ok(retrieval);
+        }
+
+        // An inference outage has already selected a verified lexical lane.
+        // Preserve that decision rather than retrying the unavailable model
+        // or emitting the same recovery advisory once per widened request.
+        applied = retrieval.applied;
+        candidate_limit = candidate_limit.saturating_mul(2).min(ceiling);
+    }
+}
+
+fn native_search_candidate_count(results: &[crate::search::ScoredResult]) -> usize {
+    results
+        .iter()
+        .map(|result| result.doc_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn search_sync_with_performance(
     cx: &asupersync::Cx,
@@ -15479,7 +15722,7 @@ async fn search_sync_with_performance(
 
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = plan_lookup.plan.parsed_query.q.clone();
-    let exclusion_text = if source_mode.uses_embeddings() {
+    let exclusion_text = if source_mode.uses_embeddings() || exclusion_source.is_some() {
         SearchExclusionTextProvider::for_query(&query_owned, exclusion_source)?
     } else {
         None
@@ -15560,6 +15803,7 @@ async fn search_sync_with_performance(
             let convert_start = Instant::now();
             let converted = match search_result {
                 Ok(results) => {
+                    let raw_candidate_count = native_search_candidate_count(&results);
                     let mut hits = search_hits_from_scored_results(
                         results,
                         explain,
@@ -15567,9 +15811,22 @@ async fn search_sync_with_performance(
                     );
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
-                    Ok(runtime_fallback::Retrieval {
+                    let mut degraded = Vec::new();
+                    // Widened runtime recovery stays lexical, but still uses
+                    // the same authoritative exclusion/source admission as
+                    // the first recovered round. Native negatives continue to
+                    // be evaluated by the lexical backend on every request.
+                    let verified = if let Some(provider) = exclusion_text.as_ref() {
+                        hits.retain(|hit| provider.text_for_doc(&hit.doc_id).is_some());
+                        provider.apply_scope_decision(&mut hits, &mut degraded);
+                        search_checkpoint(&cx).and_then(|()| provider.check_storage())
+                    } else {
+                        Ok(())
+                    };
+                    verified.map(|()| runtime_fallback::Retrieval {
                         hits,
-                        degraded: Vec::new(),
+                        raw_candidate_count,
+                        degraded,
                         applied: source_mode,
                     })
                 }
@@ -15672,6 +15929,9 @@ async fn search_sync_with_performance(
                 .await
         };
         let mut search_result = observed.admit_result(search_result);
+        let raw_candidate_count = search_result
+            .as_ref()
+            .map_or(0, |(results, _)| native_search_candidate_count(results));
         if let Some(provider) = exclusion_text.as_ref() {
             if let Ok((results, _)) = &mut search_result {
                 provider.retain_verified(results);
@@ -15798,6 +16058,7 @@ async fn search_sync_with_performance(
                 }
                 Ok(runtime_fallback::Retrieval {
                     hits,
+                    raw_candidate_count,
                     degraded,
                     applied: source_mode,
                 })
@@ -22860,7 +23121,11 @@ mod tests {
                 .message
                 .contains("semantic-only mode excludes lexical")
         );
-        assert!(!degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+        assert!(
+            !degraded[0]
+                .message
+                .contains("lexical/BM25 arm is unavailable")
+        );
         Ok(())
     }
 
@@ -22970,7 +23235,11 @@ mod tests {
             assert!(resolution.unavailable_no_results);
             assert_eq!(degraded.len(), 1);
             assert_eq!(degraded[0].code, "search_unavailable");
-            assert!(degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+            assert!(
+                degraded[0]
+                    .message
+                    .contains("lexical/BM25 arm is unavailable")
+            );
             assert!(
                 degraded[0]
                     .data_json()
@@ -26920,7 +27189,10 @@ mod tests {
             for arm in [&report.pre_fusion.lexical, &report.pre_fusion.semantic_fast] {
                 assert!(!arm.available);
                 assert!(arm.results.is_empty());
-                let error = arm.error.as_deref().ok_or("missing unavailable-arm reason")?;
+                let error = arm
+                    .error
+                    .as_deref()
+                    .ok_or("missing unavailable-arm reason")?;
                 assert!(error.contains("not executed"));
                 assert!(error.contains("requested search source is unavailable"));
                 assert!(!error.contains("generation is empty"));

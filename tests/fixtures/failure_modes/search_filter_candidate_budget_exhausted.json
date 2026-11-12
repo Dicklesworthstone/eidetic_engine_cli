@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_filter_candidate_budget_exhausted",
+  "introduced_by": {
+    "bead": "bd-1n0np.12.3",
+    "epic_letter": "B"
+  },
+  "surfaces": ["search"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A search with --kind or --field filters widens its indexed candidate pool to 4096 without filling the matching quality-ranking pool or observing backend exhaustion. This applies independently to the workspace and admitted user-global lanes. The response may contain fewer matches than requested, including zero, without proving that no additional matching memories exist. Complete source exhaustion does not emit this warning.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Index more than 4096 memories matching the query, with the desired kind/field matches ranked below the candidate ceiling."
+    ],
+    "invocation": "ee search 'release' --workspace . --kind failure --field family=cache --json"
+  },
+  "expected_emission": {
+    "code": "search_filter_candidate_budget_exhausted",
+    "severity": "warning",
+    "message_contains": ["candidate ceiling", "requested ranking candidates", "additional matching memories may exist"],
+    "repair_contains": "more specific query terms",
+    "repair_string": "Use more specific query terms to bring matching memories into the bounded candidate pool."
+  }
+}

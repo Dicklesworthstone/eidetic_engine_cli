@@ -2232,7 +2232,13 @@ bare; `ee` does not fabricate machine fields.
 
 `ee search` filters typed fields with `--kind <kind>` plus repeatable `--field`
 operators: `name=value` for exact, `name~value` for contains, and `name^value`
-for prefix. The full registry, bounds, indexed-field status, and v1-to-v2
+for prefix. Indexed searches progressively widen retrieval when those filters
+exclude the initial candidates, so matching memories deeper in either the local
+or published global index can still reach ranking. Retrieval stops when the
+scoring pool is filled, the backend is exhausted, or the per-index budget reaches
+4,096 candidates. If that budget prevents filling the matching pool, the response
+includes `search_filter_candidate_budget_exhausted` to mark potentially incomplete
+filtered coverage. The full registry, bounds, indexed-field status, and v1-to-v2
 compatibility notes live in
 [`docs/memory-typed-fields.md`](docs/memory-typed-fields.md).
 

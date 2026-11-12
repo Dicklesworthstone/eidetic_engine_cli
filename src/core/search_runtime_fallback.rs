@@ -22,6 +22,10 @@ const INFERENCE_UNAVAILABLE: &str = "the selected embedding model failed during 
 
 pub(super) struct Retrieval {
     pub hits: Vec<SearchHit>,
+    /// Distinct native results before EE's authoritative source or scope
+    /// pruning. Native semantic negations can still have shortened this pool,
+    /// so callers must not infer exhaustion from its length in that case.
+    pub raw_candidate_count: usize,
     pub degraded: Vec<SearchDegradation>,
     pub applied: SearchSourceMode,
 }
@@ -279,12 +283,14 @@ pub(super) async fn recover_lexical(
     search_checkpoint(cx)?;
     let results =
         result.map_err(|error| map_frankensearch_error(cx, "Lexical recovery failed", error))?;
+    let raw_candidate_count = super::native_search_candidate_count(&results);
     let mut hits =
         search_hits_from_scored_results(results, explain, FrankensearchFinalScoreScale::Native);
     canonicalize_equivalent_component_scores(&mut hits, &seed);
     sort_search_hits_by_score_order(&mut hits);
     Ok(Retrieval {
         hits,
+        raw_candidate_count,
         degraded: vec![SearchDegradation::source_mode_fallback(
             requested,
             SearchSourceMode::LexicalOnly,
@@ -919,6 +925,7 @@ mod tests {
             };
             let recovered = Retrieval {
                 hits: Vec::new(),
+                raw_candidate_count: 0,
                 degraded: Vec::new(),
                 applied: SearchSourceMode::LexicalOnly,
             };
