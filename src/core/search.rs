@@ -1994,13 +1994,14 @@ impl PackSearchHandoff {
             }
         }
         let hits = std::mem::take(&mut self.report.results);
-        let hits = apply_tombstone_visibility_with_connection(
+        let mut hits = apply_tombstone_visibility_with_connection(
             options,
             hits,
             &mut self.report.degraded,
             connection,
             Some(&mut memories),
         );
+        hits.retain(|hit| !hit.doc_id.starts_with("mem_") || memories.contains_key(&hit.doc_id));
         let hits = apply_live_evidence_visibility(
             options,
             hits,
@@ -16255,9 +16256,44 @@ fn apply_tombstone_visibility_with_connection(
                         }
                     }
                     Err(_) => {
-                        // A failed read is not absence and cannot be repaired
-                        // by trusting the index or a preloaded row instead.
-                        memory_lookup_failed = memory_lookup_failed.saturating_add(1);
+                        if !matches!(
+                            options.memory_scope,
+                            MemoryScope::Swarm | MemoryScope::Workspace
+                        ) {
+                            match connection.get_memory_for_lifecycle_visibility(&hit.doc_id) {
+                                Ok(Some(memory)) => {
+                                    // Lifecycle, tombstone, seal, and validity columns are intact
+                                    // while trust_class/trust_subclass failed to read (bd-bzajp).
+                                    // Do not populate `preloaded_memories` with synthetic trust
+                                    // fields; let `apply_memory_scope_visibility_with_connection`
+                                    // count the candidate, fail closed on its own scope metadata
+                                    // read, and emit `scope_metadata_unavailable`.
+                                    normalize_local_memory_store_identity(&mut hit, &memory);
+                                    if let Some(hit) = handle_loaded_memory(hit, &memory) {
+                                        visible_hits.push(hit);
+                                    }
+                                }
+                                Ok(None) => {
+                                    if let Some(memory) = preloaded_memories
+                                        .as_deref()
+                                        .and_then(|preloaded| preloaded.get(&hit.doc_id))
+                                    {
+                                        if let Some(hit) = handle_loaded_memory(hit, memory) {
+                                            visible_hits.push(hit);
+                                        }
+                                    } else {
+                                        orphaned_filtered = orphaned_filtered.saturating_add(1);
+                                    }
+                                }
+                                Err(_) => {
+                                    memory_lookup_failed = memory_lookup_failed.saturating_add(1);
+                                }
+                            }
+                        } else {
+                            // A failed read is not absence and cannot be repaired
+                            // by trusting the index or a preloaded row instead.
+                            memory_lookup_failed = memory_lookup_failed.saturating_add(1);
+                        }
                     }
                 }
             }
@@ -23700,6 +23736,111 @@ mod tests {
             preloaded.get(MEMORY),
             "read failures must leave the source row unchanged"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn renamed_trust_class_column_reaches_scope_admission_and_fails_closed() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000925";
+        const MEMORY: &str = "mem_00000000000000000000000925";
+        const BODY: &str = "SCOPED-TRUST-COLUMN-CANARY";
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(MEMORY, &test_memory_input(WORKSPACE, BODY))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "ALTER TABLE memories RENAME COLUMN trust_class TO retained_trust_class_probe",
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Positive arm (bd-bzajp): under an explicit non-passthrough scope filter,
+        // lifecycle visibility verifies tombstone/seal/validity via the trust-agnostic
+        // projection so scope admission observes the candidate, fails closed on
+        // `trust_class`, and reports `scope_metadata_unavailable`.
+        let mut scoped_options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        scoped_options.workspace_path = workspace.path().to_path_buf();
+        scoped_options.memory_scope = MemoryScope::Verified;
+        let mut scoped_degraded = Vec::new();
+        let mut preloaded = BTreeMap::new();
+        let lifecycle_visible = apply_tombstone_visibility_collecting(
+            &scoped_options,
+            vec![memory_visibility_hit(MEMORY, BODY)],
+            &mut scoped_degraded,
+            Some(&connection),
+            Some(&mut preloaded),
+        );
+        assert_eq!(lifecycle_visible.len(), 1);
+        assert!(
+            !preloaded.contains_key(MEMORY),
+            "trust-agnostic lifecycle projection must never populate preloaded_memories"
+        );
+        assert!(scoped_degraded.is_empty());
+        let (scoped_visible, scope_stats) = apply_memory_scope_visibility(
+            &scoped_options,
+            lifecycle_visible,
+            &mut scoped_degraded,
+            Some(&connection),
+        );
+        assert!(scoped_visible.is_empty());
+        assert_eq!(scope_stats.candidates_total, 1);
+        assert_eq!(scope_stats.candidates_excluded_by_scope, 1);
+        assert_eq!(scope_stats.excluded_memory_ids, vec![MEMORY.to_owned()]);
+        assert_eq!(scoped_degraded.len(), 1);
+        assert_eq!(scoped_degraded[0].code, "scope_metadata_unavailable");
+        assert!(scoped_degraded[0].message.contains("trust_class"));
+
+        // Negative twin arm: passthrough scope and cached pack handoff still fail
+        // closed at tombstone visibility without admitting the candidate.
+        let mut passthrough_options =
+            source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        passthrough_options.workspace_path = workspace.path().to_path_buf();
+        let mut passthrough_degraded = Vec::new();
+        let passthrough_visible = apply_tombstone_visibility_collecting(
+            &passthrough_options,
+            vec![memory_visibility_hit(MEMORY, BODY)],
+            &mut passthrough_degraded,
+            Some(&connection),
+            None,
+        );
+        assert!(passthrough_visible.is_empty());
+        assert_eq!(passthrough_degraded.len(), 1);
+        assert_eq!(
+            passthrough_degraded[0].code,
+            "tombstone_visibility_unavailable"
+        );
+
+        let mut handoff = PackSearchHandoff {
+            report: rerank_test_report(
+                vec![memory_visibility_hit(MEMORY, BODY)],
+                Vec::new(),
+                false,
+            ),
+            quality_scoring_policy: SearchScoringConfig::default().policy_hash(),
+            fusion_weights: SearchFusionWeights::default(),
+            quality_reference_time: scoped_options.as_of,
+            audit_facts: None,
+            cached_local_embedder: None,
+            snapshot: PackSearchSnapshot {
+                workspace_id: WORKSPACE.to_owned(),
+                generation: 0,
+                calibration_input_identity: None,
+                scoring_reference_time: scoped_options.as_of.unwrap_or_else(Utc::now),
+            },
+        };
+        assert!(handoff.revalidate(&scoped_options, &connection).is_empty());
+        assert!(handoff.report.results.is_empty());
         Ok(())
     }
 

@@ -29041,6 +29041,27 @@ impl DbConnection {
         rows.first().map(stored_memory_from_row).transpose()
     }
 
+    /// Read a memory's lifecycle, tombstone, validity-window, and provenance
+    /// columns without touching `trust_class` or `trust_subclass` (bd-bzajp).
+    ///
+    /// Used only by `apply_tombstone_visibility_with_connection` when a
+    /// non-passthrough `memory_scope` filter follows and `get_memory` failed,
+    /// so schema/column faults on `trust_class` reach scope admission and
+    /// report `scope_metadata_unavailable` with accurate candidate accounting
+    /// instead of collapsing into `0` scope candidates.
+    pub(crate) fn get_memory_for_lifecycle_visibility(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, '' AS trust_class, NULL AS trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_memory_from_row).transpose()
+    }
+
     /// Look up the revision-chain identifier for a memory.
     ///
     /// Every memory belongs to a revision chain whose members share a
