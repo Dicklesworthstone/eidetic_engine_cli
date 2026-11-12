@@ -23797,9 +23797,10 @@ mod tests {
         assert_eq!(scope_stats.candidates_total, 1);
         assert_eq!(scope_stats.candidates_excluded_by_scope, 1);
         assert_eq!(scope_stats.excluded_memory_ids, vec![MEMORY.to_owned()]);
-        assert_eq!(scoped_degraded.len(), 1);
+        assert_eq!(scoped_degraded.len(), 2);
         assert_eq!(scoped_degraded[0].code, "scope_metadata_unavailable");
         assert!(scoped_degraded[0].message.contains("trust_class"));
+        assert_eq!(scoped_degraded[1].code, "scope_excluded_evidence");
 
         // Negative twin arm: passthrough scope and cached pack handoff still fail
         // closed at tombstone visibility without admitting the candidate.

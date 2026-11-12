@@ -719,9 +719,10 @@ mod tests {
         let db_path = workspace.join(".ee/ee.db");
         let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
         seed_anchor_database(&connection, &workspace).map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
         let mut options = ImpactOptions {
             workspace_path: workspace,
-            database_path: Some(db_path),
+            database_path: Some(db_path.clone()),
             index_dir: None,
             surface: ImpactSurfaceQuery {
                 kind: MemoryAnchorKind::Path,
@@ -740,9 +741,12 @@ mod tests {
                 .results
                 .is_empty()
         );
-        connection
+        let ddl_connection =
+            DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        ddl_connection
             .execute_raw("ALTER TABLE team_members RENAME TO unavailable_team_members")
             .map_err(|error| error.to_string())?;
+        ddl_connection.close().map_err(|error| error.to_string())?;
         let error = run_impact(&options).expect_err("a failed roster read must be reported");
         assert!(matches!(&error, ImpactError::Storage(_)));
         assert!(error.to_string().contains("team roster members"));

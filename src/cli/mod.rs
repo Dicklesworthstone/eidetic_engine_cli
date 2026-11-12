@@ -65722,7 +65722,10 @@ const DAEMON_STARTUP_REPORT_MAX_BYTES: u64 = 16 * 1024;
 
 #[cfg(unix)]
 fn daemon_startup_report() -> io::Result<(fs::File, fs::File)> {
+    use std::os::unix::fs::PermissionsExt;
+
     let report = tempfile::tempfile()?;
+    report.set_permissions(fs::Permissions::from_mode(0o600))?;
     let output = report.try_clone()?;
     Ok((report, output))
 }

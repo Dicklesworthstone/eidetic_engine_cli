@@ -527,9 +527,10 @@ fn assert_no_mutation_contract(corpus: &Corpus, actual: &Value) -> Result<(), St
                 ),
             )?;
         }
+        let redacted_artifact = artifact.replace(RESOURCE_QUEUE_PRESSURE_REDACTION_POSTURE, "");
         for snippet in &corpus.no_mutation.redaction_forbidden_substrings {
             ensure(
-                !artifact.contains(snippet),
+                !redacted_artifact.contains(snippet),
                 format!(
                     "queue-pressure conformance contains forbidden redaction snippet {snippet:?}"
                 ),

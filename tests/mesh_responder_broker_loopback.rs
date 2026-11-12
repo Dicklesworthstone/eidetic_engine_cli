@@ -2255,7 +2255,7 @@ impl ControlRouteFixture {
         let database_path = database_path
             .canonicalize()
             .map_err(|error| error.to_string())?;
-        let workspace_id = format!("wsp_controlroute{label}000000000001");
+        let workspace_id = format!("wsp_controlroute{label}0000000000001");
         let responder_node_id = format!("node_{}", label.repeat(32));
         connection
             .insert_workspace(

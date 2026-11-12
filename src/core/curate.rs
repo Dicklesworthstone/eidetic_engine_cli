@@ -24180,6 +24180,7 @@ mod tests {
             let source_before = connection
                 .get_memory(&memory_id)
                 .map_err(|e| e.to_string())?;
+            connection.close().map_err(|e| e.to_string())?;
             let options = super::CurateApplyOptions {
                 workspace_path: workspace,
                 database_path: Some(&database),
@@ -24210,7 +24211,10 @@ mod tests {
                 "preview must not mutate the DB"
             );
             if block_audit {
-                connection.execute_raw("CREATE TRIGGER block_recipe_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'recipe audit failure'); END").map_err(|e| e.to_string())?;
+                let ddl_connection =
+                    DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+                ddl_connection.execute_raw("CREATE TRIGGER block_recipe_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'recipe audit failure'); END").map_err(|e| e.to_string())?;
+                ddl_connection.close().map_err(|e| e.to_string())?;
             }
             let options = super::CurateApplyOptions {
                 dry_run: false,
@@ -24221,27 +24225,32 @@ mod tests {
                 "Tangerine release",
                 "Prepare tangerine compass",
             );
-            let recipes = connection
+            let inspect_connection =
+                DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let recipes = inspect_connection
                 .list_plan_recipes(&workspace_id)
                 .map_err(|e| e.to_string())?;
             if block_audit {
                 assert!(applied.is_err());
                 assert!(recipes.is_empty(), "audit failure rolls back recipe insert");
                 assert_eq!(
-                    connection
+                    inspect_connection
                         .get_curation_candidate(&workspace_id, &candidate_id)
                         .map_err(|e| e.to_string())?
                         .ok_or("missing candidate")?
                         .status,
                     "approved"
                 );
+                inspect_connection.close().map_err(|e| e.to_string())?;
             } else if status == "pending" {
+                inspect_connection.close().map_err(|e| e.to_string())?;
                 assert_eq!(
                     applied.map_err(|e| e.message())?.application.status,
                     "blocked"
                 );
                 assert!(recipes.is_empty());
             } else {
+                inspect_connection.close().map_err(|e| e.to_string())?;
                 let applied = applied.map_err(|e| e.message())?;
                 assert!(applied.durable_mutation);
                 assert!(applied.degraded.is_empty());
@@ -24285,25 +24294,30 @@ mod tests {
                     explained.steps,
                     ["Tangerine compass release: verify the signed artifact."]
                 );
+                let after_connection =
+                    DbConnection::open_file(&database).map_err(|e| e.to_string())?;
                 assert!(
-                    connection
+                    after_connection
                         .list_search_index_jobs(&workspace_id, None)
                         .map_err(|e| e.to_string())?
                         .is_empty()
                 );
                 assert!(
-                    connection
+                    after_connection
                         .list_procedural_rules(&workspace_id, None, None, true)
                         .map_err(|e| e.to_string())?
                         .is_empty()
                 );
+                after_connection.close().map_err(|e| e.to_string())?;
             }
+            let final_connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             assert_eq!(
-                connection
+                final_connection
                     .get_memory(&memory_id)
                     .map_err(|e| e.to_string())?,
                 source_before
             );
+            final_connection.close().map_err(|e| e.to_string())?;
         }
         Ok(())
     }
