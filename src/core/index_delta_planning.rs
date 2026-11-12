@@ -61,6 +61,17 @@ fn diff_with_checkpoint(
             let actual_digest = digest(document);
             checkpoint()?;
             if *expected == actual_digest {
+                // Streaming reconciliation refuses conflicting commitments.
+                // Its full-collector fallback must not turn that refusal into
+                // an empty delta and republish unverified vectors as current.
+                let input = embedding_input_digest(document);
+                checkpoint()?;
+                if inputs.get(&document.id) != Some(&input) {
+                    return Err(incremental_fallback(
+                        IncrementalFallbackReason::CorpusRevisionMismatch,
+                        "unchanged source document has an inconsistent live embedding-input digest",
+                    ));
+                }
                 continue;
             }
         }

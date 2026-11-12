@@ -1743,7 +1743,7 @@ mod tests {
         let stack = super::super::hash_fallback_embedder_stack();
         let original = [doc("mem_one", "source text")];
         let live = generation_with_digests("bad-inputs", &stack, &original)?;
-        for case in 0..5 {
+        for case in 0..6 {
             let mut broken = DocDigests::new(&stack, &original);
             match case {
                 0 => broken.embedding_inputs = None,
@@ -1764,7 +1764,15 @@ mod tests {
                         .unwrap()
                         .insert("mem_one".to_owned(), "not-a-digest".to_owned());
                 }
-                _ => broken.schema = DOC_DIGESTS_SCHEMA_V2.to_owned(),
+                4 => broken.schema = DOC_DIGESTS_SCHEMA_V2.to_owned(),
+                _ => {
+                    // Structurally valid maps can still disagree about the
+                    // embedding input of an otherwise unchanged document.
+                    broken.embedding_inputs.as_mut().unwrap().insert(
+                        "mem_one".to_owned(),
+                        embedding_input_digest(&doc("mem_one", "different source text")),
+                    );
+                }
             }
             broken
                 .write(live.path())
