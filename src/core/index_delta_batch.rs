@@ -205,13 +205,26 @@ async fn infer_inputs(
     }
     // Provider errors can include private source text or endpoint details.
     // Identity/cardinality validation below retains useful, bounded diagnostics.
-    let failed = |_| tier_error(format!("{tier}-tier bound embedding inference failed"));
+    let failed = |error| {
+        // A provider can return cancellation without setting our Cx. Preserve
+        // its attributed reason before the staging caller considers a full
+        // rebuild; cancellation must never become another inference attempt.
+        if matches!(&error, frankensearch::SearchError::Cancelled { .. })
+            && let super::super::IndexRebuildError::Cancelled(reason) =
+                super::super::map_index_search_error(cx, "bound embedding inference", error)
+        {
+            cx.set_cancel_reason(reason);
+        }
+        tier_error(format!("{tier}-tier bound embedding inference failed"))
+    };
     if embedder.bound_batch_is_native() {
         validate_producer(cx, embedder, expected_identity, tier)?;
-        let outcome = embedder.embed_batch_bound(cx, texts).await;
+        let outcome = embedder.embed_batch_bound(cx, texts).await.map_err(failed);
         // Inspect the caller before propagating even an ordinary provider error.
+        // Attribute an explicit backend cancellation first: a simultaneous
+        // producer change must not hide it behind a compatibility refusal.
         validate_producer(cx, embedder, expected_identity, tier)?;
-        let vectors = outcome.map_err(failed)?;
+        let vectors = outcome?;
         validate_batch(&vectors, texts.len(), expected_identity, tier)?;
         return Ok(vectors);
     }
@@ -219,9 +232,9 @@ async fn infer_inputs(
     let mut vectors = Vec::with_capacity(texts.len());
     for text in texts {
         validate_producer(cx, embedder, expected_identity, tier)?;
-        let outcome = embedder.embed_bound(cx, text).await;
+        let outcome = embedder.embed_bound(cx, text).await.map_err(failed);
         validate_producer(cx, embedder, expected_identity, tier)?;
-        let vector = outcome.map_err(failed)?;
+        let vector = outcome?;
         // Custom bound implementations are not assumed to perform validation.
         // Refuse a bad prefix now rather than inferring the rest of the group.
         super::validate_bound_embedding(&vector, expected_identity, tier)?;
@@ -255,7 +268,7 @@ pub(super) async fn upsert(
     .await
 }
 
-async fn embed_batches_with(
+pub(super) async fn embed_batches_with(
     cx: &asupersync::Cx,
     embedder: &dyn Embedder,
     mut documents: &[IndexableDocument],

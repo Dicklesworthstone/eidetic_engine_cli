@@ -158,8 +158,9 @@ to require this publication.
 Empty vector tiers record their embedding producer before the first memory is
 appended. Before reusing a generation for a delta, the worker checks the actual
 fast and quality vector headers against the selected producers. Older tiers
-with an absent producer revision, or tiers from a different producer, go
-through the existing full staged publisher. The ordinary queued worker can
+with an absent producer revision go through the existing full staged publisher.
+A changed producer requires new vectors for that tier; the selective refresh
+described below can retain the other compatible tier. The ordinary queued worker can
 therefore repair this compatibility gap without a manual rebuild; matching
 database and index generations alone never bypass producer validation.
 
@@ -183,6 +184,33 @@ This removes corpus-sized vector copies for eligible metadata updates. Source
 reconciliation and digest-manifest writes still inspect the corpus, and content
 deltas still copy and compact complete vector tiers. Total intake cost therefore
 remains larger than O(delta).
+
+## Selective Tier Refresh
+
+Queued index processing can retain compatible native vector tiers when ordinary
+delta planning requires a rebuild. A complete V3 manifest and a fresh source
+snapshot must prove that every document ID and its exact embedding input remain
+unchanged. The worker then checks each producer independently: adding, removing
+or replacing quality preserves compatible fast vectors, and replacing fast can
+preserve compatible quality vectors. Metadata changes beyond the ordinary delta
+budget can also rebuild lexical documents while retaining both vector tiers.
+
+Retained tiers pass native read-only admission, exact document-set checks,
+producer validation and an empty-WAL check. On Unix their main files share the
+existing inodes; WALs stay private. Changed tiers receive fresh native files and
+bounded, identity-checked inference batches. The new native tier carries the
+retained tier's publication nonce so reopening the pair does not silently drop
+quality. EE still publishes the entire directory through its atomic generation
+exchange. Lexical segments are reused when document metadata is unchanged;
+otherwise the lexical tier is rebuilt from the complete source snapshot.
+
+Job reports use `staged_tier_refresh` or `coalesced_staged_tier_refresh` for this
+path. Changed inputs or membership, incomplete proofs, incompatible native
+files, or a change to every selected producer keep the ordinary full rebuild.
+Cancellation ends the operation instead of starting another build. Explicit
+`ee index rebuild` and `ee index reembed` continue to rebuild all selected tiers.
+This optimization avoids redundant inference and vector copies; source capture,
+membership validation and digest manifests still scale with the corpus.
 
 ## Session Generation Invalidation
 

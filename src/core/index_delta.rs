@@ -55,6 +55,11 @@ mod stream;
 
 pub(super) use stream::{ReconciledSource, SourceReconciler};
 
+#[path = "index_tier_refresh.rs"]
+mod tier_refresh;
+
+pub(super) use tier_refresh::stage as stage_tier_refresh;
+
 #[cfg(feature = "lexical-bm25")]
 #[path = "index_delta_lexical.rs"]
 mod lexical_maintenance;
@@ -686,31 +691,7 @@ impl AdmittedVectors {
         .into_iter()
         .flatten()
         {
-            let path = live_dir.join(name);
-            ensure_index_path_has_no_symlinks(&path, "admit published vector staging source")?;
-            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-                IndexRebuildError::Index(format!(
-                    "Failed to inspect published vector staging source: {error}"
-                ))
-            })?;
-            if !metadata.is_file() || metadata.is_symlink() {
-                return Err(IndexRebuildError::Index(
-                    "Published vector staging source is not a regular file".to_owned(),
-                ));
-            }
-            // This native compatibility API admits only legacy FSVI v1. V2's
-            // single-link immutable admission contract is deliberately separate.
-            // EE's strict adapter also refuses any pending/recoverable WAL.
-            let reader = super::vector_admission::open_read_only(&path).map_err(|error| {
-                IndexRebuildError::Index(format!(
-                    "Failed to admit published vector staging source: {error}"
-                ))
-            })?;
-            staging_copy::verify_published_vector_identity(&path, &metadata).map_err(|error| {
-                IndexRebuildError::Index(format!(
-                    "Published vector staging source changed during native admission: {error}"
-                ))
-            })?;
+            let (metadata, reader) = admit_published_vector(&live_dir.join(name))?;
             super::verify_vector_producer(&reader, descriptor, name)
                 .map_err(IndexRebuildError::Index)?;
             files.insert(PathBuf::from(name), (metadata, reader));
@@ -722,6 +703,36 @@ impl AdmittedVectors {
             files,
         })
     }
+}
+
+fn admit_published_vector(
+    path: &Path,
+) -> Result<(std::fs::Metadata, frankensearch::VectorIndex), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(path, "admit published vector staging source")?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to inspect published vector staging source: {error}"
+        ))
+    })?;
+    if !metadata.is_file() || metadata.is_symlink() {
+        return Err(IndexRebuildError::Index(
+            "Published vector staging source is not a regular file".to_owned(),
+        ));
+    }
+    // This native compatibility API admits only legacy FSVI v1. V2's
+    // single-link immutable admission contract is deliberately separate.
+    // EE's strict adapter also refuses any pending/recoverable WAL.
+    let reader = super::vector_admission::open_read_only(path).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to admit published vector staging source: {error}"
+        ))
+    })?;
+    staging_copy::verify_published_vector_identity(path, &metadata).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Published vector staging source changed during native admission: {error}"
+        ))
+    })?;
+    Ok((metadata, reader))
 }
 
 /// Stage a delta with private metadata/WAL and authoritative immutable lexical
@@ -737,13 +748,13 @@ pub(super) fn copy_generation_for_delta(
     ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
     ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
     let vectors = AdmittedVectors::open(live_dir, stack, delta)?;
-    copy_generation_files(live_dir, staging_dir, Some(&vectors))
+    copy_generation_files(live_dir, staging_dir, Some(&vectors), None)
 }
 
 /// Low-level fixtures without native vector admission always copy vectors.
 #[cfg(test)]
 fn copy_generation(live_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
-    copy_generation_files(live_dir, staging_dir, None)
+    copy_generation_files(live_dir, staging_dir, None, None)
 }
 
 /// Unsupported sharing/cloning falls back to independent byte copies.
@@ -754,6 +765,7 @@ fn copy_generation_files(
     live_dir: &Path,
     staging_dir: &Path,
     vectors: Option<&AdmittedVectors>,
+    retained_roots: Option<&BTreeSet<PathBuf>>,
 ) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
     ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
@@ -787,6 +799,19 @@ fn copy_generation_files(
             let kind = entry.file_type().map_err(|error| {
                 IndexRebuildError::Index(format!("Failed to inspect live index entry: {error}"))
             })?;
+            if !kind.is_dir() && !kind.is_file() {
+                return Err(IndexRebuildError::Index(
+                    "Refusing to copy an index generation containing a symlink or special entry"
+                        .to_owned(),
+                ));
+            }
+            // Selective tier refresh retains only admitted main files, their
+            // private empty WALs, and optionally the existing lexical tier.
+            // Changed tiers get fresh paths; never copy an old WAL or an
+            // unrelated derived sidecar into a newly selected producer.
+            if top_level && retained_roots.is_some_and(|roots| !roots.contains(Path::new(&name))) {
+                continue;
+            }
             let target = destination.join(&name);
             if kind.is_dir() {
                 let mut builder = std::fs::DirBuilder::new();

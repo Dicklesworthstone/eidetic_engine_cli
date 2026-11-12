@@ -3160,6 +3160,10 @@ where
                         processing_mode.replace("_staged_full_rebuild", "") + "_staged_delta";
                     fallback_to_full = None;
                 }
+                PublishedGenerationKind::TierRefresh => {
+                    processing_mode = "coalesced_staged_tier_refresh".to_owned();
+                    fallback_to_full = None;
+                }
                 PublishedGenerationKind::Full { delta_refused } => {
                     fallback_to_full.get_or_insert(delta_refused);
                 }
@@ -3434,6 +3438,9 @@ where
                             .replace("_staged_full_rebuild", "")
                             + "_staged_delta";
                     }
+                    PublishedGenerationKind::TierRefresh => {
+                        processing_mode = "staged_tier_refresh".to_owned();
+                    }
                     PublishedGenerationKind::Full { delta_refused } => {
                         fallback_to_full = Some(delta_refused);
                     }
@@ -3690,6 +3697,9 @@ enum PublishedGenerationKind {
     /// Only the changed documents were applied to a copy of the live
     /// generation.
     Delta,
+    /// Exact source-input proof retained compatible native tiers; only changed
+    /// producers and, when needed, the complete lexical tier were rebuilt.
+    TierRefresh,
     /// The whole corpus was rebuilt; the reason the delta path was refused.
     Full { delta_refused: String },
 }
@@ -3775,6 +3785,48 @@ where
         }
         Err(DeltaStageError::Cancelled(error)) => Err(error),
         Err(DeltaStageError::Refused(reason)) => {
+            match delta::stage_tier_refresh(
+                publish_lock,
+                index_dir,
+                &stack,
+                &indexable_docs,
+                generation,
+                document_counts,
+            )
+            .await
+            {
+                Ok(staging) => {
+                    let fingerprint = embedder_fingerprint_for_index_metadata(&stack);
+                    publish_staged_generation(
+                        publish_lock,
+                        index_dir,
+                        staging,
+                        generation,
+                        document_counts,
+                        fingerprint.as_ref(),
+                        commit_tail,
+                    )
+                    .await?;
+                    return Ok((
+                        BuildStats {
+                            source_count: indexable_docs.len(),
+                            doc_count: indexable_docs.len(),
+                            error_count: 0,
+                            has_quality_index: stack.quality().is_some(),
+                            errors: Vec::new(),
+                        },
+                        PublishedGenerationKind::TierRefresh,
+                    ));
+                }
+                Err(DeltaStageError::Cancelled(error)) => return Err(error),
+                Err(DeltaStageError::Refused(refresh_reason)) => {
+                    tracing::debug!(
+                        target: "ee::index",
+                        reason = %refresh_reason,
+                        "compatible native tier reuse refused"
+                    );
+                }
+            }
             tracing::debug!(
                 target: "ee::index",
                 reason = %reason,

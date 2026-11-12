@@ -132,10 +132,22 @@ fn estimate(
             .transpose()?
             .unwrap_or(0),
     )?;
+    let bytes = source_bytes(cx, documents, true)?;
+    Estimate::from_sizes(bytes, length(documents.len())?, dimensions)
+}
+
+fn source_bytes(
+    cx: &asupersync::Cx,
+    documents: &[IndexableDocument],
+    include_lexical: bool,
+) -> Result<u64, IndexRebuildError> {
     let mut bytes = 0;
     for document in documents {
         index_checkpoint(cx)?;
         bytes = add(bytes, length(document.id.len())?)?;
+        if !include_lexical {
+            continue;
+        }
         bytes = add(bytes, length(document.content.len())?)?;
         bytes = add(
             bytes,
@@ -150,7 +162,7 @@ fn estimate(
         bytes = add(bytes, metadata.0)?;
     }
     index_checkpoint(cx)?;
-    Estimate::from_sizes(bytes, length(documents.len())?, dimensions)
+    Ok(bytes)
 }
 
 pub(super) fn admit(
@@ -162,6 +174,53 @@ pub(super) fn admit(
 ) -> Result<(), IndexRebuildError> {
     index_checkpoint(cx)?;
     let estimate = estimate(cx, stack, documents)?;
+    let capacity = existing_directory(index_dir).and_then(probe);
+    index_checkpoint(cx)?;
+    estimate.check(capacity?)
+}
+
+/// A selective rebuild allocates only changed vector tiers and, when source
+/// metadata changed, a new lexical tier. Retained main files are priced by the
+/// staging copier at their actual sharing/reflink/byte-copy boundary. Recheck
+/// this allocation after copying so a fallback copy cannot spend build space.
+#[derive(Clone, Copy)]
+pub(super) struct TierRefreshAllocation {
+    pub fast: bool,
+    pub quality: bool,
+    pub lexical: bool,
+    pub digest_bytes: u64,
+}
+
+pub(super) fn admit_tier_refresh(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: &EmbedderStack,
+    documents: &[IndexableDocument],
+    allocation: TierRefreshAllocation,
+    probe: impl FnOnce(&Path) -> Result<Capacity, IndexRebuildError>,
+) -> Result<(), IndexRebuildError> {
+    index_checkpoint(cx)?;
+    let fast_dimensions = if allocation.fast {
+        length(stack.fast().dimension())?
+    } else {
+        0
+    };
+    let quality_dimensions = if allocation.quality {
+        stack
+            .quality()
+            .map(|quality| length(quality.dimension()))
+            .transpose()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let bytes = source_bytes(cx, documents, allocation.lexical)?;
+    let mut estimate = Estimate::from_sizes(
+        bytes,
+        length(documents.len())?,
+        add(fast_dimensions, quality_dimensions)?,
+    )?;
+    estimate.required_bytes = add(estimate.required_bytes, allocation.digest_bytes)?;
     let capacity = existing_directory(index_dir).and_then(probe);
     index_checkpoint(cx)?;
     estimate.check(capacity?)
@@ -521,6 +580,44 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|e| e.to_string())?
+    }
+
+    #[test]
+    fn selective_admission_prices_only_new_tiers_and_requested_lexical_work() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let target = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
+            let _root = root;
+            let stack = EmbedderStack::from_parts(
+                std::sync::Arc::new(crate::search::HashEmbedder::default_256()),
+                Some(std::sync::Arc::new(crate::search::HashEmbedder::jl_384(17))),
+            );
+            let mut document = IndexableDocument::new("doc", "x".repeat(1024));
+            document.title = Some("label".to_owned());
+            let documents = vec![document];
+            // The lexical payload is 3 ID + 1024 content + 5 title + 2 empty
+            // metadata bytes. Retained lexical data needs only native ID bytes
+            // in the build estimate; the copier prices its actual files.
+            for (fast, quality, lexical, dimensions, source_bytes) in [
+                (true, false, false, 256_u64, 3_u64),
+                (false, true, false, 384, 3),
+                (false, false, true, 0, 1034),
+                (false, false, false, 0, 3),
+            ] {
+                let allocation = TierRefreshAllocation { fast, quality, lexical, digest_bytes: 17 };
+                let required = 80 * MIB + 4 * (source_bytes + 4 * dimensions) + 17;
+                let exact = Capacity { available_bytes: required, available_inodes: Some(128) };
+                assert!(admit_tier_refresh(&cx, &target, &stack, &documents, allocation, |_| Ok(exact)).is_ok());
+                assert!(admit_tier_refresh(&cx, &target, &stack, &documents, allocation, |_| Ok(Capacity { available_bytes: required - 1, ..exact })).is_err());
+                assert!(admit(&cx, &target, &stack, &documents, |_| Ok(exact)).is_err(), "a whole-corpus estimate would unnecessarily reject selective reuse at this capacity");
+            }
+            assert!(!target.exists());
+            Ok(())
+        }).map_err(|error| error.to_string())?
     }
 
     #[test]
