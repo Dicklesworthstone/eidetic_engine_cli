@@ -3248,7 +3248,7 @@ mod tests {
             index_dir: None,
             query: "How should I hedge exposures?".to_owned(),
             limit: 10,
-            speed: crate::config::SearchSpeed::Fast,
+            speed: crate::search::SpeedMode::Default,
             explain: false,
             as_of: None,
             include_tombstoned: false,
