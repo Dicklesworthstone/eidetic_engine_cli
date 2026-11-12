@@ -16,6 +16,8 @@ const FIX: &str = "I fixed E0277 by deriving Serialize for Widget before writing
 
 #[path = "curate_jest_repair_tests.rs"]
 mod jest;
+#[path = "curate_vitest_repair_tests.rs"]
+mod vitest;
 
 struct Workspace {
     _temp: tempfile::TempDir,

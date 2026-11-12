@@ -80,7 +80,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// for grouped or stdout-prefixed reports without rewriting source evidence.
 /// V22 mines native Jest terminal failures and binds verbose retries to their
 /// complete named test inventory; aggregate-only reports never prove repairs.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v22";
+/// V23 also learns from complete native Vitest RUN reports, requiring the same
+/// named passing and failing subjects in a completed verbose retry.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v23";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

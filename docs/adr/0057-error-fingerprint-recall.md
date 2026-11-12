@@ -64,6 +64,31 @@ nor enumerate the full warning and outcome history. `diagnose-error` retains
 the complete report for explicit inspection. The bounded window is
 deterministic; it does not claim to identify the latest or globally best repair.
 
+### Native JavaScript test reports
+
+Jest-compatible JSON and native Jest reports share the recall and repair-proof
+pipeline with native Vitest terminal reports. Vitest support follows the
+[upstream verbose reporter and snapshots at 47c87ebb](https://github.com/vitest-dev/vitest/tree/47c87ebb5025010141cf8aa5dc69c5b57c10d2fa/packages/vitest/src/node/reporters).
+The supported proof form is a complete, single-project `RUN` report from
+`vitest run --reporter=verbose`, with every test named and consistent file/test
+totals. Plain text and bounded ANSI styling are accepted. Transient subject
+hashes bind the reported root, file and displayed test hierarchy; source line
+numbers may move during a repair.
+
+A retry must complete the identical command with explicit successful tool
+metadata. Every originally failing test and passing control must still pass;
+added regression tests are allowed. Default file aggregates supply failure
+fingerprints only. Skipped or renamed subjects, incomplete output, watch mode,
+retry/repeat annotations, changed snapshots, captured console sections and
+unsupported reporter sections cannot establish a repair. Failure-detail counts
+are checked even when Vitest merges several named failures into one error block.
+
+Only the first diagnostic line enters existing redaction and canonicalization;
+test identities, diffs and stack frames do not become fingerprint text.
+`cass_error_recall.v23` reconsiders existing imports on their next import.
+Verified repairs reach incident cards and review candidates; durable memories
+still require explicit validation and apply.
+
 ## Consequences
 
 - **Easier**: agents recall the exact repair that held for a recurring failure

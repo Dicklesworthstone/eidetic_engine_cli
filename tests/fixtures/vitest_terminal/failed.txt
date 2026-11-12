@@ -1,0 +1,32 @@
+
+ RUN  v4.0.0 /private/project
+
+ × src/cache.test.ts > cache > returns cached value 2ms
+   → expected "cache miss" to be "cache hit" // Object.is equality
+ ✓ src/cache.test.ts > cache > rejects stale entries 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/cache.test.ts > cache > returns cached value
+AssertionError: expected "cache miss" to be "cache hit" // Object.is equality
+
+- Expected
++ Received
+
+- cache hit
++ cache miss
+
+ ❯ src/cache.test.ts:18:23
+     16| test('returns cached value', () => {
+     17|   const value = cache.get('MiXeD')
+     18|   expect(value).toBe('cache hit')
+       |                 ^
+    at PRIVATE_STACK_SENTINEL
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  10:23:45
+   Duration  413ms (transform 21ms, setup 0ms, collect 10ms, tests 3ms, environment 0ms, prepare 62ms)
+

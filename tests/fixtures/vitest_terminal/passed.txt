@@ -1,0 +1,11 @@
+
+ RUN  v4.0.0 /private/project
+
+ ✓ src/cache.test.ts > cache > returns cached value 2ms
+ ✓ src/cache.test.ts > cache > rejects stale entries 1ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  10:24:05
+   Duration  390ms (transform 20ms, setup 0ms, collect 10ms, tests 3ms, environment 0ms, prepare 60ms)
+

@@ -317,3 +317,6 @@ mod coverage;
 
 #[path = "cass_error_recall_jest_terminal_tests.rs"]
 mod terminal;
+
+#[path = "cass_error_recall_vitest_terminal_tests.rs"]
+mod vitest_terminal;

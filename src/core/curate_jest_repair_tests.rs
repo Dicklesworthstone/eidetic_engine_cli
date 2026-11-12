@@ -1,4 +1,4 @@
-//! Native Jest evidence through recall, review, validation and durable apply.
+//! Native Jest evidence and shared native JavaScript repair lifecycle checks.
 
 use super::*;
 use crate::core::cass_error_recall::{record_session_error_recall, structured_error_diagnostics};
@@ -9,9 +9,10 @@ const FAILED: &str = include_str!("../../tests/fixtures/jest_terminal/failed.txt
 const PASSED: &str = include_str!("../../tests/fixtures/jest_terminal/passed.txt");
 const REPAIR: &str = "I fixed the cache lookup by using the same normalized key for reads and writes in src/cache.ts. The cache no longer misses entries created with mixed-case input.";
 
-fn native_episode(
+pub(super) fn native_episode(
     workspace: &Workspace,
     seed: u128,
+    command: &str,
     failure: &str,
     retry_command: &str,
     proof: &str,
@@ -22,8 +23,8 @@ fn native_episode(
         &session,
         &CreateSessionInput {
             workspace_id: workspace.id.clone(),
-            cass_session_id: format!("/sessions/jest-{seed}.jsonl"),
-            source_path: Some(format!("/sessions/jest-{seed}.jsonl")),
+            cass_session_id: format!("/sessions/javascript-{seed}.jsonl"),
+            source_path: Some(format!("/sessions/javascript-{seed}.jsonl")),
             agent_name: Some("claude_code".to_owned()),
             model: None,
             started_at: None,
@@ -32,7 +33,7 @@ fn native_episode(
             token_count: None,
             content_hash: format!(
                 "blake3:{}",
-                blake3::hash(format!("jest-{seed}").as_bytes()).to_hex()
+                blake3::hash(format!("javascript-{seed}").as_bytes()).to_hex()
             ),
             metadata_json: None,
         },
@@ -48,7 +49,7 @@ fn native_episode(
         "tool_call",
         "assistant",
         json!({
-            "type":"tool_use", "id":"failed", "name":"Bash", "input":{"command":JEST}
+            "type":"tool_use", "id":"failed", "name":"Bash", "input":{"command":command}
         }),
     )?;
     workspace.row(
@@ -76,17 +77,29 @@ fn native_episode(
     Ok(episode)
 }
 
-#[test]
-fn native_jest_repair_reaches_recall_card_review_and_explicit_durable_apply() -> TestResult {
+pub(super) fn assert_native_repair_lifecycle(
+    command: &str,
+    failure: &str,
+    proof: &str,
+    seed: u128,
+) -> TestResult {
     let workspace = Workspace::new()?;
-    let episode = native_episode(&workspace, 91_001, FAILED, JEST, PASSED, Some(false))?;
+    let episode = native_episode(
+        &workspace,
+        seed,
+        command,
+        failure,
+        command,
+        proof,
+        Some(false),
+    )?;
     let before = workspace
         .db
         .list_evidence_spans_for_session(&episode.session)?;
-    let diagnostic = structured_error_diagnostics(FAILED)
+    let diagnostic = structured_error_diagnostics(failure)
         .into_iter()
         .next()
-        .ok_or("Jest diagnostic")?;
+        .ok_or("native JavaScript diagnostic")?;
     let imported = record_session_error_recall(&workspace.db, &workspace.id, &episode.session)?;
     assert_eq!(imported.failures_seen, 1);
     assert_eq!(imported.fingerprints_recorded, 1);
@@ -129,7 +142,7 @@ fn native_jest_repair_reaches_recall_card_review_and_explicit_durable_apply() ->
         workspace_path: &workspace.path,
         database_path: Some(&workspace.database),
         candidate_id: &candidate.candidate_id,
-        actor: Some("native-jest-regression"),
+        actor: Some("native-javascript-regression"),
         dry_run: false,
     })
     .map_err(|error| error.message())?;
@@ -142,7 +155,7 @@ fn native_jest_repair_reaches_recall_card_review_and_explicit_durable_apply() ->
         workspace_path: &workspace.path,
         database_path: Some(&workspace.database),
         candidate_id: &candidate.candidate_id,
-        actor: Some("native-jest-regression"),
+        actor: Some("native-javascript-regression"),
         dry_run: false,
         allow_tombstone_load_bearing: false,
     })
@@ -196,6 +209,11 @@ fn native_jest_repair_reaches_recall_card_review_and_explicit_durable_apply() ->
 }
 
 #[test]
+fn native_jest_repair_reaches_recall_card_review_and_explicit_durable_apply() -> TestResult {
+    assert_native_repair_lifecycle(JEST, FAILED, PASSED, 91_001)
+}
+
+#[test]
 fn native_jest_incomplete_or_different_retries_cannot_become_cards_or_reviewed_lessons()
 -> TestResult {
     let workspace = Workspace::new()?;
@@ -225,7 +243,15 @@ fn native_jest_incomplete_or_different_retries_cannot_become_cards_or_reviewed_l
         ),
         (5, JEST, PASSED, None),
     ] {
-        let episode = native_episode(&workspace, 91_010 + offset, FAILED, retry, proof, status)?;
+        let episode = native_episode(
+            &workspace,
+            91_010 + offset,
+            JEST,
+            FAILED,
+            retry,
+            proof,
+            status,
+        )?;
         let report = record_session_error_recall(&workspace.db, &workspace.id, &episode.session)?;
         assert_eq!(report.fingerprints_recorded, 1, "case {offset}");
         assert_eq!(report.resolved_failures, 0, "case {offset}");
