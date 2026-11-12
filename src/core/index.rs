@@ -68,6 +68,9 @@ pub(crate) mod doctor_repair;
 #[path = "index_storage.rs"]
 mod storage;
 
+#[path = "index_vector_admission.rs"]
+mod vector_admission;
+
 #[path = "index_rollback_manifest.rs"]
 mod rollback_manifest;
 
@@ -4411,7 +4414,7 @@ fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFa
 }
 
 fn open_fast_vector_index_read_only(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
-    open_fast_vector_index_with(index_dir, VectorIndex::open_read_only)
+    open_fast_vector_index_with(index_dir, vector_admission::open_read_only)
 }
 
 fn open_fast_vector_index_with(
@@ -4452,7 +4455,7 @@ fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, In
 fn open_quality_vector_index_read_only(
     index_dir: &Path,
 ) -> Result<Option<VectorIndex>, IncrementalFallback> {
-    open_quality_vector_index_with(index_dir, VectorIndex::open_read_only)
+    open_quality_vector_index_with(index_dir, vector_admission::open_read_only)
 }
 
 fn open_quality_vector_index_with(

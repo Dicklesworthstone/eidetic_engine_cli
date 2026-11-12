@@ -1532,13 +1532,16 @@ fn explain_evidence_with_connection(
 ) -> WhyReport {
     let workspace_id = match workspace_path {
         Some(path) => {
-            match crate::core::workspace::addressed_workspace_row(conn, path, options.database_path) {
+            match crate::core::workspace::addressed_workspace_row(conn, path, options.database_path)
+            {
                 Ok(Some(workspace)) => Some(workspace.id),
                 Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
                 Err(error) => {
                     return WhyReport::error(
                         evidence_id.to_owned(),
-                        redact_rule_why_text(&format!("Failed to query evidence workspace: {error}")),
+                        redact_rule_why_text(&format!(
+                            "Failed to query evidence workspace: {error}"
+                        )),
                     );
                 }
             }
@@ -4315,9 +4318,17 @@ mod tests {
                 &conn,
                 Path::new("/why/native"),
             );
-            assert!(owner.found, "the owning workspace must still explain evidence");
+            assert!(
+                owner.found,
+                "the owning workspace must still explain evidence"
+            );
             assert_eq!(owner.content.as_deref(), Some(EVIDENCE_WHY_TEXT));
-            assert!(owner.storage.as_ref().is_some_and(|s| s.provenance_uri.is_some()));
+            assert!(
+                owner
+                    .storage
+                    .as_ref()
+                    .is_some_and(|s| s.provenance_uri.is_some())
+            );
             let unscoped = explain_memory_with_connection(&options, &conn);
             assert_eq!(
                 crate::output::render_why_json(&owner),
