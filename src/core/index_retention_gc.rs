@@ -24,7 +24,7 @@
 //! Its discovery, validation and deletion admission share a small budget;
 //! excess work belongs to explicit vacuum, not to a reader's lock wait.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -136,6 +136,11 @@ pub struct RetainedGenerationEntry {
     pub path: PathBuf,
     pub generation: Option<u64>,
     pub reason: RetentionReason,
+    /// Apparent bytes for a kept generation; uniquely reclaimable content
+    /// bytes for a planned removal; freshly measured content bytes released
+    /// by a successful removal. A shared inode contributes only when all its
+    /// names are removed, and contributes once across a complete plan. These
+    /// are file lengths, not filesystem allocation or free-space measurements.
     pub size_bytes: u64,
 }
 
@@ -200,7 +205,11 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
     for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation)
     {
         retention.entries.push(RetainedGenerationEntry {
-            size_bytes: directory_bytes(&candidate.path),
+            size_bytes: if reason.keeps() {
+                directory_bytes(&candidate.path)
+            } else {
+                0
+            },
             path: candidate.path,
             generation: candidate.generation,
             reason,
@@ -209,12 +218,13 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
     leftovers.sort();
     for path in leftovers {
         retention.entries.push(RetainedGenerationEntry {
-            size_bytes: directory_bytes(&path),
+            size_bytes: 0,
             path,
             generation: None,
             reason: RetentionReason::InterruptedReclaim,
         });
     }
+    measure_reclaimable_entries(&mut retention.entries);
     Ok(retention)
 }
 
@@ -355,7 +365,11 @@ pub(crate) fn apply(index_dir: &Path, retention: &RetentionPlan) -> RetentionOut
     };
     for entry in retention.reclaimable() {
         match reclaim_one(parent, &base, entry) {
-            Ok(()) => outcome.reclaimed.push(entry.clone()),
+            Ok(bytes) => {
+                let mut reclaimed = entry.clone();
+                reclaimed.size_bytes = bytes;
+                outcome.reclaimed.push(reclaimed);
+            }
             Err(error) => outcome.failures.push((entry.path.clone(), error)),
         }
     }
@@ -497,8 +511,9 @@ fn reclaim_automatic_entries(
                 continue;
             }
         }
-        match reclaim_one(parent, base, &entry) {
-            Ok(()) => {
+        match reclaim_one_with_bytes(parent, base, &entry, || entry.size_bytes) {
+            Ok(bytes) => {
+                entry.size_bytes = bytes;
                 outcome.reclaimed.push(entry);
                 try_newest = false;
             }
@@ -571,7 +586,7 @@ fn automatic_directory_bytes(
     path: &Path,
     budget: &mut AutomaticRetentionBudget,
 ) -> Result<u64, IndexRebuildError> {
-    let mut total = 0_u64;
+    let mut bytes = ReclaimableFileBytes::default();
     let mut count = 1_usize;
     let mut pending = vec![path.to_path_buf()];
     while let Some(current) = pending.pop() {
@@ -602,14 +617,25 @@ fn automatic_directory_bytes(
                 );
             }
         } else if metadata.file_type().is_file() {
-            total = total.saturating_add(metadata.len());
+            bytes.record(0, &current, &metadata);
         }
     }
     budget.checkpoint()?;
-    Ok(total)
+    Ok(bytes.finish().remove(&0).unwrap_or(0))
 }
 
-fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Result<(), String> {
+fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Result<u64, String> {
+    reclaim_one_with_bytes(parent, base, entry, || {
+        reclaimable_bytes_for_paths([entry.path.as_path()])
+    })
+}
+
+fn reclaim_one_with_bytes(
+    parent: &Path,
+    base: &str,
+    entry: &RetainedGenerationEntry,
+    measure: impl FnOnce() -> u64,
+) -> Result<u64, String> {
     // A plan is data, not deletion authority. Recheck its namespace at the
     // destructive boundary even though the ordinary planner emits only owned
     // siblings. Never allow an active/staging/quarantine path, another index,
@@ -640,6 +666,11 @@ fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Re
     if !metadata.file_type().is_dir() {
         return Err("refusing to reclaim a retained entry that is not a directory".to_owned());
     }
+    // Explicit vacuum measures after checking deletion authority. Automatic
+    // maintenance supplies its just-completed, budgeted tree measurement.
+    // Recompute per successful directory: earlier removals may have retired
+    // other links, while a failed removal must never authorize their bytes.
+    let bytes = measure();
     let doomed = if entry.reason == RetentionReason::InterruptedReclaim {
         entry.path.clone()
     } else {
@@ -654,7 +685,8 @@ fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Re
             "failed to delete reclaimed index generation '{}': {error}",
             doomed.display()
         )
-    })
+    })?;
+    Ok(bytes)
 }
 
 /// Recognize exactly the names emitted by `allocate_reclaim_name`. A prefix
@@ -692,6 +724,15 @@ fn allocate_reclaim_name(parent: &Path, base: &str) -> Result<PathBuf, String> {
 /// unreadable subtree contributes what could be read.
 fn directory_bytes(path: &Path) -> u64 {
     let mut total = 0_u64;
+    visit_regular_files(path, |_, metadata| {
+        total = total.saturating_add(metadata.len());
+    });
+    total
+}
+
+/// Only names reached without following a symlink enter byte accounting.
+/// Unreadable subtrees stay conservative, as in the apparent-size preview.
+fn visit_regular_files(path: &Path, mut visit: impl FnMut(&Path, &std::fs::Metadata)) {
     let mut pending = vec![path.to_path_buf()];
     while let Some(current) = pending.pop() {
         let Ok(metadata) = std::fs::symlink_metadata(&current) else {
@@ -702,11 +743,109 @@ fn directory_bytes(path: &Path) -> u64 {
                 pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
             }
         } else if metadata.file_type().is_file() {
-            total = total.saturating_add(metadata.len());
+            visit(&current, &metadata);
         }
     }
-    total
 }
+
+#[derive(Default)]
+struct ReclaimableFileBytes {
+    paths: BTreeSet<PathBuf>,
+    contributions: BTreeMap<usize, u64>,
+    #[cfg(unix)]
+    inodes: BTreeMap<(u64, u64), InodeLinks>,
+}
+
+#[cfg(unix)]
+struct InodeLinks {
+    length: u64,
+    links: u64,
+    selected: u64,
+    last_entry: usize,
+    consistent: bool,
+}
+
+impl ReclaimableFileBytes {
+    fn record(&mut self, owner: usize, path: &Path, metadata: &std::fs::Metadata) {
+        if !self.paths.insert(path.to_path_buf()) {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let inode = self
+                .inodes
+                .entry((metadata.dev(), metadata.ino()))
+                .or_insert(InodeLinks {
+                    length: metadata.len(),
+                    links: metadata.nlink(),
+                    selected: 0,
+                    last_entry: owner,
+                    consistent: true,
+                });
+            inode.consistent &= inode.length == metadata.len() && inode.links == metadata.nlink();
+            inode.selected = inode.selected.saturating_add(1);
+            inode.last_entry = owner;
+        }
+        #[cfg(not(unix))]
+        {
+            // Immutable segment sharing is Unix-only. Other targets retain
+            // independent copies and the existing apparent-length accounting.
+            let total = self.contributions.entry(owner).or_default();
+            *total = total.saturating_add(metadata.len());
+        }
+    }
+
+    #[cfg(unix)]
+    fn finish(mut self) -> BTreeMap<usize, u64> {
+        for inode in self.inodes.into_values() {
+            // Any link outside the selected directories (active, kept,
+            // quarantined or external) keeps the inode alive. Conflicting
+            // observations also cannot establish reclaimability.
+            if inode.consistent && inode.links > 0 && inode.selected == inode.links {
+                let total = self.contributions.entry(inode.last_entry).or_default();
+                *total = total.saturating_add(inode.length);
+            }
+        }
+        self.contributions
+    }
+
+    #[cfg(not(unix))]
+    fn finish(self) -> BTreeMap<usize, u64> {
+        self.contributions
+    }
+}
+
+fn measure_reclaimable_entries(entries: &mut [RetainedGenerationEntry]) {
+    let mut bytes = ReclaimableFileBytes::default();
+    for (owner, entry) in entries.iter_mut().enumerate() {
+        if !entry.reason.keeps() {
+            entry.size_bytes = 0;
+            visit_regular_files(&entry.path, |path, metadata| {
+                bytes.record(owner, path, metadata);
+            });
+        }
+    }
+    for (owner, contribution) in bytes.finish() {
+        entries[owner].size_bytes = contribution;
+    }
+}
+
+/// Content bytes whose last names are covered by this complete selection.
+/// Candidate-tree statistics remain apparent sizes; aggregate vacuum previews
+/// must account for shared inodes across candidates and aliases kept elsewhere.
+pub(super) fn reclaimable_bytes_for_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> u64 {
+    let mut bytes = ReclaimableFileBytes::default();
+    for path in paths {
+        visit_regular_files(path, |path, metadata| bytes.record(0, path, metadata));
+    }
+    bytes.finish().remove(&0).unwrap_or(0)
+}
+
+#[cfg(test)]
+#[path = "index_retention_link_tests.rs"]
+mod link_tests;
 
 #[cfg(test)]
 mod tests {

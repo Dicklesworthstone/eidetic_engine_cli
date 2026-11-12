@@ -1513,7 +1513,7 @@ Outcome signal vocabulary:
 | `positive` | Useful but weaker than `helpful` |
 | `negative` | Unhelpful but weaker than `harmful` |
 
-Targets can be memories, native rules, packs, or curation candidates:
+Targets can be memories, native rules, procedures, evidence spans, sessions, packs, or curation candidates:
 
 ```bash
 ee outcome <memory-id> --signal helpful --reason "Caught a release gate omission" --workspace .
@@ -1523,8 +1523,18 @@ ee outcome --pack <pack-id> --item 2 --signal harmful --reason "Selected stale a
 ee outcome <candidate-id> --target-type candidate --signal negative --reason "Too vague after review" --workspace .
 ```
 
-Native rule feedback verifies the target's workspace and active lifecycle in
-single-event and JSONL batch commands, including explicit database overrides. Each
+Feedback verifies that every native target exists in the addressed workspace,
+including single-event and JSONL batch commands with explicit database overrides.
+The workspace is resolved from `--workspace`; ordinary pack, session, and candidate
+feedback does not require manually supplying `--workspace-id`. A foreign or missing
+target is rejected before its feedback or learning state changes. Batch failures
+remain independent, so valid lines can still be recorded. External `source` targets
+retain their explicit workspace and unverified-source semantics.
+
+Pack-level feedback assesses the stored pack as a whole. Use `--pack <pack-id> --item <n>`
+to attach feedback to a particular selected memory, rule, or evidence span instead.
+
+Native rule feedback also verifies the rule's active lifecycle. Each
 nonzero helpful observation (`helpful`, `positive`, or `confirmation`) adjusts
 confidence by +0.04 and utility by +0.08; a harmful observation (`harmful`,
 `negative`, `contradiction`, or `inaccurate`) adjusts them by -0.10 and -0.12.

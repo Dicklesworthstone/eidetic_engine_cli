@@ -1025,6 +1025,9 @@ pub struct ExportMemoryRecord {
     pub level: String,
     pub kind: String,
     pub content: String,
+    /// Optional body commitment. Redacted and metadata-only exports bind this
+    /// to the emitted content, never to a body withheld from the recipient.
+    /// Unredacted full exports preserve the supplied commitment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     /// Validated, kind-specific sidecar. Absent in pre-V070 exports. The

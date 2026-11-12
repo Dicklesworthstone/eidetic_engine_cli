@@ -1528,30 +1528,47 @@ fn explain_evidence_with_connection(
     options: &WhyOptions<'_>,
     conn: &DbConnection,
     evidence_id: &str,
+    workspace_path: Option<&Path>,
 ) -> WhyReport {
-    let span = match conn.get_evidence_span(evidence_id) {
-        Ok(Some(span)) => span,
+    let workspace_id = match workspace_path {
+        Some(path) => {
+            match crate::core::workspace::addressed_workspace_row(conn, path, options.database_path)
+            {
+                Ok(Some(workspace)) => Some(workspace.id),
+                Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
+                Err(error) => {
+                    return WhyReport::error(
+                        evidence_id.to_owned(),
+                        redact_rule_why_text(&format!(
+                            "Failed to query evidence workspace: {error}"
+                        )),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+    let hydrated = match conn.get_evidence_span_with_session(evidence_id, workspace_id.as_deref()) {
+        Ok(Some(row)) => row,
         Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
         Err(error) => {
             return WhyReport::error(
                 evidence_id.to_owned(),
-                format!("Failed to query evidence span: {error}"),
+                redact_rule_why_text(&format!("Failed to query evidence provenance: {error}")),
             );
         }
     };
-    let session = match conn.get_session(&span.session_id) {
-        Ok(Some(session)) => session,
-        Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
-        Err(error) => {
-            return WhyReport::error(
-                evidence_id.to_owned(),
-                format!("Failed to query evidence provenance: {error}"),
-            );
-        }
-    };
-    if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
+    let expected_workspace_id = workspace_id
+        .as_deref()
+        .unwrap_or(hydrated.span.workspace_id.as_str());
+    let search_admitted = hydrated.is_search_admitted(expected_workspace_id);
+    if !search_admitted || hydrated.span.pack_eligibility != "admitted" {
         return WhyReport::not_found(evidence_id.to_owned());
     }
+    let Some(session) = hydrated.session else {
+        return WhyReport::not_found(evidence_id.to_owned());
+    };
+    let span = hydrated.span;
     // A derived incident card names the transcript spans it summarizes
     // (ADR 0091). Missing links leave the card explainable as evidence.
     let derivation = if span.is_derived_incident_card() {
@@ -1567,8 +1584,6 @@ fn explain_evidence_with_connection(
     // the envelope screen withhold the whole explanation. A plain excerpt
     // projects to itself and is screened exactly as before.
     let egress = crate::policy::redact_public_replay_body(&span.reader_text());
-    let redaction_classes =
-        serde_json::from_str::<Vec<String>>(&span.redaction_classes_json).unwrap_or_default();
     let latest_pack_selection =
         match latest_pack_selection(conn, &span.workspace_id, "evidence_span", evidence_id) {
             Ok(selection) => selection,
@@ -1577,8 +1592,8 @@ fn explain_evidence_with_connection(
                     options,
                     &span,
                     &session,
+                    search_admitted,
                     egress,
-                    redaction_classes,
                     None,
                     derivation.as_ref(),
                 )
@@ -1594,8 +1609,8 @@ fn explain_evidence_with_connection(
         options,
         &span,
         &session,
+        search_admitted,
         egress,
-        redaction_classes,
         latest_pack_selection,
         derivation.as_ref(),
     )
@@ -1605,14 +1620,17 @@ fn evidence_why_report(
     options: &WhyOptions<'_>,
     span: &crate::db::StoredEvidenceSpan,
     session: &crate::db::StoredSession,
+    search_admitted: bool,
     egress: crate::policy::PublicReplayTextRedactionReport,
-    redaction_classes: Vec<String>,
     latest_pack_selection: Option<PackSelectionExplanation>,
     derivation: Option<&crate::db::IncidentCardDerivation>,
 ) -> WhyReport {
     let incident_card = span.is_derived_incident_card();
-    let search_admitted = span.is_search_admitted_for_session(&span.workspace_id, session);
-    let pack_admitted = span.is_direct_pack_admitted_for_session(&span.workspace_id, session);
+    // Admission was decided once against the caller's pinned source view.
+    // Rendering must not re-screen the same stored excerpt twice more.
+    let pack_admitted = search_admitted && span.pack_eligibility == "admitted";
+    let redaction_classes =
+        serde_json::from_str::<Vec<String>>(&span.redaction_classes_json).unwrap_or_default();
     let selection_score = latest_pack_selection
         .as_ref()
         .map_or(0.0, |selection| selection.relevance);
@@ -1730,7 +1748,7 @@ fn evidence_why_report(
     })
 }
 
-/// Explain a target from a caller-owned source snapshot, binding native rules to
+/// Explain a target from a caller-owned source snapshot, binding native entities to
 /// the explicitly addressed workspace. The legacy entrypoint remains store scoped.
 pub fn explain_memory_for_workspace_with_connection(
     options: &WhyOptions<'_>,
@@ -1817,7 +1835,7 @@ fn explain_memory_in_scope_with_budget(
     }
 
     if target.result_source == Some(WhyResultDocumentSource::Evidence) {
-        return explain_evidence_with_connection(options, conn, memory_id);
+        return explain_evidence_with_connection(options, conn, memory_id, workspace_path);
     }
 
     if let Some(source) = target.unsupported_result_source() {
@@ -4027,8 +4045,9 @@ fn fetch_rationale_traces(
 mod tests {
     use super::*;
     use crate::db::{
-        CreateArtifactInput, CreateGraphSnapshotInput, CreateMemoryInput,
-        CreateProceduralRuleInput, CreateSessionInput, CreateWorkspaceInput, GraphSnapshotType,
+        CreateArtifactInput, CreateEvidenceSpanInput, CreateGraphSnapshotInput, CreateMemoryInput,
+        CreateProceduralRuleInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
+        GraphSnapshotType,
     };
     use crate::models::{
         RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
@@ -4213,6 +4232,258 @@ mod tests {
 
     fn canonical_memory_id(seed: u128) -> String {
         MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
+    }
+
+    const EVIDENCE_WHY_TEXT: &str =
+        "The cache commits its transaction before publishing the new checksum.";
+
+    fn evidence_why_fixture(
+        producer_kind: EvidenceProducerKind,
+    ) -> Result<(DbConnection, String, String, String), String> {
+        let (conn, workspace_id, _) = native_rule_why_fixture()?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8547_1001)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8547_1002)).to_string();
+        let content_hash = format!("blake3:{}", blake3::hash(EVIDENCE_WHY_TEXT.as_bytes()));
+        conn.insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.clone(),
+                cass_session_id: "why-evidence-session".to_owned(),
+                source_path: None,
+                agent_name: None,
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 1,
+                token_count: None,
+                content_hash: content_hash.clone(),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let (role, span_kind) = if producer_kind == EvidenceProducerKind::DocsBootstrap {
+            ("docs_bootstrap", "file")
+        } else {
+            ("assistant", "message")
+        };
+        conn.insert_evidence_span(
+            &evidence_id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.clone(),
+                session_id: session_id.clone(),
+                memory_id: None,
+                producer_kind,
+                cass_span_id: "why-evidence-span".to_owned(),
+                span_kind: span_kind.to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some(role.to_owned()),
+                excerpt: EVIDENCE_WHY_TEXT.to_owned(),
+                content_hash,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((conn, workspace_id, session_id, evidence_id))
+    }
+
+    fn assert_evidence_why_withheld(report: &WhyReport, evidence_id: &str) {
+        assert_eq!(
+            crate::output::render_why_json(report),
+            crate::output::render_why_json(&WhyReport::not_found(evidence_id.to_owned())),
+            "a withheld source must expose neither its body nor its provenance"
+        );
+    }
+
+    #[test]
+    fn why_evidence_obeys_explicit_workspace_for_direct_and_result_targets() -> TestResult {
+        let (conn, _, _, evidence_id) = evidence_why_fixture(EvidenceProducerKind::CassImport)?;
+        conn.insert_workspace(
+            &crate::testing::wsp("evidencewhyforeign"),
+            &CreateWorkspaceInput {
+                path: "/why/foreign".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for target in [evidence_id.clone(), format!("result:{evidence_id}")] {
+            let options = native_rule_why_options(&target);
+            let owner = explain_memory_for_workspace_with_connection(
+                &options,
+                &conn,
+                Path::new("/why/native"),
+            );
+            assert!(
+                owner.found,
+                "the owning workspace must still explain evidence"
+            );
+            assert_eq!(owner.content.as_deref(), Some(EVIDENCE_WHY_TEXT));
+            assert!(
+                owner
+                    .storage
+                    .as_ref()
+                    .is_some_and(|s| s.provenance_uri.is_some())
+            );
+            let unscoped = explain_memory_with_connection(&options, &conn);
+            assert_eq!(
+                crate::output::render_why_json(&owner),
+                crate::output::render_why_json(&unscoped),
+                "the legacy unscoped API remains store scoped"
+            );
+            for workspace in ["/why/foreign", "/why/missing"] {
+                let denied = explain_memory_for_workspace_with_connection(
+                    &options,
+                    &conn,
+                    Path::new(workspace),
+                );
+                assert_evidence_why_withheld(&denied, &evidence_id);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_evidence_revalidates_missing_and_mismatched_recorded_verdicts() -> TestResult {
+        let (conn, workspace_id, _, evidence_id) =
+            evidence_why_fixture(EvidenceProducerKind::CassImport)?;
+        let options = native_rule_why_options(&evidence_id);
+        let explain = || {
+            explain_memory_for_workspace_with_connection(&options, &conn, Path::new("/why/native"))
+        };
+        let original = explain();
+        assert!(original.found);
+        let original_json = crate::output::render_why_json(&original);
+        let hydrated = conn
+            .get_evidence_span_with_session(&evidence_id, Some(&workspace_id))
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence source missing")?;
+        assert!(hydrated.recorded_verdict.is_some());
+        assert!(hydrated.is_search_admitted(&workspace_id));
+
+        conn.execute_raw(&format!(
+            "DELETE FROM evidence_admission_verdicts WHERE evidence_span_id = '{evidence_id}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(crate::output::render_why_json(&explain()), original_json);
+        conn.backfill_evidence_admission_verdicts(Some(&workspace_id))
+            .map_err(|error| error.to_string())?;
+        let unrelated_binding = format!("blake3:{}", blake3::hash(b"unrelated-why-verdict"));
+        conn.execute_raw(&format!(
+            "UPDATE evidence_admission_verdicts SET verdict_binding = '{unrelated_binding}' WHERE evidence_span_id = '{evidence_id}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(crate::output::render_why_json(&explain()), original_json);
+        Ok(())
+    }
+
+    #[test]
+    fn why_evidence_refuses_stale_denied_and_quarantined_sources() -> TestResult {
+        for changes in [
+            "security_policy_epoch = 0",
+            "search_eligibility = 'denied', pack_eligibility = 'denied'",
+            "search_eligibility = 'quarantined', pack_eligibility = 'quarantined'",
+        ] {
+            let (conn, _, _, evidence_id) = evidence_why_fixture(EvidenceProducerKind::CassImport)?;
+            conn.execute_raw(&format!(
+                "UPDATE evidence_spans SET {changes} WHERE id = '{evidence_id}'"
+            ))
+            .map_err(|error| error.to_string())?;
+            let report = explain_memory_for_workspace_with_connection(
+                &native_rule_why_options(&evidence_id),
+                &conn,
+                Path::new("/why/native"),
+            );
+            assert_evidence_why_withheld(&report, &evidence_id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_evidence_requires_the_live_owning_session_despite_a_recorded_verdict() -> TestResult {
+        let (conn, workspace_id, session_id, evidence_id) =
+            evidence_why_fixture(EvidenceProducerKind::CassImport)?;
+        let options = native_rule_why_options(&evidence_id);
+        let original = conn
+            .get_evidence_span_with_session(&evidence_id, Some(&workspace_id))
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence source missing")?;
+        assert!(original.recorded_verdict.is_some());
+        let foreign_id = crate::testing::wsp("evidencewhysession");
+        conn.insert_workspace(
+            &foreign_id,
+            &CreateWorkspaceInput {
+                path: "/why/foreign-session".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute_raw(&format!(
+            "UPDATE sessions SET workspace_id = '{foreign_id}' WHERE id = '{session_id}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        let moved = conn
+            .get_evidence_span_with_session(&evidence_id, Some(&workspace_id))
+            .map_err(|error| error.to_string())?
+            .ok_or("retained evidence source missing")?;
+        assert_eq!(moved.recorded_verdict, original.recorded_verdict);
+        assert!(!moved.is_search_admitted(&workspace_id));
+        assert_evidence_why_withheld(
+            &explain_memory_for_workspace_with_connection(
+                &options,
+                &conn,
+                Path::new("/why/native"),
+            ),
+            &evidence_id,
+        );
+
+        // Simulate an orphaned legacy row without deleting its retained body.
+        conn.execute_raw("PRAGMA foreign_keys = OFF")
+            .map_err(|error| error.to_string())?;
+        conn.execute_raw(&format!("DELETE FROM sessions WHERE id = '{session_id}'"))
+            .map_err(|error| error.to_string())?;
+        let orphan = conn
+            .get_evidence_span_with_session(&evidence_id, Some(&workspace_id))
+            .map_err(|error| error.to_string())?
+            .ok_or("the orphaned source must remain for the negative control")?;
+        assert!(orphan.session.is_none());
+        assert_evidence_why_withheld(
+            &explain_memory_for_workspace_with_connection(
+                &options,
+                &conn,
+                Path::new("/why/native"),
+            ),
+            &evidence_id,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn why_evidence_keeps_native_derivation_sources_out_of_direct_inspection() -> TestResult {
+        let (conn, workspace_id, session_id, evidence_id) =
+            evidence_why_fixture(EvidenceProducerKind::DocsBootstrap)?;
+        let span = conn
+            .get_evidence_span(&evidence_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("native evidence missing")?;
+        let session = conn
+            .get_session(&session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("native session missing")?;
+        assert!(span.is_derivation_admitted_for_session(&workspace_id, &session));
+        assert_evidence_why_withheld(
+            &explain_memory_for_workspace_with_connection(
+                &native_rule_why_options(&evidence_id),
+                &conn,
+                Path::new("/why/native"),
+            ),
+            &evidence_id,
+        );
+        Ok(())
     }
 
     #[test]

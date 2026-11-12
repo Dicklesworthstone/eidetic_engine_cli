@@ -1,0 +1,13 @@
+> cache-example@1.0.0 test
+> jest --runInBand --verbose
+
+PASS src/cache.test.ts
+  cache
+    ✓ returns cached value (2 ms)
+    ✓ rejects stale entries (1 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       2 passed, 2 total
+Snapshots:   0 total
+Time:        0.413 s
+Ran all test suites.

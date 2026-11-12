@@ -15448,6 +15448,19 @@ pub struct HydratedEvidenceSpan {
 }
 
 impl HydratedEvidenceSpan {
+    /// Derivation admission against the live session. Recognized native
+    /// producers remain eligible without entering direct search or packs.
+    #[must_use]
+    pub fn is_derivation_admitted(&self, expected_workspace_id: &str) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            self.span.is_derivation_admitted_with_recorded_verdict(
+                expected_workspace_id,
+                session,
+                self.recorded_verdict.as_deref(),
+            )
+        })
+    }
+
     /// Search admission against the live session, reusing the recorded
     /// verdict when it still binds this exact row.
     #[must_use]
@@ -17937,6 +17950,36 @@ impl DbConnection {
         Ok(self.evidence_spans_from_rows(&rows)?.into_iter().next())
     }
 
+    /// Load one evidence source and its admission inputs by primary-key lookup.
+    ///
+    /// The caller owns the read snapshot. An explicit workspace is checked
+    /// before loading session or verdict metadata; an unscoped inspection keeps
+    /// the legacy store-wide lookup. Missing or outdated verdicts retain the
+    /// existing full-validation fallback in `HydratedEvidenceSpan`.
+    pub(crate) fn get_evidence_span_with_session(
+        &self,
+        id: &str,
+        expected_workspace_id: Option<&str>,
+    ) -> Result<Option<HydratedEvidenceSpan>> {
+        let Some(span) = self.get_evidence_span(id)? else {
+            return Ok(None);
+        };
+        if expected_workspace_id.is_some_and(|workspace_id| span.workspace_id != workspace_id) {
+            return Ok(None);
+        }
+        let session = self.get_session(&span.session_id)?;
+        let recorded_verdict = if session.is_some() {
+            self.recorded_admission_verdicts(&[id])?.remove(id)
+        } else {
+            None
+        };
+        Ok(Some(HydratedEvidenceSpan {
+            span,
+            session,
+            recorded_verdict,
+        }))
+    }
+
     /// Load evidence rows and their joined sessions for many ids with one
     /// bounded `IN (...)` query per chunk instead of two point reads per id
     /// (bd-reality-core-convergence-1azkt.64).
@@ -17998,18 +18041,14 @@ impl DbConnection {
         id: &str,
         expected_workspace_id: &str,
     ) -> Result<Option<StoredEvidenceSpan>> {
-        let Some(span) = self.get_evidence_span(id)? else {
+        let Some(hydrated) =
+            self.get_evidence_span_with_session(id, Some(expected_workspace_id))?
+        else {
             return Ok(None);
         };
-        if span.workspace_id != expected_workspace_id {
-            return Ok(None);
-        }
-        let Some(session) = self.get_session(&span.session_id)? else {
-            return Ok(None);
-        };
-        Ok(span
-            .is_search_admitted_for_session(expected_workspace_id, &session)
-            .then_some(span))
+        Ok(hydrated
+            .is_search_admitted(expected_workspace_id)
+            .then_some(hydrated.span))
     }
 
     /// Get one live evidence row admitted for explicit derivation.
@@ -18022,18 +18061,14 @@ impl DbConnection {
         id: &str,
         expected_workspace_id: &str,
     ) -> Result<Option<StoredEvidenceSpan>> {
-        let Some(span) = self.get_evidence_span(id)? else {
+        let Some(hydrated) =
+            self.get_evidence_span_with_session(id, Some(expected_workspace_id))?
+        else {
             return Ok(None);
         };
-        if span.workspace_id != expected_workspace_id {
-            return Ok(None);
-        }
-        let Some(session) = self.get_session(&span.session_id)? else {
-            return Ok(None);
-        };
-        Ok(span
-            .is_derivation_admitted_for_session(expected_workspace_id, &session)
-            .then_some(span))
+        Ok(hydrated
+            .is_derivation_admitted(expected_workspace_id)
+            .then_some(hydrated.span))
     }
 
     /// List positively admitted CASS evidence for one live session.
@@ -32145,6 +32180,23 @@ impl DbConnection {
         rows.iter()
             .map(stored_curation_candidate_from_row)
             .collect()
+    }
+
+    /// Read a curation candidate's durable owner before admitting native feedback.
+    pub(crate) fn get_curation_candidate_workspace_id(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id FROM curation_candidates WHERE id = ?1",
+            &[Value::Text(candidate_id.to_owned())],
+        )?;
+        rows.first()
+            .map(|row| {
+                required_text(row, 0, DbOperation::Query, "workspace_id").map(str::to_owned)
+            })
+            .transpose()
     }
 
     /// Get one curation candidate by ID within a workspace.
@@ -57685,6 +57737,18 @@ UPDATE memories
             "a session in another workspace refuses despite a matching verdict",
         )?;
 
+        for session in [None, Some(moved_session)] {
+            let hydrated = super::HydratedEvidenceSpan {
+                span: span.clone(),
+                session,
+                recorded_verdict: Some(binding.clone()),
+            };
+            ensure(
+                !hydrated.is_derivation_admitted(WORKSPACE),
+                "a missing or moved session cannot derive from a cached verdict",
+            )?;
+        }
+
         // A candidate whose full check fails records a denied verdict, and the
         // scan keeps refusing it.
         let denied_id =
@@ -57721,8 +57785,40 @@ UPDATE memories
             "the scan admits exactly the rows a full check admits",
         )?;
 
+        // Single-source derivation and inspection make the same decision
+        // whether their recorded verdict is present or needs full fallback.
+        for remove_verdicts in [false, true] {
+            if remove_verdicts {
+                connection.execute_raw("DELETE FROM evidence_admission_verdicts")?;
+            }
+            for (id, expected) in [(&first_id, true), (&denied_id, false)] {
+                ensure_equal(
+                    &connection
+                        .get_search_admitted_evidence_span(id, WORKSPACE)?
+                        .is_some(),
+                    &expected,
+                    "single-source search preserves the full admission decision",
+                )?;
+                ensure_equal(
+                    &connection
+                        .get_derivation_admitted_evidence_span(id, WORKSPACE)?
+                        .is_some(),
+                    &expected,
+                    "single-source derivation preserves the full admission decision",
+                )?;
+            }
+            ensure(
+                connection
+                    .get_derivation_admitted_evidence_span(
+                        &first_id,
+                        "wsp_99999999999999999999999999",
+                    )?
+                    .is_none(),
+                "a stored source cannot grant derivation to another workspace",
+            )?;
+        }
+
         // Backfill restores missing verdicts once, and is then a no-op.
-        connection.execute_raw("DELETE FROM evidence_admission_verdicts")?;
         ensure_equal(
             &connection.backfill_evidence_admission_verdicts(Some(WORKSPACE))?,
             &3_u64,
@@ -57885,6 +57981,20 @@ UPDATE memories
                 &expected,
                 "pack admission rejects unsafe historical reader bytes",
             )?;
+            ensure_equal(
+                &connection
+                    .get_search_admitted_evidence_span(&id, WORKSPACE)?
+                    .is_some(),
+                &expected,
+                "single-source search invalidates the old policy verdict",
+            )?;
+            ensure_equal(
+                &connection
+                    .get_derivation_admitted_evidence_span(&id, WORKSPACE)?
+                    .is_some(),
+                &expected,
+                "single-source derivation invalidates the old policy verdict",
+            )?;
             if expected {
                 ensure(
                     loaded.reader_text().contains("quartzmarkerrepair passed."),
@@ -57943,6 +58053,18 @@ UPDATE memories
         let (admitted, _) =
             connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
         ensure_equal(&admitted.len(), &1_usize, "full validation admits")?;
+        ensure(
+            connection
+                .get_search_admitted_evidence_span(&evidence_id, WORKSPACE)?
+                .is_some(),
+            "single-source search works before the verdict-table migration",
+        )?;
+        ensure(
+            connection
+                .get_derivation_admitted_evidence_span(&evidence_id, WORKSPACE)?
+                .is_some(),
+            "single-source derivation works before the verdict-table migration",
+        )?;
         ensure_equal(
             &connection.backfill_evidence_admission_verdicts(None)?,
             &0_u64,
@@ -58129,6 +58251,16 @@ UPDATE memories
                 &(eligibility != "quarantined"),
                 "safe recognized producers support explicit derivation while quarantined rows do not",
             )?;
+            ensure_equal(
+                &connection
+                    .get_search_admitted_evidence_span(
+                        &evidence_id,
+                        "wsp_01234567890123456789012345",
+                    )?
+                    .is_some(),
+                &(eligibility == "admitted"),
+                "single-source search withholds safe native derivation sources",
+            )?;
         }
 
         let (admitted, report) = connection
@@ -58174,6 +58306,15 @@ UPDATE memories
                 .get_search_admitted_evidence_span(&admitted_id, "wsp_01234567890123456789012345")?
                 .is_none(),
             "live canonical hash drift must revoke admission",
+        )?;
+        ensure(
+            connection
+                .get_derivation_admitted_evidence_span(
+                    &admitted_id,
+                    "wsp_01234567890123456789012345",
+                )?
+                .is_none(),
+            "a recorded verdict cannot hide canonical hash drift from derivation",
         )?;
 
         let mut mismatch = evidence_span_input(&session_id, "content-hash-mismatch", 100);

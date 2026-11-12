@@ -1060,13 +1060,20 @@ fn record_outcome_inner(
     let connection = open_existing_database(options.database_path, options.dry_run)?;
 
     let record = || {
-        let target = resolve_target_workspace(
-            &connection,
-            &target_type,
-            &target_id,
-            options.workspace_id.as_deref(),
-            options.prompt_injection_guard,
-        )?;
+        let target = if require_learning_observation && target_type == "candidate" {
+            // Typed learn observe/close envelopes use external experiment IDs,
+            // not curation candidate IDs. Only the private learning entrypoint
+            // can select this lane; its mandatory sidecar is validated below.
+            resolve_external_outcome_workspace(&connection, options.workspace_id.as_deref())?
+        } else {
+            resolve_target_workspace(
+                &connection,
+                &target_type,
+                &target_id,
+                options.workspace_id.as_deref(),
+                options.prompt_injection_guard,
+            )?
+        };
 
         let feedback_input = CreateFeedbackEventInput {
             workspace_id: target.workspace_id.clone(),
@@ -2993,6 +3000,28 @@ fn feedback_quarantine_review_audit_details(
     .to_string()
 }
 
+/// Native targets have durable ownership; external source identifiers do not.
+pub(crate) fn outcome_target_is_native(target_type: &str) -> bool {
+    matches!(
+        target_type.trim(),
+        "memory" | "evidence" | "procedure" | "rule" | "session" | "pack" | "candidate"
+    )
+}
+
+fn require_outcome_target_workspace(
+    target_type: &str,
+    target_workspace_id: &str,
+    requested_workspace_id: Option<&str>,
+) -> Result<(), DomainError> {
+    if requested_workspace_id.is_some_and(|workspace| workspace != target_workspace_id) {
+        return Err(DomainError::PolicyDenied {
+            message: format!("{target_type} target is not bound to the requested workspace."),
+            repair: Some("Use the workspace that owns the feedback target.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn resolve_target_workspace(
     connection: &DbConnection,
     target_type: &str,
@@ -3016,12 +3045,7 @@ fn resolve_target_workspace(
                 id: target_id.to_owned(),
                 repair: Some("ee rule list --json".to_owned()),
             })?;
-        if workspace_id.is_some_and(|workspace| workspace != rule.workspace_id) {
-            return Err(DomainError::PolicyDenied {
-                message: "Rule target is not bound to the requested workspace.".to_owned(),
-                repair: Some("Use the workspace that owns the rule.".to_owned()),
-            });
-        }
+        require_outcome_target_workspace(target_type, &rule.workspace_id, workspace_id)?;
         if rule.tombstoned_at.is_some()
             || rule.superseded_by.is_some()
             || !crate::models::RuleMaturity::from_str(&rule.maturity)
@@ -3057,6 +3081,7 @@ fn resolve_target_workspace(
                 id: target_id.to_string(),
                 repair: Some("ee memory list".to_string()),
             })?;
+        require_outcome_target_workspace(target_type, &memory.workspace_id, workspace_id)?;
         if prompt_injection_guard {
             let instruction_report =
                 crate::policy::detect_instruction_like_content(&memory.content);
@@ -3084,6 +3109,7 @@ fn resolve_target_workspace(
                 id: target_id.to_string(),
                 repair: Some("ee procedure list --json".to_string()),
             })?;
+        require_outcome_target_workspace(target_type, &procedure.workspace_id, workspace_id)?;
         return Ok(TargetResolution {
             workspace_id: procedure.workspace_id,
             verified: true,
@@ -3118,18 +3144,45 @@ fn resolve_target_workspace(
                 repair: Some("ee import status --json".to_owned()),
             });
         }
-        if workspace_id.is_some_and(|workspace_id| workspace_id != span.workspace_id) {
-            return Err(DomainError::PolicyDenied {
-                message: "Evidence target is not bound to the requested workspace.".to_owned(),
-                repair: Some("Use the workspace that owns the evidence span.".to_owned()),
-            });
-        }
+        require_outcome_target_workspace(target_type, &span.workspace_id, workspace_id)?;
         return Ok(TargetResolution {
             workspace_id: span.workspace_id,
             verified: true,
         });
     }
+    if matches!(target_type, "pack" | "session" | "candidate") {
+        let owner = match target_type {
+            "pack" => connection
+                .get_pack_record(target_id)
+                .map(|record| record.map(|record| record.workspace_id)),
+            "session" => connection
+                .get_session(target_id)
+                .map(|session| session.map(|session| session.workspace_id)),
+            _ => connection.get_curation_candidate_workspace_id(target_id),
+        }
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query {target_type} target: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: target_type.to_owned(),
+            id: target_id.to_owned(),
+            repair: Some("Inspect the persisted target in its owning workspace.".to_owned()),
+        })?;
+        require_outcome_target_workspace(target_type, &owner, workspace_id)?;
+        return Ok(TargetResolution {
+            workspace_id: owner,
+            verified: true,
+        });
+    }
 
+    resolve_external_outcome_workspace(connection, workspace_id)
+}
+
+fn resolve_external_outcome_workspace(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+) -> Result<TargetResolution, DomainError> {
     let workspace_id = require_nonempty(
         "workspace id",
         workspace_id.unwrap_or_default(),
@@ -6093,6 +6146,360 @@ mod tests {
     const OUTCOME_TEST_PROMPT_INJECTION_MEMORY_ID: &str = "mem_00000000000000000000000003";
     const OUTCOME_TEST_SESSION_ID: &str = "sess_00000000000000000000000996";
     const OUTCOME_TEST_RULE_ID: &str = "rule_00000000000000000000000004";
+
+    const OUTCOME_OWNERSHIP_PROCEDURE_ID: &str = "proc_00000000000000000000000993";
+    const OUTCOME_OWNERSHIP_PACK_ID: &str = "pack_00000000000000000000000994";
+    const OUTCOME_OWNERSHIP_CANDIDATE_ID: &str = "curate_00000000000000000000000995";
+    const OUTCOME_OTHER_WORKSPACE_ID: &str = "wsp_00000000000000000000000999";
+
+    fn seed_persisted_outcome_targets(connection: &DbConnection) -> TestResult {
+        connection
+            .insert_procedure(
+                OUTCOME_OWNERSHIP_PROCEDURE_ID,
+                &crate::db::CreateProcedureInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+                    name: "Release validation".to_owned(),
+                    body: "Run the integration suite before publishing a release.".to_owned(),
+                    level: "procedural".to_owned(),
+                    maturity: "provisional".to_owned(),
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.6,
+                    evidence_uris: Vec::new(),
+                    created_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_pack_record(
+                OUTCOME_OWNERSHIP_PACK_ID,
+                &crate::db::CreatePackRecordInput {
+                    task_paths: Vec::new(),
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+                    query: "release validation".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 512,
+                    used_tokens: 50,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"outcome-ownership-pack").to_hex()
+                    ),
+                    degraded_json: None,
+                    created_by: Some("outcome-test".to_owned()),
+                },
+                &[crate::db::CreatePackItemInput {
+                    pack_id: OUTCOME_OWNERSHIP_PACK_ID.to_owned(),
+                    memory_id: OUTCOME_TEST_MEMORY_ID.to_owned(),
+                    rank: 1,
+                    section: "procedural_rules".to_owned(),
+                    estimated_tokens: 50,
+                    relevance: 0.9,
+                    utility: 0.7,
+                    combined_score: None,
+                    attempt_family_multiplicity: None,
+                    why: "Release validation rule.".to_owned(),
+                    diversity_key: None,
+                    provenance_json: serde_json::json!({
+                        "schema": "ee.pack_item.provenance.v1",
+                        "entries": [{"uri": "file://AGENTS.md", "note": "release rule"}],
+                    })
+                    .to_string(),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("project-rule".to_owned()),
+                }],
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                OUTCOME_OWNERSHIP_CANDIDATE_ID,
+                &crate::db::CreateCurationCandidateInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: Some(OUTCOME_TEST_MEMORY_ID.to_owned()),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.9),
+                    proposed_trust_class: None,
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some(OUTCOME_TEST_MEMORY_ID.to_owned()),
+                    reason: "Review the release rule.".to_owned(),
+                    confidence: 0.9,
+                    status: None,
+                    created_at: None,
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn persisted_outcome_targets() -> [(&'static str, &'static str); 5] {
+        [
+            ("memory", OUTCOME_TEST_MEMORY_ID),
+            ("procedure", OUTCOME_OWNERSHIP_PROCEDURE_ID),
+            ("pack", OUTCOME_OWNERSHIP_PACK_ID),
+            ("session", OUTCOME_TEST_SESSION_ID),
+            ("candidate", OUTCOME_OWNERSHIP_CANDIDATE_ID),
+        ]
+    }
+
+    #[test]
+    fn native_outcome_targets_verify_ownership_before_writes_dry_runs_and_replays() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-outcome-target-ownership")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_persisted_outcome_targets(&connection)?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: dir.path().join("other").to_string_lossy().into_owned(),
+                    name: Some("other".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        for (ordinal, (target_type, target_id)) in persisted_outcome_targets().iter().enumerate() {
+            let mut options = native_rule_outcome_options(
+                &database,
+                "harmful",
+                &format!("fb_{:026}", 700 + ordinal),
+            );
+            options.target_type = (*target_type).to_owned();
+            options.target_id = (*target_id).to_owned();
+            options.agent_name = Some("ownership-test".to_owned());
+            options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+            for dry_run in [false, true] {
+                options.dry_run = dry_run;
+                assert!(
+                    matches!(
+                        record_outcome(&options),
+                        Err(DomainError::PolicyDenied { .. })
+                    ),
+                    "{target_type} must reject a real foreign workspace before side effects"
+                );
+            }
+            options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+            options.target_id = format!(
+                "{}_00000000000000000000000998",
+                target_id.split('_').next().ok_or("target prefix")?
+            );
+            for dry_run in [false, true] {
+                options.dry_run = dry_run;
+                assert!(
+                    matches!(record_outcome(&options), Err(DomainError::NotFound { .. })),
+                    "{target_type} must exist before feedback can be admitted"
+                );
+            }
+            options.target_id = (*target_id).to_owned();
+            let preview = record_outcome(&options).map_err(|error| error.message())?;
+            assert_eq!(preview.status, OutcomeRecordStatus::DryRun);
+            assert!(preview.target_verified);
+            assert_eq!(preview.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
+        }
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "refused and previewed feedback must leave every table unchanged"
+        );
+
+        for (ordinal, (target_type, target_id)) in persisted_outcome_targets().iter().enumerate() {
+            let mut options = native_rule_outcome_options(
+                &database,
+                "helpful",
+                &format!("fb_{:026}", 710 + ordinal),
+            );
+            options.target_type = (*target_type).to_owned();
+            options.target_id = (*target_id).to_owned();
+            // The store-scoped library API can infer ownership from a real row.
+            let recorded = record_outcome(&options).map_err(|error| error.message())?;
+            assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+            assert!(recorded.target_verified);
+            assert_eq!(recorded.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
+            let recorded_state = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+            assert!(
+                matches!(
+                    record_outcome(&options),
+                    Err(DomainError::PolicyDenied { .. })
+                ),
+                "an existing event ID must not bypass {target_type} ownership"
+            );
+            options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+            assert_eq!(
+                record_outcome(&options)
+                    .map_err(|error| error.message())?
+                    .status,
+                OutcomeRecordStatus::AlreadyRecorded
+            );
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                recorded_state,
+                "foreign and exact replays must not apply learning a second time"
+            );
+        }
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn native_pack_feedback_does_not_propagate_to_selected_memories() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-pack-target")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_persisted_outcome_targets(&connection)?;
+        let memory_before = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        let posterior_before = connection
+            .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        let mut options =
+            native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000720");
+        options.target_type = "pack".to_owned();
+        options.target_id = OUTCOME_OWNERSHIP_PACK_ID.to_owned();
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        let recorded = record_outcome(&options).map_err(|error| error.message())?;
+        assert!(recorded.target_verified);
+        assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(
+            connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            memory_before
+        );
+        assert_eq!(
+            connection
+                .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            posterior_before
+        );
+        assert_eq!(
+            connection
+                .count_feedback_by_signal("memory", OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .total_count(),
+            0
+        );
+        assert_eq!(
+            connection
+                .count_feedback_by_signal("pack", OUTCOME_OWNERSHIP_PACK_ID)
+                .map_err(|error| error.to_string())?
+                .total_count(),
+            1
+        );
+        options.target_type = "source".to_owned();
+        options.target_id = "external:release-verification".to_owned();
+        options.event_id = Some("fb_00000000000000000000000721".to_owned());
+        let external = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(external.status, OutcomeRecordStatus::Recorded);
+        assert!(!external.target_verified);
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn workspace_batch_rejects_foreign_native_targets_without_poisoning_valid_lines() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-outcome-owned-batch")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_persisted_outcome_targets(&connection)?;
+        let other = dir.path().join("other");
+        fs::create_dir_all(&other).map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: other.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let options = super::OutcomeBatchOptions {
+            database_path: &database,
+            actor: Some("ownership-test".to_owned()),
+            agent_name: Some("ownership-test".to_owned()),
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        };
+        let foreign_lines = persisted_outcome_targets()
+            .iter()
+            .enumerate()
+            .flat_map(|(ordinal, (target_type, target_id))| {
+                [None, Some(OUTCOME_TEST_WORKSPACE_ID)].map(|workspace_id| {
+                    serde_json::json!({
+                        "targetType": format!(" {target_type} "),
+                        "target": target_id,
+                        "workspaceId": workspace_id,
+                        "signal": "harmful",
+                        "eventId": format!("fb_{:026}", 730 + ordinal),
+                    })
+                    .to_string()
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let rejected =
+            super::record_outcome_batch_stdin_for_workspace(&options, &foreign_lines, &other)
+                .map_err(|error| error.message())?;
+        assert!(rejected.all_failed());
+        assert_eq!(rejected.failed_count, 10);
+        assert_eq!(rejected.quarantined_count, 0);
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "foreign rows, including an explicit owner-ID spoof, cannot write"
+        );
+        let mixed = [
+            serde_json::json!({
+                "targetType": "pack",
+                "target": OUTCOME_OWNERSHIP_PACK_ID,
+                "workspaceId": OUTCOME_OTHER_WORKSPACE_ID,
+                "signal": "helpful",
+                "eventId": "fb_00000000000000000000000740",
+            }),
+            serde_json::json!({
+                "targetType": "pack",
+                "target": "pack_00000000000000000000000998",
+                "signal": "helpful",
+                "eventId": "fb_00000000000000000000000741",
+            }),
+            serde_json::json!({
+                "targetType": "pack",
+                "target": OUTCOME_OWNERSHIP_PACK_ID,
+                "signal": "helpful",
+                "eventId": "fb_00000000000000000000000742",
+            }),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+        let report = super::record_outcome_batch_stdin_for_workspace(&options, &mixed, dir.path())
+            .map_err(|error| error.message())?;
+        assert_eq!(report.failed_count, 2);
+        assert_eq!(report.recorded_count, 1);
+        assert_eq!(report.quarantined_count, 0);
+        assert_eq!(report.results[2].status, "recorded");
+        assert_eq!(
+            connection
+                .count_table_rows("feedback_events")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
 
     fn seed_native_outcome_rule(connection: &DbConnection, workspace_id: &str) -> TestResult {
         connection
@@ -9454,8 +9861,10 @@ fn parse_outcome_batch_line(line: &str) -> Result<OutcomeBatchLineDraft, String>
     })
 }
 
-/// Resolve native rule feedback to the workspace addressed by the caller.
-pub(crate) fn outcome_native_rule_workspace(
+/// Resolve native feedback to the workspace addressed by the caller.
+/// An explicit workspace ID must agree with the addressed path; neither can
+/// silently retarget feedback to another workspace in a shared store.
+pub(crate) fn outcome_addressed_workspace(
     database_path: &Path,
     workspace_path: &Path,
     requested_id: Option<&str>,
@@ -9463,7 +9872,7 @@ pub(crate) fn outcome_native_rule_workspace(
     crate::core::ensure_addressed_database_exists(database_path)?;
     let connection =
         DbConnection::open_file_read_only(database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to inspect native rule workspace: {error}"),
+            message: format!("Failed to inspect outcome workspace: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
     let workspace = crate::core::workspace::addressed_workspace_row(
@@ -9473,9 +9882,9 @@ pub(crate) fn outcome_native_rule_workspace(
     )?
     .filter(|workspace| requested_id.is_none_or(|requested| requested == workspace.id))
     .ok_or_else(|| DomainError::PolicyDenied {
-        message: "Native rule feedback must address the workspace that owns the rule.".to_owned(),
+        message: "Feedback must address the workspace that owns its target.".to_owned(),
         repair: Some(
-            "Use --workspace with the rule's workspace and its bound database.".to_owned(),
+            "Use --workspace with the target's workspace and its bound database.".to_owned(),
         ),
     })?;
     Ok(workspace.id)
@@ -9490,7 +9899,7 @@ pub fn record_outcome_batch_stdin(
     record_outcome_batch_stdin_inner(options, input, None)
 }
 
-/// Record a JSONL batch, binding each native rule target to the addressed workspace.
+/// Record a JSONL batch, binding each native target to the addressed workspace.
 /// A workspace mismatch fails only that line, before any feedback is recorded.
 pub fn record_outcome_batch_stdin_for_workspace(
     options: &OutcomeBatchOptions<'_>,
@@ -9573,9 +9982,9 @@ fn record_outcome_batch_stdin_inner(
             prompt_injection_guard: options.prompt_injection_guard,
         };
         let result = if let Some(workspace_path) = workspace_path
-            && line_options.target_type.trim().eq_ignore_ascii_case("rule")
+            && outcome_target_is_native(&line_options.target_type)
         {
-            outcome_native_rule_workspace(
+            outcome_addressed_workspace(
                 options.database_path,
                 workspace_path,
                 line_options.workspace_id.as_deref(),

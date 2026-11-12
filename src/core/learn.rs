@@ -6516,6 +6516,7 @@ mod tests {
             .ok_or_else(|| "feedback report must be present".to_string())?;
         assert_eq!(feedback.target_type, "candidate");
         assert_eq!(feedback.target_id, "exp_replay_error_boundary");
+        assert!(!feedback.target_verified);
         assert_eq!(feedback.signal, "harmful");
         assert!(feedback.evidence_json_present);
         assert!(feedback.audit_id.is_some());
@@ -6640,7 +6641,7 @@ mod tests {
         let event_id = observe.event_id.as_deref().unwrap();
         // This is the durable state left by the old two-transaction path after
         // its accepted feedback committed but the observation write failed.
-        crate::core::outcome::record_outcome(&OutcomeRecordOptions {
+        let generic_options = OutcomeRecordOptions {
             database_path: &database,
             target_type: "candidate".to_owned(),
             target_id: observe.experiment_id.clone(),
@@ -6660,9 +6661,40 @@ mod tests {
             harmful_burst_window_seconds:
                 crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
             prompt_injection_guard: true,
-        })
-        .map_err(|error| error.message())?;
+        };
         let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before = db.logical_table_digests().map_err(|error| error.to_string())?;
+        assert!(
+            matches!(
+                crate::core::outcome::record_outcome(&generic_options),
+                Err(DomainError::NotFound { .. })
+            ),
+            "typed evidence cannot make the public candidate path accept an external experiment"
+        );
+        assert_eq!(
+            db.logical_table_digests().map_err(|error| error.to_string())?,
+            before
+        );
+        db.insert_feedback_event_audited(
+            event_id,
+            &crate::db::AuditedFeedbackEventInput {
+                event: CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: generic_options.target_type,
+                    target_id: generic_options.target_id,
+                    signal: generic_options.signal,
+                    weight: crate::db::feedback_scoring::WEIGHT_AUTOMATED_CHECK,
+                    source_type: generic_options.source_type,
+                    source_id: generic_options.source_id,
+                    reason: generic_options.reason,
+                    evidence_json: generic_options.evidence_json,
+                    session_id: None,
+                },
+                actor: observe.actor.clone(),
+                details: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
         let event = db
             .get_feedback_event(event_id)
             .map_err(|error| error.to_string())?;
@@ -6687,11 +6719,15 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .is_empty()
         );
-        assert_eq!(
-            observe_experiment(&observe)
-                .map_err(|error| error.message())?
-                .status,
-            "already_recorded"
+        let replay = observe_experiment(&observe).map_err(|error| error.message())?;
+        assert_eq!(replay.status, "already_recorded");
+        assert!(
+            !replay
+                .feedback
+                .as_ref()
+                .ok_or("missing learning feedback")?
+                .target_verified,
+            "external experiment identity remains unverified on the typed learning lane"
         );
         let observations = db
             .list_learning_observations(&workspace_id, None)
@@ -7017,12 +7053,35 @@ mod tests {
             ..observe.clone()
         })
         .map_err(|error| error.message())?;
+        let candidate_memory = "mem_00000000000000000000000997";
+        insert_memory_for_gap_candidate(&database, &workspace_id, candidate_memory)?;
         let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.insert_curation_candidate(
+            "curate_00000000000000000000000997",
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.clone(),
+                candidate_type: "promote".to_owned(),
+                target_memory_id: Some(candidate_memory.to_owned()),
+                proposed_content: None,
+                proposed_confidence: Some(0.9),
+                proposed_trust_class: None,
+                source_type: "agent_inference".to_owned(),
+                source_id: None,
+                reason: "Review the cited learning evidence.".to_owned(),
+                confidence: 0.9,
+                status: None,
+                created_at: None,
+                ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
         seed_learning_feedback_burst(&db, &workspace_id, "human_explicit", "human-review")?;
         let report = record_outcome(&OutcomeRecordOptions {
             database_path: &database,
             target_type: "candidate".to_owned(),
-            target_id: "exp_cited_document".to_owned(),
+            target_id: "curate_00000000000000000000000997".to_owned(),
             workspace_id: Some(workspace_id.clone()),
             signal: "harmful".to_owned(),
             weight: None,

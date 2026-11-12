@@ -806,12 +806,28 @@ fn first_usize_in_text(text: &str) -> Option<usize> {
         .and_then(|token| token.parse().ok())
 }
 
+fn upstream_cass_repair_hint(value: &JsonValue) -> Option<&str> {
+    [
+        value.pointer("/error/repair"),
+        value.pointer("/error/hint"),
+        value.get("repair"),
+        value.get("hint"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(JsonValue::as_str)
+    .map(str::trim)
+    .find(|hint| !hint.is_empty())
+}
+
 fn parse_upstream_cass_error_json(text: &str) -> Option<JsonValue> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed) {
+    if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed)
+        && upstream_cass_repair_hint(&value).is_some()
+    {
         return Some(value);
     }
     for line in trimmed.lines() {
@@ -819,6 +835,7 @@ fn parse_upstream_cass_error_json(text: &str) -> Option<JsonValue> {
         if line.starts_with('{')
             && line.ends_with('}')
             && let Ok(value) = serde_json::from_str::<JsonValue>(line)
+            && upstream_cass_repair_hint(&value).is_some()
         {
             return Some(value);
         }
@@ -828,6 +845,7 @@ fn parse_upstream_cass_error_json(text: &str) -> Option<JsonValue> {
     (start < end)
         .then(|| serde_json::from_str::<JsonValue>(&trimmed[start..=end]).ok())
         .flatten()
+        .filter(|value| upstream_cass_repair_hint(value).is_some())
 }
 
 fn extract_actionable_cass_or_ee_command(redacted_hint: &str) -> Option<String> {
@@ -835,12 +853,14 @@ fn extract_actionable_cass_or_ee_command(redacted_hint: &str) -> Option<String> 
     if trimmed.starts_with("cass ") || trimmed.starts_with("ee ") {
         return Some(trimmed.to_string());
     }
-    if trimmed.len() > 4
-        && trimmed[..4].eq_ignore_ascii_case("run ")
-        && (trimmed[4..].trim_start().starts_with("cass ")
-            || trimmed[4..].trim_start().starts_with("ee "))
+    if let Some(prefix) = trimmed.get(..4)
+        && prefix.eq_ignore_ascii_case("run ")
+        && let Some(command) = trimmed.get(4..)
     {
-        return Some(trimmed[4..].trim_start().to_string());
+        let command = command.trim_start();
+        if command.starts_with("cass ") || command.starts_with("ee ") {
+            return Some(command.to_string());
+        }
     }
     for quote in ['\'', '`', '"'] {
         let mut rest = redacted_hint;
@@ -861,14 +881,7 @@ fn extract_actionable_cass_or_ee_command(redacted_hint: &str) -> Option<String> 
 
 fn extract_upstream_cass_repair_hint(stderr: &str) -> Option<(String, String)> {
     let value = parse_upstream_cass_error_json(stderr)?;
-    let raw_hint = value
-        .pointer("/error/repair")
-        .and_then(JsonValue::as_str)
-        .or_else(|| value.pointer("/error/hint").and_then(JsonValue::as_str))
-        .or_else(|| value.get("repair").and_then(JsonValue::as_str))
-        .or_else(|| value.get("hint").and_then(JsonValue::as_str))
-        .map(str::trim)
-        .filter(|hint| !hint.is_empty())?;
+    let raw_hint = upstream_cass_repair_hint(&value)?;
     let redacted_hint = bounded_public_cass_text(raw_hint, 512);
     let redacted_trimmed = redacted_hint.trim();
     if redacted_trimmed.is_empty() {
@@ -4295,6 +4308,86 @@ mod tests {
         ] {
             assert_eq!(view_session_refusal(&error), None, "{error}");
         }
+    }
+
+    #[test]
+    fn cass_import_repair_hints_accept_unicode_and_mixed_diagnostics() -> TestResult {
+        let command_hint = "Run 'cass index --full' to rebuild the index.";
+        let cases = [
+            (
+                json!({"error": {"hint": "修復: `cass index --full`"}}).to_string(),
+                "cass index --full",
+            ),
+            (
+                json!({"error": {"hint": "🛠️ 'ee doctor --json'"}}).to_string(),
+                "ee doctor --json",
+            ),
+            (
+                json!({"error": {"hint": "修復してください"}}).to_string(),
+                "修復してください",
+            ),
+            (
+                json!({"error": {"hint": "RUN cass index --full."}}).to_string(),
+                "cass index --full",
+            ),
+            (
+                format!(
+                    "{}\n{}\n{}",
+                    json!({"level": "info", "message": "opening index"}),
+                    json!({"error": {"kind": "search-db-missing"}}),
+                    json!({"error": {"hint": command_hint}}),
+                ),
+                "cass index --full",
+            ),
+            (
+                json!({"error": {"repair": "  ", "hint": command_hint}}).to_string(),
+                "cass index --full",
+            ),
+            (
+                json!({"error": {"repair": null, "hint": false}, "repair": command_hint})
+                    .to_string(),
+                "cass index --full",
+            ),
+            (
+                format!(
+                    "diagnostic preamble\n{}\ndiagnostic trailer",
+                    serde_json::to_string_pretty(&json!({"error": {"hint": command_hint}}))
+                        .map_err(|error| error.to_string())?,
+                ),
+                "cass index --full",
+            ),
+            (
+                json!({"error": {"repair": "ee doctor --json", "hint": command_hint}})
+                    .to_string(),
+                "ee doctor --json",
+            ),
+            (
+                json!({"error": {"kind": "internal", "hint": "  "}}).to_string(),
+                "run cass health --json",
+            ),
+            (
+                "unstructured failure without a repair hint".to_string(),
+                "run cass health --json",
+            ),
+        ];
+        for (stderr, expected) in cases {
+            let error = CassImportError::CassCommand {
+                command: "cass sessions".to_string(),
+                exit_code: Some(3),
+                stderr,
+                timed_out: false,
+                stderr_truncated: false,
+                stdout_line_count: None,
+                peak_stdout_line_bytes: None,
+                peak_stdout_buffer_bytes: None,
+            };
+            assert_eq!(
+                error.resolved_repair_hint().as_deref(),
+                Some(expected),
+                "{error}",
+            );
+        }
+        Ok(())
     }
 
     #[test]

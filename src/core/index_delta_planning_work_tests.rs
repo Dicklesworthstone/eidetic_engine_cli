@@ -201,3 +201,79 @@ fn every_hash_free_addition_checkpoint_can_stop_before_a_delta_escapes() {
         assert_eq!(error.detail, "cancelled hash-free intake");
     }
 }
+
+#[test]
+fn ordinary_fallback_rejects_inconsistent_unchanged_input_commitments() {
+    let original = documents(16);
+    let live = digests(&original);
+    let valid_inputs = inputs(&original);
+    let mut current = original.clone();
+    current[0].title = Some("metadata-only update before the corrupt row".to_owned());
+    current[1].content.push_str(" changed input before the corrupt row");
+    let unchanged = &original[15];
+
+    for missing in [false, true] {
+        let mut input = valid_inputs.clone();
+        if missing {
+            input.remove(&unchanged.id);
+        } else {
+            let mut conflicting = unchanged.clone();
+            conflicting.content.push_str(" a different indexed input");
+            input.insert(
+                unchanged.id.clone(),
+                embedding_input_digest(&conflicting),
+            );
+        }
+        let before = input.clone();
+        // Exercise the dispatcher as well: a proof refusal must not fall
+        // through to growth/maintenance or return the already planned prefix.
+        let error = super::super::diff(&live, &input, &current, IDENTITY.to_owned())
+            .expect_err("inconsistent unchanged input must require a full rebuild");
+        assert_eq!(
+            error.reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        assert!(
+            error
+                .detail
+                .contains("inconsistent live embedding-input digest")
+        );
+        assert_eq!(input, before, "planning never repairs its own proof");
+        assert_eq!(live, digests(&original));
+    }
+}
+
+#[test]
+fn verified_unchanged_inputs_preserve_metadata_reuse_and_reembed_changed_bodies() {
+    let original = documents(16);
+    let live = digests(&original);
+    let input = inputs(&original);
+    let unchanged = super::super::diff(&live, &input, &original, IDENTITY.to_owned())
+        .expect("matching document and input commitments");
+    assert!(unchanged.upserts.is_empty());
+    assert!(unchanged.removals.is_empty());
+
+    let mut current = original.clone();
+    current[0].title = Some("new metadata, identical embedding input".to_owned());
+    let metadata_only = super::super::diff(&live, &input, &current, IDENTITY.to_owned())
+        .expect("metadata reuse remains available");
+    assert_eq!(metadata_only.upserts.len(), 1);
+    assert!(
+        metadata_only
+            .vector_upserts(IDENTITY)
+            .expect("matching producer")
+            .is_empty()
+    );
+
+    current[1].content.push_str(" a genuinely changed body");
+    let changed = super::super::diff(&live, &input, &current, IDENTITY.to_owned())
+        .expect("changed bodies are not mistaken for inconsistent unchanged proofs");
+    assert_eq!(changed.upserts.len(), 2);
+    assert!(changed.removals.is_empty());
+    let vectors = changed.vector_upserts(IDENTITY).expect("matching producer");
+    assert_eq!(vectors.len(), 1);
+    assert_eq!(vectors[0].id, current[1].id);
+    assert_eq!(vectors[0].content, current[1].content);
+    assert_eq!(input, inputs(&original));
+    assert_eq!(live, digests(&original));
+}

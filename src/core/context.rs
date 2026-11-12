@@ -11059,6 +11059,8 @@ fn candidates_from_search_for_task_paths(
         Option<(MemoryId, Option<String>)>,
         Option<MeshDisplayProvenance>,
     )> = Vec::new();
+    let evidence_batch =
+        preload_evidence_pack_hits(connection, workspace_path, search_report, degraded);
     for hit in &search_report.results {
         let mesh_provenance = match mesh_query_visibility(hit.metadata.as_ref()) {
             MeshQueryVisibility::Local => None,
@@ -11073,7 +11075,7 @@ fn candidates_from_search_for_task_paths(
         // Deferring it is successful resolution, not a failed memory lookup;
         // the native admission boundary below owns its selection and denial.
         let evidence_resolution =
-            resolve_evidence_pack_hit(connection, workspace_path, hit, degraded);
+            resolve_evidence_pack_hit(connection, &evidence_batch, hit, degraded);
         if matches!(
             evidence_resolution.as_ref(),
             Some(EvidencePackHitResolution::Direct)
@@ -17552,6 +17554,63 @@ fn direct_evidence_matches_filters(
     true
 }
 
+struct EvidencePackHitBatch {
+    workspace_ids: Vec<String>,
+    // None means the bulk read failed. An empty successful map still proves
+    // absence and must never send missing or duplicate hits back to point reads.
+    rows: Option<BTreeMap<String, crate::db::HydratedEvidenceSpan>>,
+}
+
+fn preload_evidence_pack_hits(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &crate::core::search::SearchReport,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> EvidencePackHitBatch {
+    let ids = search_report
+        .results
+        .iter()
+        .filter(|hit| {
+            !matches!(
+                mesh_query_visibility(hit.metadata.as_ref()),
+                MeshQueryVisibility::Blocked
+            )
+        })
+        .filter_map(|hit| EvidenceId::from_str(&hit.doc_id).ok())
+        .map(|id| id.to_string())
+        .collect::<BTreeSet<_>>();
+    if ids.is_empty() {
+        return EvidencePackHitBatch {
+            workspace_ids: Vec::new(),
+            rows: Some(BTreeMap::new()),
+        };
+    }
+
+    let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
+    let id_refs = ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let rows = match connection.get_evidence_spans_with_sessions(&id_refs) {
+        Ok(rows) => Some(
+            rows.into_iter()
+                .map(|row| (row.span.id.clone(), row))
+                .collect(),
+        ),
+        Err(_) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                "Imported-evidence batch hydration failed; individual source reads were used during candidate resolution.",
+                Some("ee doctor --json".to_owned()),
+            );
+            None
+        }
+    };
+    EvidencePackHitBatch {
+        workspace_ids,
+        rows,
+    }
+}
+
 enum EvidencePackHitResolution {
     Linked {
         memory_id: MemoryId,
@@ -17564,12 +17623,12 @@ enum EvidencePackHitResolution {
 /// evidence admission without reporting a failed memory conversion.
 ///
 /// Search-hit metadata is a derived, staleable asset and therefore never
-/// authorizes pack hydration. Reload the span, session, and linked memory,
-/// verify that the evidence belongs to the requested workspace, and re-run
-/// the current positive-admission policy before returning a memory id.
+/// authorizes pack hydration. Use the live batched span and session, then
+/// revalidate any linked memory before returning its id. Only a failed bulk
+/// read falls back to point reads; a successful batch's missing rows stay absent.
 fn resolve_evidence_pack_hit(
     connection: &DbConnection,
-    workspace_path: &Path,
+    evidence_batch: &EvidencePackHitBatch,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<EvidencePackHitResolution> {
@@ -17590,7 +17649,18 @@ fn resolve_evidence_pack_hit(
         }
     };
 
-    let span = match connection.get_evidence_span(&evidence_id) {
+    let hydrated = evidence_batch
+        .rows
+        .as_ref()
+        .and_then(|rows| rows.get(&evidence_id));
+    let span = if evidence_batch.rows.is_some() {
+        Ok(hydrated.map(|row| std::borrow::Cow::Borrowed(&row.span)))
+    } else {
+        connection
+            .get_evidence_span(&evidence_id)
+            .map(|span| span.map(std::borrow::Cow::Owned))
+    };
+    let span = match span {
         Ok(Some(span)) => span,
         Ok(None) => {
             push_degradation(
@@ -17616,8 +17686,11 @@ fn resolve_evidence_pack_hit(
             return None;
         }
     };
-    let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
-    if !workspace_ids.iter().any(|id| id == &span.workspace_id) {
+    if !evidence_batch
+        .workspace_ids
+        .iter()
+        .any(|id| id == &span.workspace_id)
+    {
         push_degradation(
             degraded,
             "context_evidence_hit_unhydrated",
@@ -17630,7 +17703,16 @@ fn resolve_evidence_pack_hit(
         );
         return None;
     }
-    let session = match connection.get_session(&span.session_id) {
+    let session = if evidence_batch.rows.is_some() {
+        Ok(hydrated
+            .and_then(|row| row.session.as_ref())
+            .map(std::borrow::Cow::Borrowed))
+    } else {
+        connection
+            .get_session(&span.session_id)
+            .map(|session| session.map(std::borrow::Cow::Owned))
+    };
+    let session = match session {
         Ok(Some(session)) => session,
         Ok(None) => {
             push_degradation(
@@ -17659,7 +17741,11 @@ fn resolve_evidence_pack_hit(
             return None;
         }
     };
-    if !span.is_search_admitted_for_session(&span.workspace_id, &session) {
+    let search_admitted = hydrated.map_or_else(
+        || span.is_search_admitted_for_session(&span.workspace_id, &session),
+        |row| row.is_search_admitted(&span.workspace_id),
+    );
+    if !search_admitted {
         push_degradation(
             degraded,
             "context_evidence_hit_unhydrated",

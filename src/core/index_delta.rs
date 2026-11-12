@@ -4,10 +4,11 @@
 //! Since cancellation-safe staged publication landed, every write rebuilt and
 //! re-embedded the whole corpus, so write cost grew with the store. This module
 //! limits inference to changed inputs while preserving publication properties:
-//! the staged generation is a private copy of the live one with only changed
-//! documents applied, validated and published through the same masked, fenced,
-//! atomic path as a full build. Source reconciliation and generation copies
-//! still scale with the corpus; total write cost is not O(delta).
+//! the staged generation has private mutable files and shares authoritative
+//! immutable lexical components, with only changed documents applied, validated
+//! and published through the same masked, fenced, atomic path as a full build.
+//! Source reconciliation and mutable vector copies still scale with the corpus;
+//! total write cost is not O(delta).
 //!
 //! The delta is not taken from job bookkeeping. Every generation records a
 //! digest of each document it indexed (`doc_digests.json`). The publisher
@@ -25,8 +26,8 @@
 //! with conservative inference; V1 cannot prove compatible embedding spaces.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use frankensearch::core::traits::IdentityBoundEmbedding;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ mod lexical_maintenance;
 
 #[path = "index_staging_copy.rs"]
 mod staging_copy;
+
+#[cfg(all(test, unix, feature = "lexical-bm25"))]
+#[path = "index_delta_sharing_tests.rs"]
+mod sharing_tests;
 
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
@@ -641,17 +646,19 @@ fn diff_documents(
     })
 }
 
-/// Copy the live generation's tier files into an empty private staging
-/// directory. Prefer copy-on-write clones, falling back to independent byte
-/// copies when the filesystem refuses cloning. Never use hard links: tier
-/// writers mutate files in place. Admission state (`meta.json`, digests,
-/// retired manifests) and writer locks are not copied; staging earns its own.
+/// Copy mutable tier files into an empty private staging directory, sharing
+/// only the exact immutable components named by live Tantivy segment metadata.
+/// Vector files and lexical metadata remain independent: their writers can
+/// mutate them in place. Unsupported sharing/cloning falls back to independent
+/// byte copies. Admission state (`meta.json`, digests, retired manifests) and
+/// writer locks are not copied; staging earns its own.
 pub(super) fn copy_generation(
     live_dir: &Path,
     staging_dir: &Path,
 ) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
     ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
+    let immutable_segments = immutable_lexical_segments(live_dir)?;
     let mut copier = staging_copy::StagingCopier::default();
     let mut pending = vec![(live_dir.to_path_buf(), staging_dir.to_path_buf(), true)];
     while let Some((source, destination, top_level)) = pending.pop() {
@@ -696,7 +703,18 @@ pub(super) fn copy_generation(
                 })?;
                 pending.push((entry.path(), target, false));
             } else if kind.is_file() {
-                copier.copy_file(&entry.path(), &target).map_err(|error| {
+                let source_path = entry.path();
+                let relative = source_path.strip_prefix(live_dir).map_err(|_| {
+                    IndexRebuildError::Index(
+                        "Index staging source escaped its generation".to_owned(),
+                    )
+                })?;
+                let copied = if immutable_segments.contains(relative) {
+                    copier.share_immutable_segment(&source_path, &target)
+                } else {
+                    copier.copy_file(&source_path, &target)
+                };
+                copied.map_err(|error| {
                     IndexRebuildError::Index(format!("Failed to copy live index file: {error}"))
                 })?;
             } else {
@@ -715,9 +733,113 @@ pub(super) fn copy_generation(
         cloned_files = stats.cloned_files,
         cloned_bytes = stats.cloned_bytes,
         clone_refusals = stats.clone_refusals,
-        "staged independent index files"
+        linked_files = stats.linked_files,
+        linked_bytes = stats.linked_bytes,
+        link_refusals = stats.link_refusals,
+        "staged mutable index files and immutable lexical segments"
     );
     Ok(())
+}
+
+/// Tantivy's Directory contract is write-once for segment components: their
+/// writers use create_new, merges get new segment IDs, and deletion bitsets get
+/// new opstamp-qualified paths. Never infer immutability from a file extension
+/// or the managed-file inventory, which can also contain obsolete files.
+fn immutable_lexical_segments(live_dir: &Path) -> Result<BTreeSet<PathBuf>, IndexRebuildError> {
+    #[cfg(not(feature = "lexical-bm25"))]
+    {
+        let _ = live_dir;
+        Ok(BTreeSet::new())
+    }
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let request = asupersync::Cx::current();
+        let checkpoint = || -> Result<(), IndexRebuildError> {
+            if let Some(cx) = &request {
+                cx.checkpoint().map_err(|error| {
+                    IndexRebuildError::Index(format!("Index staging request interrupted: {error}"))
+                })?;
+            }
+            Ok(())
+        };
+        checkpoint()?;
+        let lexical_path = live_dir.join(LEXICAL_INDEX_SUBDIR);
+        // The copier also serves empty/vector-only fixtures. Without an
+        // authoritative lexical manifest, no file earns permission to share.
+        let meta_path = lexical_path.join("meta.json");
+        ensure_index_path_has_no_symlinks(&meta_path, "read live lexical segment metadata")?;
+        let metadata = std::fs::symlink_metadata(&meta_path);
+        checkpoint()?;
+        match metadata {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeSet::new());
+            }
+            Err(error) => {
+                return Err(IndexRebuildError::Index(format!(
+                    "Failed to inspect live lexical segment metadata: {error}"
+                )));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(IndexRebuildError::Index(
+                    "Live lexical segment metadata is not a regular file".to_owned(),
+                ));
+            }
+            Ok(_) => {}
+        }
+        let managed_path = lexical_path.join(".managed.json");
+        ensure_index_path_has_no_symlinks(&managed_path, "read live lexical managed metadata")?;
+        let managed_metadata = std::fs::symlink_metadata(&managed_path);
+        checkpoint()?;
+        match managed_metadata {
+            Ok(metadata) if metadata.is_file() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(IndexRebuildError::Index(
+                    "Live lexical managed metadata is not a regular file".to_owned(),
+                ));
+            }
+            Err(error) => {
+                return Err(IndexRebuildError::Index(format!(
+                    "Failed to inspect live lexical managed metadata: {error}"
+                )));
+            }
+        }
+        checkpoint()?;
+        let index = frankensearch::lexical_tantivy::Index::open_in_dir(&lexical_path);
+        checkpoint()?;
+        let index = index.map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "Failed to open live lexical segment metadata: {error}"
+            ))
+        })?;
+        let segments = index.searchable_segment_metas();
+        checkpoint()?;
+        let segments = segments.map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "Failed to enumerate live lexical segments: {error}"
+            ))
+        })?;
+        let mut files = BTreeSet::new();
+        for segment in segments {
+            checkpoint()?;
+            for path in segment.list_files() {
+                let mut components = path.components();
+                if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                    || components.next().is_some()
+                {
+                    return Err(IndexRebuildError::Index(
+                        "Live lexical segment metadata names a non-local file".to_owned(),
+                    ));
+                }
+                // Some components (notably a segment's initial .0.del) are
+                // absent. Only existing files encountered by the copier use
+                // this allowlist; absence never creates a link or a payload.
+                files.insert(Path::new(LEXICAL_INDEX_SUBDIR).join(path));
+            }
+        }
+        checkpoint()?;
+        Ok(files)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1390,15 +1512,31 @@ mod tests {
         write(INDEX_METADATA_FILE, "{}")?;
         write(DOC_DIGESTS_FILE, "{}")?;
         write(".rejected-meta-1-000.json", "{}")?;
-        write("lexical/meta.json", "tantivy meta")?;
         write("lexical/abc.idx", "segment")?;
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let schema =
+                frankensearch::lexical_tantivy::tantivy_crate::schema::Schema::builder().build();
+            frankensearch::lexical_tantivy::Index::create_in_dir(
+                live.path().join("lexical"),
+                schema,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        #[cfg(not(feature = "lexical-bm25"))]
+        write("lexical/meta.json", "tantivy meta")?;
+        let lexical_metadata = std::fs::read_to_string(live.path().join("lexical/meta.json"))
+            .map_err(|error| error.to_string())?;
         write("lexical/.tantivy-writer.lock", "")?;
 
         copy_generation(live.path(), staging.path()).map_err(|error| error.to_string())?;
 
         let read = |relative: &str| std::fs::read_to_string(staging.path().join(relative)).ok();
         assert_eq!(read("vector.fast.idx").as_deref(), Some("vectors"));
-        assert_eq!(read("lexical/meta.json").as_deref(), Some("tantivy meta"));
+        assert_eq!(
+            read("lexical/meta.json").as_deref(),
+            Some(lexical_metadata.as_str())
+        );
         assert_eq!(read("lexical/abc.idx").as_deref(), Some("segment"));
         for excluded in [
             INDEX_METADATA_FILE,
@@ -1743,7 +1881,7 @@ mod tests {
         let stack = super::super::hash_fallback_embedder_stack();
         let original = [doc("mem_one", "source text")];
         let live = generation_with_digests("bad-inputs", &stack, &original)?;
-        for case in 0..5 {
+        for case in 0..6 {
             let mut broken = DocDigests::new(&stack, &original);
             match case {
                 0 => broken.embedding_inputs = None,
@@ -1764,7 +1902,15 @@ mod tests {
                         .unwrap()
                         .insert("mem_one".to_owned(), "not-a-digest".to_owned());
                 }
-                _ => broken.schema = DOC_DIGESTS_SCHEMA_V2.to_owned(),
+                4 => broken.schema = DOC_DIGESTS_SCHEMA_V2.to_owned(),
+                _ => {
+                    // Structurally valid maps can still disagree about the
+                    // embedding input of an otherwise unchanged document.
+                    broken.embedding_inputs.as_mut().unwrap().insert(
+                        "mem_one".to_owned(),
+                        embedding_input_digest(&doc("mem_one", "different source text")),
+                    );
+                }
             }
             broken
                 .write(live.path())

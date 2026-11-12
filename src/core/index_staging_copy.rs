@@ -1,9 +1,12 @@
-//! Independent staging inodes, using copy-on-write only when the filesystem permits it.
+//! Private mutable staging files and shared immutable lexical segments.
 //!
 //! A reflink is not a hard link: later writes to either file must not change the
 //! other generation. Unsupported cloning falls back to a bounded byte copy;
 //! capacity and I/O failures remain failures. The caller owns the private
 //! staging directory, publication lease, flush barrier, and abandoned-file cleanup.
+//! Only files named by authoritative Tantivy segment metadata may use the
+//! separate immutable-sharing entrypoint. Tantivy creates segment components
+//! once and replaces deletion bitsets under new opstamp-qualified names.
 //! CLI copies observe the already-installed request's cancellation between I/O
 //! calls. This is cooperative: it cannot preempt an individual filesystem call.
 
@@ -21,11 +24,22 @@ pub(super) struct CopyStats {
     /// Logical file bytes whose content was cloned, not measured disk allocation.
     pub cloned_bytes: u64,
     pub clone_refusals: u64,
+    pub linked_files: u64,
+    /// Logical bytes shared with an immutable source, not newly allocated bytes.
+    pub linked_bytes: u64,
+    pub link_refusals: u64,
+}
+
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Mutable,
+    ImmutableSegment,
 }
 
 #[derive(Default)]
 pub(super) struct StagingCopier {
     clone_unavailable: bool,
+    link_unavailable: bool,
     buffer: Vec<u8>,
     stats: CopyStats,
 }
@@ -37,6 +51,95 @@ impl StagingCopier {
 
     pub(super) fn copy_file(&mut self, source: &Path, target: &Path) -> io::Result<()> {
         self.copy_with(source, target, clone_file)
+    }
+
+    /// Share a component from the live index's exact SegmentMeta::list_files
+    /// allowlist. Mutable metadata, vectors, and arbitrary files must instead
+    /// use copy_file. Existing shared components can be shared again.
+    pub(super) fn share_immutable_segment(
+        &mut self,
+        source: &Path,
+        target: &Path,
+    ) -> io::Result<()> {
+        let request = asupersync::Cx::current();
+        self.share_with_checkpoint(source, target, link_immutable_file, || {
+            if let Some(cx) = &request {
+                cx.checkpoint().map_err(|error| {
+                    io::Error::other(format!("index staging request interrupted: {error}"))
+                })?;
+            }
+            Ok(())
+        })
+    }
+
+    fn share_with_checkpoint(
+        &mut self,
+        source_path: &Path,
+        target: &Path,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        mut checkpoint: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        if !self.link_unavailable {
+            let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
+            require_source_regular(&before, SourceKind::ImmutableSegment)?;
+            let source = checked_io(&mut checkpoint, || open_source(source_path))?;
+            require_source_unchanged(
+                &before,
+                &checked_io(&mut checkpoint, || source.metadata())?,
+                SourceKind::ImmutableSegment,
+            )?;
+            checked_io(&mut checkpoint, || {
+                super::super::storage::admit_copy(
+                    target,
+                    0,
+                    super::super::storage::filesystem_capacity,
+                )
+                .map_err(|error| io::Error::other(error.to_string()))
+            })?;
+            match checked_io(&mut checkpoint, || link(source_path, target)) {
+                Ok(()) => {
+                    // Linking changes ctime/nlink, but never content, identity,
+                    // permissions, or mtime. A replaced path or symlink cannot
+                    // become an accepted shared component.
+                    for metadata in [
+                        checked_io(&mut checkpoint, || source.metadata())?,
+                        checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?,
+                        checked_io(&mut checkpoint, || fs::symlink_metadata(target))?,
+                    ] {
+                        require_source_unchanged(&before, &metadata, SourceKind::ImmutableSegment)?;
+                    }
+                    checkpoint()?;
+                    self.stats.linked_files = self.stats.linked_files.saturating_add(1);
+                    self.stats.linked_bytes = self.stats.linked_bytes.saturating_add(before.len());
+                    return Ok(());
+                }
+                Err(error) if link_is_unavailable(&error) => {
+                    self.link_unavailable = true;
+                    self.stats.link_refusals = self.stats.link_refusals.saturating_add(1);
+                    tracing::info!(
+                        target: "ee::index",
+                        errno = error.raw_os_error(),
+                        "immutable lexical segment sharing unavailable; using independent staging copies for this generation"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.copy_source_with_checkpoint_and_capacity(
+            source_path,
+            target,
+            clone_file,
+            checkpoint,
+            |target, bytes| {
+                super::super::storage::admit_copy(
+                    target,
+                    bytes,
+                    super::super::storage::filesystem_capacity,
+                )
+                .map_err(|error| io::Error::other(error.to_string()))
+            },
+            SourceKind::ImmutableSegment,
+        )
     }
 
     fn copy_with(
@@ -89,13 +192,36 @@ impl StagingCopier {
         source_path: &Path,
         target: &Path,
         clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
-        mut checkpoint: impl FnMut() -> io::Result<()>,
+        checkpoint: impl FnMut() -> io::Result<()>,
         admit_copy: impl FnOnce(&Path, u64) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.copy_source_with_checkpoint_and_capacity(
+            source_path,
+            target,
+            clone,
+            checkpoint,
+            admit_copy,
+            SourceKind::Mutable,
+        )
+    }
+
+    fn copy_source_with_checkpoint_and_capacity(
+        &mut self,
+        source_path: &Path,
+        target: &Path,
+        clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
+        mut checkpoint: impl FnMut() -> io::Result<()>,
+        admit_copy: impl FnOnce(&Path, u64) -> io::Result<()>,
+        source_kind: SourceKind,
+    ) -> io::Result<()> {
         let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
-        require_regular(&before)?;
+        require_source_regular(&before, source_kind)?;
         let mut source = checked_io(&mut checkpoint, || open_source(source_path))?;
-        require_unchanged(&before, &checked_io(&mut checkpoint, || source.metadata())?)?;
+        require_source_unchanged(
+            &before,
+            &checked_io(&mut checkpoint, || source.metadata())?,
+            source_kind,
+        )?;
         let length = before.len();
         let (mut destination, cloned) = if length == 0 || self.clone_unavailable {
             (
@@ -155,10 +281,15 @@ impl StagingCopier {
         if written.len() != length {
             return Err(changed("staged file length differs from its source"));
         }
-        require_unchanged(&before, &checked_io(&mut checkpoint, || source.metadata())?)?;
-        require_unchanged(
+        require_source_unchanged(
+            &before,
+            &checked_io(&mut checkpoint, || source.metadata())?,
+            source_kind,
+        )?;
+        require_source_unchanged(
             &before,
             &checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?,
+            source_kind,
         )?;
         require_unchanged(
             &written,
@@ -209,6 +340,10 @@ fn changed(message: &'static str) -> io::Error {
 }
 
 fn require_regular(metadata: &Metadata) -> io::Result<()> {
+    require_source_regular(metadata, SourceKind::Mutable)
+}
+
+fn require_source_regular(metadata: &Metadata, source_kind: SourceKind) -> io::Result<()> {
     if !metadata.file_type().is_file() {
         return Err(changed(
             "index staging source or destination is not a regular file",
@@ -217,10 +352,12 @@ fn require_regular(metadata: &Metadata) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
+        if matches!(source_kind, SourceKind::Mutable) && metadata.nlink() != 1 {
             return Err(changed("index staging refuses multiply linked files"));
         }
     }
+    #[cfg(not(unix))]
+    let _ = source_kind;
     Ok(())
 }
 
@@ -229,7 +366,15 @@ fn require_regular(metadata: &Metadata) -> io::Result<()> {
 /// uncooperative writers on filesystems with coarse timestamps. Reading atime
 /// is intentionally excluded because ordinary byte-copy fallback may update it.
 fn require_unchanged(before: &Metadata, after: &Metadata) -> io::Result<()> {
-    require_regular(after)?;
+    require_source_unchanged(before, after, SourceKind::Mutable)
+}
+
+fn require_source_unchanged(
+    before: &Metadata,
+    after: &Metadata,
+    source_kind: SourceKind,
+) -> io::Result<()> {
+    require_source_regular(after, source_kind)?;
     let mut same = before.len() == after.len() && before.permissions() == after.permissions();
     #[cfg(unix)]
     {
@@ -239,9 +384,10 @@ fn require_unchanged(before: &Metadata, after: &Metadata) -> io::Result<()> {
             && before.uid() == after.uid()
             && before.gid() == after.gid()
             && before.mtime() == after.mtime()
-            && before.mtime_nsec() == after.mtime_nsec()
-            && before.ctime() == after.ctime()
-            && before.ctime_nsec() == after.ctime_nsec();
+            && before.mtime_nsec() == after.mtime_nsec();
+        if matches!(source_kind, SourceKind::Mutable) {
+            same &= before.ctime() == after.ctime() && before.ctime_nsec() == after.ctime_nsec();
+        }
     }
     #[cfg(not(unix))]
     {
@@ -338,6 +484,7 @@ fn clone_is_unavailable(error: &io::Error) -> bool {
         return [
             libc::EXDEV,
             libc::EOPNOTSUPP,
+            libc::ENOTSUP,
             libc::ENOSYS,
             libc::ENOTTY,
             libc::EINVAL,
@@ -346,6 +493,36 @@ fn clone_is_unavailable(error: &io::Error) -> bool {
         .contains(&code);
     }
     error.kind() == io::ErrorKind::Unsupported
+}
+
+fn link_is_unavailable(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        return [
+            libc::EXDEV,
+            libc::EOPNOTSUPP,
+            libc::ENOTSUP,
+            libc::ENOSYS,
+            libc::EPERM,
+            libc::EMLINK,
+        ]
+        .contains(&code);
+    }
+    error.kind() == io::ErrorKind::Unsupported
+}
+
+fn link_immutable_file(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::hard_link(source, target)
+    }
+    #[cfg(not(unix))]
+    {
+        // Shared identity validation and retention accounting need inode/link
+        // metadata. Keep independent staging where std does not expose it.
+        let _ = (source, target);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 /// Observe cancellation before interpreting an I/O result, including a failure.
@@ -445,6 +622,185 @@ mod tests {
             file: None,
             error: Some(io::Error::from(io::ErrorKind::Unsupported)),
         })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sharing_and_cloning_accept_both_native_unsupported_error_codes() {
+        // Darwin distinguishes these codes; Linux aliases them. A refused
+        // hard link must still reach the independent clone/copy fallback.
+        for errno in [libc::ENOTSUP, libc::EOPNOTSUPP] {
+            let error = io::Error::from_raw_os_error(errno);
+            assert!(link_is_unavailable(&error));
+            assert!(clone_is_unavailable(&error));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn immutable_segments_share_again_without_weakening_mutable_file_guards() -> TestResult {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let mutable = root.path().join("mutable");
+        fs::write(&source, b"immutable segment bytes")?;
+        let mut copier = StagingCopier::default();
+        copier.share_immutable_segment(&source, &first)?;
+        copier.share_immutable_segment(&first, &second)?;
+        let original = fs::metadata(&source)?;
+        assert_eq!(original.nlink(), 3);
+        for path in [&first, &second] {
+            let shared = fs::metadata(path)?;
+            assert_eq!(
+                (shared.dev(), shared.ino()),
+                (original.dev(), original.ino())
+            );
+            assert_eq!(shared.permissions(), original.permissions());
+            assert_eq!(fs::read(path)?, b"immutable segment bytes");
+        }
+        assert_eq!(copier.stats().linked_files, 2);
+        assert_eq!(copier.stats().linked_bytes, original.len() * 2);
+        assert!(copier.copy_file(&source, &mutable).is_err());
+        assert!(
+            !mutable.exists(),
+            "mutable copies must still reject shared sources"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_sharing_is_probed_once_and_copies_already_shared_segments() -> TestResult {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        fs::write(&source, b"retained immutable segment")?;
+        fs::hard_link(&source, root.path().join("older-generation"))?;
+        let mut copier = StagingCopier::default();
+        let attempts = std::cell::Cell::new(0);
+        for number in 0..2 {
+            let target = root.path().join(format!("copy-{number}"));
+            copier.share_with_checkpoint(
+                &source,
+                &target,
+                |_, _| {
+                    attempts.set(attempts.get() + 1);
+                    Err(io::Error::from_raw_os_error(libc::EXDEV))
+                },
+                || Ok(()),
+            )?;
+            assert_eq!(fs::read(&target)?, fs::read(&source)?);
+            assert_ne!(fs::metadata(&target)?.ino(), fs::metadata(&source)?.ino());
+            assert_eq!(fs::metadata(&target)?.nlink(), 1);
+        }
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(copier.stats().link_refusals, 1);
+        assert_eq!(copier.stats().linked_files, 0);
+        assert_eq!(copier.stats().copied_files + copier.stats().cloned_files, 2);
+        assert_eq!(fs::metadata(&source)?.nlink(), 2);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sharing_preserves_io_failures_and_cancellation_without_copying() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        fs::write(&source, b"unchanged source")?;
+        for errno in [libc::ENOSPC, libc::EDQUOT, libc::EIO, libc::EACCES] {
+            let target = root.path().join(format!("failure-{errno}"));
+            let mut copier = StagingCopier::default();
+            let error = copier
+                .share_with_checkpoint(
+                    &source,
+                    &target,
+                    |_, _| Err(io::Error::from_raw_os_error(errno)),
+                    || Ok(()),
+                )
+                .expect_err("real I/O failures must not become fallback copies");
+            assert_eq!(error.raw_os_error(), Some(errno));
+            assert!(!target.exists());
+            assert_eq!(copier.stats().link_refusals, 0);
+        }
+        for linked in [false, true] {
+            let target = root.path().join(format!("cancelled-{linked}"));
+            let cancelled = std::cell::Cell::new(false);
+            let mut copier = StagingCopier::default();
+            let error = copier
+                .share_with_checkpoint(
+                    &source,
+                    &target,
+                    |source, target| {
+                        if linked {
+                            fs::hard_link(source, target)?;
+                        }
+                        cancelled.set(true);
+                        if linked {
+                            Ok(())
+                        } else {
+                            Err(io::Error::from(io::ErrorKind::Unsupported))
+                        }
+                    },
+                    || {
+                        if cancelled.get() {
+                            Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "cancel shared staging",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("post-I/O cancellation must win");
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(target.exists(), linked);
+            assert_eq!(copier.stats().linked_files, 0);
+            assert_eq!(copier.stats().link_refusals, 0);
+            assert_eq!(copier.stats().copied_files + copier.stats().cloned_files, 0);
+            assert_eq!(fs::read(&source)?, b"unchanged source");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sharing_rejects_symlinks_existing_targets_and_changed_permissions() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let symlink = root.path().join("symlink");
+        let target = root.path().join("target");
+        fs::write(&source, b"immutable bytes")?;
+        std::os::unix::fs::symlink(&source, &symlink)?;
+        let mut copier = StagingCopier::default();
+        assert!(copier.share_immutable_segment(&symlink, &target).is_err());
+        assert!(!target.exists());
+        fs::write(&target, b"preexisting unrelated bytes")?;
+        assert!(copier.share_immutable_segment(&source, &target).is_err());
+        assert_eq!(fs::read(&target)?, b"preexisting unrelated bytes");
+        let changed_target = root.path().join("changed-permissions");
+        assert!(
+            copier
+                .share_with_checkpoint(
+                    &source,
+                    &changed_target,
+                    |source, target| {
+                        fs::hard_link(source, target)?;
+                        let mut permissions = fs::metadata(source)?.permissions();
+                        permissions.set_readonly(true);
+                        fs::set_permissions(source, permissions)
+                    },
+                    || Ok(()),
+                )
+                .is_err()
+        );
+        assert_eq!(copier.stats().linked_files, 0);
+        assert_eq!(copier.stats().link_refusals, 0);
+        Ok(())
     }
 
     #[test]

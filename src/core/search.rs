@@ -1947,6 +1947,7 @@ impl PackSearchHandoff {
             &options.workspace_path,
             options.database_path.as_deref(),
             Some(connection),
+            self.snapshot.scoring_reference_time,
         );
         if calibration.input_identity().as_ref() != Some(identity) {
             return None;
@@ -4883,6 +4884,7 @@ struct SearchScoreCalibrationCacheKey {
     database_path: PathBuf,
     workspace_id: String,
     feedback_content_hash: String,
+    feedback_selection_hash: String,
     jsonl_fingerprint: SearchScoreCalibrationJsonlCacheFingerprint,
 }
 
@@ -5047,14 +5049,22 @@ fn search_score_calibration_for_workspace_cached(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
+    reference_time: DateTime<Utc>,
 ) -> SearchScoreCalibration {
-    search_score_calibration_with_feedback(workspace_path, database_path, read_connection).0
+    search_score_calibration_with_feedback(
+        workspace_path,
+        database_path,
+        read_connection,
+        reference_time,
+    )
+    .0
 }
 
 fn search_score_calibration_with_feedback<'a>(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&'a DbConnection>,
+    reference_time: DateTime<Utc>,
 ) -> (SearchScoreCalibration, Option<SearchFeedbackSnapshot<'a>>) {
     let workspace_id = bound_search_workspace_id(workspace_path, database_path, read_connection);
     let default_database_path = default_workspace_database_path(workspace_path);
@@ -5081,6 +5091,44 @@ fn search_score_calibration_with_feedback<'a>(
     } else {
         None
     };
+    // Calibration and quality scoring share the request's frozen clock.
+    // Keep the complete ledger for handoff identity and harmful-count scoring,
+    // but do not let later observations grant confidence to an earlier query.
+    // The JSONL remains the caller's current, explicitly supplied calibration
+    // artifact; its legacy rows do not carry observation timestamps.
+    let mut calibration_feedback = Vec::new();
+    let mut malformed_timestamp_count = 0usize;
+    let mut selection_hasher = blake3::Hasher::new();
+    selection_hasher.update(b"ee.search.calibration_feedback_selection.v1");
+    for event in &feedback_events.events {
+        let Some(evidence_json) = event.evidence_json.as_deref() else {
+            continue;
+        };
+        let created_at = match DateTime::parse_from_rfc3339(&event.created_at) {
+            Ok(created_at) => created_at.with_timezone(&Utc),
+            Err(_) => {
+                // Unrelated feedback evidence is not a calibration defect.
+                // Malformed JSON already counted as malformed calibration;
+                // a dated sample with unknown time must now fail closed too.
+                let unrelated_evidence = serde_json::from_str::<serde_json::Value>(evidence_json)
+                    .is_ok_and(|value| calibration_sample_from_value(&value).is_none());
+                if !unrelated_evidence {
+                    malformed_timestamp_count = malformed_timestamp_count.saturating_add(1);
+                }
+                continue;
+            }
+        };
+        if created_at > reference_time {
+            continue;
+        }
+        selection_hasher.update(&(event.id.len() as u64).to_be_bytes());
+        selection_hasher.update(event.id.as_bytes());
+        calibration_feedback.push(event);
+    }
+    selection_hasher.update(&(malformed_timestamp_count as u64).to_be_bytes());
+    let feedback_selection_hash = format!("blake3:{}", selection_hasher.finalize().to_hex());
+    // Key by admitted observations, not the wall clock: identical selections
+    // reuse calibration while crossing an observation boundary invalidates it.
     let cache_key = feedback_content_hash
         .as_ref()
         .filter(|_| jsonl_load.unreadable_reason.is_none())
@@ -5089,6 +5137,7 @@ fn search_score_calibration_with_feedback<'a>(
             database_path: resolved_database_path.to_path_buf(),
             workspace_id: workspace_id.clone(),
             feedback_content_hash: feedback_content_hash.clone(),
+            feedback_selection_hash: feedback_selection_hash.clone(),
             jsonl_fingerprint: search_score_calibration_jsonl_cache_fingerprint(&jsonl_load),
         });
     let request_feedback = |feedback_events: SearchScoreCalibrationFeedbackEvents| {
@@ -5119,9 +5168,10 @@ fn search_score_calibration_with_feedback<'a>(
 
     let calibration = SearchScoreCalibration::from_jsonl_load_with_feedback_event_status(
         jsonl_load,
-        &feedback_events.events,
+        calibration_feedback,
         feedback_events.unavailable_reason.clone(),
         feedback_content_hash,
+        malformed_timestamp_count,
     );
     if let Some(cache_key) = cache_key
         && let Ok(mut cache_guard) = cache.write()
@@ -5177,14 +5227,16 @@ impl SearchScoreCalibration {
             feedback_events,
             feedback_event_unavailable_reason,
             feedback_content_hash,
+            0,
         )
     }
 
-    fn from_jsonl_load_with_feedback_event_status(
+    fn from_jsonl_load_with_feedback_event_status<'a>(
         jsonl_load: SearchScoreCalibrationJsonlLoad,
-        feedback_events: &[StoredFeedbackEvent],
+        feedback_events: impl IntoIterator<Item = &'a StoredFeedbackEvent>,
         feedback_event_unavailable_reason: Option<String>,
         feedback_content_hash: Option<String>,
+        malformed_timestamp_count: usize,
     ) -> Self {
         let mut residuals = jsonl_load.residuals.clone();
         let corrupt_line_numbers = jsonl_load.corrupt_line_numbers.clone();
@@ -5196,7 +5248,7 @@ impl SearchScoreCalibration {
         // contributors does not bloat every search payload.
         let mut feedback_event_ids: Vec<String> = Vec::new();
         let mut feedback_event_ids_truncated = false;
-        let mut feedback_event_malformed_count = 0usize;
+        let mut feedback_event_malformed_count = malformed_timestamp_count;
         let mut feedback_evidence = Vec::<(String, u32)>::new();
 
         for event in feedback_events {
@@ -5791,6 +5843,7 @@ fn annotate_hits_with_score_calibration(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
+    reference_time: DateTime<Utc>,
     hits: &mut [SearchHit],
     degraded: &mut Vec<SearchDegradation>,
 ) -> Option<String> {
@@ -5798,6 +5851,7 @@ fn annotate_hits_with_score_calibration(
         workspace_path,
         database_path,
         read_connection,
+        reference_time,
     );
     annotate_hits_with_loaded_score_calibration(&calibration, hits, degraded)
 }
@@ -10835,7 +10889,10 @@ async fn run_search_inner_with_performance(
             fast_embedder_override.as_deref(),
         )?
     };
-    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation
+        && !source_mode.unavailable_no_results
+        && source_mode.applied.uses_embeddings()
+    {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -10877,6 +10934,7 @@ async fn run_search_inner_with_performance(
     let rerank_runtime = if producer_selection_error.is_some()
         || live_snapshot_retrieval.is_some()
         || empty_generation
+        || source_mode.unavailable_no_results
     {
         SearchRerankRuntime::disabled()
     } else {
@@ -11106,6 +11164,7 @@ async fn run_search_inner_with_performance(
                 &options.workspace_path,
                 options.database_path.as_deref(),
                 read_connection,
+                scoring_reference_time,
             );
             // Unpinned read/write library handles retain the SQL scoring path.
             // Only the held source view may reuse this request's ledger rows.
@@ -11762,7 +11821,10 @@ async fn run_diag_search_in_snapshot(
             unavailable_no_results: false,
         }
     };
-    let embed_backend = if !empty_generation && source_mode.applied.uses_embeddings() {
+    let embed_backend = if !empty_generation
+        && !source_mode.unavailable_no_results
+        && source_mode.applied.uses_embeddings()
+    {
         fast_embedder_override.as_ref().map_or_else(
             crate::core::index::active_embed_backend,
             |embedder| {
@@ -11798,7 +11860,13 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(scoring_candidate_limit);
-    let mut diag_result = if empty_generation {
+    let mut diag_result = if source_mode.unavailable_no_results {
+        unavailable_diag_search_result(
+            config.rrf_k,
+            scoring_candidate_limit as usize,
+            fusion_weights,
+        )
+    } else if empty_generation {
         empty_diag_search_result(
             source_mode.applied,
             fast_embedder_override
@@ -11863,6 +11931,7 @@ async fn run_diag_search_in_snapshot(
         &options.workspace_path,
         options.database_path.as_deref(),
         read_connection,
+        scoring_reference_time,
         &mut raw_hits,
         &mut degraded,
     );
@@ -12421,16 +12490,21 @@ fn resolve_source_mode_with_tiers(
                     unavailable_no_results: false,
                 });
             }
-            SearchSourceMode::Hybrid if options.strict_source_mode => {
+            SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly
+                if options.strict_source_mode =>
+            {
                 return Err(SearchError::SourceModeUnavailable {
                     requested,
                     reason: format!("embedding model unavailable: {reason}"),
                 });
             }
             SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly => {
-                degraded.push(SearchDegradation::search_unavailable(
-                    "the embedding model is unavailable and the lexical/BM25 arm is unavailable",
-                ));
+                let reason = if lexical_available {
+                    "the embedding model is unavailable and the requested semantic-only mode excludes lexical retrieval"
+                } else {
+                    "the embedding model is unavailable and the lexical/BM25 arm is unavailable"
+                };
+                degraded.push(SearchDegradation::search_unavailable(reason));
                 return Ok(SourceModeResolution {
                     applied: requested,
                     fallback_applied: false,
@@ -12453,6 +12527,16 @@ fn resolve_source_mode_with_tiers(
                 reason: format!("semantic similarity unavailable: {reason}"),
             });
         }
+        if !lexical_available {
+            degraded.push(SearchDegradation::search_unavailable(
+                "semantic similarity is unavailable on the deterministic hash fallback and the lexical/BM25 arm is unavailable",
+            ));
+            return Ok(SourceModeResolution {
+                applied: requested,
+                fallback_applied: false,
+                unavailable_no_results: true,
+            });
+        }
         degraded.push(SearchDegradation::embed_model_unavailable(reason));
         tracing::warn!(
             target: "ee::search::embedder_down",
@@ -12463,17 +12547,10 @@ fn resolve_source_mode_with_tiers(
             reason,
             "active embedder is deterministic hash fallback; semantic similarity unavailable"
         );
-        if lexical_available {
-            return Ok(SourceModeResolution {
-                applied: SearchSourceMode::LexicalOnly,
-                fallback_applied: true,
-                unavailable_no_results: false,
-            });
-        }
         return Ok(SourceModeResolution {
             applied: SearchSourceMode::LexicalOnly,
             fallback_applied: true,
-            unavailable_no_results: true,
+            unavailable_no_results: false,
         });
     }
 
@@ -13244,6 +13321,31 @@ fn empty_diag_search_result(
         errors: Vec::new(),
         degraded: Vec::new(),
     }
+}
+
+fn unavailable_diag_search_result(
+    rrf_k: f64,
+    limit: usize,
+    fusion_weights: SearchFusionWeights,
+) -> DiagSearchSyncResult {
+    let mut result = empty_diag_search_result(
+        SearchSourceMode::LexicalOnly,
+        false,
+        rrf_k,
+        limit,
+        fusion_weights,
+    );
+    for arm in [
+        &mut result.pre_fusion.lexical,
+        &mut result.pre_fusion.semantic_fast,
+    ] {
+        arm.available = false;
+        arm.error = Some(
+            "retrieval arm not executed because the requested search source is unavailable"
+                .to_owned(),
+        );
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -20957,8 +21059,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_corrupt", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE);
@@ -21005,8 +21113,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_too_large", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(
@@ -21090,8 +21204,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_unreadable", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE);
@@ -21132,8 +21252,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_absent", 0.5)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
         assert!(
             degraded.is_empty(),
             "absent calibration must not emit any degradation"
@@ -21314,6 +21440,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut hits,
             &mut degraded,
         );
@@ -21446,6 +21573,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut first_hits,
             &mut first_degraded,
         );
@@ -21462,6 +21590,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut second_hits,
             &mut second_degraded,
         );
@@ -21489,6 +21618,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut third_hits,
             &mut third_degraded,
         );
@@ -21540,6 +21670,7 @@ mod tests {
                 &workspace,
                 Some(&database_path),
                 Some(&connection),
+                Utc::now(),
             )
         };
         let baseline = load();
@@ -21612,6 +21743,7 @@ mod tests {
             &workspace,
             None,
             None,
+            Utc::now(),
             &mut original_hits,
             &mut Vec::new(),
         );
@@ -21639,6 +21771,7 @@ mod tests {
             &workspace,
             None,
             None,
+            Utc::now(),
             &mut changed_hits,
             &mut Vec::new(),
         );
@@ -21649,7 +21782,8 @@ mod tests {
             changed_hits[0].metadata.as_ref().unwrap()["scoreInterval"],
         );
         replace(&baseline_rows)?;
-        let restored = search_score_calibration_for_workspace_cached(&workspace, None, None);
+        let restored =
+            search_score_calibration_for_workspace_cached(&workspace, None, None, Utc::now());
         assert_eq!(restored.input_identity(), original_identity);
         assert_ne!(
             restored.input_identity(),
@@ -21690,6 +21824,7 @@ mod tests {
                 &workspace,
                 Some(&database_path),
                 Some(&reader),
+                Utc::now(),
             )
         };
         let original_identity = load().input_identity();
@@ -21832,6 +21967,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             None,
+            Utc::now(),
             &mut hits,
             &mut degraded,
         );
@@ -22662,6 +22798,73 @@ mod tests {
     }
 
     #[test]
+    fn strict_source_modes_reject_missing_embedder_before_fallback() -> TestResult {
+        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            for lexical_available in [false, true] {
+                let options = source_mode_test_options(source_mode, true);
+                let mut degraded = Vec::new();
+                let error = match resolve_source_mode_with_tiers(
+                    &options,
+                    &mut degraded,
+                    SearchTierState {
+                        lexical_available,
+                        embed_model_unavailable: Some("missing model fixture"),
+                        semantic_embedder_pending: None,
+                        semantic_embedder_degraded: None,
+                    },
+                ) {
+                    Ok(resolution) => {
+                        return Err(format!(
+                            "strict {source_mode:?} must reject a missing model (lexical available: {lexical_available}): {resolution:?}"
+                        ));
+                    }
+                    Err(error) => error,
+                };
+                match error {
+                    SearchError::SourceModeUnavailable { requested, reason } => {
+                        assert_eq!(requested, source_mode);
+                        assert!(reason.contains("embedding model unavailable"));
+                        assert!(reason.contains("missing model fixture"));
+                    }
+                    other => return Err(format!("unexpected source mode error: {other}")),
+                }
+                assert!(degraded.is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_only_missing_embedder_reports_excluded_lexical_arm() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::SemanticOnly, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
+        assert!(!resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "search_unavailable");
+        assert!(
+            degraded[0]
+                .message
+                .contains("semantic-only mode excludes lexical")
+        );
+        assert!(!degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+        Ok(())
+    }
+
+    #[test]
     fn emit_lexical_unavailable_when_fts5_only_down() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
         let mut degraded = Vec::new();
@@ -22741,30 +22944,40 @@ mod tests {
             "hash fallback reason should reach the degraded message: {}",
             degraded[0].message
         );
+        assert_eq!(degraded[0].data_json()["details"]["lexicalAvailable"], true);
         Ok(())
     }
 
     #[test]
-    fn hash_fallback_never_reenters_hybrid_when_lexical_is_unavailable() -> TestResult {
-        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
-        let mut degraded = Vec::new();
-        let resolution = resolve_source_mode_with_tiers(
-            &options,
-            &mut degraded,
-            SearchTierState {
-                lexical_available: false,
-                embed_model_unavailable: None,
-                semantic_embedder_pending: None,
-                semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    fn hash_fallback_without_lexical_reports_unavailable_without_claiming_fallback() -> TestResult {
+        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            let options = source_mode_test_options(source_mode, false);
+            let mut degraded = Vec::new();
+            let resolution = resolve_source_mode_with_tiers(
+                &options,
+                &mut degraded,
+                SearchTierState {
+                    lexical_available: false,
+                    embed_model_unavailable: None,
+                    semantic_embedder_pending: None,
+                    semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
+                },
+            )
+            .map_err(|error| error.to_string())?;
 
-        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
-        assert!(resolution.fallback_applied);
-        assert!(resolution.unavailable_no_results);
-        assert_eq!(degraded.len(), 1);
-        assert_eq!(degraded[0].code, "embed_model_unavailable");
+            assert_eq!(resolution.applied, source_mode);
+            assert!(!resolution.fallback_applied);
+            assert!(resolution.unavailable_no_results);
+            assert_eq!(degraded.len(), 1);
+            assert_eq!(degraded[0].code, "search_unavailable");
+            assert!(degraded[0].message.contains("lexical/BM25 arm is unavailable"));
+            assert!(
+                degraded[0]
+                    .data_json()
+                    .pointer("/details/lexicalAvailable")
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
@@ -26631,6 +26844,94 @@ mod tests {
         assert!(!diag_json.contains(&evidence_id));
         assert!(!diag_json.contains(denied_phrase));
         assert!(diag_json.contains(memory_id));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_unavailable_sources_skip_query_embedding_and_retrieval() -> TestResult {
+        use frankensearch::core::generation::EmbeddingIdentityBundleV1;
+        use frankensearch::core::traits::ModelCategory;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingHash {
+            hash: HashEmbedder,
+            calls: AtomicUsize,
+        }
+        impl Embedder for CountingHash {
+            fn embed<'a>(
+                &'a self,
+                cx: &'a asupersync::Cx,
+                text: &'a str,
+            ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.hash.embed(cx, text)
+            }
+            fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+                self.hash.identity()
+            }
+            fn dimension(&self) -> usize {
+                self.hash.dimension()
+            }
+            fn id(&self) -> &str {
+                self.hash.id()
+            }
+            fn model_name(&self) -> &str {
+                self.hash.model_name()
+            }
+            fn is_semantic(&self) -> bool {
+                false
+            }
+            fn category(&self) -> ModelCategory {
+                self.hash.category()
+            }
+        }
+
+        let index_dir = collection_cancellation_index("diag-unavailable-sources")?;
+        write_current_index_metadata(&index_dir, 1)?;
+        assert!(!lexical_search_available(&index_dir));
+        let embedder = Arc::new(CountingHash {
+            hash: HashEmbedder::default_256(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut options = source_mode_test_options(SearchSourceMode::SemanticOnly, false);
+        options.workspace_path = index_dir.clone();
+        options.database_path = Some(index_dir.join("absent.db"));
+        options.index_dir = Some(index_dir);
+        options.query =
+            "Preserve exact caller cancellation during Frankensearch collection.".to_owned();
+        options.relevance_floor = Some(0.0);
+
+        for source_mode in [
+            SearchSourceMode::Hybrid,
+            SearchSourceMode::SemanticOnly,
+            SearchSourceMode::LexicalOnly,
+        ] {
+            options.source_mode = source_mode;
+            let selected = Arc::clone(&embedder) as Arc<dyn Embedder>;
+            let options = &options;
+            let report = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                run_diag_search_with_cx_and_workspace_embedder(&cx, options, Some(selected)).await
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            assert_eq!(embedder.calls.load(Ordering::Relaxed), 0);
+            assert!(report.final_report.results.is_empty());
+            assert!(!report.final_report.source_mode_fallback);
+            for arm in [&report.pre_fusion.lexical, &report.pre_fusion.semantic_fast] {
+                assert!(!arm.available);
+                assert!(arm.results.is_empty());
+                let error = arm.error.as_deref().ok_or("missing unavailable-arm reason")?;
+                assert!(error.contains("not executed"));
+                assert!(error.contains("requested search source is unavailable"));
+                assert!(!error.contains("generation is empty"));
+            }
+        }
+
+        // The populated vector fixture and spy must observe an executed query.
+        options.source_mode = SearchSourceMode::SemanticOnly;
+        run_diag_search_with_embedder(&options, embedder.clone())
+            .map_err(|error| error.to_string())?;
+        assert!(embedder.calls.load(Ordering::Relaxed) > 0);
         Ok(())
     }
 
