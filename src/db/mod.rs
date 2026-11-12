@@ -32182,6 +32182,23 @@ impl DbConnection {
             .collect()
     }
 
+    /// Read a curation candidate's durable owner before admitting native feedback.
+    pub(crate) fn get_curation_candidate_workspace_id(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id FROM curation_candidates WHERE id = ?1",
+            &[Value::Text(candidate_id.to_owned())],
+        )?;
+        rows.first()
+            .map(|row| {
+                required_text(row, 0, DbOperation::Query, "workspace_id").map(str::to_owned)
+            })
+            .transpose()
+    }
+
     /// Get one curation candidate by ID within a workspace.
     pub fn get_curation_candidate(
         &self,

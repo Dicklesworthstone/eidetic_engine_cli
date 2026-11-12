@@ -11359,11 +11359,12 @@ pub struct OutcomeArgs {
     #[arg(long, value_name = "N", requires = "pack")]
     pub item: Option<u32>,
 
-    /// Target type: memory, evidence, rule, session, source, pack, or candidate.
+    /// Target type: memory, evidence, procedure, rule, session, source, pack, or candidate.
     #[arg(long, default_value = "memory")]
     pub target_type: String,
 
-    /// Workspace ID for other targets; native rule ownership is resolved from --workspace.
+    /// Workspace ID for external sources; native targets are bound to --workspace.
+    /// When supplied for a native target, it must match the addressed workspace.
     #[arg(long)]
     pub workspace_id: Option<String>,
 
@@ -52888,8 +52889,8 @@ where
         .database
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    if target_type.trim().eq_ignore_ascii_case("rule") {
-        match crate::core::outcome::outcome_native_rule_workspace(
+    if crate::core::outcome::outcome_target_is_native(&target_type) {
+        match crate::core::outcome::outcome_addressed_workspace(
             &database_path,
             &workspace_path,
             workspace_id.as_deref(),
@@ -73057,6 +73058,124 @@ mod tests {
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
     use crate::core::init::{InitOptions, init_workspace};
+
+    #[test]
+    fn outcome_pack_command_binds_the_addressed_workspace_without_workspace_id() -> TestResult {
+        use crate::db::{CreatePackRecordInput, CreateWorkspaceInput, DbConnection};
+
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let owner = "wsp_00000000000000000000000991";
+        let pack_id = "pack_00000000000000000000000991";
+        connection
+            .insert_workspace(
+                owner,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let other = workspace.join("other");
+        fs::create_dir_all(&other).map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_00000000000000000000000992",
+                &CreateWorkspaceInput {
+                    path: other.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_pack_record(
+                pack_id,
+                &CreatePackRecordInput {
+                    task_paths: Vec::new(),
+                    workspace_id: owner.to_owned(),
+                    query: "release validation".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 512,
+                    used_tokens: 0,
+                    item_count: 0,
+                    omitted_count: 0,
+                    pack_hash: format!("blake3:{}", blake3::hash(b"cli-outcome-pack").to_hex()),
+                    degraded_json: None,
+                    created_by: None,
+                },
+                &[],
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+        let invoke = |addressed: &Path, explicit_owner: Option<&str>| {
+            let mut argv = vec![
+                "ee".to_owned(),
+                "outcome".to_owned(),
+                pack_id.to_owned(),
+                "--target-type".to_owned(),
+                "pack".to_owned(),
+                "--workspace".to_owned(),
+                addressed.to_string_lossy().into_owned(),
+                "--signal".to_owned(),
+                "helpful".to_owned(),
+                "--event-id".to_owned(),
+                "fb_00000000000000000000000991".to_owned(),
+                "--json".to_owned(),
+            ];
+            if addressed != workspace.as_path() {
+                argv.extend([
+                    "--database".to_owned(),
+                    database.to_string_lossy().into_owned(),
+                ]);
+            }
+            if let Some(owner) = explicit_owner {
+                argv.extend(["--workspace-id".to_owned(), owner.to_owned()]);
+            }
+            let cli = Cli::try_parse_from(argv).map_err(|error| error.to_string())?;
+            let Some(super::Command::Outcome(args)) = &cli.command else {
+                return Err("expected outcome command".to_owned());
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::handle_outcome(&cli, args, &mut stdout, &mut stderr);
+            let response: serde_json::Value =
+                serde_json::from_slice(&stdout).map_err(|error| {
+                    format!(
+                        "outcome JSON: {error}; stdout={}; stderr={}",
+                        String::from_utf8_lossy(&stdout),
+                        String::from_utf8_lossy(&stderr)
+                    )
+                })?;
+            Ok((exit, response))
+        };
+        let (exit, response) = invoke(&workspace, None)?;
+        assert_eq!(exit, ProcessExitCode::Success, "{response}");
+        assert_eq!(response["data"]["status"], "recorded");
+        assert_eq!(response["data"]["target"]["verified"], true);
+        assert_eq!(response["data"]["target"]["workspaceId"], owner);
+        let recorded = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        for explicit_owner in [None, Some(owner)] {
+            let (exit, response) = invoke(&other, explicit_owner)?;
+            assert_eq!(exit, ProcessExitCode::PolicyDenied, "{response}");
+        }
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            recorded,
+            "a shared database and existing event ID cannot retarget CLI feedback"
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
 
     #[test]
     fn pack_error_log_recalls_later_native_diagnostic_from_text_and_file()
