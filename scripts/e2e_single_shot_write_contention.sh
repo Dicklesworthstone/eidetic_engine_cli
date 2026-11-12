@@ -28,6 +28,120 @@ fi
 
 E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
+# bd-mfqa2: the macOS temp path is a PLATFORM preference, not a default for
+# every host. Resolved centrally so this script does not re-implement it.
+# shellcheck source=scripts/lib/e2e_tmproot.sh
+# shellcheck disable=SC1091
+source "${E2E_SCRIPT_DIR}/lib/e2e_tmproot.sh"
+
+emit_event_json() {
+    local label="$1" status="$2" diagnosis="${3:-}"
+    jq -cn --arg test_id "${TEST_ID}" --arg label "${label}" --arg status "${status}" \
+        --arg diagnosis "${diagnosis}" \
+        '{schema:"ee.test_event.v1",test_id:$test_id,kind:"assert_result",fields:{label:$label,status:$status,first_failure_diagnosis:$diagnosis}}'
+}
+
+run_self_test() {
+    local st_base st_root st_out st_rc
+    st_base="$(e2e_temp_root)"
+    st_root="$(mktemp -d "${st_base%/}/ee-write-contention-selftest.XXXXXX")"
+
+    # Arm 1 (negative): missing EE_E2E_TMPDIR fails closed at temp_root_ok
+    # before touching /ws or /logs and records the missing path in diagnosis.
+    local missing_tmp="${st_root}/does-not-exist"
+    st_out="$(EE_E2E_TMPDIR="${missing_tmp}" EE_SINGLE_SHOT_CONTENTION_PROBE_STOP_AFTER_INIT=1 \
+        bash "${BASH_SOURCE[0]}" 2>/dev/null)"
+    st_rc=$?
+    if [[ "${st_rc}" -ne 3 ]] || ! jq -e --arg p "${missing_tmp}" '
+        .schema == "ee.test_event.v1"
+        and .fields.label == "temp_root_ok"
+        and .fields.status == "fail"
+        and (.fields.first_failure_diagnosis | contains($p))
+    ' <<<"${st_out}" >/dev/null; then
+        echo "FAIL self-test arm 1 (missing temp root): rc=${st_rc} out=${st_out}" >&2
+        return 1
+    fi
+
+    # Arm 2 (negative): failing `ee init --json` that writes its error envelope
+    # to stdout (init.json) with empty stderr still populates first_failure_diagnosis.
+    local fake_ee_fail="${st_root}/fake-ee-fail"
+    cat >"${fake_ee_fail}" <<'EOF'
+#!/usr/bin/env bash
+printf '{"schema":"ee.response.v2","success":false,"error":{"code":"storage_open_failed","message":"simulated stdout-only init error"}}\n'
+exit 2
+EOF
+    chmod +x "${fake_ee_fail}"
+    st_out="$(EE_E2E_TMPDIR="${st_root}" EE_BIN="${fake_ee_fail}" \
+        EE_SKIP_BINARY_FRESHNESS_CHECK=1 EE_SINGLE_SHOT_CONTENTION_PROBE_STOP_AFTER_INIT=1 \
+        bash "${BASH_SOURCE[0]}" 2>/dev/null)"
+    st_rc=$?
+    if [[ "${st_rc}" -ne 2 ]] || ! jq -s -e '
+        any(.[]; .fields.label == "temp_root_ok" and .fields.status == "pass")
+        and any(.[]; .fields.label == "init_ok"
+            and .fields.status == "fail"
+            and (.fields.first_failure_diagnosis | contains("simulated stdout-only init error")))
+    ' <<<"${st_out}" >/dev/null; then
+        echo "FAIL self-test arm 2 (stdout-only init failure diagnosis): rc=${st_rc} out=${st_out}" >&2
+        return 1
+    fi
+
+    # Arm 3 (positive): valid temp root + succeeding init passes both guards.
+    local fake_ee_ok="${st_root}/fake-ee-ok"
+    cat >"${fake_ee_ok}" <<'EOF'
+#!/usr/bin/env bash
+printf '{"schema":"ee.response.v2","success":true}\n'
+exit 0
+EOF
+    chmod +x "${fake_ee_ok}"
+    st_out="$(EE_E2E_TMPDIR="${st_root}" EE_BIN="${fake_ee_ok}" \
+        EE_SKIP_BINARY_FRESHNESS_CHECK=1 EE_SINGLE_SHOT_CONTENTION_PROBE_STOP_AFTER_INIT=1 \
+        bash "${BASH_SOURCE[0]}" 2>/dev/null)"
+    st_rc=$?
+    if [[ "${st_rc}" -ne 0 ]] || ! jq -s -e '
+        any(.[]; .fields.label == "temp_root_ok" and .fields.status == "pass")
+        and any(.[]; .fields.label == "init_ok" and .fields.status == "pass")
+    ' <<<"${st_out}" >/dev/null; then
+        echo "FAIL self-test arm 3 (positive init guard): rc=${st_rc} out=${st_out}" >&2
+        return 1
+    fi
+
+    echo "PASS: e2e_single_shot_write_contention.sh --self-test (3/3 arms)"
+    return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    run_self_test
+    exit $?
+fi
+
+# bd-79x8m: validate temp root and mktemp creation BEFORE resolving the binary
+# or deriving /ws and /logs paths, so a missing EE_E2E_TMPDIR can never collapse
+# ROOT to "" and attempt mkdir -p /ws /logs at the filesystem root.
+ROOT_BASE="$(e2e_temp_root)"
+if [[ -z "${ROOT_BASE}" || ! -d "${ROOT_BASE}" ]]; then
+    emit_event_json temp_root_ok fail "temp root missing or not a directory: ${ROOT_BASE:-<empty>}"
+    echo "cannot continue without an existing temp root (${ROOT_BASE:-<empty>})" >&2
+    exit 3
+fi
+mktemp_err=""
+if ! ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-write-contention-e2e.XXXXXX" 2>&1)"; then
+    mktemp_err="${ROOT}"
+    ROOT=""
+fi
+if [[ -z "${ROOT}" || ! -d "${ROOT}" || "${ROOT}" == "/" ]]; then
+    emit_event_json temp_root_ok fail "mktemp -d failed under ${ROOT_BASE}: ${mktemp_err:-empty ROOT}"
+    echo "cannot continue without a writable workspace temp dir under ${ROOT_BASE}" >&2
+    exit 3
+fi
+WS="${ROOT}/ws"
+LOG_DIR="${ROOT}/logs"
+EVENT_LOG="${LOG_DIR}/events.jsonl"
+if ! mkdir -p "${WS}" "${LOG_DIR}" 2>/dev/null || ! : >"${EVENT_LOG}" 2>/dev/null; then
+    emit_event_json temp_root_ok fail "failed to initialize workspace/log directories under ${ROOT}"
+    echo "cannot continue without writable workspace/log directories under ${ROOT}" >&2
+    exit 3
+fi
+
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
@@ -51,44 +165,39 @@ fi
 # this host (an RCH run can leave a Linux ELF in a shared target dir, which
 # satisfies -x and dies with exec format error). Refuse rather than report
 # assertion failures with one environmental cause.
-if ! ee_require_current_binary "${REAL_EE}" "e2e_single_shot_write_contention"; then
-    exit 3
+if [[ "${EE_SKIP_BINARY_FRESHNESS_CHECK:-0}" != "1" ]]; then
+    if ! ee_require_current_binary "${REAL_EE}" "e2e_single_shot_write_contention"; then
+        exit 3
+    fi
 fi
 
 WRITERS="${EE_E2E_WRITERS:-6}"
 WRITES="${EE_E2E_WRITES:-10}"
-# bd-mfqa2: the macOS temp path is a PLATFORM preference, not a default for
-# every host. Resolved centrally so this script does not re-implement it.
-# shellcheck source=scripts/lib/e2e_tmproot.sh
-# shellcheck disable=SC1091
-source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e_tmproot.sh"
-ROOT_BASE="$(e2e_temp_root)"
-ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-write-contention-e2e.XXXXXX")"
-WS="${ROOT}/ws"
-LOG_DIR="${ROOT}/logs"
-EVENT_LOG="${LOG_DIR}/events.jsonl"
-mkdir -p "${WS}" "${LOG_DIR}"
-: >"${EVENT_LOG}"
 RUN_TOKEN="$(basename "${ROOT}" | tr -cd '[:alnum:]')"
 CONTENT_MARKER="contentionfact${RUN_TOKEN}"
 
 event() {
     local label="$1" status="$2" diagnosis="${3:-}"
-    jq -cn --arg test_id "${TEST_ID}" --arg label "${label}" --arg status "${status}" \
-        --arg diagnosis "${diagnosis}" \
-        '{schema:"ee.test_event.v1",test_id:$test_id,kind:"assert_result",fields:{label:$label,status:$status,first_failure_diagnosis:$diagnosis}}' \
-        | tee -a "${EVENT_LOG}"
+    emit_event_json "${label}" "${status}" "${diagnosis}" | tee -a "${EVENT_LOG}"
     if [[ "${status}" == "fail" ]]; then
         FAILURES=$((FAILURES + 1))
     fi
 }
 
+event temp_root_ok pass
+
 if ! "${REAL_EE}" init --workspace "${WS}" --json >"${LOG_DIR}/init.json" 2>"${LOG_DIR}/init.err"; then
-    event init_ok fail "init failed: $(head -c 200 "${LOG_DIR}/init.err")"
+    init_rc=$?
+    init_err_head="$(head -c 240 "${LOG_DIR}/init.err" 2>/dev/null || true)"
+    init_out_head="$(head -c 240 "${LOG_DIR}/init.json" 2>/dev/null || true)"
+    event init_ok fail "init failed (rc=${init_rc}): stderr=${init_err_head:-<empty>}; stdout=${init_out_head:-<empty>}"
     echo "cannot continue without a workspace" >&2
     exit 2
 fi
 event init_ok pass
+if [[ "${EE_SINGLE_SHOT_CONTENTION_PROBE_STOP_AFTER_INIT:-0}" == "1" ]]; then
+    exit 0
+fi
 
 # --- concurrent interleaved writers -------------------------------------
 # Each worker alternates journal append / remember. Every command's exit
