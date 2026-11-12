@@ -1666,6 +1666,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         &fixture.root,
         fixture.options().database_path.as_deref(),
         Some(&reader),
+        reference,
     );
     let feedback = feedback.unwrap();
     let mut sql_hits = hits.clone();
@@ -1796,6 +1797,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         &fixture.root,
         fixture.options().database_path.as_deref(),
         Some(&reader),
+        reference,
     );
     let feedback = feedback.unwrap();
     let mut unknown_hits = hits.clone();
@@ -1936,6 +1938,7 @@ fn pinned_feedback_rows_match_sql_counts_and_quality_scores() {
         &fixture.root,
         fixture.options().database_path.as_deref(),
         Some(&reader),
+        reference,
     );
     let feedback = feedback.unwrap();
     let ids = [memory.as_str(), zero.as_str(), memory.as_str()];
@@ -2024,6 +2027,7 @@ fn feedback_reuse_rejects_malformed_matching_time_and_different_source_views() {
         &fixture.root,
         fixture.options().database_path.as_deref(),
         Some(&reader),
+        reference,
     );
     let feedback = feedback.unwrap();
     fixture
@@ -2068,6 +2072,7 @@ fn feedback_reuse_rejects_malformed_matching_time_and_different_source_views() {
         &fixture.root,
         fixture.options().database_path.as_deref(),
         Some(&reader),
+        reference,
     );
     let feedback = feedback.unwrap();
     assert!(
@@ -2234,6 +2239,7 @@ fn handoff_rejects_config_only_fusion_changes_with_unchanged_source_and_feedback
             &fixture.root,
             options.database_path.as_deref(),
             Some(&fixture.db),
+            handoff.snapshot.scoring_reference_time,
         )
         .input_identity(),
         calibration_identity
@@ -2926,4 +2932,213 @@ fn workspace_anchor_cap_controls_real_ranking_and_invalidates_cached_handoffs() 
         limited.results[0].relevance_score(),
         before.results[0].relevance_score()
     );
+}
+
+fn timed_calibration_feedback(
+    fixture: &Fixture,
+    number: usize,
+    created_at: &str,
+    evidence_json: serde_json::Value,
+) {
+    fixture
+        .db
+        .insert_feedback_event_for_recovery(&StoredFeedbackEvent {
+            id: format!("fb_{number:026}"),
+            workspace_id: fixture.workspace.clone(),
+            target_type: "candidate".to_owned(),
+            target_id: format!("cand_calibration_{number}"),
+            signal: "confirmation".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: Some(evidence_json.to_string()),
+            session_id: None,
+            applied_at: None,
+            created_at: created_at.to_owned(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn calibration_uses_request_time_across_search_diagnostics_cache_and_handoff() {
+    let fixture = Fixture::new();
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let future = reference + chrono::Duration::nanoseconds(2);
+    let memory = fixture.memory(1, 1.0, 1.0, reference - chrono::Duration::days(1));
+    fixture
+        .db
+        .execute(
+            "UPDATE memories SET valid_from = ?1 WHERE id = ?2",
+            &[
+                sqlmodel_core::Value::Text((reference - chrono::Duration::days(1)).to_rfc3339()),
+                sqlmodel_core::Value::Text(memory.clone()),
+            ],
+        )
+        .unwrap();
+    for index in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+        timed_calibration_feedback(
+            &fixture,
+            index,
+            &reference.to_rfc3339(),
+            serde_json::json!({ "score": 1.0, "groundTruthRelevance": 1.0 }),
+        );
+        timed_calibration_feedback(
+            &fixture,
+            index + MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            &future.to_rfc3339(),
+            serde_json::json!({ "score": 1.0, "groundTruthRelevance": 0.0 }),
+        );
+    }
+    let _embedder = fixture.publish_index();
+    let load = |at| {
+        search_score_calibration_for_workspace_cached(
+            &fixture.root,
+            fixture.options().database_path.as_deref(),
+            Some(&fixture.db),
+            at,
+        )
+    };
+    let parse_count = || {
+        SEARCH_SCORE_CALIBRATION_PARSE_LOADS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get(&fixture.root)
+            .copied()
+            .unwrap_or(0)
+    };
+
+    let earlier = load(reference);
+    assert_eq!(earlier.sample_count, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES);
+    assert_eq!(earlier.interval_for_score(1.0), [1.0, 1.0]);
+    let parses = parse_count();
+    let same_selection = load(reference + chrono::Duration::nanoseconds(1));
+    assert_eq!(same_selection.input_identity(), earlier.input_identity());
+    assert_eq!(
+        parse_count(),
+        parses,
+        "a different clock with identical observations must reuse calibration"
+    );
+    let later = load(future);
+    assert_eq!(later.sample_count, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES * 2);
+    assert_eq!(later.interval_for_score(1.0), [0.0, 1.0]);
+    assert_eq!(parse_count(), parses + 1);
+    assert_ne!(later.input_identity(), earlier.input_identity());
+
+    let mut options = fixture.options();
+    options.as_of = Some(reference);
+    options.relevance_floor = None;
+    let canonical = run_search(&options).unwrap();
+    let diagnostic = run_diag_search(&options).unwrap();
+    let handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.can_reuse_for_pack());
+    assert!(
+        handoff.snapshot_matches(&options, &fixture.db),
+        "handoff validation must use the original request clock"
+    );
+    for report in [&canonical, &diagnostic.final_report, &handoff.report] {
+        assert_eq!(report.results.len(), 1, "{:#?}", report.degraded);
+        assert_eq!(report.results[0].doc_id, memory);
+        let metadata = report.results[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata["calibrated"], true);
+        assert_eq!(
+            metadata["scoreCalibration"]["sampleCount"].as_u64(),
+            Some(MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64)
+        );
+    }
+
+    // The same observations are relevant at their own timestamp, and their
+    // large residuals must then change the real default admission decision.
+    let mut later_options = options.clone();
+    later_options.as_of = Some(future);
+    for report in [
+        run_search(&later_options).unwrap(),
+        run_diag_search(&later_options).unwrap().final_report,
+    ] {
+        assert!(report.results.is_empty());
+        assert_eq!(report.candidates_below_floor, 1);
+    }
+
+    // Temporal admission must not weaken the complete-ledger handoff witness:
+    // even an edit to a currently excluded observation changes its identity.
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE feedback_events SET reason = 'later observation edited' WHERE id = 'fb_{:026}'",
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+        ))
+        .unwrap();
+    let refreshed = load(reference);
+    assert_eq!(refreshed.interval_for_score(1.0), [1.0, 1.0]);
+    assert_ne!(refreshed.input_identity(), earlier.input_identity());
+    assert!(!handoff.snapshot_matches(&options, &fixture.db));
+}
+
+#[test]
+fn calibration_withholds_unknown_observation_time_without_poisoning_unrelated_feedback() {
+    let fixture = Fixture::new();
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let sample = serde_json::json!({ "score": 0.8, "groundTruthRelevance": 0.8 });
+    for index in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+        timed_calibration_feedback(&fixture, index, &reference.to_rfc3339(), sample.clone());
+    }
+    timed_calibration_feedback(
+        &fixture,
+        MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+        "unrelated-invalid-time",
+        serde_json::json!({ "note": "non-calibrating feedback" }),
+    );
+    let load = || {
+        search_score_calibration_for_workspace_cached(
+            &fixture.root,
+            fixture.options().database_path.as_deref(),
+            Some(&fixture.db),
+            reference,
+        )
+    };
+    let unrelated = load();
+    assert_eq!(unrelated.sample_count, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES);
+    assert_eq!(unrelated.feedback_event_malformed_count, 0);
+    assert!(search_calibration_is_eligible_for_coverage(&unrelated));
+
+    timed_calibration_feedback(
+        &fixture,
+        MIN_SEARCH_SCORE_CALIBRATION_SAMPLES + 1,
+        "unknown-calibration-time",
+        sample,
+    );
+    let invalid = load();
+    assert_eq!(invalid.sample_count, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES);
+    assert_eq!(invalid.feedback_event_malformed_count, 1);
+    assert!(!search_calibration_is_eligible_for_coverage(&invalid));
+    assert!(invalid.input_identity().is_none());
+    let mut hits = vec![SearchHit {
+        doc_id: "mem_calibration_time".to_owned(),
+        score: 0.8,
+        source: ScoreSource::SemanticFast,
+        fast_score: Some(0.8),
+        quality_score: None,
+        lexical_score: None,
+        rerank_score: None,
+        metadata: None,
+        explanation: None,
+    }];
+    let mut degraded = Vec::new();
+    assert!(
+        annotate_hits_with_loaded_score_calibration(&invalid, &mut hits, &mut degraded).is_none()
+    );
+    let metadata = hits[0].metadata.as_ref().unwrap();
+    assert_eq!(metadata["calibrated"], false);
+    assert_eq!(metadata["scoreInterval"], serde_json::json!([0.0, 1.0]));
+    assert!(metadata["coverageGuarantee"].is_null());
+    assert!(degraded.iter().any(|entry| {
+        entry.code == SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE
+            && entry.message.contains("feedback_events_malformed")
+    }));
 }

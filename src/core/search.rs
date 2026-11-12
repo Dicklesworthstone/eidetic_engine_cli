@@ -1947,6 +1947,7 @@ impl PackSearchHandoff {
             &options.workspace_path,
             options.database_path.as_deref(),
             Some(connection),
+            self.snapshot.scoring_reference_time,
         );
         if calibration.input_identity().as_ref() != Some(identity) {
             return None;
@@ -4883,6 +4884,7 @@ struct SearchScoreCalibrationCacheKey {
     database_path: PathBuf,
     workspace_id: String,
     feedback_content_hash: String,
+    feedback_selection_hash: String,
     jsonl_fingerprint: SearchScoreCalibrationJsonlCacheFingerprint,
 }
 
@@ -5047,14 +5049,22 @@ fn search_score_calibration_for_workspace_cached(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
+    reference_time: DateTime<Utc>,
 ) -> SearchScoreCalibration {
-    search_score_calibration_with_feedback(workspace_path, database_path, read_connection).0
+    search_score_calibration_with_feedback(
+        workspace_path,
+        database_path,
+        read_connection,
+        reference_time,
+    )
+    .0
 }
 
 fn search_score_calibration_with_feedback<'a>(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&'a DbConnection>,
+    reference_time: DateTime<Utc>,
 ) -> (SearchScoreCalibration, Option<SearchFeedbackSnapshot<'a>>) {
     let workspace_id = bound_search_workspace_id(workspace_path, database_path, read_connection);
     let default_database_path = default_workspace_database_path(workspace_path);
@@ -5081,6 +5091,44 @@ fn search_score_calibration_with_feedback<'a>(
     } else {
         None
     };
+    // Calibration and quality scoring share the request's frozen clock.
+    // Keep the complete ledger for handoff identity and harmful-count scoring,
+    // but do not let later observations grant confidence to an earlier query.
+    // The JSONL remains the caller's current, explicitly supplied calibration
+    // artifact; its legacy rows do not carry observation timestamps.
+    let mut calibration_feedback = Vec::new();
+    let mut malformed_timestamp_count = 0usize;
+    let mut selection_hasher = blake3::Hasher::new();
+    selection_hasher.update(b"ee.search.calibration_feedback_selection.v1");
+    for event in &feedback_events.events {
+        let Some(evidence_json) = event.evidence_json.as_deref() else {
+            continue;
+        };
+        let created_at = match DateTime::parse_from_rfc3339(&event.created_at) {
+            Ok(created_at) => created_at.with_timezone(&Utc),
+            Err(_) => {
+                // Unrelated feedback evidence is not a calibration defect.
+                // Malformed JSON already counted as malformed calibration;
+                // a dated sample with unknown time must now fail closed too.
+                let unrelated_evidence = serde_json::from_str::<serde_json::Value>(evidence_json)
+                    .is_ok_and(|value| calibration_sample_from_value(&value).is_none());
+                if !unrelated_evidence {
+                    malformed_timestamp_count = malformed_timestamp_count.saturating_add(1);
+                }
+                continue;
+            }
+        };
+        if created_at > reference_time {
+            continue;
+        }
+        selection_hasher.update(&(event.id.len() as u64).to_be_bytes());
+        selection_hasher.update(event.id.as_bytes());
+        calibration_feedback.push(event);
+    }
+    selection_hasher.update(&(malformed_timestamp_count as u64).to_be_bytes());
+    let feedback_selection_hash = format!("blake3:{}", selection_hasher.finalize().to_hex());
+    // Key by admitted observations, not the wall clock: identical selections
+    // reuse calibration while crossing an observation boundary invalidates it.
     let cache_key = feedback_content_hash
         .as_ref()
         .filter(|_| jsonl_load.unreadable_reason.is_none())
@@ -5089,6 +5137,7 @@ fn search_score_calibration_with_feedback<'a>(
             database_path: resolved_database_path.to_path_buf(),
             workspace_id: workspace_id.clone(),
             feedback_content_hash: feedback_content_hash.clone(),
+            feedback_selection_hash: feedback_selection_hash.clone(),
             jsonl_fingerprint: search_score_calibration_jsonl_cache_fingerprint(&jsonl_load),
         });
     let request_feedback = |feedback_events: SearchScoreCalibrationFeedbackEvents| {
@@ -5119,9 +5168,10 @@ fn search_score_calibration_with_feedback<'a>(
 
     let calibration = SearchScoreCalibration::from_jsonl_load_with_feedback_event_status(
         jsonl_load,
-        &feedback_events.events,
+        calibration_feedback,
         feedback_events.unavailable_reason.clone(),
         feedback_content_hash,
+        malformed_timestamp_count,
     );
     if let Some(cache_key) = cache_key
         && let Ok(mut cache_guard) = cache.write()
@@ -5177,14 +5227,16 @@ impl SearchScoreCalibration {
             feedback_events,
             feedback_event_unavailable_reason,
             feedback_content_hash,
+            0,
         )
     }
 
-    fn from_jsonl_load_with_feedback_event_status(
+    fn from_jsonl_load_with_feedback_event_status<'a>(
         jsonl_load: SearchScoreCalibrationJsonlLoad,
-        feedback_events: &[StoredFeedbackEvent],
+        feedback_events: impl IntoIterator<Item = &'a StoredFeedbackEvent>,
         feedback_event_unavailable_reason: Option<String>,
         feedback_content_hash: Option<String>,
+        malformed_timestamp_count: usize,
     ) -> Self {
         let mut residuals = jsonl_load.residuals.clone();
         let corrupt_line_numbers = jsonl_load.corrupt_line_numbers.clone();
@@ -5196,7 +5248,7 @@ impl SearchScoreCalibration {
         // contributors does not bloat every search payload.
         let mut feedback_event_ids: Vec<String> = Vec::new();
         let mut feedback_event_ids_truncated = false;
-        let mut feedback_event_malformed_count = 0usize;
+        let mut feedback_event_malformed_count = malformed_timestamp_count;
         let mut feedback_evidence = Vec::<(String, u32)>::new();
 
         for event in feedback_events {
@@ -5791,6 +5843,7 @@ fn annotate_hits_with_score_calibration(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
+    reference_time: DateTime<Utc>,
     hits: &mut [SearchHit],
     degraded: &mut Vec<SearchDegradation>,
 ) -> Option<String> {
@@ -5798,6 +5851,7 @@ fn annotate_hits_with_score_calibration(
         workspace_path,
         database_path,
         read_connection,
+        reference_time,
     );
     annotate_hits_with_loaded_score_calibration(&calibration, hits, degraded)
 }
@@ -11106,6 +11160,7 @@ async fn run_search_inner_with_performance(
                 &options.workspace_path,
                 options.database_path.as_deref(),
                 read_connection,
+                scoring_reference_time,
             );
             // Unpinned read/write library handles retain the SQL scoring path.
             // Only the held source view may reuse this request's ledger rows.
@@ -11863,6 +11918,7 @@ async fn run_diag_search_in_snapshot(
         &options.workspace_path,
         options.database_path.as_deref(),
         read_connection,
+        scoring_reference_time,
         &mut raw_hits,
         &mut degraded,
     );
@@ -20957,8 +21013,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_corrupt", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE);
@@ -21005,8 +21067,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_too_large", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(
@@ -21090,8 +21158,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_unreadable", 0.8)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE);
@@ -21132,8 +21206,14 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_absent", 0.5)];
         let mut degraded = Vec::new();
-        let _ =
-            annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        let _ = annotate_hits_with_score_calibration(
+            &workspace,
+            None,
+            None,
+            Utc::now(),
+            &mut hits,
+            &mut degraded,
+        );
         assert!(
             degraded.is_empty(),
             "absent calibration must not emit any degradation"
@@ -21314,6 +21394,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut hits,
             &mut degraded,
         );
@@ -21446,6 +21527,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut first_hits,
             &mut first_degraded,
         );
@@ -21462,6 +21544,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut second_hits,
             &mut second_degraded,
         );
@@ -21489,6 +21572,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             Some(&connection),
+            Utc::now(),
             &mut third_hits,
             &mut third_degraded,
         );
@@ -21540,6 +21624,7 @@ mod tests {
                 &workspace,
                 Some(&database_path),
                 Some(&connection),
+                Utc::now(),
             )
         };
         let baseline = load();
@@ -21612,6 +21697,7 @@ mod tests {
             &workspace,
             None,
             None,
+            Utc::now(),
             &mut original_hits,
             &mut Vec::new(),
         );
@@ -21639,6 +21725,7 @@ mod tests {
             &workspace,
             None,
             None,
+            Utc::now(),
             &mut changed_hits,
             &mut Vec::new(),
         );
@@ -21649,7 +21736,8 @@ mod tests {
             changed_hits[0].metadata.as_ref().unwrap()["scoreInterval"],
         );
         replace(&baseline_rows)?;
-        let restored = search_score_calibration_for_workspace_cached(&workspace, None, None);
+        let restored =
+            search_score_calibration_for_workspace_cached(&workspace, None, None, Utc::now());
         assert_eq!(restored.input_identity(), original_identity);
         assert_ne!(
             restored.input_identity(),
@@ -21690,6 +21778,7 @@ mod tests {
                 &workspace,
                 Some(&database_path),
                 Some(&reader),
+                Utc::now(),
             )
         };
         let original_identity = load().input_identity();
@@ -21832,6 +21921,7 @@ mod tests {
             &workspace,
             Some(&database_path),
             None,
+            Utc::now(),
             &mut hits,
             &mut degraded,
         );
