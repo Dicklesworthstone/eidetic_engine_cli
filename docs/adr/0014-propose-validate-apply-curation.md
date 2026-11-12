@@ -63,6 +63,73 @@ Only `approved` candidates can be applied; attempting to apply `pending`,
 - Rollback is conceptual: create a `retract` candidate for the prior mutation.
 - Queue depth is visible via `ee curate stats --json`.
 
+## Native extractive episodic summaries
+
+`ee curate candidates --type summary` previews deterministic proposals without
+writing. Adding `--propose` persists pending `create_derived_memory` candidates
+whose producer is `episodic_summary`. The normal `curate validate` and `curate
+apply` commands remain separate. `--target-memory` requires that memory to be a
+source member; it never identifies a row to overwrite. Existing candidate
+status, sorting and pagination options continue to apply. Rejected and applied
+proposal identities are not rediscovered as new pending work.
+
+Discovery reads at most 128 current episodic rows in ID order. Targeted discovery
+puts the requested source first and limits its neighborhood to the same kind and
+workflow. This is a bounded source window, not an exhaustive similarity search.
+A further row, a source larger than 16 KiB, or a cluster exceeding the 16-source
+proposal limit emits `curate_summary_source_limit`; an empty result with that
+warning does not prove no summary can be made. Large clusters contribute a
+deterministic subset, retaining the requested target when present.
+
+The proposer groups textual `fact`, `decision`, `observation`, `note` and
+`summary` sources only when their workflow, exact scope tags and source authority
+scope agree. At least three distinct bodies are required; duplicated captures
+cannot establish repeated evidence. Typed payloads, explicit anchors, stale
+anchors and sentinel-bearing memories are excluded. Automatically extracted
+anchors must still appear verbatim in the selected source span. Closed seals,
+pending review holds, quarantined sources, superseded revisions, tombstones,
+future or expired applicability and malformed bounds all prevent admission.
+Secret-like source content is excluded before extraction.
+
+Topical grouping reuses the existing deterministic average-linkage cluster
+engine with 256-dimensional hash embeddings, a 0.78 merge threshold and the
+existing 0.40 silhouette gate. These are lexical topical-coherence measurements,
+not semantic-model confidence or independent corroboration. The proposer
+abstains on stored contradiction/supersession links within the source cluster
+and on the conservative textual opposition already recognized by `ask`, including
+negation, incompatible settings and reversed command order. Undetected or
+paraphrased opposition remains a reason for explicit review.
+
+Each proposal includes one distinct whole source span per cited memory, selected
+using the existing extractive span segmenter and scorer. Fences and command
+clauses remain whole; no sentence is byte-truncated or paraphrased. Each span
+carries its source ID, exact UTF-8 byte range, excerpt hash and a commitment to
+the source row and authority/scope sidecars in the versioned
+`ee.curate.episodic_summary.v1` producer payload. If every cited source cannot be
+represented within 2 KiB per span and an 8 KiB output, the proposer abstains.
+This selects observations; it does not assert that every source detail is in
+the summary.
+
+For this native producer only, exact validated source coverage replaces the
+generic rule-prose specificity heuristic. Ordinary observations need not name
+a command or path merely to pass that heuristic. Prompt-injection, trust,
+content and metadata checks remain mandatory, and manual/external derived
+candidates retain the existing specificity gate. A producer label alone cannot
+authorize the exception: reconstruction must match the exact committed native
+proposal and all live source state.
+
+The new memory is semantic `summary` with `agent_assertion` trust and confidence
+no greater than either 0.60 or the weakest source. It retains the common tags,
+workflow and applicable agent-producer URI, and intersects the source validity
+windows. Validation reconstructs the exact extractive proposal from live
+sources. Apply repeats that reconstruction inside the serialized writer
+transaction before inserting anything; changed source bodies, scores, scope,
+holds, validity, revisions or detected conflicts invalidate the old proposal.
+The existing derived-memory apply path creates provenance links, audit records
+and index work. Original source rows remain intact, and replay converges on the
+same derived memory rather than duplicating it. Cancellation rolls back a
+proposal batch and never authorizes a derived write.
+
 ## Rejected Alternatives
 
 - **Immediate mutation with undo log**: Harder to surface for review before commit.
@@ -75,3 +142,7 @@ Only `approved` candidates can be applied; attempting to apply `pending`,
 - `tests/curate_state_machine.rs`: Asserts valid/invalid transitions.
 - Golden tests for `ee curate list --pending --json` output shape.
 - E2E test: propose → approve → apply → verify memory changed.
+- `src/core/curate_summary_tests.rs`: native preview → proposal → validation →
+  apply, exact source coverage and lineage, original-row preservation, replay,
+  contradictory and restricted sources, source changes inside the writer
+  boundary, bounded discovery and request cancellation.

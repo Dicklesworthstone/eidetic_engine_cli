@@ -911,6 +911,15 @@ fn same_numeric_context(left: &str, right: &str) -> bool {
     left.is_empty() || right.is_empty() || left == right
 }
 
+/// Conservative textual opposition shared by answer composition and extractive
+/// curation. This is a refusal signal, never evidence that two claims agree.
+pub(crate) fn texts_conflict(left: &str, right: &str) -> bool {
+    (has_negation(left) != has_negation(right)
+        && same_numeric_context(left, right)
+        && same_conflict_topic(&tokenize_for_ask(left), &tokenize_for_ask(right)))
+        || numeric_conflict(left, right)
+}
+
 /// Look for supported opposition to the best answer throughout the admitted
 /// clusters, not just at rank two. The caller has already applied the evidence
 /// floor; a weak span must not manufacture a conflict with a strong answer.
@@ -918,14 +927,10 @@ fn detect_contradiction(clusters: &[AskSpan]) -> bool {
     let Some(anchor) = clusters.first() else {
         return false;
     };
-    let anchor_terms = tokenize_for_ask(&anchor.text);
-    let anchor_negated = has_negation(&anchor.text);
-    clusters.iter().skip(1).any(|span| {
-        (has_negation(&span.text) != anchor_negated
-            && same_numeric_context(&anchor.text, &span.text)
-            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
-            || numeric_conflict(&anchor.text, &span.text)
-    })
+    clusters
+        .iter()
+        .skip(1)
+        .any(|span| texts_conflict(&anchor.text, &span.text))
 }
 
 /// An explicit edge supplies relational relevance for a paraphrased opposing

@@ -29245,6 +29245,59 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
+    /// Read a bounded source window for native episodic summary discovery.
+    /// Targeted discovery includes the requested source first, then the same
+    /// kind/workflow in ID order. The caller requests one extra row to expose
+    /// truncation and verifies source authority in the same snapshot.
+    pub(crate) fn list_episodic_summary_sources(
+        &self,
+        workspace_id: &str,
+        target_memory_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredMemory>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND level = 'episodic' AND tombstoned_at IS NULL AND superseded_at IS NULL",
+        );
+        let mut params = vec![Value::Text(workspace_id.to_owned())];
+        if let Some(target) = target_memory_id {
+            sql.push_str(
+                " AND kind = (SELECT kind FROM memories WHERE id = ?2 AND workspace_id = ?1) AND workflow_id IS (SELECT workflow_id FROM memories WHERE id = ?2 AND workspace_id = ?1) ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END, id ASC LIMIT ?3",
+            );
+            params.push(Value::Text(target.to_owned()));
+        } else {
+            sql.push_str(" ORDER BY id ASC LIMIT ?2");
+        }
+        params.push(Value::Integer(i64::from(limit)));
+        self.query_for(DbOperation::Query, &sql, &params)?
+            .iter()
+            .map(stored_memory_from_row)
+            .collect()
+    }
+
+    /// Test conflicting lineage inside a bounded source set without loading
+    /// every incident edge or traversing the graph.
+    pub(crate) fn summary_sources_have_conflict(&self, memory_ids: &[&str]) -> Result<bool> {
+        if memory_ids.len() < 2 {
+            return Ok(false);
+        }
+        let placeholders = (1..=memory_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params = memory_ids
+            .iter()
+            .map(|id| Value::Text((*id).to_owned()))
+            .collect::<Vec<_>>();
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!(
+                "SELECT 1 FROM memory_links WHERE src_memory_id IN ({placeholders}) AND dst_memory_id IN ({placeholders}) AND relation IN ('contradicts', 'supersedes') LIMIT 1"
+            ),
+            &params,
+        )?;
+        Ok(!rows.is_empty())
+    }
+
     /// Read current-head applicability metadata in the caller's read view.
     /// Expired, future and malformed bounds remain present so the caller can
     /// evaluate both endpoints at one explicit reference time. No body read,
@@ -32193,9 +32246,7 @@ impl DbConnection {
             &[Value::Text(candidate_id.to_owned())],
         )?;
         rows.first()
-            .map(|row| {
-                required_text(row, 0, DbOperation::Query, "workspace_id").map(str::to_owned)
-            })
+            .map(|row| required_text(row, 0, DbOperation::Query, "workspace_id").map(str::to_owned))
             .transpose()
     }
 

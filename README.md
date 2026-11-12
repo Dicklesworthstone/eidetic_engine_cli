@@ -1556,6 +1556,35 @@ by the rule. In JSON, native rule identity appears in `data.entity`, while
 `data.memoryId` is null. Human, Markdown, and Mermaid output identify the native
 entity too; stored secrets and private paths are redacted on output.
 
+### Episodic summaries
+
+Discover extractive summaries of related episodic memories with
+`ee curate candidates --type summary`. Discovery requires at least three
+distinct source bodies with compatible scope and workflow metadata. It uses
+bounded deterministic clustering and quotes source passages without calling
+an external model. Closed seals, review holds, expired or superseded sources,
+and detected conflicts prevent a cluster from becoming a summary.
+
+```bash
+# Preview proposed summaries without writing.
+ee curate candidates --type summary --workspace . --json
+
+# Persist pending proposals, then inspect and explicitly approve one.
+ee curate candidates --type summary --propose --workspace . --json
+ee curate show <candidate-id> --workspace . --json
+ee curate validate <candidate-id> --workspace . --json
+ee curate apply <candidate-id> --workspace . --json
+```
+
+`--target-memory <memory-id>` restricts discovery to summaries citing that
+source. A summary becomes a semantic memory through the existing
+`create_derived_memory` workflow, with `DERIVED_FROM` links and the ordinary
+index work reported by apply. Original memories remain intact. The proposal
+records source identities, content hashes and exact excerpt boundaries;
+validation and apply recheck source content, scope and admission. Changed
+sources require a fresh proposal. Confidence is capped at the lowest source
+confidence and 0.6; topical similarity is not treated as independent evidence.
+
 ### External reflection
 
 `ee reflect` packages cited memories or evidence for an external producer and

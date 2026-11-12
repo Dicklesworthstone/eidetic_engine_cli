@@ -68,6 +68,8 @@ mod corroboration;
 pub(crate) mod session_arc;
 #[path = "curate_source_admission.rs"]
 pub(crate) mod source_admission;
+#[path = "curate_summary.rs"]
+mod summary;
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -175,7 +177,7 @@ pub struct CurateCandidatesOptions<'a> {
     pub sort: &'a str,
     /// Group likely duplicates contiguously in the result ordering.
     pub group_duplicates: bool,
-    /// Persist newly synthesized deduplication proposals. Without this explicit
+    /// Persist newly synthesized deduplication or episodic summary proposals. Without this explicit
     /// opt-in, discovery previews candidates without writing or migrating.
     pub propose: bool,
 }
@@ -2638,15 +2640,25 @@ fn reflection_retention_cutoff(
 pub fn list_curation_candidates(
     options: &CurateCandidatesOptions<'_>,
 ) -> Result<CurateCandidatesReport, DomainError> {
-    let candidate_type = parse_optional_candidate_type(options.candidate_type)?;
+    let summary_requested = summary::requested(options.candidate_type);
+    let candidate_type = if summary_requested {
+        Some(CandidateType::CreateDerivedMemory.as_str().to_owned())
+    } else {
+        parse_optional_candidate_type(options.candidate_type)?
+    };
     let status = parse_optional_status(options.status)?;
     let target_memory_id = parse_optional_memory_id(options.target_memory_id)?;
     validate_list_window(options.limit)?;
     let synthesize_dedup =
         should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref());
-    if options.propose && !synthesize_dedup {
+    let synthesize_summary = summary_requested
+        && status
+            .as_deref()
+            .is_none_or(|status| status == CandidateStatus::Pending.as_str());
+    if options.propose && !synthesize_dedup && !synthesize_summary {
         return Err(curate_usage_error(
-            "--propose requires --type dedup and an absent or pending status filter".to_owned(),
+            "--propose requires --type dedup or summary and an absent or pending status filter"
+                .to_owned(),
             "ee curate candidates --type dedup --propose --json",
         ));
     }
@@ -2671,7 +2683,7 @@ pub fn list_curation_candidates(
         open_bound_curate_snapshot(&mut prepared)?
     };
     let build_report = || -> Result<CurateCandidatesReport, DomainError> {
-        let query_target_memory_id = if synthesize_dedup {
+        let query_target_memory_id = if synthesize_dedup || summary_requested {
             None
         } else {
             target_memory_id.as_deref()
@@ -2688,11 +2700,15 @@ pub fn list_curation_candidates(
                 repair: Some("ee doctor".to_owned()),
             })?;
         let mut stored = stored;
+        if summary_requested {
+            stored.retain(summary::is_summary);
+        }
         let persisted_ids = stored
             .iter()
             .map(|candidate| candidate.id.clone())
             .collect::<BTreeSet<_>>();
         let mut proposed_count = 0;
+        let mut degraded = Vec::new();
         if synthesize_dedup {
             proposed_count += append_embedding_dedup_candidates(
                 &connection,
@@ -2709,9 +2725,22 @@ pub fn list_curation_candidates(
                 options.propose,
             )?;
         }
+        if synthesize_summary {
+            proposed_count += summary::append_candidates(
+                &connection,
+                &prepared.workspace_id,
+                target_memory_id.as_deref(),
+                &mut stored,
+                options.propose,
+                &mut degraded,
+            )?;
+        }
         let durable_mutation = options.propose && proposed_count > 0;
         if let (true, Some(target)) = (synthesize_dedup, target_memory_id.as_deref()) {
             stored.retain(|candidate| dedup_candidate_matches_target(candidate, target));
+        }
+        if let (true, Some(target)) = (summary_requested, target_memory_id.as_deref()) {
+            stored.retain(|candidate| summary::matches_source(candidate, target));
         }
         let now = Utc::now().to_rfc3339();
         let mut stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
@@ -2737,7 +2766,11 @@ pub fn list_curation_candidates(
                     &prepared.workspace_path,
                 )?;
                 if preview_only {
-                    let command = dedup_proposal_command(&prepared, target_memory_id.as_deref());
+                    let command = if summary_requested {
+                        summary::proposal_command(&prepared, target_memory_id.as_deref())
+                    } else {
+                        dedup_proposal_command(&prepared, target_memory_id.as_deref())
+                    };
                     summary.requires_validate = false;
                     summary.requires_apply = false;
                     summary.next_action.clone_from(&command);
@@ -2767,14 +2800,18 @@ pub fn list_curation_candidates(
             truncated,
             durable_mutation,
             filter: CurateCandidatesFilter {
-                candidate_type,
+                candidate_type: if summary_requested {
+                    Some("summary".to_owned())
+                } else {
+                    candidate_type
+                },
                 status,
                 target_memory_id,
                 sort: sort_mode.as_str().to_owned(),
                 group_duplicates: options.group_duplicates,
             },
             candidates,
-            degraded: Vec::new(),
+            degraded,
             next_action,
         })
     };
@@ -11260,7 +11297,15 @@ fn evaluate_create_derived_candidate_for_validation(
                 confidence: stored.confidence,
                 ttl_seconds: None,
             };
-            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard) {
+            // Native summaries establish specificity through exact, bounded
+            // source coverage below. Observational prose need not contain the
+            // command/path tokens required by the generic rule-prose heuristic.
+            // Every other validation error remains fatal, and the native
+            // reconstruction is mandatory even when only this gate is waived.
+            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard)
+                && !(summary::is_summary(stored)
+                    && matches!(&error, CandidateValidationError::CandidateTooGeneric { .. }))
+            {
                 errors.push(validation_issue(
                     error.code(),
                     error.to_string(),
@@ -11278,6 +11323,7 @@ fn evaluate_create_derived_candidate_for_validation(
         Err(issue) => errors.push(issue),
     }
     validate_derivation_metadata(stored, &mut errors);
+    summary::validate(connection, stored, now_rfc3339, &mut errors);
 
     finish_candidate_validation(stored, current_status, errors, warnings)
 }
@@ -16478,6 +16524,12 @@ fn persist_create_derived_candidate_application_inner(
             ),
             repair: Some(issue.repair),
         })?,
+        &mut source_errors,
+    );
+    summary::validate(
+        connection,
+        stored,
+        &Utc::now().to_rfc3339(),
         &mut source_errors,
     );
     if !source_errors.is_empty() {

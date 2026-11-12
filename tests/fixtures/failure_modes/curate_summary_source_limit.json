@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "curate_summary_source_limit",
+  "introduced_by": {
+    "bead": "bd-1oep7",
+    "epic_letter": "C"
+  },
+  "surfaces": ["curate candidates"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Native episodic summary discovery observes more than 128 current source rows in its deterministic window, skips a source body over 16384 bytes, or limits a coherent cluster to 16 sources per proposal. Targeted discovery puts the requested source first and restricts its window to the same kind/workflow; it does not prove exhaustive neighborhood coverage. The response may contain zero candidates without proving no related sources exist.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Store more than 128 current episodic memories, or a coherent cluster containing more than 16 distinct source bodies."
+    ],
+    "invocation": "ee curate candidates --type summary --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "curate_summary_source_limit",
+    "severity": "warning",
+    "message_contains": ["discovery is incomplete", "bounded source window", "Additional related memories may exist"],
+    "repair_contains": "--target-memory <source-id>",
+    "repair_string": "Use --target-memory <source-id> to inspect a bounded source neighborhood, or use ee curate propose-derived with explicitly reviewed sources."
+  }
+}

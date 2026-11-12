@@ -676,6 +676,7 @@ that helper is the thing to change.
 | `auto_propose_skipped_too_few_neighbors` | info | bd-17c65.7.3 (G3) |
 | `cass_evidence_not_available` | low | bd-17c65.7.4 (G4) |
 | `curate_apply_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
+| `curate_summary_source_limit` | warning | bd-1oep7 — bounded episodic summary discovery reached its source-row, source-body or proposal-member limit; additional related memories may exist |
 | `curation_harmful_candidate_escalated` | high | bd-17c65.7.4 (G4) |
 | `curation_health_unavailable` | low | bd-17c65.10.6 (J6) |
 | `curation_ttl_blocked` | medium | bd-17c65.7.4 (G4) |
