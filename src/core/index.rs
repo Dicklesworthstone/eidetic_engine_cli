@@ -3891,10 +3891,10 @@ async fn stage_planned_index_delta_with_capacity(
     let producer = delta::embedder_identity(stack);
     let staging = UnpublishedIndexStage::create(index_dir).map_err(DeltaStageError::from)?;
     let staged = async {
-        delta::copy_generation(index_dir, staging.path())?;
+        delta::copy_generation_for_delta(index_dir, staging.path(), stack, &applied)?;
         publish_lock.checkpoint()?;
-        // Reflinks consume little space, but a filesystem may require full
-        // independent byte copies. Reprice the delta against what remains
+        // Shared files and reflinks consume little space, but a filesystem may
+        // require independent byte copies. Reprice the delta against what remains
         // after that copy before either backend starts allocating new data.
         storage::admit_delta(
             cx,
@@ -4410,7 +4410,28 @@ async fn delete_incremental_document(
 }
 
 fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
-    open_fast_vector_index_with(index_dir, VectorIndex::open)
+    open_fast_vector_index_with(index_dir, open_private_vector_writer)
+}
+
+/// Published vector main files can be shared by metadata-only generations.
+/// A content delta must first copy them into private staging inodes. Keep this
+/// check at every native writer entrypoint so a late plan change cannot mutate
+/// the active or retained generations through a shared staging path.
+fn open_private_vector_writer(path: &Path) -> Result<VectorIndex, SearchError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(SearchError::Io)?;
+    let private = metadata.is_file() && !metadata.is_symlink();
+    #[cfg(unix)]
+    let private = {
+        use std::os::unix::fs::MetadataExt;
+        private && metadata.nlink() == 1
+    };
+    if !private {
+        return Err(SearchError::IndexCorrupted {
+            path: path.to_path_buf(),
+            detail: "vector writes require an independent private staging file".to_owned(),
+        });
+    }
+    VectorIndex::open(path)
 }
 
 fn open_fast_vector_index_read_only(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
@@ -4449,7 +4470,7 @@ fn open_fast_vector_index_with(
 }
 
 fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, IncrementalFallback> {
-    open_quality_vector_index_with(index_dir, VectorIndex::open)
+    open_quality_vector_index_with(index_dir, open_private_vector_writer)
 }
 
 fn open_quality_vector_index_read_only(

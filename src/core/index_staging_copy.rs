@@ -1,12 +1,14 @@
-//! Private mutable staging files and shared immutable lexical segments.
+//! Private mutable staging files and shared immutable generation components.
 //!
 //! A reflink is not a hard link: later writes to either file must not change the
 //! other generation. Unsupported cloning falls back to a bounded byte copy;
 //! capacity and I/O failures remain failures. The caller owns the private
 //! staging directory, publication lease, flush barrier, and abandoned-file cleanup.
-//! Only files named by authoritative Tantivy segment metadata may use the
-//! separate immutable-sharing entrypoint. Tantivy creates segment components
-//! once and replaces deletion bitsets under new opstamp-qualified names.
+//! Tantivy segment metadata authorizes lexical sharing. Native-admitted legacy
+//! vector tiers may also be shared when the delta proves no vector writes;
+//! a later content delta copies those tiers into independent writable inodes.
+//! Admission holds their shared native reader locks and supplies the exact
+//! file identity. Arbitrary multiply linked files remain refused.
 //! CLI copies observe the already-installed request's cancellation between I/O
 //! calls. This is cooperative: it cannot preempt an individual filesystem call.
 
@@ -15,6 +17,19 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+
+/// Recheck immediately after native admission as well as at the later copy
+/// boundary. The publisher's generation lease prevents cooperating path
+/// replacement; these identities also reject an observed external replacement.
+pub(super) fn verify_published_vector_identity(
+    source: &Path,
+    admitted: &Metadata,
+) -> io::Result<()> {
+    require_admitted_source(
+        &fs::symlink_metadata(source)?,
+        SourceKind::PublishedVector(admitted),
+    )
+}
 
 #[derive(Debug, Default)]
 pub(super) struct CopyStats {
@@ -31,9 +46,10 @@ pub(super) struct CopyStats {
 }
 
 #[derive(Clone, Copy)]
-enum SourceKind {
+enum SourceKind<'a> {
     Mutable,
     ImmutableSegment,
+    PublishedVector(&'a Metadata),
 }
 
 #[derive(Default)]
@@ -54,8 +70,9 @@ impl StagingCopier {
     }
 
     /// Share a component from the live index's exact SegmentMeta::list_files
-    /// allowlist. Mutable metadata, vectors, and arbitrary files must instead
-    /// use copy_file. Existing shared components can be shared again.
+    /// allowlist. Mutable metadata and arbitrary files must use copy_file.
+    /// Vectors require separate native admission. Existing shared components
+    /// can be shared again.
     pub(super) fn share_immutable_segment(
         &mut self,
         source: &Path,
@@ -72,21 +89,96 @@ impl StagingCopier {
         })
     }
 
+    /// The caller retains a native read-only reader of this exact admitted
+    /// legacy vector file and has proved that the delta cannot mutate it.
+    pub(super) fn share_unchanged_vector(
+        &mut self,
+        source: &Path,
+        target: &Path,
+        admitted: &Metadata,
+    ) -> io::Result<()> {
+        let request = asupersync::Cx::current();
+        self.share_source_with_checkpoint(
+            source,
+            target,
+            link_immutable_file,
+            || {
+                if let Some(cx) = &request {
+                    cx.checkpoint().map_err(|error| {
+                        io::Error::other(format!("index staging request interrupted: {error}"))
+                    })?;
+                }
+                Ok(())
+            },
+            SourceKind::PublishedVector(admitted),
+        )
+    }
+
+    /// Copy a native-admitted published vector, including one shared by older
+    /// generations, into a private inode before any vector writer is opened.
+    pub(super) fn copy_published_vector(
+        &mut self,
+        source: &Path,
+        target: &Path,
+        admitted: &Metadata,
+    ) -> io::Result<()> {
+        let request = asupersync::Cx::current();
+        self.copy_source_with_checkpoint_and_capacity(
+            source,
+            target,
+            clone_file,
+            || {
+                if let Some(cx) = &request {
+                    cx.checkpoint().map_err(|error| {
+                        io::Error::other(format!("index staging request interrupted: {error}"))
+                    })?;
+                }
+                Ok(())
+            },
+            |target, bytes| {
+                super::super::storage::admit_copy(
+                    target,
+                    bytes,
+                    super::super::storage::filesystem_capacity,
+                )
+                .map_err(|error| io::Error::other(error.to_string()))
+            },
+            SourceKind::PublishedVector(admitted),
+        )
+    }
+
     fn share_with_checkpoint(
         &mut self,
         source_path: &Path,
         target: &Path,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        checkpoint: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.share_source_with_checkpoint(
+            source_path,
+            target,
+            link,
+            checkpoint,
+            SourceKind::ImmutableSegment,
+        )
+    }
+
+    fn share_source_with_checkpoint(
+        &mut self,
+        source_path: &Path,
+        target: &Path,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
         mut checkpoint: impl FnMut() -> io::Result<()>,
+        source_kind: SourceKind<'_>,
     ) -> io::Result<()> {
         if !self.link_unavailable {
             let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
-            require_source_regular(&before, SourceKind::ImmutableSegment)?;
+            require_admitted_source(&before, source_kind)?;
             let source = checked_io(&mut checkpoint, || open_source(source_path))?;
             require_source_unchanged(
                 &before,
                 &checked_io(&mut checkpoint, || source.metadata())?,
-                SourceKind::ImmutableSegment,
+                source_kind,
             )?;
             checked_io(&mut checkpoint, || {
                 super::super::storage::admit_copy(
@@ -106,7 +198,7 @@ impl StagingCopier {
                         checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?,
                         checked_io(&mut checkpoint, || fs::symlink_metadata(target))?,
                     ] {
-                        require_source_unchanged(&before, &metadata, SourceKind::ImmutableSegment)?;
+                        require_source_unchanged(&before, &metadata, source_kind)?;
                     }
                     checkpoint()?;
                     self.stats.linked_files = self.stats.linked_files.saturating_add(1);
@@ -119,7 +211,7 @@ impl StagingCopier {
                     tracing::info!(
                         target: "ee::index",
                         errno = error.raw_os_error(),
-                        "immutable lexical segment sharing unavailable; using independent staging copies for this generation"
+                        "immutable generation sharing unavailable; using independent staging copies for this generation"
                     );
                 }
                 Err(error) => return Err(error),
@@ -138,7 +230,7 @@ impl StagingCopier {
                 )
                 .map_err(|error| io::Error::other(error.to_string()))
             },
-            SourceKind::ImmutableSegment,
+            source_kind,
         )
     }
 
@@ -212,10 +304,10 @@ impl StagingCopier {
         clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
         mut checkpoint: impl FnMut() -> io::Result<()>,
         admit_copy: impl FnOnce(&Path, u64) -> io::Result<()>,
-        source_kind: SourceKind,
+        source_kind: SourceKind<'_>,
     ) -> io::Result<()> {
         let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
-        require_source_regular(&before, source_kind)?;
+        require_admitted_source(&before, source_kind)?;
         let mut source = checked_io(&mut checkpoint, || open_source(source_path))?;
         require_source_unchanged(
             &before,
@@ -343,7 +435,15 @@ fn require_regular(metadata: &Metadata) -> io::Result<()> {
     require_source_regular(metadata, SourceKind::Mutable)
 }
 
-fn require_source_regular(metadata: &Metadata, source_kind: SourceKind) -> io::Result<()> {
+fn require_admitted_source(metadata: &Metadata, source_kind: SourceKind<'_>) -> io::Result<()> {
+    require_source_regular(metadata, source_kind)?;
+    if let SourceKind::PublishedVector(admitted) = source_kind {
+        require_source_unchanged(admitted, metadata, source_kind)?;
+    }
+    Ok(())
+}
+
+fn require_source_regular(metadata: &Metadata, source_kind: SourceKind<'_>) -> io::Result<()> {
     if !metadata.file_type().is_file() {
         return Err(changed(
             "index staging source or destination is not a regular file",
@@ -372,7 +472,7 @@ fn require_unchanged(before: &Metadata, after: &Metadata) -> io::Result<()> {
 fn require_source_unchanged(
     before: &Metadata,
     after: &Metadata,
-    source_kind: SourceKind,
+    source_kind: SourceKind<'_>,
 ) -> io::Result<()> {
     require_source_regular(after, source_kind)?;
     let mut same = before.len() == after.len() && before.permissions() == after.permissions();
@@ -1196,6 +1296,89 @@ mod tests {
         assert_eq!(staged.tombstone_count(), 0);
         assert_eq!(reader.search_top_k(&query, 10, None)?, original_hits);
         assert_eq!(fs::read(&source)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_shared_vectors_fall_back_to_private_copies_without_touching_readers() -> TestResult
+    {
+        use frankensearch::VectorIndex;
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("live.idx");
+        let shared = root.path().join("shared.idx");
+        let fallback = root.path().join("fallback.idx");
+        let writable = root.path().join("writable.idx");
+        let mut builder = VectorIndex::create(&source, "shared-vector-control", 4)?;
+        builder.write_record("kept", &[1.0, 0.0, 0.0, 0.0])?;
+        builder.finish()?;
+        let admitted = fs::symlink_metadata(&source)?;
+        let reader = VectorIndex::open_read_only(&source)?;
+        let before = fs::read(&source)?;
+        let mut copier = StagingCopier::default();
+        copier.share_unchanged_vector(&source, &shared, &admitted)?;
+        assert_eq!(fs::metadata(&source)?.ino(), fs::metadata(&shared)?.ino());
+        assert_eq!(copier.stats().linked_bytes, before.len() as u64);
+        let mut fallback_copier = StagingCopier {
+            clone_unavailable: true,
+            ..StagingCopier::default()
+        };
+        fallback_copier.share_source_with_checkpoint(
+            &shared,
+            &fallback,
+            |_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
+            || Ok(()),
+            SourceKind::PublishedVector(&admitted),
+        )?;
+        assert_eq!(fallback_copier.stats().link_refusals, 1);
+        assert_eq!(fallback_copier.stats().copied_bytes, before.len() as u64);
+        assert_eq!(fs::metadata(&fallback)?.nlink(), 1);
+        assert_eq!(fs::read(&fallback)?, before);
+        fallback_copier.copy_published_vector(&shared, &writable, &admitted)?;
+        assert_eq!(fs::metadata(&writable)?.nlink(), 1);
+        assert_ne!(fs::metadata(&writable)?.ino(), admitted.ino());
+        let mut writer = VectorIndex::open(&writable)?;
+        writer.append("new", &[0.0, 1.0, 0.0, 0.0])?;
+        writer.compact()?;
+        assert_eq!(reader.live_doc_ids()?.len(), 1);
+        assert_eq!(fs::read(&source)?, before);
+        assert_eq!(fs::read(&shared)?, before);
+        assert_eq!(fs::read(&fallback)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vector_admission_identity_rejects_replaced_paths_and_unadmitted_aliases() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let displaced = root.path().join("displaced");
+        fs::write(&source, b"admitted original")?;
+        let admitted = fs::symlink_metadata(&source)?;
+        fs::rename(&source, &displaced)?;
+        fs::write(&source, b"unadmitted source")?;
+        let mut copier = StagingCopier::default();
+        for shared in [false, true] {
+            let target = root.path().join(format!("target-{shared}"));
+            let copied = if shared {
+                copier.share_unchanged_vector(&source, &target, &admitted)
+            } else {
+                copier.copy_published_vector(&source, &target, &admitted)
+            };
+            assert!(copied.is_err());
+            assert!(!target.exists());
+        }
+        let alias = root.path().join("arbitrary-alias");
+        fs::hard_link(&displaced, &alias)?;
+        assert!(
+            copier
+                .copy_file(&alias, &root.path().join("unadmitted-copy"))
+                .is_err()
+        );
+        assert_eq!(fs::read(&displaced)?, b"admitted original");
+        assert_eq!(fs::read(&source)?, b"unadmitted source");
         Ok(())
     }
 

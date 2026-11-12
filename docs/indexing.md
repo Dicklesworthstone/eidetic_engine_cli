@@ -163,6 +163,27 @@ through the existing full staged publisher. The ordinary queued worker can
 therefore repair this compatibility gap without a manual rebuild; matching
 database and index generations alone never bypass producer validation.
 
+## Reusing Unchanged Vector Tiers
+
+Metadata-only changes, including feedback and tag updates whose exact embedding
+inputs stay unchanged, reuse both vector tiers without copying their main files
+on Unix. The delta must prove the complete embedding identities and unchanged
+inputs, and each native legacy FSVI v1 tier must pass strict admission with no
+pending WAL records. Native read-only locks and file-identity checks protect the
+source during staging. Lexical documents still receive their updated metadata;
+vector WAL sidecars, lexical metadata and generation manifests remain private.
+
+Later content changes or deletions copy shared vector main files into independent
+staging inodes before opening a writer. Late plan or producer changes cannot
+write through a shared inode. Unsupported hard links fall back to independent
+reflinks or bounded byte copies; other platforms retain private vector copies.
+FSVI v2's separate single-link admission contract is unchanged.
+
+This removes corpus-sized vector copies for eligible metadata updates. Source
+reconciliation and digest-manifest writes still inspect the corpus, and content
+deltas still copy and compact complete vector tiers. Total intake cost therefore
+remains larger than O(delta).
+
 ## Session Generation Invalidation
 
 `V097_SESSION_INDEX_GENERATIONS` makes the session source family obey the same

@@ -5,10 +5,11 @@
 //! re-embedded the whole corpus, so write cost grew with the store. This module
 //! limits inference to changed inputs while preserving publication properties:
 //! the staged generation has private mutable files and shares authoritative
-//! immutable lexical components, with only changed documents applied, validated
-//! and published through the same masked, fenced, atomic path as a full build.
-//! Source reconciliation and mutable vector copies still scale with the corpus;
-//! total write cost is not O(delta).
+//! immutable lexical components and unchanged vector tiers, with only changed
+//! documents applied, validated and published through the same masked, fenced,
+//! atomic path as a full build. Source reconciliation and vector copies for
+//! changed embedding inputs still scale with the corpus; total write cost is
+//! not O(delta).
 //!
 //! The delta is not taken from job bookkeeping. Every generation records a
 //! digest of each document it indexed (`doc_digests.json`). The publisher
@@ -64,6 +65,10 @@ mod staging_copy;
 #[cfg(all(test, unix, feature = "lexical-bm25"))]
 #[path = "index_delta_sharing_tests.rs"]
 mod sharing_tests;
+
+#[cfg(all(test, unix))]
+#[path = "index_delta_vector_sharing_tests.rs"]
+mod vector_sharing_tests;
 
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
@@ -646,15 +651,109 @@ fn diff_documents(
     })
 }
 
-/// Copy mutable tier files into an empty private staging directory, sharing
-/// only the exact immutable components named by live Tantivy segment metadata.
-/// Vector files and lexical metadata remain independent: their writers can
-/// mutate them in place. Unsupported sharing/cloning falls back to independent
-/// byte copies. Admission state (`meta.json`, digests, retired manifests) and
-/// writer locks are not copied; staging earns its own.
-pub(super) fn copy_generation(
+/// Native reader locks keep admitted main files read-only while staging shares
+/// or copies them. Their exact identities also bind the later filesystem copy
+/// to the files whose empty WAL and producer contract were checked here.
+struct AdmittedVectors {
+    share: bool,
+    files: BTreeMap<PathBuf, (std::fs::Metadata, frankensearch::VectorIndex)>,
+}
+
+impl AdmittedVectors {
+    fn open(
+        live_dir: &Path,
+        stack: &EmbedderStack,
+        delta: &Delta,
+    ) -> Result<Self, IndexRebuildError> {
+        let rewrite = delta.requires_vector_rewrite(stack).map_err(|fallback| {
+            IndexRebuildError::Index(format!("{}: {}", fallback.reason.as_str(), fallback.detail))
+        })?;
+        let (fast, quality) = super::stack_descriptors(stack);
+        let fast_name =
+            if super::path_is_regular_file_no_follow(&live_dir.join(super::VECTOR_INDEX_FAST_FILE))
+            {
+                super::VECTOR_INDEX_FAST_FILE
+            } else {
+                super::VECTOR_INDEX_FALLBACK_FILE
+            };
+        let mut files = BTreeMap::new();
+        for (name, descriptor) in [
+            Some((fast_name, &fast)),
+            quality
+                .as_ref()
+                .map(|descriptor| (super::VECTOR_INDEX_QUALITY_FILE, descriptor)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = live_dir.join(name);
+            ensure_index_path_has_no_symlinks(&path, "admit published vector staging source")?;
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                IndexRebuildError::Index(format!(
+                    "Failed to inspect published vector staging source: {error}"
+                ))
+            })?;
+            if !metadata.is_file() || metadata.is_symlink() {
+                return Err(IndexRebuildError::Index(
+                    "Published vector staging source is not a regular file".to_owned(),
+                ));
+            }
+            // This native compatibility API admits only legacy FSVI v1. V2's
+            // single-link immutable admission contract is deliberately separate.
+            // EE's strict adapter also refuses any pending/recoverable WAL.
+            let reader = super::vector_admission::open_read_only(&path).map_err(|error| {
+                IndexRebuildError::Index(format!(
+                    "Failed to admit published vector staging source: {error}"
+                ))
+            })?;
+            staging_copy::verify_published_vector_identity(&path, &metadata).map_err(|error| {
+                IndexRebuildError::Index(format!(
+                    "Published vector staging source changed during native admission: {error}"
+                ))
+            })?;
+            super::verify_vector_producer(&reader, descriptor, name)
+                .map_err(IndexRebuildError::Index)?;
+            files.insert(PathBuf::from(name), (metadata, reader));
+        }
+        Ok(Self {
+            // The writer guard can prove an independent inode on Unix. Other
+            // platforms retain private copies until they have that same proof.
+            share: cfg!(unix) && !rewrite,
+            files,
+        })
+    }
+}
+
+/// Stage a delta with private metadata/WAL and authoritative immutable lexical
+/// segments. Complete producer/input proof permits unchanged vector main files
+/// to be shared; any vector mutation first copies all selected main tiers into
+/// independent inodes, including sources shared by older generations.
+pub(super) fn copy_generation_for_delta(
     live_dir: &Path,
     staging_dir: &Path,
+    stack: &EmbedderStack,
+    delta: &Delta,
+) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
+    ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
+    let vectors = AdmittedVectors::open(live_dir, stack, delta)?;
+    copy_generation_files(live_dir, staging_dir, Some(&vectors))
+}
+
+/// Low-level fixtures without native vector admission always copy vectors.
+#[cfg(test)]
+fn copy_generation(live_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
+    copy_generation_files(live_dir, staging_dir, None)
+}
+
+/// Unsupported sharing/cloning falls back to independent byte copies.
+/// Admission state (`meta.json`, digests, retired manifests) and writer locks
+/// are not copied; staging earns its own. Only the admitted vector allowlist
+/// may copy a multiply linked vector source; arbitrary aliases stay refused.
+fn copy_generation_files(
+    live_dir: &Path,
+    staging_dir: &Path,
+    vectors: Option<&AdmittedVectors>,
 ) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
     ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
@@ -709,7 +808,15 @@ pub(super) fn copy_generation(
                         "Index staging source escaped its generation".to_owned(),
                     )
                 })?;
-                let copied = if immutable_segments.contains(relative) {
+                let copied = if let Some(vectors) = vectors
+                    && let Some((admitted, _reader)) = vectors.files.get(relative)
+                {
+                    if vectors.share {
+                        copier.share_unchanged_vector(&source_path, &target, admitted)
+                    } else {
+                        copier.copy_published_vector(&source_path, &target, admitted)
+                    }
+                } else if immutable_segments.contains(relative) {
                     copier.share_immutable_segment(&source_path, &target)
                 } else {
                     copier.copy_file(&source_path, &target)
@@ -736,7 +843,8 @@ pub(super) fn copy_generation(
         linked_files = stats.linked_files,
         linked_bytes = stats.linked_bytes,
         link_refusals = stats.link_refusals,
-        "staged mutable index files and immutable lexical segments"
+        shared_vector_tiers = vectors.is_some_and(|vectors| vectors.share),
+        "staged mutable index files and shared immutable components"
     );
     Ok(())
 }
