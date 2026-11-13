@@ -4110,14 +4110,53 @@ fn capture_suggestion_dedupe_status(
         };
     }
 
+    // Similar vocabulary is useful review context, not proof of a duplicate.
+    // Topic tokens discard negation, ordering, command case and short options;
+    // suppressing on their overlap can hide the very correction being learned.
+    // Check complete bodies in both stores before considering related guidance.
+    if let Some(existing) = existing_candidates
+        .iter()
+        .filter(|existing| {
+            existing.proposed_content.as_deref() == Some(candidate.proposed_content.as_str())
+        })
+        .min_by(|left, right| left.id.cmp(&right.id))
+    {
+        return CaptureSuggestionDedupeStatus {
+            status: "suppressed_existing_candidate".to_owned(),
+            method: "curation_queue_exact_content".to_owned(),
+            reason: format!(
+                "Curation candidate {} with status `{}` already contains this complete lesson.",
+                existing.id, existing.status
+            ),
+            matched_candidate_id: Some(existing.id.clone()),
+            matched_memory_id: None,
+            similarity: Some(1.0),
+        };
+    }
+
+    if let Some(memory) = existing_memories
+        .iter()
+        .filter(|memory| memory.content == candidate.proposed_content)
+        .min_by(|left, right| left.id.cmp(&right.id))
+    {
+        return CaptureSuggestionDedupeStatus {
+            status: "suppressed_existing_memory".to_owned(),
+            method: "memory_exact_content".to_owned(),
+            reason: format!("Memory {} already contains this complete lesson.", memory.id),
+            matched_candidate_id: None,
+            matched_memory_id: Some(memory.id.clone()),
+            similarity: Some(1.0),
+        };
+    }
+
     if let Some((existing, similarity)) =
         best_existing_candidate_capture_match(candidate, existing_candidates)
     {
         return CaptureSuggestionDedupeStatus {
-            status: "suppressed_existing_candidate".to_owned(),
+            status: "related_existing_candidate".to_owned(),
             method: "curation_queue_lexical_jaccard".to_owned(),
             reason: format!(
-                "Existing curation candidate {} with status `{}` is {:.0}% lexically similar.",
+                "Existing curation candidate {} with status `{}` is {:.0}% lexically similar, but its complete lesson differs; review both before deciding whether they agree.",
                 existing.id,
                 existing.status,
                 similarity * 100.0
@@ -4132,10 +4171,10 @@ fn capture_suggestion_dedupe_status(
         best_existing_memory_capture_match(candidate, existing_memories)
     {
         return CaptureSuggestionDedupeStatus {
-            status: "suppressed_existing_memory".to_owned(),
+            status: "related_existing_memory".to_owned(),
             method: "memory_lexical_jaccard".to_owned(),
             reason: format!(
-                "Existing memory {} is {:.0}% lexically similar; capture suggest suppresses duplicate lessons.",
+                "Existing memory {} is {:.0}% lexically similar, but its complete lesson differs; review both before deciding whether they agree.",
                 memory.id,
                 similarity * 100.0
             ),
@@ -4148,7 +4187,7 @@ fn capture_suggestion_dedupe_status(
     CaptureSuggestionDedupeStatus {
         status: "unique".to_owned(),
         method: "curation_queue_then_memory_lexical_jaccard".to_owned(),
-        reason: "No matching curation candidate or existing memory reached the capture suppression threshold."
+        reason: "No exact duplicate or sufficiently similar related guidance was found in the curation queue or existing memories."
             .to_owned(),
         matched_candidate_id: None,
         matched_memory_id: None,
@@ -4480,8 +4519,9 @@ impl ReviewLessons {
             let mut supported = false;
             for sentence in review_span_lesson_sentences(span) {
                 supported = true;
-                let key = sentence.to_ascii_lowercase();
-                if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(key) {
+                // Case and spacing may be command arguments. Only an exact
+                // repeated lesson is interchangeable with the earlier one.
+                if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(sentence.clone()) {
                     sentences.push(sentence);
                 }
             }
@@ -21529,6 +21569,280 @@ mod tests {
     }
 
     #[test]
+    fn capture_suggestions_preserve_changed_lessons_through_persistence() -> TestResult {
+        for (previous, current) in [
+            (
+                "Always run cargo test before publishing.",
+                "Never run cargo test before publishing.",
+            ),
+            (
+                "Run the migration before deploying.",
+                "Do not run the migration before deploying.",
+            ),
+            (
+                "Always copy config.yaml before deployment.",
+                "Always copy config.yaml after deployment.",
+            ),
+            (
+                "Always run `cargo test --jobs 1` before publishing.",
+                "Always run `cargo test --jobs 8` before publishing.",
+            ),
+            (
+                "Always run `cargo test --fail-fast` before publishing.",
+                "Always run `cargo test --no-fail-fast` before publishing.",
+            ),
+            (
+                "Always use `CACHE_DIR=Prod` before release checks.",
+                "Always use `CACHE_DIR=prod` before release checks.",
+            ),
+            (
+                "Always use `printf \"left right\"` before release checks.",
+                "Always use `printf \"left  right\"` before release checks.",
+            ),
+            (
+                "Always run `prepare && publish` after release review.",
+                "Always run `publish && prepare` after release review.",
+            ),
+        ] {
+            let fixture = review_session_fixture()?;
+            let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(940)).to_string();
+            let source_id = evidence_id(941);
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(942)).to_string();
+            let previous_candidate_id = curate_id(943);
+            let envelope = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": current},
+            })
+            .to_string();
+            let connection =
+                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            connection
+                .insert_session(
+                    &session_id,
+                    &session_input(&fixture.workspace_id, "cass-capture-correction"),
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_evidence_span(
+                    &source_id,
+                    &evidence_span_input(
+                        &fixture.workspace_id,
+                        &session_id,
+                        None,
+                        "capture-correction",
+                        1,
+                        &envelope,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+
+            let options = CaptureSuggestOptions {
+                workspace_path: &fixture.workspace_path,
+                database_path: Some(&fixture.database_path),
+                session_id: Some(&session_id),
+                from_recent: false,
+                min_confidence: 0.0,
+                limit: 10,
+            };
+            let initial = capture_suggestions(&options).map_err(|error| error.message())?;
+            assert_eq!(initial.candidate_count, 1, "{current}");
+            let suggestion = &initial.candidates[0];
+            assert!(
+                suggestion
+                    .proposed_fields
+                    .content
+                    .contains(current.trim_end_matches('.')),
+                "the proposed lesson must retain its complete source: {current}"
+            );
+            let prior_content = suggestion.proposed_fields.content.replacen(
+                current.trim_end_matches('.'),
+                previous.trim_end_matches('.'),
+                1,
+            );
+            assert_ne!(prior_content, suggestion.proposed_fields.content);
+            assert!(
+                super::capture_content_similarity(
+                    &prior_content,
+                    &suggestion.proposed_fields.content,
+                )
+                .is_some_and(|similarity| {
+                    similarity >= super::CAPTURE_SUGGESTION_DEDUP_MIN_JACCARD
+                }),
+                "the old suppression must actually confuse this pair: {previous} / {current}"
+            );
+
+            let connection =
+                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            insert_review_memory(&connection, &fixture.workspace_id, &memory_id, &prior_content)?;
+            connection.close().map_err(|error| error.to_string())?;
+            let related_memory = capture_suggestions(&options).map_err(|error| error.message())?;
+            assert_eq!(related_memory.candidate_count, 1, "{current}");
+            assert!(!related_memory.durable_mutation);
+            assert!(related_memory.suppressed.is_empty());
+            assert_eq!(
+                related_memory.candidates[0].candidate_id,
+                suggestion.candidate_id
+            );
+            assert_eq!(
+                related_memory.candidates[0].dedupe_status.status,
+                "related_existing_memory"
+            );
+            assert_eq!(
+                related_memory.candidates[0]
+                    .dedupe_status
+                    .matched_memory_id
+                    .as_deref(),
+                Some(memory_id.as_str())
+            );
+
+            let connection =
+                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            insert_capture_dedup_candidate(
+                &connection,
+                &fixture.workspace_id,
+                &previous_candidate_id,
+                suggestion,
+                &prior_content,
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+            let related_candidate = capture_suggestions(&options).map_err(|error| error.message())?;
+            assert_eq!(related_candidate.candidate_count, 1, "{current}");
+            assert!(related_candidate.suppressed.is_empty());
+            assert_eq!(
+                related_candidate.candidates[0].dedupe_status.status,
+                "related_existing_candidate"
+            );
+            assert_eq!(
+                related_candidate.candidates[0]
+                    .dedupe_status
+                    .matched_candidate_id
+                    .as_deref(),
+                Some(previous_candidate_id.as_str())
+            );
+            assert_eq!(related_candidate.candidates[0].evidence, suggestion.evidence);
+            assert_eq!(
+                related_candidate.candidates[0].proposed_fields.content,
+                suggestion.proposed_fields.content
+            );
+
+            let persisted = review_session_proposals(&ReviewSessionOptions {
+                workspace_path: &fixture.workspace_path,
+                database_path: Some(&fixture.database_path),
+                session_id: Some(&session_id),
+                propose: true,
+                dry_run: false,
+                min_confidence: 0.0,
+                limit: 10,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(persisted.candidate_count, 1, "{current}");
+            assert!(persisted.candidates[0].persisted);
+            assert_eq!(persisted.candidates[0].candidate_id, suggestion.candidate_id);
+            assert_eq!(persisted.candidates[0].source_ids, vec![source_id.clone()]);
+            let connection =
+                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            let stored = connection
+                .get_curation_candidate(&fixture.workspace_id, &suggestion.candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "missing persisted correction".to_owned())?;
+            assert_eq!(
+                stored.proposed_content.as_deref(),
+                Some(suggestion.proposed_fields.content.as_str())
+            );
+            assert!(
+                stored
+                    .derivation_source_refs_json
+                    .as_deref()
+                    .is_some_and(|refs| refs.contains(&source_id))
+            );
+            connection.close().map_err(|error| error.to_string())?;
+            let replay = capture_suggestions(&options).map_err(|error| error.message())?;
+            assert!(replay.candidates.is_empty());
+            assert_eq!(replay.suppressed.len(), 1);
+            assert_eq!(
+                replay.suppressed[0].dedupe_status.method,
+                "curation_queue_exact_id"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capture_suggestions_prefer_complete_duplicates_over_related_guidance() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let options = CaptureSuggestOptions {
+            workspace_path: &fixture.workspace_path,
+            database_path: Some(&fixture.database_path),
+            session_id: Some(&fixture.session_id),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 2,
+        };
+        let initial = capture_suggestions(&options).map_err(|error| error.message())?;
+        let suggestion = initial
+            .candidates
+            .first()
+            .ok_or_else(|| "expected a capture suggestion".to_owned())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(950)).to_string();
+        let related_id = curate_id(951);
+        let exact_id = curate_id(952);
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        insert_capture_dedup_candidate(
+            &connection,
+            &fixture.workspace_id,
+            &related_id,
+            suggestion,
+            &format!(
+                "{} Never publish unreviewed changes.",
+                suggestion.proposed_fields.content
+            ),
+        )?;
+        insert_review_memory(
+            &connection,
+            &fixture.workspace_id,
+            &memory_id,
+            &suggestion.proposed_fields.content,
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let with_memory = capture_suggestions(&options).map_err(|error| error.message())?;
+        let suppressed = with_memory
+            .suppressed
+            .iter()
+            .find(|entry| entry.candidate_id == suggestion.candidate_id)
+            .ok_or_else(|| "an exact memory must win over related queue content".to_owned())?;
+        assert_eq!(suppressed.dedupe_status.method, "memory_exact_content");
+        assert_eq!(
+            suppressed.dedupe_status.matched_memory_id.as_deref(),
+            Some(memory_id.as_str())
+        );
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        insert_capture_dedup_candidate(
+            &connection,
+            &fixture.workspace_id,
+            &exact_id,
+            suggestion,
+            &suggestion.proposed_fields.content,
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let with_exact = capture_suggestions(&options).map_err(|error| error.message())?;
+        let suppressed = with_exact
+            .suppressed
+            .iter()
+            .find(|entry| entry.candidate_id == suggestion.candidate_id)
+            .ok_or_else(|| "identical rejected guidance must stay suppressed".to_owned())?;
+        assert_eq!(suppressed.dedupe_status.method, "curation_queue_exact_content");
+        assert_eq!(
+            suppressed.dedupe_status.matched_candidate_id.as_deref(),
+            Some(exact_id.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn review_session_proposals_persist_bootstrap_as_create_derived_candidate() -> TestResult {
         const LESSON: &str =
             "Always run `printf 'left  right'; cargo fmt --check` before cutting a release tag.";
@@ -31603,6 +31917,62 @@ mod tests {
         )
     }
 
+    fn insert_capture_dedup_candidate(
+        connection: &DbConnection,
+        workspace_id: &str,
+        candidate_id: &str,
+        suggestion: &super::CaptureSuggestion,
+        content: &str,
+    ) -> TestResult {
+        let derived = suggestion.candidate_type == CandidateType::CreateDerivedMemory.as_str();
+        let source_refs = derived.then(|| {
+            let refs = suggestion
+                .evidence
+                .iter()
+                .map(|source| {
+                    serde_json::json!({
+                        "kind": "evidence_span",
+                        "id": source.evidence_span_id,
+                        "contentHash": source.content_hash,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!(refs).to_string()
+        });
+        let metadata = derived.then(|| {
+            serde_json::json!({
+                "memorySpec": {
+                    "level": suggestion.proposed_fields.level,
+                    "kind": suggestion.proposed_fields.kind,
+                },
+                "producer": {"producer": "capture_dedup_fixture"},
+            })
+            .to_string()
+        });
+        connection
+            .insert_curation_candidate(
+                candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.to_owned(),
+                    candidate_type: suggestion.candidate_type.clone(),
+                    target_memory_id: suggestion.target_memory_id.clone(),
+                    proposed_content: Some(content.to_owned()),
+                    proposed_confidence: Some(suggestion.proposed_fields.confidence),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: CandidateSource::AgentInference.as_str().to_owned(),
+                    source_id: None,
+                    reason: "Previously reviewed guidance for capture deduplication.".to_owned(),
+                    confidence: suggestion.confidence,
+                    status: Some(CandidateStatus::Rejected.as_str().to_owned()),
+                    created_at: Some("2026-05-06T00:11:00Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: source_refs,
+                    derivation_metadata_json: metadata,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     fn insert_review_memory_with_provenance(
         connection: &DbConnection,
         workspace_id: &str,
@@ -31928,6 +32298,29 @@ mod tests {
             span.excerpt, original,
             "projection never rewrites durable evidence"
         );
+    }
+
+    #[test]
+    fn bootstrap_learning_retains_case_distinct_commands_and_deduplicates_exact_repeats() {
+        let session = synthetic_stored_session();
+        let upper = "Always use `CACHE_DIR=Prod` before release checks";
+        let lower = "Always use `CACHE_DIR=prod` before release checks";
+        let body = format!("{upper}.\n{upper}.\n{lower}.");
+        let envelope = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": body},
+        })
+        .to_string();
+        let span = synthetic_span("span_case_sensitive_commands", None, &envelope);
+        let candidates = build_bootstrap_session_candidates(
+            &session.workspace_id,
+            &session,
+            &[span],
+            0.0,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].proposed_content.matches(upper).count(), 1);
+        assert_eq!(candidates[0].proposed_content.matches(lower).count(), 1);
     }
 
     #[test]
