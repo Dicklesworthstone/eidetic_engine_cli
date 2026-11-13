@@ -395,7 +395,7 @@ fn a_previously_fragmented_card_gains_an_immutable_complete_revision() -> TestRe
 }
 
 #[test]
-fn recent_plans_do_not_crowd_a_real_explanation_out_of_the_two_turn_budget() -> TestResult {
+fn recent_plans_do_not_crowd_a_real_explanation_out_of_the_source_budget() -> TestResult {
     let fixture = Fixture::new(&[
         FIX,
         "Let me change Widget again to fix a different E0277 tomorrow.",
@@ -837,5 +837,115 @@ fn reserved_card_identities_never_become_tool_events_or_repair_sources() -> Test
     let mut checks = CardChecks::default();
     checks.observe(&current)?;
     assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn overbudget_rederivation_withholds_v24_suffixes_without_erasing_history() -> TestResult {
+    let repairs = (0..17)
+        .map(|index| {
+            format!("I fixed E0277 by deriving Serialize for Widget{index} in src/widget.rs.")
+        })
+        .collect::<Vec<_>>();
+    let refs = repairs.iter().map(String::as_str).collect::<Vec<_>>();
+    let fixture = Fixture::new(&refs)?;
+    let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
+    let sources = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
+    let mut arc = session_failure_arcs(WS, &session, &sources)
+        .into_iter()
+        .next()
+        .ok_or("arc")?;
+    let resolution = arc.resolution.as_mut().ok_or("completed retry")?;
+    assert!(resolution.repair_ids.is_empty());
+
+    // Recreate v24's persisted attribution to only the newest two turns.
+    let legacy_repairs = fixture
+        .repairs
+        .iter()
+        .rev()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    resolution.repair_ids = legacy_repairs.clone();
+    let old = draft_incident_card(WS, &fixture.session, &sources, &arc).ok_or("v24 card")?;
+    fixture.db.insert_evidence_span(&old.id, &old.input)?;
+    let old_card = fixture
+        .db
+        .get_evidence_span(&old.id)?
+        .ok_or("stored v24 card")?;
+    let diagnostic = from_rustc(Some("E0277"), "trait bound");
+    record_error_repair_links(
+        &fixture.db,
+        WS,
+        &diagnostic,
+        &ErrorRepairLinkRecording {
+            helpful_repairs: legacy_repairs.clone(),
+            proof_links: vec![fixture.proof.clone()],
+            created_by: Some(CASS_ERROR_RECALL_ACTOR.to_owned()),
+            evidence_ref: Some(fixture.failure.clone()),
+            ..ErrorRepairLinkRecording::default()
+        },
+    )?;
+    record_error_repair_links(
+        &fixture.db,
+        WS,
+        &diagnostic,
+        &ErrorRepairLinkRecording {
+            helpful_repairs: vec![old.id.clone()],
+            created_by: Some(INCIDENT_CARD_ACTOR.to_owned()),
+            evidence_ref: Some(fixture.failure.clone()),
+            ..ErrorRepairLinkRecording::default()
+        },
+    )?;
+    let before = fixture
+        .db
+        .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.repair_links_recorded, 1);
+    assert_eq!(report.incident_cards_recorded, 0);
+    let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+    assert!(
+        legacy_repairs
+            .iter()
+            .all(|id| recall.helpful_repairs.contains(id))
+    );
+    assert!(recall.helpful_repairs.contains(&old.id));
+    assert_eq!(recall.proof_links, vec![fixture.proof.clone()]);
+
+    let exposed = recalled_repair_evidence(&fixture.db, WS, &recall)?;
+    assert_eq!(exposed.len(), 1);
+    assert_eq!(exposed[0].evidence_id, fixture.proof);
+    assert_eq!(exposed[0].role, "proof");
+    assert!(exposed[0].text.is_none());
+    assert!(!pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
+    let mut checks = CardChecks::default();
+    checks.observe(&old_card)?;
+    assert_eq!(
+        checks.withheld(&fixture.db, WS)?,
+        BTreeSet::from([old.id.clone()])
+    );
+    assert_eq!(
+        fixture.db.get_evidence_span(&old.id)?.as_ref(),
+        Some(&old_card)
+    );
+    for original in &sources {
+        assert_eq!(
+            fixture.db.get_evidence_span(&original.id)?.as_ref(),
+            Some(original)
+        );
+    }
+    let after = fixture
+        .db
+        .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+    assert_eq!(after.len(), before.len());
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!(old.link_id, new.link_id);
+        assert_eq!(old.evidence_ref, new.evidence_ref);
+        assert_eq!(old.created_at, new.created_at);
+    }
     Ok(())
 }

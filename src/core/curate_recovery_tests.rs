@@ -424,3 +424,89 @@ fn a_contributing_explanation_before_the_failed_attempt_notice_is_not_rehabilita
     );
     Ok(())
 }
+
+#[test]
+fn complete_multi_turn_repairs_survive_public_review_and_validation() -> TestResult {
+    let workspace = Workspace::new()?;
+    let first = "I fixed E0277 by importing Serialize in src/widget.rs. This applies only to validated records.";
+    let second = "I fixed E0277 by adding Serialize support for the nested Widget state in src/widget.rs.";
+    let episode = workspace.episode(
+        86_001,
+        "Work item multi-turn.",
+        &[first, second],
+        &[],
+        COMMAND,
+        true,
+    )?;
+    let sources = workspace
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
+    let report = workspace.review(&episode, 0.6, false)?;
+    let proposed = native(&report);
+    assert_eq!(proposed.len(), 1);
+    assert_eq!(proposed[0].source_ids.len(), 3);
+    assert!(proposed[0].source_ids.contains(&episode.repair));
+    assert!(proposed[0].proposed_content.contains(&format!(
+        "Repair: {first}\n\n{second}\n\n{FIX}\nVerification:"
+    )));
+    validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
+
+    let written = workspace.review(&episode, 0.6, true)?;
+    assert!(written.durable_mutation);
+    assert_eq!(native(&written)[0].candidate_id, proposed[0].candidate_id);
+    let stored = workspace
+        .db
+        .get_curation_candidate(&workspace.id, &proposed[0].candidate_id)?
+        .ok_or("stored")?;
+    assert_eq!(stored.proposed_content, proposed[0].proposed_content);
+    validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+    assert!(!workspace.review(&episode, 0.6, true)?.durable_mutation);
+    assert_eq!(
+        workspace
+            .db
+            .list_evidence_spans_for_session(&episode.session)?,
+        sources
+    );
+    assert!(
+        workspace
+            .db
+            .list_memories(&workspace.id, None, true)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn later_repair_turns_cannot_hide_an_earlier_refuted_explanation() -> TestResult {
+    let workspace = Workspace::new()?;
+    let earlier = "I fixed E0277 by adding the Serialize import in src/widget.rs.";
+    let later = "I fixed E0277 by correcting the Widget serializer in src/widget.rs.";
+    let episode = workspace.episode(
+        86_002,
+        "Work item refuted chain.",
+        &[earlier, NOTICE],
+        &[later],
+        COMMAND,
+        true,
+    )?;
+    let session = workspace
+        .db
+        .get_session(&episode.session)?
+        .ok_or("session")?;
+    let spans = workspace
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
+    let arcs =
+        crate::core::cass_error_recall::session_failure_arcs(&workspace.id, &session, &spans);
+    assert!(
+        arcs.iter().any(|arc| arc
+            .resolution
+            .as_ref()
+            .is_some_and(|resolution| resolution.repair_ids.len() == 3)),
+        "every contributing explanation must reach the refutation check"
+    );
+    let evidence = SessionEvidence::new(&workspace.id, &session, &spans);
+    assert!(evidence.native().candidates.is_empty());
+    assert!(native(&workspace.review(&episode, 0.0, false)?).is_empty());
+    Ok(())
+}

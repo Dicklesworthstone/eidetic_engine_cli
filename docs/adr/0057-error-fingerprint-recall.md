@@ -85,7 +85,7 @@ are checked even when Vitest merges several named failures into one error block.
 
 Only the first diagnostic line enters existing redaction and canonicalization;
 test identities, diffs and stack frames do not become fingerprint text.
-`cass_error_recall.v24` reconsiders existing imports on their next import.
+`cass_error_recall.v25` reconsiders existing imports on their next import.
 Verified repairs reach incident cards and review candidates; durable memories
 still require explicit validation and apply.
 
@@ -97,6 +97,17 @@ remaining token budget, no card is emitted. The full admitted repair turn and
 its verified error-recall links remain available. Existing cards are retained;
 changed renderings use immutable revisions and current-source proof checks
 withhold obsolete or no-longer-supported renderings.
+
+Repair attribution retains every eligible performed assistant turn between the
+failed result and the verifying invocation, up to 16 turns. This source bound
+is separate from the 120-token card and 8 KiB complete durable-lesson budgets.
+If a seventeenth eligible turn exists, the failure fingerprint and successful
+execution proof remain available, but no partial repair set, incident card or
+verified repair lesson is derived. A recent suffix cannot stand in for the
+whole repair. Existing source admission and command-context checks still apply;
+durable lessons also retain their refutation checks. Re-import and live readers
+revalidate historical cards and repair links without rewriting source evidence
+or deleting the recorded history.
 
 ## Consequences
 

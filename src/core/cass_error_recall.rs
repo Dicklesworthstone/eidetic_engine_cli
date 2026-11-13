@@ -84,7 +84,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// named passing and failing subjects in a completed verbose retry.
 /// V24 preserves complete technical repair clauses in incident cards and
 /// withholds cards whose repair cannot fit without truncation or misattribution.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v24";
+/// V25 retains complete bounded repair-source sets rather than teaching only
+/// the latest turns; over-budget episodes retain their successful proof alone.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v25";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -92,8 +94,9 @@ const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_DIAGNOSTICS_PER_FAILURE: usize = 4;
 /// Unresolved failures remembered while walking one session.
 const MAX_PENDING_FAILURES: usize = 32;
-/// Admitted assistant turns linked as the repair of one failure.
-const MAX_REPAIR_TURNS: usize = 2;
+/// Bound source attribution independently of card and durable-lesson budgets.
+/// Sixteen turns keep one incident and its proof within a recall target batch.
+const MAX_REPAIR_TURNS: usize = 16;
 /// Conversation completion inspects a small, complete tool interlude only.
 pub(crate) const MAX_TOOL_INTERLUDE_ROWS: usize = 16;
 pub(crate) const MAX_TOOL_INTERLUDE_BYTES: usize = 256 * 1024;
@@ -1115,7 +1118,7 @@ fn resolve_pending(
         // be credited to that run. Narration is not a helpful repair, and a
         // message written while the command was running is not verified by it.
         // A successful retry may still record proof without a repair or card.
-        let repair_ids = turns
+        let mut repair_ids = turns
             .iter()
             .rev()
             .filter(|span| {
@@ -1128,9 +1131,15 @@ fn resolve_pending(
                         failure.symptom.as_deref(),
                     )
             })
-            .take(MAX_REPAIR_TURNS)
+            .take(MAX_REPAIR_TURNS + 1)
             .map(|span| span.id.clone())
             .collect::<Vec<_>>();
+        // A capped suffix can omit an essential step or an earlier refutation.
+        // Keep the completed retry as proof, but never attribute an incomplete
+        // repair set to that success.
+        if repair_ids.len() > MAX_REPAIR_TURNS {
+            repair_ids.clear();
+        }
         arcs.push(failure.into_arc(Some(Resolution {
             proof_id: success.id.clone(),
             proof_family: family.clone(),
