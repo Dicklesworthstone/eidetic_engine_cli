@@ -1055,8 +1055,106 @@ fn workspace_only_tool_schema() -> Value {
     })
 }
 
+const RETRIEVAL_ARGUMENT_ALIASES: &[(&str, &str)] = &[
+    ("indexDir", "index_dir"),
+    ("sourceMode", "source_mode"),
+    ("strictSourceMode", "strict_source_mode"),
+    ("memoryScope", "memory_scope"),
+    ("strictScope", "strict_scope"),
+    ("asOf", "as_of"),
+    ("includeExpired", "include_expired"),
+    ("includeFuture", "include_future"),
+    ("includeStale", "include_stale"),
+    ("relevanceFloor", "relevance_floor"),
+    ("includeTombstoned", "include_tombstoned"),
+    ("fieldFilters", "field_filters"),
+    ("maxTokens", "max_tokens"),
+    ("candidatePool", "candidate_pool"),
+    ("taskPaths", "task_paths"),
+    ("readOnly", "read_only"),
+    ("requireFreshSentinels", "require_fresh_sentinels"),
+];
+
+// These pre-existing optional arguments accepted JSON null as omission. Keep
+// that compatibility while new authority/validity constraints fail closed.
+const NULLABLE_RETRIEVAL_ARGUMENTS: &[&str] = &[
+    "workspace",
+    "database",
+    "indexDir",
+    "index_dir",
+    "limit",
+    "explain",
+    "maxTokens",
+    "max_tokens",
+    "candidatePool",
+    "candidate_pool",
+    "profile",
+];
+
+/// Search, context and pack-DNA must advertise the same retrieval constraints
+/// they pass to the CLI. An unsupported constraint is never silently dropped.
+fn retrieval_tool_schema(mut schema: Value) -> Value {
+    let common = json!({
+        "speed": {
+            "type": "string", "enum": ["instant", "default", "quality"],
+            "description": "Retrieval speed/quality budget"
+        },
+        "sourceMode": {
+            "type": "string", "enum": ["lexical_only", "semantic_only", "hybrid"],
+            "description": "Retrieval source; lexical_only does not load an embedding model"
+        },
+        "strictSourceMode": {
+            "type": "boolean",
+            "description": "Fail when the requested source is unavailable instead of falling back"
+        },
+        "memoryScope": {
+            "type": "string", "enum": ["self", "team", "global", "workspace", "verified", "swarm"],
+            "description": "Trust lane within the addressed workspace"
+        },
+        "strictScope": {
+            "type": "boolean",
+            "description": "Fail closed when relevant evidence exists outside the requested scope"
+        },
+        "asOf": {
+            "type": "string", "format": "date-time",
+            "description": "RFC3339 reference time for temporal validity and replay"
+        },
+        "includeExpired": { "type": "boolean", "description": "Include expired memories" },
+        "includeFuture": { "type": "boolean", "description": "Include not-yet-valid memories" },
+        "includeStale": { "type": "boolean", "description": "Include stale memories" },
+        "relevanceFloor": {
+            "type": "number", "minimum": 0, "maximum": 1,
+            "description": "Minimum relevance score; zero disables the cutoff"
+        }
+    });
+    if let (Some(properties), Value::Object(common)) = (
+        schema.get_mut("properties").and_then(Value::as_object_mut),
+        common,
+    ) {
+        properties.extend(common);
+        for &name in NULLABLE_RETRIEVAL_ARGUMENTS {
+            if let Some(property) = properties.get_mut(name) {
+                if let Some(kind) = property.get("type").and_then(Value::as_str) {
+                    let kind = kind.to_owned();
+                    property["type"] = json!([kind, "null"]);
+                    if let Some(variants) = property.get_mut("enum").and_then(Value::as_array_mut) {
+                        variants.push(Value::Null);
+                    }
+                }
+            }
+        }
+        for &(canonical, alias) in RETRIEVAL_ARGUMENT_ALIASES {
+            if let Some(property) = properties.get(canonical).cloned() {
+                properties.insert(alias.to_owned(), property);
+            }
+        }
+    }
+    schema["additionalProperties"] = json!(false);
+    schema
+}
+
 fn search_tool_schema() -> Value {
-    json!({
+    retrieval_tool_schema(json!({
         "type": "object",
         "properties": {
             "query": {
@@ -1082,14 +1180,31 @@ fn search_tool_schema() -> Value {
             "explain": {
                 "type": "boolean",
                 "description": "Include score explanations"
+            },
+            "full": {
+                "type": "boolean",
+                "description": "Return complete result bodies instead of excerpts"
+            },
+            "includeTombstoned": { "type": "boolean" },
+            "kind": { "type": "string", "description": "Restrict results to one memory kind" },
+            "fieldFilters": {
+                "oneOf": [
+                    { "type": "string", "minLength": 1 },
+                    { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                ],
+                "description": "Typed field predicates: name=value, name~value, or name^value"
+            },
+            "dedupe": {
+                "type": "string", "enum": ["doc_id", "mi"],
+                "description": "Deduplicate by document identity or mutual information"
             }
         },
         "required": ["query"]
-    })
+    }))
 }
 
 fn context_tool_schema() -> Value {
-    json!({
+    retrieval_tool_schema(json!({
         "type": "object",
         "properties": {
             "query": {
@@ -1100,7 +1215,7 @@ fn context_tool_schema() -> Value {
                 "type": "string",
                 "description": "Workspace path"
             },
-            "max_tokens": {
+            "maxTokens": {
                 "type": "integer",
                 "description": "Token budget (default 4000)"
             },
@@ -1120,10 +1235,28 @@ fn context_tool_schema() -> Value {
             "indexDir": {
                 "type": "string",
                 "description": "Index directory override"
+            },
+            "taskPaths": {
+                "oneOf": [
+                    { "type": "string", "minLength": 1 },
+                    { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                ],
+                "description": "Literal workspace-relative task paths for file/directory scoped rules; not globs"
+            },
+            "readOnly": {
+                "type": "boolean",
+                "description": "Assemble without persisting pack records, audit rows, or L2 cache entries"
+            },
+            "requireFreshSentinels": {
+                "type": "boolean",
+                "description": "Only admit sentinel-backed memories whose latest checks pass and are fresh"
+            },
+            "explain": {
+                "type": "boolean", "description": "Include pack explanation metadata"
             }
         },
         "required": ["query"]
-    })
+    }))
 }
 
 fn recall_tool_schema() -> Value {
@@ -1280,41 +1413,7 @@ fn proximity_tool_schema() -> Value {
 }
 
 fn pack_dna_explain_tool_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Task description"
-            },
-            "workspace": {
-                "type": "string",
-                "description": "Workspace path"
-            },
-            "max_tokens": {
-                "type": "integer",
-                "description": "Token budget"
-            },
-            "candidatePool": {
-                "type": "integer",
-                "description": "Maximum candidate memories before packing"
-            },
-            "profile": {
-                "type": "string",
-                "description": "Context profile",
-                "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
-            },
-            "database": {
-                "type": "string",
-                "description": "Database path override"
-            },
-            "indexDir": {
-                "type": "string",
-                "description": "Index directory override"
-            }
-        },
-        "required": ["query"]
-    })
+    context_tool_schema()
 }
 
 fn revision_impact_tool_schema() -> Value {
@@ -2089,24 +2188,148 @@ fn build_capabilities_tool_args(
     Ok(())
 }
 
-fn build_search_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
-    push_arg(args, "search");
-    push_arg(args, required_string(arguments, &["query"])?);
-    if let Some(limit) = optional_u32(arguments, &["limit"])? {
-        push_arg(args, "--limit");
-        push_arg(args, limit.to_string());
+fn validate_retrieval_tool_arguments(arguments: &Value, schema: &Value) -> Result<(), String> {
+    validate_closed_tool_argument_names(arguments, schema)?;
+    for &(canonical, alias) in RETRIEVAL_ARGUMENT_ALIASES {
+        if arguments.get(canonical).is_some() && arguments.get(alias).is_some() {
+            return Err(format!(
+                "Conflicting aliases for '{canonical}'; supply only one spelling"
+            ));
+        }
     }
-    append_optional_path_flag(args, arguments, &["database"], "--database")?;
-    append_optional_path_flag(args, arguments, &["indexDir", "index_dir"], "--index-dir")?;
-    if optional_bool(arguments, &["explain"])? {
-        push_arg(args, "--explain");
+    if let Some(object) = arguments.as_object() {
+        for (name, value) in object {
+            if value.is_null() && NULLABLE_RETRIEVAL_ARGUMENTS.contains(&name.as_str()) {
+                continue;
+            }
+            if value.is_null() {
+                return Err(format!("Argument '{name}' must not be null"));
+            }
+            if value.as_str().is_some_and(|value| value.trim().is_empty()) {
+                return Err(format!("Argument '{name}' must be non-empty"));
+            }
+            if value.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|item| item.trim().is_empty()))
+            }) {
+                return Err(format!("Argument '{name}' must contain non-empty strings"));
+            }
+        }
     }
     Ok(())
 }
 
+fn append_retrieval_tool_constraints(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    if let Some(speed) = optional_string(arguments, &["speed"])? {
+        let speed = speed
+            .parse::<crate::search::SpeedMode>()
+            .map_err(|_| "Argument 'speed' must be instant, default, or quality".to_owned())?;
+        push_arg(args, format!("--speed={}", speed.as_str()));
+    }
+    if let Some(source) = find_argument(arguments, &["sourceMode", "source_mode"]) {
+        let source = serde_json::from_value::<crate::core::search::SearchSourceMode>(source.clone())
+            .map_err(|_| {
+                "Argument 'sourceMode' must be lexical_only, semantic_only, or hybrid".to_owned()
+            })?;
+        push_arg(args, format!("--source-mode={}", source.as_str()));
+    }
+    if let Some(scope) = optional_string(arguments, &["memoryScope", "memory_scope"])? {
+        let scope = crate::models::MemoryScope::parse(scope)
+            .ok_or_else(|| "Argument 'memoryScope' must name a supported memory scope".to_owned())?;
+        push_arg(args, format!("--memory-scope={}", scope.as_str()));
+    }
+    if let Some(as_of) = optional_string(arguments, &["asOf", "as_of"])? {
+        chrono::DateTime::parse_from_rfc3339(as_of)
+            .map_err(|_| "Argument 'asOf' must be an RFC3339 timestamp".to_owned())?;
+        push_arg(args, format!("--as-of={as_of}"));
+    }
+    if let Some(floor) = find_argument(arguments, &["relevanceFloor", "relevance_floor"]) {
+        let floor = floor
+            .as_f64()
+            .filter(|floor| floor.is_finite() && (0.0..=1.0).contains(floor))
+            .ok_or_else(|| "Argument 'relevanceFloor' must be a number from 0 to 1".to_owned())?;
+        push_arg(args, format!("--relevance-floor={floor}"));
+    }
+    for (names, flag) in [
+        (
+            ["strictSourceMode", "strict_source_mode"],
+            "--strict-source-mode",
+        ),
+        (["strictScope", "strict_scope"], "--strict-scope"),
+        (["includeExpired", "include_expired"], "--include-expired"),
+        (["includeFuture", "include_future"], "--include-future"),
+        (["includeStale", "include_stale"], "--include-stale"),
+    ] {
+        if optional_bool(arguments, &names)? {
+            push_arg(args, flag);
+        }
+    }
+    for (names, flag) in [
+        (&["database"][..], "--database"),
+        (&["indexDir", "index_dir"][..], "--index-dir"),
+    ] {
+        if let Some(path) = optional_string(arguments, names)? {
+            push_arg(args, format!("{flag}={path}"));
+        }
+    }
+    Ok(())
+}
+
+fn build_search_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    validate_retrieval_tool_arguments(arguments, &search_tool_schema())?;
+    let query = required_string(arguments, &["query"])?;
+    push_arg(args, "search");
+    if let Some(limit) = optional_u32(arguments, &["limit"])? {
+        push_arg(args, "--limit");
+        push_arg(args, limit.to_string());
+    }
+    append_retrieval_tool_constraints(args, arguments)?;
+    if optional_bool(arguments, &["explain"])? {
+        push_arg(args, "--explain");
+    }
+    if optional_bool(arguments, &["full"])? {
+        push_arg(args, "--full");
+    }
+    if optional_bool(arguments, &["includeTombstoned", "include_tombstoned"])? {
+        push_arg(args, "--include-tombstoned");
+    }
+    if let Some(kind) = optional_string(arguments, &["kind"])? {
+        push_arg(args, format!("--kind={kind}"));
+    }
+    for field in optional_string_list(arguments, &["fieldFilters", "field_filters"])? {
+        crate::core::search::TypedMemoryFieldFilter::parse(&field)
+            .map_err(|_| {
+                "Argument 'fieldFilters' contains an invalid typed field predicate".to_owned()
+            })?;
+        push_arg(args, format!("--field={field}"));
+    }
+    if let Some(dedupe) = optional_string(arguments, &["dedupe"])? {
+        if !matches!(dedupe, "doc_id" | "mi") {
+            return Err("Argument 'dedupe' must be doc_id or mi".to_owned());
+        }
+        push_arg(args, format!("--dedupe={dedupe}"));
+    }
+    push_arg(args, "--");
+    push_arg(args, query);
+    Ok(())
+}
+
 fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    build_context_tool_args_with_explanation(args, arguments, false)
+}
+
+fn build_context_tool_args_with_explanation(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+    force_explanation: bool,
+) -> Result<(), String> {
+    validate_retrieval_tool_arguments(arguments, &context_tool_schema())?;
+    let query = required_string(arguments, &["query"])?;
     push_arg(args, "pack");
-    push_arg(args, required_string(arguments, &["query"])?);
     if let Some(max_tokens) = optional_u32(arguments, &["maxTokens", "max_tokens"])? {
         push_arg(args, "--max-tokens");
         push_arg(args, max_tokens.to_string());
@@ -2119,8 +2342,21 @@ fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resul
         push_arg(args, "--profile");
         push_arg(args, parse_mcp_context_profile(profile)?);
     }
-    append_optional_path_flag(args, arguments, &["database"], "--database")?;
-    append_optional_path_flag(args, arguments, &["indexDir", "index_dir"], "--index-dir")?;
+    append_retrieval_tool_constraints(args, arguments)?;
+    for path in optional_string_list(arguments, &["taskPaths", "task_paths"])? {
+        push_arg(args, format!("--task-path={path}"));
+    }
+    if optional_bool(arguments, &["readOnly", "read_only"])? {
+        push_arg(args, "--read-only");
+    }
+    if optional_bool(arguments, &["requireFreshSentinels", "require_fresh_sentinels"])? {
+        push_arg(args, "--require-fresh-sentinels");
+    }
+    if optional_bool(arguments, &["explain"])? || force_explanation {
+        push_arg(args, "--explain");
+    }
+    push_arg(args, "--");
+    push_arg(args, query);
     Ok(())
 }
 
@@ -2225,9 +2461,7 @@ fn build_pack_dna_explain_tool_args(
     args: &mut Vec<OsString>,
     arguments: &Value,
 ) -> Result<(), String> {
-    build_context_tool_args(args, arguments)?;
-    push_arg(args, "--explain");
-    Ok(())
+    build_context_tool_args_with_explanation(args, arguments, true)
 }
 
 fn build_revision_impact_tool_args(
@@ -5129,12 +5363,13 @@ mod tests {
                 "ee",
                 "--json",
                 "pack",
-                "prepare release",
                 "--max-tokens",
                 "1200",
                 "--profile",
                 "balanced",
                 "--explain",
+                "--",
+                "prepare release",
             ]
         );
 
@@ -5596,6 +5831,416 @@ mod tests {
         assert_eq!(
             error.get("message").and_then(Value::as_str),
             Some("Write tool ee_remember requires allowWrite=true when dryRun=false")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retrieval_tools_preserve_authority_validity_and_literal_arguments_through_clap()
+    -> Result<(), String> {
+        use clap::Parser;
+
+        let query = "--memory-scope=swarm";
+        let paths = ["src/a,b.rs", "src/café notes.rs", "--private.rs"];
+        for name in ["ee_search", "ee_context", "ee_pack_dna_explain"] {
+            for scope in ["self", "team", "global", "workspace", "verified", "swarm"] {
+                let mut arguments = json!({
+                    "query": query,
+                    "workspace": "workspace with spaces",
+                    "database": "--foreign-store",
+                    "indexDir": "--foreign-index",
+                    "memoryScope": scope,
+                    "strictScope": true,
+                    "sourceMode": "lexical_only",
+                    "strictSourceMode": true,
+                    "speed": "instant",
+                    "asOf": "2025-01-02T03:04:05Z",
+                    "includeExpired": true,
+                    "includeFuture": true,
+                    "includeStale": true,
+                    "relevanceFloor": 0.0
+                });
+                if name == "ee_search" {
+                    arguments["limit"] = json!(7);
+                    arguments["full"] = json!(true);
+                    arguments["includeTombstoned"] = json!(true);
+                    arguments["kind"] = json!("failure");
+                    arguments["fieldFilters"] = json!(["root_cause~cache mismatch", "code=E0425"]);
+                    arguments["dedupe"] = json!("mi");
+                } else {
+                    arguments["taskPaths"] = json!(paths);
+                    arguments["readOnly"] = json!(true);
+                    arguments["requireFreshSentinels"] = json!(true);
+                    arguments["maxTokens"] = json!(1200);
+                }
+                let args = build_cli_args_for_tool(registry_tool(name)?, &arguments)?;
+                let cli = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+                assert_eq!(cli.workspace, Some(PathBuf::from("workspace with spaces")));
+                match cli.command {
+                    Some(crate::cli::Command::Search(args)) => {
+                        assert_eq!(args.query.as_deref(), Some(query));
+                        assert_eq!(args.database, Some(PathBuf::from("--foreign-store")));
+                        assert_eq!(args.index_dir, Some(PathBuf::from("--foreign-index")));
+                        assert_eq!(args.memory_scope.as_str(), scope);
+                        assert!(args.strict_scope && args.strict_source_mode);
+                        assert_eq!(args.source_mode.as_str(), "lexical_only");
+                        assert_eq!(args.speed.as_str(), "instant");
+                        assert_eq!(args.as_of.map(|time| time.timestamp()), Some(1_735_787_045));
+                        assert!(args.include_expired && args.include_future && args.include_stale);
+                        assert_eq!(args.relevance_floor, Some(0.0));
+                        assert_eq!(args.limit, 7);
+                        assert!(args.full && args.include_tombstoned);
+                        assert_eq!(args.kind.as_deref(), Some("failure"));
+                        assert_eq!(args.field_filters, ["root_cause~cache mismatch", "code=E0425"]);
+                        assert_eq!(args.dedupe.as_str(), "mi");
+                    }
+                    Some(crate::cli::Command::Pack(args)) => {
+                        assert!(args.command.is_none(), "query must never become a subcommand");
+                        assert_eq!(args.query.as_deref(), Some(query));
+                        assert_eq!(args.database, Some(PathBuf::from("--foreign-store")));
+                        assert_eq!(args.index_dir, Some(PathBuf::from("--foreign-index")));
+                        assert_eq!(args.memory_scope.map(|scope| scope.as_str()), Some(scope));
+                        assert!(args.strict_scope && args.strict_source_mode);
+                        assert_eq!(
+                            args.source_mode.map(|mode| mode.as_str()),
+                            Some("lexical_only")
+                        );
+                        assert_eq!(args.speed.map(|speed| speed.as_str()), Some("instant"));
+                        assert_eq!(args.as_of.map(|time| time.timestamp()), Some(1_735_787_045));
+                        assert!(args.include_expired && args.include_future && args.include_stale);
+                        assert_eq!(args.relevance_floor, Some(0.0));
+                        assert_eq!(args.task_paths, paths);
+                        assert!(args.read_only && args.require_fresh_sentinels);
+                        assert_eq!(args.max_tokens, Some(1200));
+                        assert_eq!(args.explain, name == "ee_pack_dna_explain");
+                    }
+                    _ => return Err(format!("{name} selected the wrong CLI command")),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retrieval_tool_schemas_aliases_and_legacy_nulls_match_the_executable_contract()
+    -> Result<(), String> {
+        for name in ["ee_search", "ee_context", "ee_pack_dna_explain"] {
+            let tool = registry_tool(name)?;
+            let schema = (tool.input_schema)();
+            assert_eq!(schema["additionalProperties"], false);
+            for property in [
+                "memoryScope",
+                "strictScope",
+                "sourceMode",
+                "strictSourceMode",
+                "asOf",
+            ] {
+                assert!(schema["properties"][property].is_object(), "{name}: {property}");
+            }
+            let mut canonical = json!({"query":"Q", "memoryScope":"verified",
+                "strictScope":true, "sourceMode":"lexical_only", "strictSourceMode":true,
+                "asOf":"2025-01-01T00:00:00Z", "includeExpired":true,
+                "includeFuture":true, "includeStale":true, "relevanceFloor":0.25});
+            if name != "ee_search" {
+                canonical["taskPaths"] = json!(["src/a,b.rs"]);
+                canonical["readOnly"] = json!(true);
+                canonical["requireFreshSentinels"] = json!(true);
+                canonical["maxTokens"] = json!(900);
+                canonical["candidatePool"] = json!(50);
+            }
+            let mut aliases = canonical.clone();
+            for &(canonical, alias) in RETRIEVAL_ARGUMENT_ALIASES {
+                if schema["properties"].get(canonical).is_some() {
+                    assert_eq!(schema["properties"][canonical], schema["properties"][alias]);
+                }
+                if let Some(object) = aliases.as_object_mut() {
+                    if let Some(value) = object.remove(canonical) {
+                        object.insert(alias.to_owned(), value);
+                    }
+                }
+            }
+            assert_eq!(
+                build_cli_args_for_tool(tool, &canonical)?,
+                build_cli_args_for_tool(tool, &aliases)?
+            );
+            let omitted = json!({"query":"Q"});
+            let mut nullable = omitted.clone();
+            for field in ["workspace", "database", "indexDir", "explain"] {
+                nullable[field] = Value::Null;
+            }
+            if name == "ee_search" {
+                nullable["limit"] = Value::Null;
+            } else {
+                nullable["max_tokens"] = Value::Null;
+                nullable["candidate_pool"] = Value::Null;
+                nullable["profile"] = Value::Null;
+            }
+            assert_eq!(
+                build_cli_args_for_tool(tool, &omitted)?,
+                build_cli_args_for_tool(tool, &nullable)?,
+                "legacy null option compatibility: {name}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retrieval_constraints_fail_closed_before_cli_execution() {
+        for name in ["ee_search", "ee_context", "ee_pack_dna_explain"] {
+            for constraint in [
+                json!({"memoryScope":"private-canary"}),
+                json!({"sourceMode":"private-canary"}),
+                json!({"speed":"private-canary"}),
+                json!({"asOf":"private-canary"}),
+                json!({"strictScope":"private-canary"}),
+                json!({"strictSourceMode":null}),
+                json!({"memoryScope":null}),
+                json!({"memoryScope":"verified", "memory_scope":"swarm"}),
+                json!({"sourceMode":"lexical_only", "source_mode":"hybrid"}),
+                json!({"asOf":"2025-01-01T00:00:00Z", "as_of":null}),
+                json!({"relevanceFloor":-0.1}),
+                json!({"relevanceFloor":1.1}),
+                json!({"includeExpired":1}),
+                json!({"private-canary-constraint":"verified"}),
+                json!({"changedSymbols":["private-canary"]}),
+            ] {
+                let mut arguments = json!({"query":"Q", "workspace":"/private-canary-missing"});
+                if let Some(constraint) = constraint.as_object() {
+                    for (key, value) in constraint {
+                        arguments[key] = value.clone();
+                    }
+                }
+                let response = handle_tools_call(
+                    json!(1),
+                    Some(&json!({"name":name, "arguments":arguments})),
+                );
+                assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+                assert!(response.get("result").is_none());
+                assert!(!response.to_string().contains("private-canary"));
+            }
+        }
+        for paths in [
+            Value::Null,
+            json!(" "),
+            json!(["src/lib.rs", null]),
+            json!([" "]),
+        ] {
+            let response = handle_tools_call(
+                json!(1),
+                Some(&json!({"name":"ee_context", "arguments":{"query":"Q", "taskPaths":paths}})),
+            );
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "lexical-bm25")]
+    fn persistent_mcp_retrieval_enforces_scope_validity_and_native_rule_paths()
+    -> Result<(), String> {
+        use crate::db::{
+            CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
+        };
+
+        fn call(process: &mut McpProcess, name: &str, arguments: Value) -> Result<Value, String> {
+            let response = handle_tools_call_in_process(
+                process,
+                json!(1),
+                Some(&json!({"name":name, "arguments":arguments})),
+            );
+            if response.get("error").is_some() || response["result"]["isError"] != false {
+                return Err(format!("{name} failed: {response}"));
+            }
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .ok_or("MCP tool omitted its canonical response")?;
+            serde_json::from_str(text).map_err(|error| error.to_string())
+        }
+
+        fn ids(value: &Value, pointer: &str, field: &str) -> Result<BTreeSet<String>, String> {
+            let items = value
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("missing {pointer}: {value}"))?;
+            Ok(items
+                .iter()
+                .filter_map(|item| item.get(field).and_then(Value::as_str).map(str::to_owned))
+                .collect())
+        }
+
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let db = DbConnection::open_file(workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        db.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let mut memory_ids = Vec::new();
+        let created_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        for (ordinal, trust, valid_from, valid_to) in [
+            (1, "human_explicit", "2020-01-01T00:00:00Z", None),
+            (2, "agent_assertion", "2020-01-01T00:00:00Z", None),
+            (
+                3,
+                "human_explicit",
+                "2020-01-01T00:00:00Z",
+                Some("2021-01-01T00:00:00Z"),
+            ),
+            (4, "human_explicit", "2050-01-01T00:00:00Z", None),
+        ] {
+            let id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(ordinal)).to_string();
+            db.insert_memory_at(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    content: format!("Quasar deployment release fact {ordinal}."),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.8,
+                    importance: 0.8,
+                    provenance_uri: None,
+                    trust_class: trust.to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some(valid_from.to_owned()),
+                    valid_to: valid_to.map(str::to_owned),
+                },
+                created_at,
+            )
+            .map_err(|error| error.to_string())?;
+            memory_ids.push(id);
+        }
+        let mut rule_ids = Vec::new();
+        for (ordinal, scope, pattern) in [
+            (1, "directory", "src"),
+            (2, "directory", "tests"),
+            (3, "file_pattern", "notes/a,b.rs"),
+        ] {
+            let id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(ordinal)).to_string();
+            db.insert_procedural_rule(
+                &id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: format!("Run the Quasar deployment release check for {pattern}."),
+                    confidence: 0.95,
+                    utility: 0.8,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: scope.to_owned(),
+                    scope_pattern: Some(pattern.to_owned()),
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            rule_ids.push(id);
+        }
+        db.execute_raw(
+            "UPDATE procedural_rules SET created_at = '2020-01-01T00:00:00Z', updated_at = '2020-01-01T00:00:00Z'",
+        )
+        .map_err(|error| error.to_string())?;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(rebuilt.status, crate::core::index::IndexRebuildStatus::Success);
+        let base = json!({
+            "query":"Quasar deployment release",
+            "workspace":workspace.to_string_lossy(),
+            "memoryScope":"verified",
+            "sourceMode":"lexical_only",
+            "strictSourceMode":true,
+            "speed":"instant",
+            "asOf":"2025-01-01T00:00:00Z",
+            "relevanceFloor":0.0
+        });
+        let mut process = McpProcess::default();
+        let mut search = base.clone();
+        search["limit"] = json!(30);
+        let verified = call(&mut process, "ee_search", search.clone())?;
+        assert_eq!(verified["data"]["request"]["memoryScope"], "verified");
+        assert_eq!(verified["data"]["metrics"]["sourceModeApplied"], "lexical_only");
+        assert_eq!(
+            ids(&verified, "/data/results", "memoryId")?,
+            BTreeSet::from([memory_ids[0].clone()])
+        );
+        search["includeExpired"] = json!(true);
+        search["includeFuture"] = json!(true);
+        let expanded = call(&mut process, "ee_search", search.clone())?;
+        assert_eq!(
+            ids(&expanded, "/data/results", "memoryId")?,
+            BTreeSet::from([
+                memory_ids[0].clone(),
+                memory_ids[2].clone(),
+                memory_ids[3].clone(),
+            ])
+        );
+        search["strictScope"] = json!(true);
+        let withheld = call(&mut process, "ee_search", search)?;
+        assert_eq!(withheld["data"]["resultCount"], 0, "{withheld}");
+        assert!(
+            withheld["degraded"]
+                .as_array()
+                .ok_or("strict search omitted degradations")?
+                .iter()
+                .any(|entry| entry["code"] == "scope_strict_excluded_evidence"),
+            "{withheld}"
+        );
+
+        let pack_rows = db
+            .count_table_rows("pack_records")
+            .map_err(|error| error.to_string())?;
+        let audit_rows = db
+            .count_table_rows("audit_log")
+            .map_err(|error| error.to_string())?;
+        for (index, path) in ["src/new.rs", "tests/check.rs", "notes/a,b.rs"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut context = base.clone();
+            context["taskPaths"] = json!([path]);
+            context["readOnly"] = json!(true);
+            context["maxTokens"] = json!(4000);
+            let packed = call(&mut process, "ee_context", context)?;
+            assert_eq!(
+                ids(&packed, "/data/pack/items", "ruleId")?,
+                BTreeSet::from([rule_ids[index].clone()]),
+                "scoped native rule must follow the current request: {path}"
+            );
+            assert_eq!(
+                ids(&packed, "/data/pack/items", "memoryId")?,
+                BTreeSet::from([memory_ids[0].clone()])
+            );
+        }
+        assert_eq!(
+            db.count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            pack_rows
+        );
+        assert_eq!(
+            db.count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?,
+            audit_rows
         );
         Ok(())
     }
