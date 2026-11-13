@@ -24,6 +24,12 @@ pub(super) fn lesson_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
     clauses::lesson_sentences(excerpt)
 }
 
+/// Incident-card repair attribution shares complete technical-text boundaries
+/// without treating a semicolon qualification as an independent instruction.
+pub(crate) fn repair_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
+    clauses::repair_sentences(excerpt)
+}
+
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an
 /// excerpt are not transcript line boundaries and must not invent provenance.

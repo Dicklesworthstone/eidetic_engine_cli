@@ -3588,6 +3588,13 @@ mod tests {
 
         impl Fixture {
             fn new(initial_spans: usize) -> Self {
+                Self::with_repair(
+                    initial_spans,
+                    "Updated the workspace schema by applying the pending migrations, which fixes opening the evidence tables during search.",
+                )
+            }
+
+            fn with_repair(initial_spans: usize, repair: &str) -> Self {
                 let db = DbConnection::open_memory().unwrap();
                 db.migrate().unwrap();
                 let workspace =
@@ -3609,7 +3616,7 @@ mod tests {
                         "content":failure.to_string()
                     }]}}),
                     json!({"type":"assistant", "message":{"role":"assistant", "content":[{
-                        "type":"text", "text":"Updated the workspace schema by applying the pending migrations, which fixes opening the evidence tables during search."
+                        "type":"text", "text":repair
                     }]}}),
                     json!({"type":"assistant", "message":{"role":"assistant", "content":[{
                         "type":"tool_use", "id":"verified", "name":"Bash",
@@ -3702,6 +3709,126 @@ mod tests {
                 assert!(links.iter().any(|link| link.target_id == proof));
                 assert!(self.db.get_audit(&self.marker_id()).unwrap().is_some());
             }
+        }
+
+        #[test]
+        fn unchanged_import_replaces_a_fragmented_v23_card_with_a_complete_revision() {
+            const REPAIR: &str = "I fixed migration_required by running `cd . && ee migrate`.";
+            let fixture = Fixture::with_repair(6, REPAIR);
+            let publication = fixture.publication_id();
+            let source_rows = fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session_id)
+                .unwrap();
+            let session = fixture.db.get_session(&fixture.session_id).unwrap().unwrap();
+            let arcs = crate::core::cass_error_recall::session_failure_arcs(
+                &fixture.workspace,
+                &session,
+                &source_rows,
+            );
+            assert_eq!(arcs.len(), 1);
+            let complete = crate::core::incident_card::draft_incident_card(
+                &fixture.workspace,
+                &fixture.session_id,
+                &source_rows,
+                &arcs[0],
+            )
+            .unwrap();
+            let expected = complete.revision_draft();
+            let mut old = complete;
+            old.input.excerpt = old.input.excerpt.replacen(
+                REPAIR,
+                "I fixed migration_required by running `cd .",
+                1,
+            );
+            old.input.content_hash = format!(
+                "blake3:{}",
+                blake3::hash(old.input.excerpt.as_bytes()).to_hex()
+            );
+            fixture.db.insert_evidence_span(&old.id, &old.input).unwrap();
+            let original = fixture.db.get_evidence_span(&old.id).unwrap().unwrap();
+            crate::core::error_diagnosis::record_error_repair_links(
+                &fixture.db,
+                &fixture.workspace,
+                &crate::core::error_recall::from_ee_error(
+                    "migration_required",
+                    "Schema migration required",
+                ),
+                &crate::core::error_diagnosis::ErrorRepairLinkRecording {
+                    helpful_repairs: vec![old.id.clone()],
+                    created_by: Some(crate::core::incident_card::INCIDENT_CARD_ACTOR.to_owned()),
+                    evidence_ref: Some(arcs[0].failure_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let previous_session_marker = AuditId::from_uuid(stable_uuid(&format!(
+                "audit:{}:cass_error_recall.v23:{}:{}",
+                crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE,
+                crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+                fixture.session_id,
+            )))
+            .to_string();
+            let previous_marker = AuditId::from_uuid(stable_uuid(&format!(
+                "audit:cass-error-recall-snapshot:{previous_session_marker}:{publication}"
+            )))
+            .to_string();
+            fixture
+                .db
+                .insert_audit(
+                    &previous_marker,
+                    &CreateAuditInput {
+                        workspace_id: Some(fixture.workspace.clone()),
+                        actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                        action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                        target_type: Some("session".to_owned()),
+                        target_id: Some(fixture.session_id.clone()),
+                        details: Some(
+                            json!({
+                                "committedPublicationId": publication,
+                                "fingerprintsRecorded": 1,
+                                "repairLinksRecorded": 1,
+                                "incidentCardsRecorded": 1,
+                                "incidentCardDerivation": crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+                                "errorRecallDerivation": "cass_error_recall.v23",
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )
+                .unwrap();
+            let previous_audit = fixture.db.get_audit(&previous_marker).unwrap().unwrap();
+
+            fixture.derive();
+            let current = fixture.db.get_evidence_span(&expected.id).unwrap().unwrap();
+            assert!(current.matches_screened_input(&expected.input).unwrap());
+            assert!(current.reader_body().contains(REPAIR));
+            assert_eq!(fixture.publication_id(), publication);
+            assert_ne!(fixture.marker_id(), previous_marker);
+            assert!(fixture.db.get_audit(&fixture.marker_id()).unwrap().is_some());
+            assert_eq!(
+                fixture.db.get_audit(&previous_marker).unwrap(),
+                Some(previous_audit)
+            );
+            assert_eq!(fixture.db.get_evidence_span(&old.id).unwrap(), Some(original));
+            for source in &source_rows {
+                assert_eq!(
+                    fixture.db.get_evidence_span(&source.id).unwrap().as_ref(),
+                    Some(source)
+                );
+            }
+            let after = fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session_id)
+                .unwrap();
+            fixture.derive();
+            assert_eq!(
+                fixture
+                    .db
+                    .list_evidence_spans_for_session(&fixture.session_id)
+                    .unwrap(),
+                after
+            );
         }
 
         #[test]

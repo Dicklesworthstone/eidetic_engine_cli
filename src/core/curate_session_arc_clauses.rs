@@ -311,14 +311,25 @@ fn elapsed_duration(text: &str) -> bool {
 }
 
 fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
-    split_parts(excerpt, false).map(|part| part.text)
+    split_parts(excerpt, ClausePurpose::Observation).map(|part| part.text)
 }
 
 /// Lesson extraction shares the code-aware scanner, but questions and quoted
 /// blocks are observations to review, not asserted procedural guidance.
 pub(super) fn lesson_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
+    asserted_sentences(excerpt, ClausePurpose::Lesson)
+}
+
+/// A repair explanation keeps semicolon-qualified prose together: a completed
+/// edit followed by `; it did not work` is not an observed fix. Code, quotation
+/// and attribution boundaries otherwise match ordinary lesson extraction.
+pub(super) fn repair_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
+    asserted_sentences(excerpt, ClausePurpose::Repair)
+}
+
+fn asserted_sentences(excerpt: &str, purpose: ClausePurpose) -> impl Iterator<Item = &str> {
     let mut quoted_paragraph = false;
-    split_parts(excerpt, true).filter_map(move |part| {
+    split_parts(excerpt, purpose).filter_map(move |part| {
         let text = part.text.trim();
         if text.is_empty() {
             // A newline left over after sentence punctuation is not a blank
@@ -348,7 +359,15 @@ struct ClausePart<'a> {
     lesson_prose: bool,
 }
 
-fn split_parts(excerpt: &str, lessons: bool) -> impl Iterator<Item = ClausePart<'_>> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ClausePurpose {
+    Observation,
+    Lesson,
+    Repair,
+}
+
+fn split_parts(excerpt: &str, purpose: ClausePurpose) -> impl Iterator<Item = ClausePart<'_>> {
+    let lessons = purpose != ClausePurpose::Observation;
     let mut characters = excerpt.char_indices().peekable();
     let mut start = 0;
     let mut line_start = 0;
@@ -415,7 +434,9 @@ fn split_parts(excerpt: &str, lessons: bool) -> impl Iterator<Item = ClausePart<
                 .peek()
                 .is_none_or(|(_, next)| next.is_whitespace());
             let boundary = ch == '\n'
-                || (ch == ';' && (!lessons || followed_by_space))
+                || (ch == ';'
+                    && purpose != ClausePurpose::Repair
+                    && (!lessons || followed_by_space))
                 || (ch == '.' && sentence_period(excerpt, end))
                 || (lessons && matches!(ch, '!' | '?') && followed_by_space);
             if boundary {

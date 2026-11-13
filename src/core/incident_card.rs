@@ -488,13 +488,10 @@ fn fix_facet(repairs: &[String], anchors: &BTreeSet<String>, budget: u32) -> Opt
         chosen.push(*position);
     }
     if chosen.is_empty() {
-        // The best sentence alone is over budget: keep its head.
-        let (_, position) = scored.first()?;
-        let budget_chars = usize::try_from(budget)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(3);
-        let head = bounded_chars(&sentences[*position], budget_chars);
-        return (crate::pack::estimate_tokens_default(&head) <= budget).then_some(head);
+        // A prefix can omit a command suffix or an essential qualification.
+        // Keep the full repair turn available to recall, but do not publish a
+        // compact card when no complete explanation fits its remaining budget.
+        return None;
     }
     chosen.sort_unstable();
     Some(
@@ -560,53 +557,17 @@ fn sentence_score(sentence: &str, anchors: &BTreeSet<String>) -> i32 {
     score
 }
 
-/// Split projected turn text without attributing quoted examples or fenced
-/// source to the speaker. Fence kind and length must match before prose resumes.
+/// Reuse the learning scanner's code-aware and attribution-aware boundaries.
+/// Inline commands, including nested backticks and embedded newlines, retain
+/// their exact bytes; quoted examples and indented/fenced source stay excluded.
 fn split_sentences(text: &str) -> Vec<String> {
-    let mut output = Vec::new();
-    let mut fence: Option<(u8, usize)> = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('>') {
-            continue;
-        }
-        let marker = trimmed.as_bytes()[0];
-        let width = trimmed.bytes().take_while(|byte| *byte == marker).count();
-        if matches!(marker, b'`' | b'~') && width >= 3 {
-            match fence {
-                None => fence = Some((marker, width)),
-                Some((kind, opened))
-                    if kind == marker && width >= opened && trimmed[width..].trim().is_empty() =>
-                {
-                    fence = None;
-                }
-                _ => {}
-            }
-            continue;
-        }
-        if fence.is_some() {
-            continue;
-        }
-        let trimmed = trimmed.trim_start_matches(['-', '*', '#']).trim_start();
-        let trimmed = strip_numbered_marker(trimmed);
-        if trimmed.starts_with('>') {
-            continue;
-        }
-        let mut start = 0;
-        let bytes = trimmed.as_bytes();
-        for (index, byte) in bytes.iter().enumerate() {
-            let ends_sentence = matches!(byte, b'.' | b'!' | b'?')
-                && bytes
-                    .get(index + 1)
-                    .is_none_or(|next| next.is_ascii_whitespace());
-            if ends_sentence {
-                push_sentence(&mut output, &trimmed[start..=index]);
-                start = index + 1;
-            }
-        }
-        push_sentence(&mut output, &trimmed[start..]);
-    }
-    output
+    crate::core::curate::session_arc::repair_sentences(text)
+        .map(str::trim)
+        .map(|sentence| sentence.trim_start_matches(['-', '*', '#']).trim_start())
+        .map(strip_numbered_marker)
+        .filter(|sentence| !sentence.is_empty() && !sentence.starts_with('>'))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn strip_numbered_marker(line: &str) -> &str {
@@ -615,13 +576,6 @@ fn strip_numbered_marker(line: &str) -> &str {
         &line[digits + 2..]
     } else {
         line
-    }
-}
-
-fn push_sentence(output: &mut Vec<String>, sentence: &str) {
-    let sentence = sentence.trim();
-    if !sentence.is_empty() {
-        output.push(sentence.to_owned());
     }
 }
 
@@ -933,14 +887,79 @@ mod tests {
     #[test]
     fn fix_facet_respects_its_budget_and_is_deterministic() {
         let anchors = BTreeSet::new();
-        let long = "Fixed the bound by adding a missing import of the serde derive macro to the widget module. ".repeat(6);
-        let first = fix_facet(std::slice::from_ref(&long), &anchors, 20).expect("fix");
-        assert!(
-            crate::pack::estimate_tokens_default(&first) <= 20,
-            "{first}"
+        let sentence = "Fixed the bound by adding a missing import of the serde derive macro to the widget module.";
+        let long = format!("{sentence} ").repeat(6);
+        let budget = crate::pack::estimate_tokens_default(sentence).saturating_add(1);
+        let first = fix_facet(std::slice::from_ref(&long), &anchors, budget).expect("fix");
+        assert_eq!(first, sentence);
+        assert_eq!(
+            fix_facet(std::slice::from_ref(&long), &anchors, budget),
+            Some(first)
         );
-        assert_eq!(fix_facet(&[long], &anchors, 20), Some(first));
+        let too_small = crate::pack::estimate_tokens_default(sentence).saturating_sub(1);
+        assert_eq!(fix_facet(&[long], &anchors, too_small), None);
         assert_eq!(fix_facet(&["ok".to_owned()], &anchors, 20), None);
+    }
+
+    #[test]
+    fn complete_inline_repairs_preserve_punctuation_newlines_and_command_bytes() {
+        let anchors = anchor_terms("error[E0277]: Widget does not implement Serialize");
+        for sentence in [
+            "I fixed E0277 by running `cd . && cargo fmt`.",
+            "I fixed E0277 with ``printf 'a. b'; cargo fmt``.",
+            "I fixed E0277 with `printf \"left  right\"`.",
+            "I fixed E0277 by running `printf 'row1\nrow2'; cargo fmt`.",
+            "I fixed E0277 with `printf 'done! still here? yes'`.",
+            "I fixed src/widget.rs by selecting version 2.4.1, e.g. the matching serde release.",
+        ] {
+            assert_eq!(split_sentences(sentence), vec![sentence], "{sentence}");
+            assert_eq!(
+                fix_facet(&[sentence.to_owned()], &anchors, 100),
+                Some(sentence.to_owned()),
+                "{sentence}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_complete_lower_scored_repair_beats_a_truncated_high_scored_command() {
+        let anchors = anchor_terms("error[E0277]: Widget does not implement Serialize");
+        let long = format!("I fixed E0277 by running `{}`.", "echo repair; ".repeat(80));
+        let short = "Added the missing import.";
+        let budget = crate::pack::estimate_tokens_default(short).saturating_add(1);
+        assert!(sentence_score(&long, &anchors) > sentence_score(short, &anchors));
+        assert_eq!(
+            fix_facet(std::slice::from_ref(&long), &anchors, budget),
+            None
+        );
+        let mixed = format!("{long}\n{short}");
+        assert_eq!(fix_facet(&[mixed], &anchors, budget), Some(short.to_owned()));
+    }
+
+    #[test]
+    fn quoted_continuations_and_incomplete_commands_never_gain_repair_credit() {
+        let actual = "I fixed E0277 by deriving Serialize for Widget.";
+        for text in [
+            format!("    {actual}"),
+            format!("\t{actual}"),
+            format!("> Earlier example.\n{actual}"),
+            "I fixed E0277 by running `cd . && cargo fmt".to_owned(),
+            "I fixed E0277 by deriving Serialize; the change did not work.".to_owned(),
+        ] {
+            assert!(!explains_a_fix(&text, Some("E0277 Widget")), "{text}");
+            assert_eq!(
+                fix_facet(std::slice::from_ref(&text), &anchor_terms("E0277"), 100),
+                None
+            );
+        }
+        assert_eq!(
+            fix_facet(
+                &[format!("> Earlier example.\n\n{actual}")],
+                &anchor_terms("E0277"),
+                100,
+            ),
+            Some(actual.to_owned())
+        );
     }
 
     #[test]

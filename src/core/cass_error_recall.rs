@@ -82,7 +82,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// complete named test inventory; aggregate-only reports never prove repairs.
 /// V23 also learns from complete native Vitest RUN reports, requiring the same
 /// named passing and failing subjects in a completed verbose retry.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v23";
+/// V24 preserves complete technical repair clauses in incident cards and
+/// withholds cards whose repair cannot fit without truncation or misattribution.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v24";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

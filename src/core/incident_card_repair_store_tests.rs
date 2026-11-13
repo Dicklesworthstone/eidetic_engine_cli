@@ -213,6 +213,10 @@ fn a_successful_retry_does_not_turn_admitted_plans_into_helpful_repairs() -> Tes
         "I think I fixed E0277 by changing Widget.",
         "> I fixed E0277 by deriving Serialize for Widget.",
         "~~~text\nI fixed E0277 by deriving Serialize for Widget.\n~~~",
+        "    I fixed E0277 by deriving Serialize for Widget.",
+        "> Earlier example.\nI fixed E0277 by deriving Serialize for Widget.",
+        "I fixed E0277 by running `cd . && cargo fmt",
+        "I fixed E0277 by deriving Serialize; the change did not work.",
     ] {
         let fixture = Fixture::new(&[text])?;
         assert!(
@@ -235,6 +239,158 @@ fn a_successful_retry_does_not_turn_admitted_plans_into_helpful_repairs() -> Tes
         assert!(recall.helpful_repairs.is_empty(), "{text}");
         assert_eq!(recall.proof_links, vec![fixture.proof]);
     }
+    Ok(())
+}
+
+#[test]
+fn complete_commands_survive_card_storage_recall_and_current_source_proof() -> TestResult {
+    for repair in [
+        "I fixed E0277 by running `cd . && cargo fmt`.",
+        "I fixed E0277 with ``printf 'a. b'; cargo fmt``.",
+        "I fixed E0277 with `printf \"left  right\"`.",
+        "I fixed E0277 by running `printf 'row1\nrow2'; cargo fmt`.",
+    ] {
+        let fixture = Fixture::new(&[repair])?;
+        let source = fixture
+            .db
+            .get_search_admitted_evidence_span(&fixture.repairs[0], WS)?
+            .ok_or("repair must be retrieval-admitted")?;
+        assert_eq!(source.reader_body().as_ref(), repair);
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, 1, "{repair}");
+        assert_eq!(report.repair_links_recorded, 2, "{repair}");
+        assert_eq!(report.incident_cards_recorded, 1, "{repair}");
+        let card = fixture
+            .db
+            .get_evidence_span(&incident_card_id(WS, &fixture.failure))?
+            .ok_or("card")?;
+        assert!(card.reader_body().contains(&format!("Fix: {repair}\nVerified:")));
+        assert!(
+            crate::pack::estimate_tokens_default(&card.excerpt)
+                <= crate::core::incident_card::INCIDENT_CARD_TOKEN_BUDGET
+        );
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        let diagnostic = from_rustc(Some("E0277"), "trait bound");
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        let exposed = recalled_repair_evidence(&fixture.db, WS, &recall)?;
+        assert!(exposed.iter().any(|item| {
+            item.evidence_id == card.id
+                && item.text.as_deref().is_some_and(|text| text.contains(repair))
+        }));
+        assert_eq!(
+            fixture.db.get_evidence_span(&source.id)?.as_ref(),
+            Some(&source)
+        );
+        assert_eq!(
+            record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn overbudget_repairs_remain_recallable_without_publishing_command_fragments() -> TestResult {
+    let long = format!(
+        "I fixed E0277 by running `{}`.",
+        "printf complete_chunk; ".repeat(80)
+    );
+    let short = "Added the missing Serialize import.";
+    for alternative in [false, true] {
+        let repair = if alternative {
+            format!("{long}\n{short}")
+        } else {
+            long.clone()
+        };
+        let fixture = Fixture::new(&[&repair])?;
+        let source = fixture
+            .db
+            .get_search_admitted_evidence_span(&fixture.repairs[0], WS)?
+            .ok_or("long repair must be retrieval-admitted")?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.repair_links_recorded, 2);
+        assert_eq!(report.incident_cards_recorded, if alternative { 1 } else { 0 });
+        let card = fixture
+            .db
+            .get_evidence_span(&incident_card_id(WS, &fixture.failure))?;
+        if alternative {
+            let card = card.ok_or("complete alternative should fit")?;
+            assert!(card.reader_body().contains(&format!("Fix: {short}\nVerified:")));
+            assert!(!card.reader_body().contains("complete_chunk"));
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        } else {
+            assert!(card.is_none(), "an incomplete repair is not a compact incident");
+        }
+        let diagnostic = from_rustc(Some("E0277"), "trait bound");
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.helpful_repairs.contains(&source.id));
+        let exposed = recalled_repair_evidence(&fixture.db, WS, &recall)?;
+        assert!(exposed.iter().any(|item| {
+            item.evidence_id == source.id
+                && item.role == "repair"
+                && item.text.is_some()
+        }));
+        assert_eq!(source.reader_body().as_ref(), repair.as_str());
+        assert_eq!(
+            fixture.db.get_evidence_span(&source.id)?.as_ref(),
+            Some(&source)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_previously_fragmented_card_gains_an_immutable_complete_revision() -> TestResult {
+    let repair = "I fixed E0277 by running `cd . && cargo fmt`.";
+    let fixture = Fixture::new(&[repair])?;
+    let expected = fixture.draft()?.revision_draft();
+    let mut old = fixture.draft()?;
+    old.input.excerpt = old
+        .input
+        .excerpt
+        .replacen(repair, "I fixed E0277 by running `cd .", 1);
+    old.input.content_hash = format!(
+        "blake3:{}",
+        blake3::hash(old.input.excerpt.as_bytes()).to_hex()
+    );
+    fixture.db.insert_evidence_span(&old.id, &old.input)?;
+    let original = fixture.db.get_evidence_span(&old.id)?.ok_or("old card")?;
+    let mut checks = CardChecks::default();
+    checks.observe(&original)?;
+    assert_eq!(
+        checks.withheld(&fixture.db, WS)?,
+        BTreeSet::from([original.id.clone()])
+    );
+    assert_eq!(
+        record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded,
+        1
+    );
+    let current = fixture
+        .db
+        .get_evidence_span(&expected.id)?
+        .ok_or("complete revision")?;
+    assert!(current.matches_screened_input(&expected.input)?);
+    assert!(current.reader_body().contains(repair));
+    assert_eq!(
+        fixture.db.get_evidence_span(&original.id)?.as_ref(),
+        Some(&original)
+    );
+    let mut checks = CardChecks::default();
+    checks.observe(&original)?;
+    checks.observe(&current)?;
+    assert_eq!(
+        checks.withheld(&fixture.db, WS)?,
+        BTreeSet::from([original.id])
+    );
+    assert_eq!(
+        record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded,
+        0
+    );
     Ok(())
 }
 
