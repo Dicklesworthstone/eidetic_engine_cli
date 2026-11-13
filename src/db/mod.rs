@@ -33976,21 +33976,34 @@ impl DbConnection {
             return Ok(());
         }
 
-        self.with_transaction(|| {
-            let mut prev_row_hash = self.latest_audit_row_hash()?;
-            let mut last_timestamp = None;
-            let mut prepared_entries = Vec::with_capacity(entries.len());
-            for (id, input) in entries {
-                let timestamp = next_audit_batch_timestamp(&mut last_timestamp);
-                let mut entry =
-                    build_audit_entry(id, input, timestamp, prev_row_hash.clone(), None);
-                let this_row_hash = compute_audit_row_hash(&entry);
-                entry.this_row_hash = Some(this_row_hash.clone());
-                prev_row_hash = Some(this_row_hash);
-                prepared_entries.push(entry);
-            }
-            self.insert_prepared_audit_entry_batch(&prepared_entries)
-        })
+        self.with_transaction(|| self.insert_audit_batch_in_current_transaction(entries))
+    }
+
+    /// Append an ordered batch inside the caller's writer-fenced transaction.
+    ///
+    /// Source imports must commit evidence, its redaction/reconciliation audits,
+    /// and the publication checkpoint together. Reuse the canonical hash-chain
+    /// builder without opening or committing a nested transaction. The caller
+    /// owns rollback on every error; no row is independently durable here.
+    pub(crate) fn insert_audit_batch_in_current_transaction(
+        &self,
+        entries: &[(String, CreateAuditInput)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut prev_row_hash = self.latest_audit_row_hash()?;
+        let mut last_timestamp = None;
+        let mut prepared_entries = Vec::with_capacity(entries.len());
+        for (id, input) in entries {
+            let timestamp = next_audit_batch_timestamp(&mut last_timestamp);
+            let mut entry = build_audit_entry(id, input, timestamp, prev_row_hash.clone(), None);
+            let this_row_hash = compute_audit_row_hash(&entry);
+            entry.this_row_hash = Some(this_row_hash.clone());
+            prev_row_hash = Some(this_row_hash);
+            prepared_entries.push(entry);
+        }
+        self.insert_prepared_audit_entry_batch(&prepared_entries)
     }
 
     fn insert_prepared_audit_entry(&self, entry: &StoredAuditEntry) -> Result<String> {

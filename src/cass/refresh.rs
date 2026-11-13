@@ -274,9 +274,7 @@ pub(super) fn refresh_session_with_source_key(
 
         let (mut added_lines, admission) =
             batch::insert_additions(connection, workspace_id, &stored, &additions, source_root)?;
-        for (audit_id, audit) in &reconciliations {
-            connection.insert_audit(audit_id, audit)?;
-        }
+        batch::insert_audits(connection, &reconciliations)?;
         // Persist the checkpoint even when discovery fields did not change.
         // Its job and every captured row belong to this same transaction.
         update_metadata(connection, workspace_id, session_id, &input)?;

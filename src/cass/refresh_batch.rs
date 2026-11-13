@@ -6,8 +6,8 @@
 //! all commit, or none of them do.
 
 use crate::db::{
-    CreateEvidenceSpanInput, DbConnection, DbError, DbOperation, EvidenceAdmissionTally,
-    StoredSession,
+    CreateAuditInput, CreateEvidenceSpanInput, DbConnection, DbError, DbOperation,
+    EvidenceAdmissionTally, StoredSession,
 };
 use crate::policy::store_auth::StoreAuthRoot;
 use sqlmodel_core::Value;
@@ -62,14 +62,7 @@ pub(in crate::cass::import) fn insert_initial_spans(
     let admission = write_prepared_batches(rows, REFRESH_PREPARED_HEAP_BYTES, |rows| {
         connection.insert_evidence_spans_in_session(rows, session)
     })?;
-    for span in spans.iter().filter(|span| span.redacted) {
-        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, std::time::Duration::ZERO)?;
-        let evidence_id = stable_evidence_id(&session.id, &span.cass_span_id);
-        connection.insert_audit(
-            &stable_cass_redaction_audit_id(&evidence_id),
-            &cass_redaction_audit_input(workspace_id, &session.id, &evidence_id, span),
-        )?;
-    }
+    insert_redaction_audits(connection, workspace_id, &session.id, spans.iter())?;
     Ok(admission)
 }
 
@@ -119,17 +112,57 @@ pub(super) fn insert_additions(
             REFRESH_PREPARED_HEAP_BYTES,
             |rows| connection.insert_evidence_spans_in_session(rows, session),
         )?);
-        for (span, evidence_id) in batch.iter().zip(&identities) {
-            if span.redacted {
-                connection.insert_audit(
-                    &stable_cass_redaction_audit_id(evidence_id),
-                    &cass_redaction_audit_input(workspace_id, &session.id, evidence_id, span),
-                )?;
-            }
+        for span in batch {
             added_lines.push(span.end_line);
         }
     }
+    insert_redaction_audits(
+        connection,
+        workspace_id,
+        &session.id,
+        additions.iter().copied(),
+    )?;
     Ok((added_lines, admission))
+}
+
+/// Redaction is common in real transcripts. Each span still gets its exact
+/// audit identity and payload, but the global chain tip is read once per group
+/// and the DB writer uses bind-safe multi-row inserts. Only bounded audit
+/// metadata is copied; transcript bodies never enter this buffer or the log.
+fn insert_redaction_audits<'a>(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    spans: impl IntoIterator<Item = &'a CassViewSpanForImport>,
+) -> Result<(), DbError> {
+    let mut audits = Vec::with_capacity(REFRESH_WRITE_BATCH_ROWS);
+    for span in spans.into_iter().filter(|span| span.redacted) {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, std::time::Duration::ZERO)?;
+        let evidence_id = stable_evidence_id(session_id, &span.cass_span_id);
+        audits.push((
+            stable_cass_redaction_audit_id(&evidence_id),
+            cass_redaction_audit_input(workspace_id, session_id, &evidence_id, span),
+        ));
+        if audits.len() == REFRESH_WRITE_BATCH_ROWS {
+            insert_audits(connection, &audits)?;
+            audits.clear();
+        }
+    }
+    insert_audits(connection, &audits)
+}
+
+/// Both new-source redactions and retained-source reconciliation extend the
+/// same ordered chain under the import transaction. Never start another
+/// transaction or publish an independently committed audit prefix.
+pub(super) fn insert_audits(
+    connection: &DbConnection,
+    entries: &[(String, CreateAuditInput)],
+) -> Result<(), DbError> {
+    for chunk in entries.chunks(REFRESH_WRITE_BATCH_ROWS) {
+        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, std::time::Duration::ZERO)?;
+        connection.insert_audit_batch_in_current_transaction(chunk)?;
+    }
+    Ok(())
 }
 
 /// Account all owned string/vector capacity in a prepared input. The fixed
