@@ -17,6 +17,13 @@ pub(super) fn sequence_candidates(
     sequence::candidates(workspace_id, session, spans)
 }
 
+/// Reuse technical-text boundaries for the topic and bootstrap proposers.
+/// Their directive classifier must never see a quoted example as an assertion
+/// or receive only the prefix of an inline command.
+pub(super) fn lesson_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
+    clauses::lesson_sentences(excerpt)
+}
+
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an
 /// excerpt are not transcript line boundaries and must not invent provenance.

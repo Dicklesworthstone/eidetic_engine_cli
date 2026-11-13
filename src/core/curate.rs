@@ -4531,6 +4531,22 @@ fn review_span_lesson_sentences(span: &StoredEvidenceSpan) -> Vec<String> {
     review_lesson_sentences(&span.reader_body(), span.role.as_deref() == Some("user"))
 }
 
+/// Remove only prose/list framing and an explicit lesson label. Preserve the
+/// remaining body verbatim, including whitespace inside technical commands.
+fn review_lesson_sentence(raw: &str) -> (&str, bool) {
+    let sentence = raw
+        .trim()
+        .trim_end_matches(['.', '!', ';'])
+        .trim_start_matches(['-', '*', '#', ' ', '\t'])
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .trim_start_matches([')', '.', ' '])
+        .trim();
+    match review_lesson_label_remainder(sentence) {
+        Some(rest) => (rest, true),
+        None => (sentence, false),
+    }
+}
+
 /// Directive sentences in projected conversation text, in source order.
 ///
 /// A sentence the speaker labels as a lesson ("Lesson for next time: bump
@@ -4541,56 +4557,26 @@ fn review_span_lesson_sentences(span: &StoredEvidenceSpan) -> Vec<String> {
 /// bd-reality-core-convergence-1azkt.46).
 fn review_lesson_sentences(text: &str, from_user: bool) -> Vec<String> {
     let mut lessons = Vec::new();
-    for raw in review_sentences(text) {
-        let sentence = raw
-            .trim()
-            .trim_start_matches(['-', '*', '>', '#', ' ', '\t'])
-            .trim_start_matches(|ch: char| ch.is_ascii_digit())
-            .trim_start_matches([')', '.', ' '])
-            .trim();
-        let sentence = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (sentence, labelled) = match review_lesson_label_remainder(&sentence) {
-            Some(rest) => (rest.to_owned(), true),
-            None => (sentence, false),
-        };
+    for raw in session_arc::lesson_sentences(text) {
+        let (sentence, labelled) = review_lesson_sentence(raw);
+        if sentence.starts_with(['`', '"', '\'', '“', '‘', '>']) {
+            continue;
+        }
         let length = sentence.chars().count();
         if !(REVIEW_LESSON_MIN_CHARS..=REVIEW_LESSON_MAX_CHARS).contains(&length) {
             continue;
         }
-        let accepted = match review_sentence_directive_kind(&sentence) {
+        let accepted = match review_sentence_directive_kind(sentence) {
             ReviewDirectiveKind::Narration => false,
             ReviewDirectiveKind::RuleMarker => true,
             ReviewDirectiveKind::Imperative => labelled || !from_user,
             ReviewDirectiveKind::Plain => labelled,
         };
         if accepted {
-            lessons.push(sentence);
+            lessons.push(sentence.to_owned());
         }
     }
     lessons
-}
-
-/// Split on line breaks and on `.`, `!`, `?` or `;` followed by whitespace or
-/// the end, so paths, versions and commands (`src/main.rs`, `v1.2.3`) stay
-/// whole inside their sentence.
-fn review_sentences(text: &str) -> Vec<&str> {
-    let mut sentences = Vec::new();
-    for line in text.lines() {
-        let mut start = 0;
-        let mut chars = line.char_indices().peekable();
-        while let Some((index, ch)) = chars.next() {
-            if matches!(ch, '.' | '!' | '?' | ';')
-                && chars.peek().is_none_or(|(_, next)| next.is_whitespace())
-            {
-                sentences.push(&line[start..index]);
-                start = index + ch.len_utf8();
-            }
-        }
-        if start < line.len() {
-            sentences.push(&line[start..]);
-        }
-    }
-    sentences
 }
 
 /// The text after an explicit lesson label, if the sentence opens with one.
@@ -18210,6 +18196,77 @@ mod tests {
     }
 
     #[test]
+    fn lesson_extraction_preserves_complete_technical_commands() {
+        for text in [
+            "Use `cargo test; cargo clippy` before publishing.",
+            "Always run `printf 'left  right'; cargo fmt --check` before publishing.",
+            "Use ``printf '`key`'; cargo test`` before publishing.",
+            "Always pass `\"why? wait! done.\"` as one argument.",
+            "Use `printf 'first\nsecond'` before publishing.",
+            "Keep version v1.2.3 in Cargo.toml, e.g. during release preparation.",
+            "Use cargo test;cargo clippy before publishing.",
+        ] {
+            assert_eq!(
+                super::review_lesson_sentences(text, false),
+                vec![text.trim_end_matches('.')],
+                "the complete asserted command must survive: {text:?}"
+            );
+        }
+        assert_eq!(
+            super::review_lesson_sentences(
+                "Should we always skip tests? Always run cargo fmt --check. Never skip cargo clippy!",
+                true,
+            ),
+            vec!["Always run cargo fmt --check", "Never skip cargo clippy"]
+        );
+    }
+
+    #[test]
+    fn lesson_extraction_abstains_on_examples_questions_and_unclosed_code() {
+        for text in [
+            "```text\nAlways skip the release tests.\n```",
+            "~~~text\nAlways skip the release tests; never run cargo clippy.\n~~~",
+            "> Always skip the release tests.\nNever run cargo clippy.",
+            "    Always skip the release tests.\n    Never run cargo clippy.",
+            "\tAlways skip the release tests.",
+            "    example(); Always skip release tests.",
+            "    Example. Always skip release tests.",
+            "\texample(); Always skip release tests.",
+            "\"The release should always skip cargo test.\"",
+            "‘The release must always skip cargo test.’",
+            "`The release should always skip cargo test.`",
+            "\"An example. Always skip the release tests.\"",
+            "“An example. Always skip the release tests.”",
+            "Lesson: \"Always skip the release tests.\"",
+            "Lesson: \"An example. Always skip the release tests.\"",
+            "- Lesson: \"An example. Always skip the release tests.\"",
+            "Should we always run cargo test with --release?",
+            "Always run `cargo fmt; cargo clippy",
+            "```text\nAlways skip the release tests.",
+        ] {
+            assert!(
+                super::review_lesson_sentences(text, false).is_empty(),
+                "quoted, uncertain or incomplete advice is not a lesson: {text:?}"
+            );
+        }
+        let text = concat!(
+            "```text\nAlways skip the release tests.\n```\n\n",
+            "> Never run cargo clippy.\n",
+            "The release should always skip cargo test.\n\n",
+            "Always run `cargo fmt --check; cargo clippy` before publishing.\n",
+            "Never skip the evidence review.\n",
+        );
+        assert_eq!(
+            super::review_lesson_sentences(text, false),
+            vec![
+                "Always run `cargo fmt --check; cargo clippy` before publishing",
+                "Never skip the evidence review",
+            ],
+            "a real blank line ends the quote, and independent lessons remain available"
+        );
+    }
+
+    #[test]
     fn topic_keys_name_the_subject_not_the_first_long_word() {
         assert_eq!(
             super::review_topic_key(
@@ -21473,6 +21530,8 @@ mod tests {
 
     #[test]
     fn review_session_proposals_persist_bootstrap_as_create_derived_candidate() -> TestResult {
+        const LESSON: &str =
+            "Always run `printf 'left  right'; cargo fmt --check` before cutting a release tag.";
         let fixture = review_session_fixture()?;
         let connection =
             DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
@@ -21493,7 +21552,7 @@ mod tests {
                     None,
                     "bootstrap-direct-span",
                     60,
-                    "Always run cargo fmt --check before cutting a release tag.",
+                    LESSON,
                 ),
             )
             .map_err(|error| error.to_string())?;
@@ -21539,6 +21598,10 @@ mod tests {
         assert_eq!(bootstrap.source_ids, vec![bootstrap_evidence_id.clone()]);
         assert!(bootstrap.persisted);
         assert!(
+            bootstrap.proposed_content.contains(LESSON.trim_end_matches('.')),
+            "persisted proposals must retain the complete command and quoted whitespace"
+        );
+        assert!(
             second
                 .candidates
                 .iter()
@@ -21551,6 +21614,10 @@ mod tests {
             .get_curation_candidate(&fixture.workspace_id, &bootstrap.candidate_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected persisted create-derived candidate".to_owned())?;
+        assert_eq!(
+            stored.proposed_content.as_deref(),
+            Some(bootstrap.proposed_content.as_str())
+        );
         assert_eq!(
             stored.candidate_type,
             CandidateType::CreateDerivedMemory.as_str()
@@ -31792,6 +31859,74 @@ mod tests {
             )
             .is_empty(),
             "narration with no lesson must abstain"
+        );
+    }
+
+    #[test]
+    fn bootstrap_learning_distinguishes_asserted_commands_from_quoted_examples() {
+        let session = synthetic_stored_session();
+        let workspace_id = "wsp_test00000000000000000000000";
+        let make_span = |body: &str| {
+            let envelope = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": body},
+            })
+            .to_string();
+            let mut span = synthetic_span(
+                "span_lesson000000000000000000000",
+                None,
+                &envelope,
+            );
+            span.role = Some("assistant".to_owned());
+            span
+        };
+        for example in [
+            "```text\nAlways skip the release tests.\n```",
+            "> Always skip the release tests.\nNever run cargo clippy.",
+            "    example(); Always skip release tests.",
+            "Lesson: \"An example. Always skip the release tests.\"",
+            "Should we always run cargo test with --release?",
+            "Always run `cargo fmt; cargo clippy",
+        ] {
+            let span = make_span(example);
+            assert!(
+                build_bootstrap_session_candidates(workspace_id, &session, &[span], 0.0)
+                    .is_empty(),
+                "a real transcript projection must not manufacture a lesson: {example:?}"
+            );
+        }
+
+        let first = "Always run `printf 'left  right'; cargo fmt --check` before publishing";
+        let second = "Never skip cargo clippy";
+        let body = format!(
+            "```text\nAlways skip the release tests.\n```\n\n> Never run verification.\n\n{first}.\n{second}."
+        );
+        let span = make_span(&body);
+        let original = span.excerpt.clone();
+        let candidates = build_bootstrap_session_candidates(
+            workspace_id,
+            &session,
+            std::slice::from_ref(&span),
+            0.0,
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the two real lessons still produce a proposal"
+        );
+        let candidate = &candidates[0];
+        assert!(candidate.proposed_content.contains(first));
+        assert!(candidate.proposed_content.contains(second));
+        assert!(!candidate.proposed_content.contains("skip the release tests"));
+        assert!(!candidate.proposed_content.contains("Never run verification"));
+        assert_eq!(candidate.source_ids, vec![span.id.clone()]);
+        assert_eq!(
+            candidate.content_hash,
+            content_hash_for_candidate(&candidate.proposed_content)
+        );
+        assert_eq!(
+            span.excerpt, original,
+            "projection never rewrites durable evidence"
         );
     }
 

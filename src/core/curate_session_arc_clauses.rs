@@ -311,11 +311,51 @@ fn elapsed_duration(text: &str) -> bool {
 }
 
 fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
+    split_parts(excerpt, false).map(|part| part.text)
+}
+
+/// Lesson extraction shares the code-aware scanner, but questions and quoted
+/// blocks are observations to review, not asserted procedural guidance.
+pub(super) fn lesson_sentences(excerpt: &str) -> impl Iterator<Item = &str> {
+    let mut quoted_paragraph = false;
+    split_parts(excerpt, true).filter_map(move |part| {
+        let text = part.text.trim();
+        if text.is_empty() {
+            // A newline left over after sentence punctuation is not a blank
+            // line: unmarked quotation continuations still belong to the quote.
+            if part.starts_line && part.text.contains('\n') {
+                quoted_paragraph = false;
+            }
+            return None;
+        }
+        if !part.lesson_prose {
+            return None;
+        }
+        let (assertion, _) = super::super::review_lesson_sentence(part.text);
+        if assertion.starts_with(['`', '"', '\'', '“', '‘', '>']) {
+            quoted_paragraph = true;
+        }
+        if quoted_paragraph || text.ends_with('?') {
+            return None;
+        }
+        Some(part.text)
+    })
+}
+
+struct ClausePart<'a> {
+    text: &'a str,
+    starts_line: bool,
+    lesson_prose: bool,
+}
+
+fn split_parts(excerpt: &str, lessons: bool) -> impl Iterator<Item = ClausePart<'_>> {
     let mut characters = excerpt.char_indices().peekable();
     let mut start = 0;
     let mut line_start = 0;
+    let mut part_line_start = 0;
     let mut code_delimiter = 0;
     let mut fence: Option<(char, usize)> = None;
+    let mut contains_fence = false;
     std::iter::from_fn(move || {
         while let Some((position, ch)) = characters.next() {
             let end = position + ch.len_utf8();
@@ -356,6 +396,7 @@ fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
                     && (ch == '~' || !rest.contains('`'))
                 {
                     fence = Some((ch, width));
+                    contains_fence = true;
                     continue;
                 }
                 if ch == '`' {
@@ -370,21 +411,44 @@ fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
             if fence.is_some() || code_delimiter != 0 {
                 continue;
             }
-            let boundary = matches!(ch, '\n' | ';') || (ch == '.' && sentence_period(excerpt, end));
+            let followed_by_space = characters
+                .peek()
+                .is_none_or(|(_, next)| next.is_whitespace());
+            let boundary = ch == '\n'
+                || (ch == ';' && (!lessons || followed_by_space))
+                || (ch == '.' && sentence_period(excerpt, end))
+                || (lessons && matches!(ch, '!' | '?') && followed_by_space);
             if boundary {
-                let part = &excerpt[start..end];
+                let part = ClausePart {
+                    text: &excerpt[start..end],
+                    starts_line: start == part_line_start,
+                    lesson_prose: !contains_fence && !indented_code(excerpt, part_line_start),
+                };
                 start = end;
+                part_line_start = line_start;
+                contains_fence = false;
                 return Some(part);
             }
         }
         if start < excerpt.len() {
-            let part = &excerpt[start..];
+            let part = ClausePart {
+                text: &excerpt[start..],
+                starts_line: start == part_line_start,
+                lesson_prose: !contains_fence
+                    && fence.is_none()
+                    && code_delimiter == 0
+                    && !indented_code(excerpt, part_line_start),
+            };
             start = excerpt.len();
             Some(part)
         } else {
             None
         }
     })
+}
+
+fn indented_code(text: &str, line_start: usize) -> bool {
+    text[line_start..].starts_with("    ") || text[line_start..].starts_with('\t')
 }
 
 fn fence_indent(prefix: &str) -> bool {
