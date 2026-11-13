@@ -46,20 +46,34 @@ if [ "$(python3 "$base/probe-write-lock.py" "$lock")" != held ]; then
     exit 1
 fi
 
+probe_started=$SECONDS
 "$ee_bin" doctor --workspace "$target" --json > "$base/locked-doctor.json"
+probe_elapsed=$((SECONDS - probe_started))
+if [ "$probe_elapsed" -ge 30 ]; then
+    printf 'fixture assert: %s doctor waited behind the writer for %ss\n' "$FM" "$probe_elapsed" >&2
+    exit 1
+fi
+printf 'held-writer doctor elapsed: %ss\n' "$probe_elapsed" >&2
 if ! jq -es '
     length == 1 and (.[0] |
         .schema == "ee.response.v2" and .success == true and
         .data.healthy == false and .data.posture == "blocked" and
         any(.data.actionable[]; .name == "database" and .errorCode == "EE-E201" and
-            (.message | test("write lock holder made no progress"))))
+            (.message | test("write lock is currently held"))))
 ' "$base/locked-doctor.json" >/dev/null; then
     printf 'fixture assert: %s doctor does not report the held lock as database EE-E201; see %s\n' \
         "$FM" "$base/locked-doctor.json" >&2
     exit 1
 fi
+fix_started=$SECONDS
 doctor_fixture_assert_guidance_only "$FM" "database_locked" "database" "EE-E201" \
     ".ee/index-rebuild-request.json"
+fix_elapsed=$((SECONDS - fix_started))
+if [ "$fix_elapsed" -ge 30 ]; then
+    printf 'fixture assert: %s doctor --fix and its follow-up probe waited %ss\n' "$FM" "$fix_elapsed" >&2
+    exit 1
+fi
+printf 'held-writer doctor --fix and follow-up elapsed: %ss\n' "$fix_elapsed" >&2
 # Lock guidance only: never the corrupted-store or unavailable plan.
 if ! jq -es '
     length == 1 and (.[0] |

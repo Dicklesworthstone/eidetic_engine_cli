@@ -22,13 +22,15 @@ Per `bd-2oh15`, the fixture lifecycle is:
    holder before returning, so no process outlives the fixture. Its
    independent witness is a second non-blocking flock being refused. `ee
    doctor` must report posture `blocked` with `database` `EE-E201` (locked,
-   "write lock holder made no progress"). It then runs
+   "write lock is currently held") without waiting for the writer. It then runs
    `doctor_fixture_assert_guidance_only` in `lib.sh`: an unscoped
    `ee doctor --fix` exits 6 recording only `database_locked` manual guidance
    (never `database_corrupted` or `database_unavailable`), and the lock is
    still reported afterwards. With the holder stopped, doctor is healthy and
-   the content digest is unchanged. One held doctor run takes about 150 s. The
-   fixture needs `python3` on `PATH`.
+   the content digest is unchanged. The fixture records elapsed time and requires
+   both the initial probe and the fix-plus-follow-up phase to finish within 30 s;
+   entering even one 38 s stagnant-writer wait fails this regression. The fixture
+   needs `python3` on `PATH`.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs

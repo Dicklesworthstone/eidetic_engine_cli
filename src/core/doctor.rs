@@ -48,7 +48,8 @@ use super::budget_delta_recommender::{
 use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, SemanticReadiness, get_index_status,
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
+    SemanticReadiness, get_index_status_with_connection,
 };
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::search::{RegisteredRerankerResolution, resolve_registered_reranker};
@@ -2981,7 +2982,11 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
         return CheckResult::error("database", message, code);
     }
 
-    match DbConnection::open_file(&database_path) {
+    if let Some(check) = check_database_write_lock(workspace_path) {
+        return check;
+    }
+
+    match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => {
             if let Err(error) = connection.ping() {
                 return database_failure::check(&error);
@@ -3030,6 +3035,99 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
         }
         Err(error) => database_failure::check(&error),
     }
+}
+
+/// Observe the existing writer lock without entering the write-owner gate.
+/// A diagnostic must not spend a writer's patience budget before it can tell
+/// the operator why writes are blocked. The probe never creates a lock file,
+/// advances its epoch, reclaims a holder, or changes database state.
+#[cfg(unix)]
+fn check_database_write_lock(workspace_path: &Path) -> Option<CheckResult> {
+    match database_write_lock_held(workspace_path) {
+        Ok(false) => None,
+        Ok(true) => {
+            let mut check = CheckResult::error(
+                "database",
+                "Database write lock is currently held by another writer; diagnostics did not wait for it. This is not evidence of data loss.",
+                error_codes::DATABASE_LOCKED,
+            );
+            check.repair = Some(
+                "Wait for the active writer to finish, then rerun `ee doctor --workspace . --json`; leave the database, sidecars and lock file in place",
+            );
+            Some(check)
+        }
+        Err(error) => Some(CheckResult::error(
+            "database",
+            format!("Database writer availability could not be inspected: {error}"),
+            error_codes::DATABASE_UNAVAILABLE,
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn check_database_write_lock(_workspace_path: &Path) -> Option<CheckResult> {
+    // The Unix flock gate has no counterpart on this platform. The normal
+    // read-only database inspection below retains its typed storage errors.
+    None
+}
+
+#[cfg(unix)]
+fn database_write_lock_held(workspace_path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    use rustix::fs::{FlockOperation, OFlags, flock};
+    use rustix::io::Errno;
+
+    // Canonicalize workspace aliases, but never follow a redirected .ee
+    // directory or lock leaf. NONBLOCK also prevents a substituted FIFO from
+    // turning the inspection itself into a hang.
+    let directory = workspace_path.canonicalize()?.join(".ee");
+    if !std::fs::symlink_metadata(&directory)?.file_type().is_dir() {
+        return Err(std::io::Error::other(
+            "store directory is not a real directory",
+        ));
+    }
+    let path = directory.join("ee.write.lock");
+    let expected = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !expected.file_type().is_file() {
+        return Err(std::io::Error::other(
+            "database write lock is not a regular file",
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    let current = std::fs::symlink_metadata(&path)?;
+    if !opened.file_type().is_file()
+        || !current.file_type().is_file()
+        || expected.dev() != opened.dev()
+        || expected.ino() != opened.ino()
+        || current.dev() != opened.dev()
+        || current.ino() != opened.ino()
+    {
+        return Err(std::io::Error::other(
+            "database write lock changed during inspection",
+        ));
+    }
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(false),
+        Err(error) if error == Errno::WOULDBLOCK || error == Errno::AGAIN => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Reuse index readiness logic without its standalone write-capable open.
+/// Both embedding and search diagnostics must remain available behind a held
+/// writer, and inspecting a healthy store must not advance its writer epoch.
+fn doctor_index_status(options: &IndexStatusOptions) -> Result<IndexStatusReport, IndexStatusError> {
+    let connection = DbConnection::open_file_read_only(options.resolve_database_path())?;
+    get_index_status_with_connection(options, Some(&connection))
 }
 
 /// What an empty store's workspace still holds that shows it once had data
@@ -3325,7 +3423,7 @@ fn embedding_posture_unavailable_check(trap_present: &[&str], reason: &str) -> C
 /// mode (neural_local vs deterministic-hash) and warn when a foreign
 /// `EMBEDDING_MODEL` / `OPENAI_API_KEY` is set that ee silently ignores.
 /// Reuses the bd-1et0v.6 `EmbeddingPosture` helper (one source of truth) via
-/// [`get_index_status`]. Never flips top-line health.
+/// [`get_index_status_with_connection`]. Never flips top-line health.
 fn check_embedding_posture(
     workspace_path: Option<&Path>,
 ) -> (CheckResult, Option<SemanticReadiness>) {
@@ -3336,9 +3434,9 @@ fn check_embedding_posture(
             None,
         );
     };
-    // bd-xa6ud / bd-wswg0: get_index_status opens the store read-write; this
-    // check runs before check_database, so on an empty or unreadable store it
-    // would write to it first. Report the posture as unavailable instead.
+    // bd-xa6ud / bd-wswg0: even a read-only open can touch sidecars. This
+    // check runs before check_database, so leave an empty or damaged store
+    // untouched and report the posture as unavailable instead.
     if let Some((_, reason)) = database_unreadable(workspace_path) {
         return (
             embedding_posture_unavailable_check(
@@ -3353,7 +3451,16 @@ fn check_embedding_posture(
         database_path: None,
         index_dir: None,
     };
-    match get_index_status(&options) {
+    if !options.resolve_database_path().exists() && !options.resolve_index_dir().exists() {
+        return (
+            embedding_posture_unavailable_check(
+                &trap_present,
+                "search index is missing; see the search_index check",
+            ),
+            None,
+        );
+    }
+    match doctor_index_status(&options) {
         Ok(report) if report.health != IndexHealth::Ready => (
             embedding_posture_unavailable_check(
                 &trap_present,
@@ -3734,8 +3841,14 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
         database_path: None,
         index_dir: None,
     };
-
-    match get_index_status(&options) {
+    if !options.resolve_database_path().exists() && !options.resolve_index_dir().exists() {
+        return CheckResult::warning(
+            "search_index",
+            "Search index is missing for the current workspace.",
+            error_codes::INDEX_NOT_FOUND,
+        );
+    }
+    match doctor_index_status(&options) {
         Ok(report) => match report.health {
             IndexHealth::Ready => CheckResult::ok(
                 "search_index",
@@ -6141,6 +6254,161 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn doctor_database_checks_do_not_wait_for_or_modify_a_held_writer() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        use rustix::fs::{FlockOperation, flock};
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &stable_workspace_id(workspace),
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("nonblocking doctor".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let lock_path = workspace.join(".ee/ee.write.lock");
+        let lock_before = std::fs::read(&lock_path).map_err(|error| error.to_string())?;
+        let database_before = std::fs::read(&database).map_err(|error| error.to_string())?;
+        // A read-only store and lock remain inspectable. The diagnostic must
+        // neither upgrade their permissions nor require a writable lock open.
+        for path in [&database, &lock_path] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
+                .map_err(|error| error.to_string())?;
+        }
+        let holder = std::fs::File::open(&lock_path).map_err(|error| error.to_string())?;
+        flock(&holder, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+
+        let started = std::time::Instant::now();
+        let _ = check_embedding_posture(Some(workspace));
+        let locked = check_database(Some(workspace));
+        let _ = check_search_index(Some(workspace));
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_secs(10) {
+            return Err(format!("doctor database checks waited behind the writer for {elapsed:?}"));
+        }
+        ensure(
+            locked.error_code,
+            Some(error_codes::DATABASE_LOCKED),
+            "active writer retains the lock-specific diagnosis",
+        )?;
+        ensure(locked.severity, CheckSeverity::Error, "writes are blocked")?;
+        ensure(
+            locked.repair.is_some_and(|repair| repair.contains("leave the database")),
+            true,
+            "lock repair preserves the live store",
+        )?;
+        ensure(
+            std::fs::read(&lock_path).map_err(|error| error.to_string())?,
+            lock_before.clone(),
+            "held writer epoch was not changed",
+        )?;
+        drop(holder);
+
+        ensure(
+            check_database(Some(workspace)).severity,
+            CheckSeverity::Ok,
+            "database is readable after the writer releases",
+        )?;
+        let _ = check_embedding_posture(Some(workspace));
+        let _ = check_search_index(Some(workspace));
+        ensure(
+            std::fs::read(&lock_path).map_err(|error| error.to_string())?,
+            lock_before,
+            "uncontended inspection did not advance the writer epoch",
+        )?;
+        ensure(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            database_before,
+            "read-only database bytes were preserved",
+        )?;
+        for path in [&database, &lock_path] {
+            ensure(
+                std::fs::metadata(path)
+                    .map_err(|error| error.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o400,
+                "inspection preserved read-only permissions",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_missing_store_probes_create_no_database_or_writer_lock() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        ensure(
+            check_database(Some(workspace)).error_code,
+            Some(error_codes::DATABASE_NOT_FOUND),
+            "missing store diagnosis",
+        )?;
+        let _ = check_embedding_posture(Some(workspace));
+        let _ = check_search_index(Some(workspace));
+        ensure(
+            doctor_index_status(&IndexStatusOptions {
+                workspace_path: workspace.to_path_buf(),
+                database_path: None,
+                index_dir: None,
+            })
+            .is_err(),
+            true,
+            "index inspection never falls back to creating a missing store",
+        )?;
+        ensure(
+            database_write_lock_held(workspace).map_err(|error| error.to_string())?,
+            false,
+            "absent writer lock is not contention",
+        )?;
+        ensure(workspace.join(".ee/ee.db").exists(), false, "no database created")?;
+        ensure(
+            workspace.join(".ee/ee.write.lock").exists(),
+            false,
+            "no writer lock created",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_writer_probe_rejects_redirected_lock_without_touching_target() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let target = workspace.join("outside-lock");
+        std::fs::write(&target, b"keep this lock unchanged")
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&target, workspace.join(".ee/ee.write.lock"))
+            .map_err(|error| error.to_string())?;
+        let check = check_database_write_lock(workspace)
+            .ok_or_else(|| "redirected lock was accepted".to_owned())?;
+        ensure(
+            check.error_code,
+            Some(error_codes::DATABASE_UNAVAILABLE),
+            "uninspectable lock is neither healthy nor corrupt",
+        )?;
+        ensure(
+            std::fs::read(&target).map_err(|error| error.to_string())?,
+            b"keep this lock unchanged".to_vec(),
+            "redirected target was untouched",
+        )
+    }
+
     #[cfg(feature = "graph")]
     #[test]
     fn doctor_graph_snapshot_measures_source_drift_without_writing() -> TestResult {
@@ -6376,7 +6644,7 @@ mod tests {
             &workspace_id,
             EmbedderStack::from_parts(Arc::new(replacement), None),
         );
-        let status = get_index_status(&IndexStatusOptions {
+        let status = crate::core::index::get_index_status(&IndexStatusOptions {
             workspace_path: workspace.to_path_buf(),
             database_path: None,
             index_dir: None,
