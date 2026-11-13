@@ -1732,7 +1732,7 @@ fn apply_native_rule_outcome_in_txn(
 /// feedback event must never survive without its posterior, trust changes and
 /// index work: retries use that event as their idempotency key and will not
 /// learn it again.
-fn memory_outcome_index_job_id(event_id: &str) -> String {
+pub(crate) fn memory_outcome_index_job_id(event_id: &str) -> String {
     let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
         .to_hex()
         .to_string();
@@ -3972,7 +3972,7 @@ fn procedure_event_id_for_feedback(feedback_event_id: &str) -> String {
     format!("pevt_{}", &hash[..26])
 }
 
-fn validate_feedback_event_id(raw: &str) -> Result<String, DomainError> {
+pub(crate) fn validate_feedback_event_id(raw: &str) -> Result<String, DomainError> {
     let value = require_nonempty("event id", raw, "ee outcome --event-id fb_...")?;
     let payload = value
         .strip_prefix("fb_")
@@ -6406,7 +6406,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_batch_rejects_foreign_native_targets_without_poisoning_valid_lines() -> TestResult {
+    fn workspace_batch_rejects_foreign_native_targets_without_poisoning_valid_lines() -> TestResult
+    {
         let (dir, database) = seed_outcome_database("ee-outcome-owned-batch")?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         seed_persisted_outcome_targets(&connection)?;

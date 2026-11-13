@@ -1145,13 +1145,18 @@ impl BackflowSignal {
 
 #[derive(Clone, Debug)]
 pub struct BackflowOptions<'a> {
+    /// The consuming workspace, which need not own the promoted origin.
     pub workspace_database_path: &'a Path,
+    pub source_workspace_id: Option<&'a str>,
     pub global_memory_id: &'a str,
     pub global_paths: &'a super::global_store::GlobalStorePaths,
     pub signal: BackflowSignal,
     /// Requested magnitude; clamped to [`MAX_BACKFLOW_STEP`].
     pub weight: f32,
     pub actor: Option<&'a str>,
+    /// Reuse this ID when retrying an observation or its origin backflow.
+    pub event_id: Option<&'a str>,
+    pub prompt_injection_guard: bool,
     pub dry_run: bool,
 }
 
@@ -1165,6 +1170,13 @@ pub struct BackflowReport {
     pub applied_delta: f32,
     pub origin_confidence_before: Option<f32>,
     pub origin_confidence_after: Option<f32>,
+    pub feedback_event_id: Option<String>,
+    /// Canonical learning/quarantine result for the authoritative global row.
+    pub global_outcome: Option<super::outcome::OutcomeRecordReport>,
+    pub historical: bool,
+    pub origin_status: &'static str,
+    pub origin_error: Option<String>,
+    pub index_status: String,
     pub executed: bool,
 }
 
@@ -1179,6 +1191,12 @@ impl BackflowReport {
             "appliedDelta": self.applied_delta,
             "originConfidenceBefore": self.origin_confidence_before,
             "originConfidenceAfter": self.origin_confidence_after,
+            "feedbackEventId": self.feedback_event_id,
+            "globalOutcome": self.global_outcome.as_ref().map(super::outcome::OutcomeRecordReport::data_json),
+            "historical": self.historical,
+            "originStatus": self.origin_status,
+            "originError": self.origin_error,
+            "indexStatus": self.index_status,
             "executed": self.executed,
         })
     }
@@ -1268,6 +1286,19 @@ fn bounded_backflow_target(before: f32, requested: f32) -> f32 {
     }
 }
 
+fn global_feedback_receipt_id(stage: &str, workspace: &str, event: &str) -> String {
+    let hash =
+        blake3::hash(format!("ee.global_feedback.{stage}.v1:{workspace}:{event}").as_bytes())
+            .to_hex();
+    format!("aud_{}", &hash[..26])
+}
+
+struct OriginAdjustment {
+    before: f32,
+    after: f32,
+    replayed: bool,
+}
+
 /// Read current confidence and commit its change, index repair, and audit as
 /// one unit. A concurrent writer either serializes or causes a reported
 /// transaction failure, never a successful lost update. Retired/missing or
@@ -1279,12 +1310,53 @@ fn persist_origin_backflow(
     origin: &(String, String),
     feedback_id: &str,
     reference: chrono::DateTime<chrono::Utc>,
-) -> crate::db::Result<Option<(f32, f32)>> {
+) -> crate::db::Result<Option<OriginAdjustment>> {
     if !options.weight.is_finite() {
         return Err(global_mutation_error("Feedback weight must be finite"));
     }
     connection.with_transaction(|| {
+        // The optional stage can run after index publication or wait for a
+        // writer; do not authorize an origin using a stale command-start time.
+        let reference = reference.max(chrono::Utc::now());
         let (workspace, id) = origin;
+        let receipt_id = global_feedback_receipt_id("origin", &global.workspace_id, feedback_id);
+        let step = options.weight.clamp(0.0, MAX_BACKFLOW_STEP);
+        let requested = match options.signal {
+            BackflowSignal::Helpful => step,
+            BackflowSignal::Harmful => -step,
+        };
+        if let Some(receipt) = connection.get_audit(&receipt_id)? {
+            let details: Value = receipt
+                .details
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .ok_or_else(|| global_mutation_error("Invalid origin feedback receipt"))?;
+            if receipt.workspace_id.as_deref() != Some(workspace)
+                || receipt.target_id.as_deref() != Some(id)
+                || receipt.target_type.as_deref() != Some("memory")
+                || receipt.action != "memory.global_feedback_backflow"
+                || details["feedbackEventId"] != feedback_id
+                || details["globalMemoryId"] != global.id
+                || details["signal"] != options.signal.as_str()
+                || details["requestedDelta"] != json!(requested)
+            {
+                return Err(global_mutation_error(
+                    "Origin feedback receipt identity mismatch",
+                ));
+            }
+            let score = |name: &str| {
+                details[name]
+                    .as_f64()
+                    .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                    .map(|value| value as f32)
+                    .ok_or_else(|| global_mutation_error("Invalid origin feedback receipt score"))
+            };
+            return Ok(Some(OriginAdjustment {
+                before: score("confidenceBefore")?,
+                after: score("confidenceAfter")?,
+                replayed: true,
+            }));
+        }
         let Some(memory) = connection.get_memory(id)? else {
             return Ok(None);
         };
@@ -1300,33 +1372,39 @@ fn persist_origin_backflow(
         if !before.is_finite() || !(0.0..=1.0).contains(&before) {
             return Err(global_mutation_error("Invalid origin confidence"));
         }
-        let step = options.weight.clamp(0.0, MAX_BACKFLOW_STEP);
-        let requested = match options.signal {
-            BackflowSignal::Helpful => step,
-            BackflowSignal::Harmful => -step,
-        };
         let after = bounded_backflow_target(before, requested);
-        if before == after {
-            return Ok(Some((before, after)));
-        }
-        if !connection.apply_memory_reinforcement(id, workspace, after, &reference.to_rfc3339())? {
+        if before != after
+            && !connection.apply_memory_reinforcement(
+                id,
+                workspace,
+                after,
+                &reference.to_rfc3339(),
+            )?
+        {
             return Err(global_mutation_error("Origin feedback was not applied"));
         }
         // Confidence contributes to retrieval metadata. Do not leave a
         // successful learning update behind an apparently current index.
-        let job = promotion_index_job_id();
-        connection.insert_search_index_job(
-            &job,
-            &CreateSearchIndexJobInput {
-                workspace_id: workspace.clone(),
-                job_type: SearchIndexJobType::SingleDocument,
-                document_source: Some("memory".to_owned()),
-                document_id: Some(id.clone()),
-                documents_total: 1,
-            },
-        )?;
+        let job = if before != after {
+            let job = promotion_index_job_id();
+            connection.insert_search_index_job(
+                &job,
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(id.clone()),
+                    documents_total: 1,
+                },
+            )?;
+            Some(job)
+        } else {
+            None
+        };
+        // Even saturation needs a durable receipt: a later confidence change
+        // must not make a retry of this observation adjust the origin again.
         connection.insert_audit(
-            &generate_audit_id(),
+            &receipt_id,
             &CreateAuditInput {
                 workspace_id: Some(workspace.clone()),
                 actor: options.actor.map(str::to_owned),
@@ -1349,24 +1427,44 @@ fn persist_origin_backflow(
                 ),
             },
         )?;
-        Ok(Some((before, after)))
+        Ok(Some(OriginAdjustment {
+            before,
+            after,
+            replayed: false,
+        }))
     })
 }
 
 /// Record global outcome evidence and apply a bounded origin adjustment.
-/// Executed reports state the actual origin delta, including zero when no
-/// current origin can be adjusted. Previews retain the requested-delta form
-/// and never open the origin store. Global and origin commits are separate.
+/// The global store owns learning; the consuming workspace is only an optional
+/// origin backflow destination. Each stage has its own durable retry identity.
+/// Previews never open the consuming workspace store.
 ///
 /// # Errors
 ///
-/// A failure after recording global feedback names the committed event and
-/// explicitly withholds a claim of origin success. Do not blindly resubmit:
-/// that would record another observation, not retry the same event.
+/// A primary admission failure returns an error. A failure in the optional
+/// origin stage is reported separately; retry with the returned event ID to
+/// finish that stage without applying the global observation again.
 pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<BackflowReport, String> {
+    use super::outcome::{OutcomeRecordOptions, OutcomeRecordStatus, record_outcome};
+
     if !options.weight.is_finite() {
         return Err("Global feedback weight must be finite".to_owned());
     }
+    if options
+        .source_workspace_id
+        .is_some_and(|id| id.parse::<crate::models::WorkspaceId>().is_err())
+    {
+        return Err("Invalid global feedback source workspace".to_owned());
+    }
+    let feedback_id = options
+        .event_id
+        .map(super::outcome::validate_feedback_event_id)
+        .transpose()
+        .map_err(|_| {
+            "Feedback event ID must be fb_ followed by 26 ASCII alphanumeric characters".to_owned()
+        })?
+        .unwrap_or_else(promotion_feedback_event_id);
     let (global_connection, global_workspace_id) =
         admission::open_existing_global(options.global_paths, options.dry_run)?;
     let reference = chrono::Utc::now();
@@ -1386,6 +1484,8 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
         .map_err(|_| "Could not verify global feedback target".to_owned())?;
         let origin = verified_backflow_origin(&row)
             .map_err(|_| "Could not verify global feedback origin".to_owned())?;
+        let historical = !backflow_target_is_current(&global_connection, &row, reference)
+            .map_err(|_| "Could not verify global feedback lifecycle".to_owned())?;
         snapshot
             .finish()
             .map_err(|_| "Could not release global feedback preview".to_owned())?;
@@ -1395,73 +1495,219 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
             applied_delta: requested,
             origin_confidence_before: None,
             origin_confidence_after: None,
+            feedback_event_id: options.event_id.map(|_| feedback_id),
+            global_outcome: None,
+            historical,
+            origin_status: "preview",
+            origin_error: None,
+            index_status: "not_applicable".to_owned(),
             executed: false,
         });
     }
 
-    let feedback_id = promotion_feedback_event_id();
-    let (row, origin, current) =
-        global_connection
-            .with_transaction(|| {
+    // The canonical outcome entrypoint opens its own connection. The existing
+    // same-file, reentrant owner fence binds our provenance/lifecycle reads to
+    // its admission and atomic learning commit without nesting SQL transactions.
+    let (row, origin, current, historical, global_outcome) = global_connection
+        .with_write_owner_fence(
+            |_| "Could not acquire global feedback admission owner".to_owned(),
+            || {
+                let reference = chrono::Utc::now();
                 let row = global_mutation_target(
                     &global_connection,
                     &global_workspace_id,
                     options.global_memory_id,
-                )?;
-                let origin = verified_backflow_origin(&row)?;
-                let current = backflow_target_is_current(&global_connection, &row, reference)?;
-                // Feedback about retired knowledge remains useful historical evidence;
-                // it must not silently alter an otherwise current origin memory.
-                global_connection.insert_feedback_event(
-            &feedback_id,
-            &crate::db::CreateFeedbackEventInput {
-                workspace_id: global_workspace_id.clone(),
-                target_type: "memory".to_owned(),
-                target_id: row.id.clone(),
-                signal: options.signal.as_str().to_owned(),
-                weight: step,
-                source_type: "outcome_observed".to_owned(),
-                source_id: options.actor.map(str::to_owned),
-                reason: Some("global-lane outcome evidence (backflow)".to_owned()),
-                evidence_json: Some(json!({
+                ).map_err(|_| "Could not verify global feedback target".to_owned())?;
+                let origin = verified_backflow_origin(&row)
+                    .map_err(|_| "Could not verify global feedback origin".to_owned())?;
+                let current = backflow_target_is_current(&global_connection, &row, reference)
+                    .map_err(|_| "Could not verify global feedback lifecycle".to_owned())?;
+                // Only immutable observation facts enter replay identity. In
+                // particular, demotion/reveal must not change the request payload.
+                let evidence = json!({
                     "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+                    "globalContentHash": blake3::hash(row.content.as_bytes()).to_hex().to_string(),
+                    "sourceWorkspaceId": options.source_workspace_id,
                     "originWorkspaceId": origin.as_ref().map(|(workspace, _)| workspace),
                     "originMemoryId": origin.as_ref().map(|(_, id)| id),
                     "requestedDelta": requested,
-                    "sourceCurrent": current,
-                }).to_string()),
-                session_id: None,
+                }).to_string();
+                let source = json!([options.source_workspace_id, options.actor.map(str::trim)]);
+                let source_id = format!("global-outcome:{}", blake3::hash(source.to_string().as_bytes()).to_hex());
+                let outcome_options = OutcomeRecordOptions {
+                    database_path: &options.global_paths.database_path,
+                    target_type: "memory".to_owned(),
+                    target_id: row.id.clone(),
+                    workspace_id: Some(global_workspace_id.clone()),
+                    signal: options.signal.as_str().to_owned(),
+                    weight: Some(step),
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some(source_id),
+                    reason: Some("global-lane outcome evidence (backflow)".to_owned()),
+                    evidence_json: Some(evidence),
+                    session_id: None,
+                    event_id: Some(feedback_id.clone()),
+                    actor: options.actor.map(str::to_owned),
+                    agent_name: None,
+                    dry_run: false,
+                    harmful_per_source_per_hour: super::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                    harmful_burst_window_seconds: super::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                    prompt_injection_guard: options.prompt_injection_guard,
+                };
+                let historical_receipt = global_feedback_receipt_id("historical", &global_workspace_id, &feedback_id);
+                let historical_audit = global_connection.get_audit(&historical_receipt)
+                    .map_err(|_| "Could not inspect global feedback receipt".to_owned())?;
+                if historical_audit.as_ref().is_some_and(|audit| {
+                    let details = audit.details.as_deref().and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+                    audit.action != "memory.global_feedback_historical"
+                        || audit.workspace_id.as_deref() != Some(global_workspace_id.as_str())
+                        || audit.target_id.as_deref() != Some(row.id.as_str())
+                        || audit.target_type.as_deref() != Some("memory")
+                        || details.as_ref().is_none_or(|details| details["feedbackEventId"] != feedback_id || details["globalMemoryId"] != row.id)
+                }) {
+                    return Err("Global feedback receipt identity mismatch".to_owned());
+                }
+                let existing = global_connection.get_feedback_event(&feedback_id)
+                    .map_err(|_| "Could not inspect existing global feedback".to_owned())?;
+                let quarantined = global_connection.get_feedback_quarantine_by_proposed_event_id(&feedback_id)
+                    .map_err(|_| "Could not inspect global feedback quarantine".to_owned())?;
+                if historical_audit.is_some() && existing.is_none() {
+                    return Err("Global feedback receipt has no observation".to_owned());
+                }
+                if current || existing.is_some() || quarantined.is_some() {
+                    // Replays (including withdrawn targets and quarantine
+                    // reservations) always use canonical exact-payload checks.
+                    let outcome = record_outcome(&outcome_options).map_err(|error| {
+                        format!("Global feedback {feedback_id} was not confirmed: {}. Retry only with the same --event-id {feedback_id}.", error.message())
+                    })?;
+                    return Ok((row, origin, current, historical_audit.is_some(), Some(outcome)));
+                }
+                // Preserve historical evidence for retired/sealed revisions
+                // without changing their posterior or enabling later decay to
+                // consume it as a fresh learning event.
+                global_connection.with_transaction(|| {
+                    global_connection.insert_feedback_event(&feedback_id, &crate::db::CreateFeedbackEventInput {
+                        workspace_id: global_workspace_id.clone(),
+                        target_type: outcome_options.target_type.clone(),
+                        target_id: row.id.clone(),
+                        signal: outcome_options.signal.clone(),
+                        weight: step,
+                        source_type: outcome_options.source_type.clone(),
+                        source_id: outcome_options.source_id.clone(),
+                        reason: outcome_options.reason.clone(),
+                        evidence_json: outcome_options.evidence_json.clone(),
+                        session_id: None,
+                    })?;
+                    if !global_connection.apply_feedback_event(&feedback_id)? {
+                        return Err(global_mutation_error("Could not consume historical global observation"));
+                    }
+                    global_connection.insert_audit(&historical_receipt, &CreateAuditInput {
+                        workspace_id: Some(global_workspace_id.clone()),
+                        actor: options.actor.map(str::to_owned),
+                        action: "memory.global_feedback_historical".to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some(row.id.clone()),
+                        details: Some(json!({"feedbackEventId": feedback_id, "globalMemoryId": row.id}).to_string()),
+                    })
+                }).map_err(|_| "Could not commit historical global feedback".to_owned())?;
+                Ok((row, origin, current, true, None))
             },
         )?;
-                Ok((row, origin, current))
-            })
-            .map_err(|_| {
-                "Could not commit global feedback; inspect the global store before retrying"
-                    .to_owned()
-            })?;
 
-    let adjustment = if current && let Some(origin) = &origin {
-        let result = (|| -> Result<Option<(f32, f32)>, String> {
+    let admitted = global_outcome.as_ref().is_some_and(|outcome| {
+        matches!(
+            outcome.status,
+            OutcomeRecordStatus::Recorded | OutcomeRecordStatus::AlreadyRecorded
+        )
+    });
+    // Publication can wait on other publishers; do it after releasing the
+    // admission owner. Replaying an event can finish its durable index job.
+    let mut index_status = "not_applicable".to_owned();
+    if admitted && !historical {
+        let job_id = super::outcome::memory_outcome_index_job_id(&feedback_id);
+        match global_connection.get_search_index_job(&job_id) {
+            Ok(Some(job))
+                if job.workspace_id == global_workspace_id
+                    && job.document_source.as_deref() == Some("memory")
+                    && job.document_id.as_deref() == Some(row.id.as_str()) =>
+            {
+                let indexed = super::memory::reconcile_committed_memory_index_job(
+                    &global_connection,
+                    &global_workspace_id,
+                    &job_id,
+                    &options.global_paths.index_dir,
+                );
+                let provisional = super::memory::remember_index_status(&indexed);
+                index_status = super::memory::authoritative_remember_index_status(
+                    &global_workspace_id,
+                    &options.global_paths.root,
+                    &options.global_paths.database_path,
+                    &options.global_paths.index_dir,
+                    std::slice::from_ref(&job_id),
+                    &provisional,
+                );
+            }
+            Ok(None) => {}
+            _ => index_status = "repair_pending".to_owned(),
+        }
+    }
+
+    let mut origin_status = if !admitted {
+        "withheld"
+    } else {
+        "not_applicable"
+    };
+    let mut origin_error = None;
+    let mut adjustment = None;
+    if admitted
+        && !historical
+        && current
+        && let Some(origin) = &origin
+    {
+        let result = (|| -> Result<Option<OriginAdjustment>, String> {
             if !options
                 .workspace_database_path
                 .try_exists()
-                .map_err(|_| "Could not inspect origin store".to_owned())?
+                .map_err(|_| "Could not inspect consuming workspace store".to_owned())?
             {
-                return Err("Origin store does not exist".to_owned());
+                return Ok(None);
             }
             let source = DbConnection::open_file(options.workspace_database_path)
-                .map_err(|_| "Could not open existing origin store".to_owned())?;
+                .map_err(|_| "Could not open existing consuming workspace store".to_owned())?;
             persist_origin_backflow(&source, options, &row, origin, &feedback_id, reference)
-                .map_err(|_| "Could not commit origin backflow".to_owned())
+                .map_err(|_| "Could not commit optional origin backflow".to_owned())
         })();
-        result.map_err(|_| format!(
-            "global_feedback_origin_pending: feedback {feedback_id} is committed; the origin update was not confirmed; inspect both stores before retrying and do not blindly record the observation again"
-        ))?
-    } else {
-        None
-    };
-    let (before, after, applied_delta) = adjustment.map_or((None, None, 0.0), |(before, after)| {
-        (Some(before), Some(after), after - before)
+        match result {
+            Ok(value) => {
+                origin_status = value.as_ref().map_or("unavailable", |change| {
+                    if change.replayed {
+                        "already_applied"
+                    } else if change.before == change.after {
+                        "unchanged"
+                    } else {
+                        "applied"
+                    }
+                });
+                adjustment = value;
+            }
+            Err(message) => {
+                origin_status = "pending";
+                origin_error = Some(format!(
+                    "global_feedback_origin_pending: {message}; global feedback {feedback_id} is committed. Retry with --event-id {feedback_id}."
+                ));
+            }
+        }
+    }
+    let (before, after, applied_delta) = adjustment.map_or((None, None, 0.0), |change| {
+        (
+            Some(change.before),
+            Some(change.after),
+            if change.replayed {
+                0.0
+            } else {
+                change.after - change.before
+            },
+        )
     });
     Ok(BackflowReport {
         global_memory_id: row.id,
@@ -1469,6 +1715,12 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
         applied_delta,
         origin_confidence_before: before,
         origin_confidence_after: after,
+        feedback_event_id: Some(feedback_id),
+        global_outcome,
+        historical,
+        origin_status,
+        origin_error,
+        index_status,
         executed: true,
     })
 }
@@ -1822,11 +2074,14 @@ mod tests {
         // Helpful outcome with an oversized weight: clamped to the step cap.
         let report = backflow_global_feedback(&BackflowOptions {
             workspace_database_path: &workspace_db,
+            source_workspace_id: None,
             global_memory_id: &global_id,
             global_paths: &paths,
             signal: BackflowSignal::Helpful,
             weight: 0.5,
             actor: Some("test-actor"),
+            event_id: None,
+            prompt_injection_guard: true,
             dry_run: false,
         })
         .expect("backflow");
@@ -1848,11 +2103,14 @@ mod tests {
         // Harmful outcome moves it back down.
         let harmful = backflow_global_feedback(&BackflowOptions {
             workspace_database_path: &workspace_db,
+            source_workspace_id: None,
             global_memory_id: &global_id,
             global_paths: &paths,
             signal: BackflowSignal::Harmful,
             weight: 0.02,
             actor: None,
+            event_id: None,
+            prompt_injection_guard: true,
             dry_run: false,
         })
         .expect("harmful backflow");
@@ -1865,11 +2123,14 @@ mod tests {
         // Dry run reports the would-be delta without touching anything.
         let dry = backflow_global_feedback(&BackflowOptions {
             workspace_database_path: &workspace_db,
+            source_workspace_id: None,
             global_memory_id: &global_id,
             global_paths: &paths,
             signal: BackflowSignal::Helpful,
             weight: 0.01,
             actor: None,
+            event_id: None,
+            prompt_injection_guard: true,
             dry_run: true,
         })
         .expect("dry backflow");
@@ -2570,13 +2831,310 @@ mod tests {
     fn backflow_options<'a>(f: &'a PublicationFixture, id: &'a str) -> BackflowOptions<'a> {
         BackflowOptions {
             workspace_database_path: &f.source_path,
+            source_workspace_id: Some(&f.memory.workspace_id),
             global_memory_id: id,
             global_paths: &f.paths,
             signal: BackflowSignal::Helpful,
             weight: 0.05,
             actor: Some("backflow-test"),
+            event_id: None,
+            prompt_injection_guard: true,
             dry_run: false,
         }
+    }
+
+    #[test]
+    fn feedback_from_another_workspace_learns_the_global_row_and_replays_once() {
+        use super::super::outcome::OutcomeRecordStatus;
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let consumer_path = f._temp.path().join("consumer.db");
+        let consumer = DbConnection::open_file(&consumer_path).unwrap();
+        consumer.migrate().unwrap();
+        let consumer_id = "wsp_00000000000000000000000092";
+        consumer
+            .insert_workspace(
+                consumer_id,
+                &CreateWorkspaceInput {
+                    path: f
+                        ._temp
+                        .path()
+                        .join("consumer")
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let origin_before = source.get_memory(&f.memory.id).unwrap();
+        let prior = f
+            .destination
+            .get_memory_bayes_posterior(&id)
+            .unwrap()
+            .unwrap();
+        let mut options = backflow_options(&f, &id);
+        options.workspace_database_path = &consumer_path;
+        options.source_workspace_id = Some(consumer_id);
+        options.signal = BackflowSignal::Harmful;
+        options.event_id = Some("fb_00000000000000000000000091");
+        let report = backflow_global_feedback(&options).unwrap();
+        let learned = f
+            .destination
+            .get_memory_bayes_posterior(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(learned.0, prior.0);
+        assert!(learned.1 > prior.1);
+        assert_eq!(report.origin_status, "unavailable");
+        assert_eq!(report.applied_delta, 0.0);
+        let outcome = report.global_outcome.unwrap();
+        assert_eq!(outcome.status, OutcomeRecordStatus::Recorded);
+        assert!(outcome.confidence_after.unwrap() < outcome.confidence_before.unwrap());
+        let event = f
+            .destination
+            .get_feedback_event(options.event_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(event.applied_at.is_some());
+        assert_eq!(event.workspace_id, f.workspace);
+        let evidence: Value =
+            serde_json::from_str(event.evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["sourceWorkspaceId"], consumer_id);
+        let job_id = super::super::outcome::memory_outcome_index_job_id(&event.id);
+        let job = f
+            .destination
+            .get_search_index_job(&job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.document_id.as_deref(), Some(id.as_str()));
+        assert_eq!(job.workspace_id, f.workspace);
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin_before);
+        assert_eq!(consumer.count_table_rows("feedback_events").unwrap(), 0);
+        assert_eq!(consumer.count_table_rows("memories").unwrap(), 0);
+        let replay = backflow_global_feedback(&options).unwrap();
+        assert_eq!(
+            replay.global_outcome.unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(
+            f.destination.get_memory_bayes_posterior(&id).unwrap(),
+            Some(learned)
+        );
+        assert_eq!(f.count("feedback_events"), 1);
+        options.signal = BackflowSignal::Helpful;
+        assert!(backflow_global_feedback(&options).is_err());
+        assert_eq!(
+            f.destination.get_memory_bayes_posterior(&id).unwrap(),
+            Some(learned)
+        );
+    }
+
+    #[test]
+    fn directly_authored_global_memory_learns_without_a_local_store() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        f.destination
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_uri = NULL WHERE id = '{id}'"
+            ))
+            .unwrap();
+        let absent = f._temp.path().join("no-local-store.db");
+        let prior = f
+            .destination
+            .get_memory_bayes_posterior(&id)
+            .unwrap()
+            .unwrap();
+        let mut options = backflow_options(&f, &id);
+        options.workspace_database_path = &absent;
+        let report = backflow_global_feedback(&options).unwrap();
+        let learned = f
+            .destination
+            .get_memory_bayes_posterior(&id)
+            .unwrap()
+            .unwrap();
+        assert!(learned.0 > prior.0);
+        assert_eq!(learned.1, prior.1);
+        assert!(report.origin.is_none());
+        assert!(report.global_outcome.unwrap().confidence_after.is_some());
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn global_learning_failure_rolls_back_the_observation_and_does_not_touch_origin() {
+        for table in ["audit_log", "search_index_jobs"] {
+            let f = PublicationFixture::new();
+            let (id, _, _) = f.publish().unwrap();
+            let prior = f.destination.get_memory_bayes_posterior(&id).unwrap();
+            let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+            let origin = source.get_memory(&f.memory.id).unwrap();
+            f.destination
+                .execute_raw(&format!(
+                    "ALTER TABLE {table} RENAME TO unavailable_global_feedback_table"
+                ))
+                .unwrap();
+            assert!(
+                backflow_global_feedback(&backflow_options(&f, &id)).is_err(),
+                "{table}"
+            );
+            assert_eq!(f.count("feedback_events"), 0);
+            assert_eq!(
+                f.destination.get_memory_bayes_posterior(&id).unwrap(),
+                prior
+            );
+            assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin);
+        }
+    }
+
+    #[test]
+    fn global_quarantine_withholds_learning_and_released_event_can_finish_origin_once() {
+        use super::super::outcome::{
+            OutcomeQuarantineReviewOptions, OutcomeRecordStatus, review_feedback_quarantine,
+        };
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let mut options = backflow_options(&f, &id);
+        options.signal = BackflowSignal::Harmful;
+        let mut held = None;
+        for _ in 0..=super::super::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR {
+            let global_before = f.destination.get_memory_bayes_posterior(&id).unwrap();
+            let origin_before = source.get_memory(&f.memory.id).unwrap();
+            let report = backflow_global_feedback(&options).unwrap();
+            if report.global_outcome.as_ref().unwrap().status == OutcomeRecordStatus::Quarantined {
+                assert_eq!(report.origin_status, "withheld");
+                assert_eq!(
+                    f.destination.get_memory_bayes_posterior(&id).unwrap(),
+                    global_before
+                );
+                assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin_before);
+                held = Some(report);
+                break;
+            }
+        }
+        let held = held.expect("harmful burst must be quarantined");
+        let event_id = held.feedback_event_id.as_deref().unwrap();
+        let quarantine_id = held
+            .global_outcome
+            .as_ref()
+            .unwrap()
+            .quarantine
+            .as_ref()
+            .unwrap()
+            .id
+            .as_deref()
+            .unwrap();
+        assert!(
+            f.destination
+                .get_feedback_event(event_id)
+                .unwrap()
+                .is_none()
+        );
+        options.event_id = Some(event_id);
+        let pending = backflow_global_feedback(&options).unwrap();
+        assert_eq!(
+            pending.global_outcome.unwrap().status,
+            OutcomeRecordStatus::Quarantined
+        );
+        review_feedback_quarantine(&OutcomeQuarantineReviewOptions {
+            workspace_path: &f.paths.root,
+            database_path: Some(&f.paths.database_path),
+            quarantine_id,
+            reject: false,
+            actor: Some("global-feedback-reviewer"),
+            dry_run: false,
+        })
+        .unwrap();
+        let released = f.destination.get_memory_bayes_posterior(&id).unwrap();
+        let recovered = backflow_global_feedback(&options).unwrap();
+        assert_eq!(
+            recovered.global_outcome.unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(recovered.origin_status, "applied");
+        assert!(recovered.applied_delta < 0.0);
+        assert_eq!(
+            f.destination.get_memory_bayes_posterior(&id).unwrap(),
+            released
+        );
+        let origin_after = source.get_memory(&f.memory.id).unwrap();
+        let replay = backflow_global_feedback(&options).unwrap();
+        assert_eq!(replay.origin_status, "already_applied");
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin_after);
+    }
+
+    #[test]
+    fn feedback_replays_do_not_reclassify_historical_or_withdrawn_observations() {
+        use super::super::outcome::OutcomeRecordStatus;
+        for historical_first in [false, true] {
+            let f = PublicationFixture::new();
+            let (id, _, _) = f.publish().unwrap();
+            let mut options = backflow_options(&f, &id);
+            options.event_id = Some("fb_00000000000000000000000093");
+            if historical_first {
+                f.destination
+                    .insert_memory_seal(
+                        &id,
+                        &crate::models::memory_seal_commitment(f.memory.content.as_bytes()),
+                        "2020-01-01T00:00:00Z",
+                    )
+                    .unwrap();
+            }
+            let first = backflow_global_feedback(&options).unwrap();
+            assert_eq!(first.historical, historical_first);
+            let learned = f.destination.get_memory_bayes_posterior(&id).unwrap();
+            let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+            let origin = source.get_memory(&f.memory.id).unwrap();
+            if historical_first {
+                f.destination
+                    .mark_memory_seal_revealed(&id, "2020-01-02T00:00:00Z")
+                    .unwrap();
+            } else {
+                persist_global_demotion(&f.destination, &f.workspace, &id, None).unwrap();
+            }
+            let replay = backflow_global_feedback(&options).unwrap();
+            assert_eq!(
+                replay.global_outcome.unwrap().status,
+                OutcomeRecordStatus::AlreadyRecorded
+            );
+            assert_eq!(replay.historical, historical_first);
+            assert_eq!(replay.applied_delta, 0.0);
+            assert_eq!(
+                f.destination.get_memory_bayes_posterior(&id).unwrap(),
+                learned
+            );
+            assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin);
+            assert_eq!(f.count("feedback_events"), 1);
+        }
+    }
+
+    #[test]
+    fn retry_of_global_feedback_cannot_apply_old_observation_to_reworded_knowledge() {
+        let f = PublicationFixture::new();
+        let (id, _, _) = f.publish().unwrap();
+        let absent = f._temp.path().join("unavailable-origin.db");
+        let mut options = backflow_options(&f, &id);
+        options.workspace_database_path = &absent;
+        options.event_id = Some("fb_00000000000000000000000094");
+        let first = backflow_global_feedback(&options).unwrap();
+        assert_eq!(first.origin_status, "unavailable");
+        let source = DbConnection::open_file(&f.source_path).unwrap();
+        for (db, memory_id) in [(&f.destination, &id), (&source, &f.memory.id)] {
+            db.execute_raw(&format!(
+                "UPDATE memories SET content = 'Revised advice.' WHERE id = '{memory_id}'"
+            ))
+            .unwrap();
+        }
+        let origin = source.get_memory(&f.memory.id).unwrap();
+        let learned = f.destination.get_memory_bayes_posterior(&id).unwrap();
+        options.workspace_database_path = &f.source_path;
+        assert!(backflow_global_feedback(&options).is_err());
+        assert_eq!(f.count("feedback_events"), 1);
+        assert_eq!(
+            f.destination.get_memory_bayes_posterior(&id).unwrap(),
+            learned
+        );
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), origin);
     }
 
     #[test]
@@ -2633,13 +3191,33 @@ mod tests {
         source
             .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_backflow_audit")
             .unwrap();
-        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(report.origin_status, "pending");
+        let error = report.origin_error.as_deref().unwrap();
         assert!(error.contains("global_feedback_origin_pending"));
-        assert!(error.contains("feedback fb_") && error.contains("do not blindly"));
+        assert!(error.contains("feedback fb_") && error.contains("--event-id"));
         assert!(!error.contains(&f.memory.content));
         assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
         assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), jobs);
         assert_eq!(f.count("feedback_events"), 1);
+        let learned = f.destination.get_memory_bayes_posterior(&id).unwrap();
+        source
+            .execute_raw("ALTER TABLE unavailable_backflow_audit RENAME TO audit_log")
+            .unwrap();
+        let mut retry = backflow_options(&f, &id);
+        retry.event_id = report.feedback_event_id.as_deref();
+        let recovered = backflow_global_feedback(&retry).unwrap();
+        assert_eq!(recovered.origin_status, "applied");
+        assert_eq!(f.count("feedback_events"), 1);
+        assert_eq!(
+            f.destination.get_memory_bayes_posterior(&id).unwrap(),
+            learned
+        );
+        let after = source.get_memory(&f.memory.id).unwrap();
+        let replay = backflow_global_feedback(&retry).unwrap();
+        assert_eq!(replay.origin_status, "already_applied");
+        assert_eq!(replay.applied_delta, 0.0);
+        assert_eq!(source.get_memory(&f.memory.id).unwrap(), after);
     }
 
     #[test]
@@ -2652,7 +3230,8 @@ mod tests {
         source
             .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_backflow_jobs")
             .unwrap();
-        assert!(backflow_global_feedback(&backflow_options(&f, &id)).is_err());
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(report.origin_status, "pending");
         assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
         assert_eq!(source.count_table_rows("audit_log").unwrap(), audits);
         assert_eq!(f.count("feedback_events"), 1);
@@ -2732,7 +3311,22 @@ mod tests {
                 source.count_table_rows("audit_log").unwrap(),
                 source.count_table_rows("search_index_jobs").unwrap()
             ),
-            counts
+            (counts.0 + 1, counts.1)
+        );
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET confidence = 0.5 WHERE id = '{}'",
+                f.memory.id
+            ))
+            .unwrap();
+        let mut retry = backflow_options(&f, &id);
+        retry.event_id = saturated.feedback_event_id.as_deref();
+        let replay = backflow_global_feedback(&retry).unwrap();
+        assert_eq!(replay.origin_status, "already_applied");
+        assert_eq!(replay.applied_delta, 0.0);
+        assert_eq!(
+            source.get_memory(&f.memory.id).unwrap().unwrap().confidence,
+            0.5
         );
         f.destination
             .execute_raw(&format!(
@@ -2764,8 +3358,12 @@ mod tests {
         let absent = f._temp.path().join("absent-feedback-origin.db");
         let mut options = backflow_options(&f, &id);
         options.workspace_database_path = &absent;
-        let error = backflow_global_feedback(&options).unwrap_err();
-        assert!(error.contains("global_feedback_origin_pending"));
+        let report = backflow_global_feedback(&options).unwrap();
+        assert_eq!(report.origin_status, "unavailable");
+        assert_eq!(
+            report.global_outcome.unwrap().status,
+            super::super::outcome::OutcomeRecordStatus::Recorded
+        );
         assert!(!absent.exists());
         assert_eq!(f.count("feedback_events"), 1);
     }
@@ -2806,8 +3404,14 @@ mod tests {
         let before = source.get_memory(&f.memory.id).unwrap();
         let audits = source.count_table_rows("audit_log").unwrap();
         f.destination.execute_raw(&format!("UPDATE memories SET provenance_uri = 'ee-mem://wsp_00000000000000000000000091/{}' WHERE id = '{id}'", f.memory.id)).unwrap();
-        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
-        assert!(error.contains("global_feedback_origin_pending"));
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(report.origin_status, "pending");
+        assert!(
+            report
+                .origin_error
+                .unwrap()
+                .contains("global_feedback_origin_pending")
+        );
         assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
         assert_eq!(source.count_table_rows("audit_log").unwrap(), audits);
     }
@@ -2834,11 +3438,14 @@ mod tests {
                         let db = DbConnection::open_file(&path);
                         let options = BackflowOptions {
                             workspace_database_path: &path,
+                            source_workspace_id: None,
                             global_memory_id: &global.id,
                             global_paths: &paths,
                             signal: BackflowSignal::Helpful,
                             weight: 0.01,
                             actor: None,
+                            event_id: None,
+                            prompt_injection_guard: true,
                             dry_run: false,
                         };
                         barrier.wait();
@@ -2902,7 +3509,9 @@ mod tests {
             .unwrap();
         let before = source.get_memory(&f.memory.id).unwrap();
         let jobs = source.count_table_rows("search_index_jobs").unwrap();
-        let error = backflow_global_feedback(&backflow_options(&f, &id)).unwrap_err();
+        let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
+        assert_eq!(report.origin_status, "pending");
+        let error = report.origin_error.unwrap();
         assert!(!error.contains("PRIVATE_VALIDITY_CANARY"));
         assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
         assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), jobs);

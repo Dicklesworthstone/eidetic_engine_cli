@@ -656,11 +656,14 @@ fn demotion_and_feedback_previews_neither_create_stores_nor_write_existing_store
     };
     let feedback = BackflowOptions {
         workspace_database_path: &missing_source,
+        source_workspace_id: None,
         global_memory_id: OTHER,
         global_paths: &fixture.global,
         signal: BackflowSignal::Helpful,
         weight: 0.03,
         actor: None,
+        event_id: None,
+        prompt_injection_guard: true,
         dry_run: true,
     };
     let before = disk(&fixture.root);
@@ -714,11 +717,14 @@ fn wrong_workspace_targets_and_nonfinite_feedback_fail_before_writes() {
             assert!(
                 backflow_global_feedback(&BackflowOptions {
                     workspace_database_path: &fixture.database,
+                    source_workspace_id: None,
                     global_memory_id: OTHER,
                     global_paths: &fixture.global,
                     signal: BackflowSignal::Helpful,
                     weight,
                     actor: None,
+                    event_id: None,
+                    prompt_injection_guard: true,
                     dry_run,
                 })
                 .is_err()

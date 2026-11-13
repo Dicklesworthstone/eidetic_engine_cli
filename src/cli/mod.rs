@@ -12701,17 +12701,21 @@ pub struct MemoryOutcomeGlobalArgs {
     #[arg(long, value_name = "SIGNAL")]
     pub signal: String,
 
-    /// Requested adjustment magnitude; clamped to the engine's per-event cap.
+    /// Origin corroboration magnitude, capped per event; global learning uses the outcome model.
     #[arg(long, value_name = "WEIGHT")]
     pub weight: Option<f32>,
 
-    /// Workspace database path (origin-side backflow target).
+    /// Consuming workspace database; origin backflow is optional when it owns the source row.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
     /// Actor recorded in the audit trail.
     #[arg(long, value_name = "NAME")]
     pub actor: Option<String>,
+
+    /// Caller-supplied feedback event ID for retrying either stage without learning twice.
+    #[arg(long, value_name = "EVENT_ID")]
+    pub event_id: Option<String>,
 
     /// Plan only: report the backflow without writing.
     #[arg(long)]
@@ -41614,14 +41618,25 @@ where
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
-    let MemoryStoreTarget {
-        workspace: _,
-        database_path,
-    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
-        Ok(target) => target,
-        Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
-        }
+    // Global feedback is useful even before the consuming workspace has a
+    // local store. An explicit local database still binds source identity to
+    // this workspace; it is never mistaken for the authoritative global store.
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
+    let database_path = args
+        .database
+        .as_ref()
+        .map(|path| resolve_cli_workspace_path(path))
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    let source_workspace_id = if !args.dry_run && database_path.exists() {
+        let bound = crate::db::DbConnection::open_file_read_only(&database_path)
+            .map_err(|_| DomainError::Storage {
+                message: "Could not read the consuming workspace identity".to_owned(),
+                repair: Some("ee doctor".to_owned()),
+            })
+            .and_then(|connection| bound_cli_workspace_id(&connection, &workspace));
+        bound.unwrap_or_else(|_| stable_cli_workspace_id(&workspace))
+    } else {
+        stable_cli_workspace_id(&workspace)
     };
     let global_paths = match global_store_paths_for_memory_lane() {
         Ok(paths) => paths,
@@ -41631,6 +41646,7 @@ where
     };
     let options = BackflowOptions {
         workspace_database_path: &database_path,
+        source_workspace_id: Some(&source_workspace_id),
         global_memory_id: &args.global_memory_id,
         global_paths: &global_paths,
         signal,
@@ -41638,6 +41654,16 @@ where
             .weight
             .unwrap_or(crate::core::global_promotion::MAX_BACKFLOW_STEP),
         actor: args.actor.as_deref(),
+        event_id: args.event_id.as_deref(),
+        prompt_injection_guard: crate::core::config_surface::get_config(
+            &crate::core::config_surface::ConfigSurfaceOptions {
+                workspace_root: workspace,
+                config_path: None,
+            },
+            crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+        )
+        .map(|config| config.value == "true")
+        .unwrap_or(true),
         dry_run: args.dry_run,
     };
     let report = match backflow_global_feedback(&options) {
@@ -41656,21 +41682,66 @@ where
         .map_or(("-", "-"), |(workspace, memory)| {
             (workspace.as_str(), memory.as_str())
         });
-    let human = format!(
-        "Global outcome backflow\n  Global memory: {}\n  Executed: {}\n  Applied delta: {}\n  Origin workspace: {}\n  Origin memory: {}\n",
+    let mut human = format!(
+        "Global outcome feedback\n  Global memory: {}\n  Executed: {}\n  Event: {}\n  Global status: {}\n  Origin status: {}\n  Origin delta: {}\n  Origin workspace: {}\n  Origin memory: {}\n  Index status: {}\n{}",
         report.global_memory_id,
         report.executed,
+        report.feedback_event_id.as_deref().unwrap_or("preview"),
+        report.global_outcome.as_ref().map_or(
+            if report.historical {
+                "historical"
+            } else {
+                "preview"
+            },
+            |outcome| outcome.status.as_str()
+        ),
+        report.origin_status,
         report.applied_delta,
         origin_workspace,
         origin_memory,
+        report.index_status,
+        report
+            .origin_error
+            .as_ref()
+            .map_or(String::new(), |error| format!(
+                "  Origin recovery: {error}\n"
+            )),
     );
-    render_global_lane_report(
-        cli,
-        "memory outcome-global",
-        &human,
-        report.data_json(),
-        stdout,
-    )
+    let mut data = report.data_json();
+    if let Some(outcome) = &report.global_outcome {
+        if let (Some(before), Some(after)) = (outcome.confidence_before, outcome.confidence_after) {
+            human.push_str(&format!("  Global confidence: {before:.4} → {after:.4}\n"));
+        }
+        if let Some(quarantine) = outcome
+            .quarantine
+            .as_ref()
+            .filter(|row| row.status == "pending")
+            && let Some(id) = quarantine.id.as_deref()
+        {
+            // Review belongs to the global store, not the consuming workspace.
+            let workspace = shell_quote_cli_arg(&global_paths.root.display().to_string());
+            let database = shell_quote_cli_arg(&global_paths.database_path.display().to_string());
+            let id = shell_quote_cli_arg(id);
+            let list = format!(
+                "ee outcome quarantine list --workspace {workspace} --database {database} --status pending --json"
+            );
+            let release = format!(
+                "ee outcome quarantine release {id} --workspace {workspace} --database {database} --json"
+            );
+            let reject = format!(
+                "ee outcome quarantine release {id} --workspace {workspace} --database {database} --reject --json"
+            );
+            human.push_str(&format!(
+                "  Global quarantine: {list}\n  Review release: {release}\n"
+            ));
+            data["quarantineRecovery"] = json!({
+                "listCommand": list,
+                "releaseCommand": release,
+                "rejectCommand": reject,
+            });
+        }
+    }
+    render_global_lane_report(cli, "memory outcome-global", &human, data, stdout)
 }
 
 fn handle_shadow_run<W, E>(
@@ -73063,6 +73134,43 @@ mod tests {
     use crate::core::init::{InitOptions, init_workspace};
 
     #[test]
+    fn memory_global_outcome_accepts_retry_identity_and_consuming_store() {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "outcome-global",
+            "mem_00000000000000000000000071",
+            "--signal",
+            "harmful",
+            "--event-id",
+            "fb_00000000000000000000000072",
+            "--database",
+            "/consumer B/.ee/ee.db",
+            "--actor",
+            "feedback reviewer",
+            "--weight",
+            "0.03",
+        ])
+        .expect("global feedback retry arguments");
+        let Some(super::Command::Memory(super::MemoryCommand::OutcomeGlobal(args))) = cli.command
+        else {
+            panic!("expected global outcome command");
+        };
+        assert_eq!(
+            args.event_id.as_deref(),
+            Some("fb_00000000000000000000000072")
+        );
+        assert_eq!(
+            args.database.as_deref(),
+            Some(Path::new("/consumer B/.ee/ee.db"))
+        );
+        assert_eq!(args.actor.as_deref(), Some("feedback reviewer"));
+        assert_eq!(args.weight, Some(0.03));
+        assert_eq!(args.signal, "harmful");
+        assert!(!args.dry_run);
+    }
+
+    #[test]
     fn outcome_pack_command_binds_the_addressed_workspace_without_workspace_id() -> TestResult {
         use crate::db::{CreatePackRecordInput, CreateWorkspaceInput, DbConnection};
 
@@ -73148,14 +73256,13 @@ mod tests {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let exit = super::handle_outcome(&cli, args, &mut stdout, &mut stderr);
-            let response: serde_json::Value =
-                serde_json::from_slice(&stdout).map_err(|error| {
-                    format!(
-                        "outcome JSON: {error}; stdout={}; stderr={}",
-                        String::from_utf8_lossy(&stdout),
-                        String::from_utf8_lossy(&stderr)
-                    )
-                })?;
+            let response: serde_json::Value = serde_json::from_slice(&stdout).map_err(|error| {
+                format!(
+                    "outcome JSON: {error}; stdout={}; stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                )
+            })?;
             Ok((exit, response))
         };
         let (exit, response) = invoke(&workspace, None)?;
