@@ -7063,7 +7063,7 @@ fn collect_task_episode_payloads(
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
-    let episodes = match connection.list_task_episodes(Some(workspace_id), None, u32::MAX) {
+    let episodes = match connection.list_task_episodes_for_recovery(workspace_id) {
         Ok(episodes) => episodes,
         Err(error) => {
             degraded.push(BackupDegradation::warning(

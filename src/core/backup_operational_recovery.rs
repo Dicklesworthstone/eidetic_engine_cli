@@ -191,8 +191,12 @@ impl OperationalExpectation {
                 .ok_or_else(|| recovery_error("Missing recovered task identity"))?
                 .to_owned();
             // Episode export uses the original workspace, not redacted IDs.
-            if row.get("workspaceId").and_then(serde_json::Value::as_str) != Some(workspace_id) {
-                return Err(recovery_error("Foreign recovered task episode"));
+            // Explicitly global history stays global. Missing or malformed
+            // ownership is not an alternative spelling of that durable null.
+            match row.get("workspaceId") {
+                Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(id)) if id == workspace_id => {}
+                _ => return Err(recovery_error("Foreign or invalid recovered task episode")),
             }
             expected.rows.insert("task_episodes", &id, row)?;
         }
@@ -223,7 +227,7 @@ impl OperationalExpectation {
             actual.insert("search_index_jobs", &row.id, &row)?;
         }
         for row in db
-            .list_task_episodes(Some(&self.workspace_id), None, u32::MAX)
+            .list_task_episodes_for_recovery(&self.workspace_id)
             .map_err(storage_error)?
         {
             let value = task_episode_json(&row, "", RedactionLevel::None, &BTreeMap::new());

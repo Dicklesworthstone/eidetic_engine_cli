@@ -137,6 +137,9 @@ fn operational_fence_still_rejects_malformed_or_foreign_durable_episodes() -> Te
             serde_json::json!(WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string()),
             "Foreign",
         ),
+        ("episode.workspaceId", serde_json::json!(false), "invalid"),
+        ("episode.workspaceId", serde_json::json!(7), "invalid"),
+        ("episode.workspaceId", serde_json::json!(""), "invalid"),
     ] {
         let mut changed = original.clone();
         if let Some(field) = field.strip_prefix("episode.") {
@@ -156,6 +159,23 @@ fn operational_fence_still_rejects_malformed_or_foreign_durable_episodes() -> Te
         assert!(!error.message().contains(&episode.id));
         assert!(!error.message().contains(&workspace_id));
     }
+    let mut missing_owner = original;
+    assert!(
+        missing_owner["episode"]
+            .as_object_mut()
+            .ok_or("episode fixture is not an object")?
+            .remove("workspaceId")
+            .is_some()
+    );
+    std::fs::write(
+        &durable.restore_path,
+        serde_json::to_vec(&missing_owner).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    assert!(
+        OperationalExpectation::from_assets(&assets, "episode-fixture", &workspace_id).is_err(),
+        "missing ownership must not be admitted as explicitly global history"
+    );
     Ok(())
 }
 
@@ -192,25 +212,34 @@ fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
             completed_at: (status != "running").then(|| TIME.to_owned()),
         })?;
     }
-    db.insert_task_episode_with_created_at(
-        "ep_000000000000000000000000001",
-        &CreateTaskEpisodeInput {
-            workspace_id: Some(workspace.to_owned()),
-            session_id: None,
-            task_input: "Orbitgate recovery preserves failure".to_owned(),
-            retrieved_memory_ids: vec![memory.clone()],
-            context_pack_id: None,
-            actions: vec![],
-            outcome: "failure".to_owned(),
-            outcome_details: Some("The source command failed.".to_owned()),
-            started_at: TIME.to_owned(),
-            ended_at: Some(TIME.to_owned()),
-            duration_ms: Some(75),
-            agent: Some("RecoveryAgent".to_owned()),
-            episode_hash: None,
-        },
-        TIME,
-    )?;
+    for (id, owner) in [
+        ("ep_000000000000000000000000001", Some(workspace)),
+        ("ep_000000000000000000000000002", None),
+    ] {
+        db.insert_task_episode_with_created_at(
+            id,
+            &CreateTaskEpisodeInput {
+                workspace_id: owner.map(str::to_owned),
+                session_id: None,
+                task_input: "Orbitgate recovery preserves failure".to_owned(),
+                retrieved_memory_ids: vec![memory.clone()],
+                context_pack_id: None,
+                actions: vec![],
+                outcome: "failure".to_owned(),
+                outcome_details: Some(if owner.is_none() {
+                    "api_key=shared-task-secret-canary".to_owned()
+                } else {
+                    "The source command failed.".to_owned()
+                }),
+                started_at: TIME.to_owned(),
+                ended_at: Some(TIME.to_owned()),
+                duration_ms: Some(75),
+                agent: Some("RecoveryAgent".to_owned()),
+                episode_hash: owner.is_none().then(|| hash_bytes(b"source global episode")),
+            },
+            TIME,
+        )?;
+    }
     let artifact_id = "art_00000000000000000000000000";
     let snippet = "Orbitgate failed build evidence";
     db.insert_artifact_for_recovery(&StoredArtifact {
@@ -245,7 +274,7 @@ fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
 
 fn snapshot(db: &DbConnection, workspace: &str) -> Result<serde_json::Value, crate::db::DbError> {
     let episodes: Vec<_> = db
-        .list_task_episodes(Some(workspace), None, u32::MAX)?
+        .list_task_episodes_for_recovery(workspace)?
         .iter()
         .map(|row| {
             task_episode_json(row, "", RedactionLevel::None, &BTreeMap::new())["episode"].clone()
@@ -412,6 +441,17 @@ fn operational_fence_preserves_task_failure_and_retrieved_context() -> TestResul
 }
 
 #[test]
+fn operational_fence_preserves_global_task_ownership() -> TestResult {
+    let workspace = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+    assert_rejected(
+        "task_episodes",
+        &format!(
+            "UPDATE task_episodes SET workspace_id = '{workspace}' WHERE workspace_id IS NULL"
+        ),
+    )
+}
+
+#[test]
 fn operational_fence_preserves_artifact_content_and_provenance() -> TestResult {
     assert_rejected(
         "artifacts",
@@ -493,6 +533,32 @@ fn operational_history_survives_two_recovery_generations() -> TestResult {
             assert_eq!(state["journals"][0]["distilledAt"], TIME);
             assert_eq!(state["journals"][0]["tombstonedAt"], TIME);
             assert_eq!(state["episodes"][0]["outcome"], "failure");
+            assert_eq!(restored.restored_task_episode_count, 2);
+            assert_eq!(state["episodes"].as_array().map(Vec::len), Some(2));
+            let global = db
+                .get_task_episode("ep_000000000000000000000000002")
+                .map_err(|e| e.to_string())?
+                .ok_or("global task history was lost")?;
+            assert!(global.workspace_id.is_none());
+            assert_eq!(global.outcome, "failure");
+            assert_eq!(global.created_at, TIME);
+            assert_eq!(
+                global.retrieved_memory_ids,
+                vec![mapping[&memories[0].id].clone()]
+            );
+            if redaction == RedactionLevel::None {
+                assert_eq!(
+                    global.outcome_details.as_deref(),
+                    Some("api_key=shared-task-secret-canary")
+                );
+                assert_eq!(
+                    global.episode_hash,
+                    Some(hash_bytes(b"source global episode"))
+                );
+            } else {
+                assert_eq!(global.outcome_details.as_deref(), Some("[REDACTED]"));
+                assert!(global.episode_hash.is_none());
+            }
             let jobs = db
                 .list_search_index_jobs(&workspace_id, None)
                 .map_err(|e| e.to_string())?;

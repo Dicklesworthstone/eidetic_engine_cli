@@ -138,10 +138,8 @@ pub(in crate::core::backup) fn count_rows(
                 .map_err(storage_error);
         }
         Scope::Column(column) => format!("\"{column}\" = ?1"),
-        // Global audit and recorder history is intentionally carried by every
-        // scoped backup. Unowned task episodes are counted too: until there is
-        // a writer for them they must remain an explicit coverage gap, not be
-        // relabelled another workspace's state and silently disappear.
+        // Global audit, recorder and task history is intentionally carried by
+        // every scoped backup without changing its NULL workspace ownership.
         Scope::WithUnscoped => "workspace_id = ?1 OR workspace_id IS NULL".to_owned(),
         Scope::Child {
             key,

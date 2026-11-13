@@ -4,8 +4,9 @@ use super::*;
 use crate::core::backup::*;
 use crate::db::{
     CreateAuditInput, CreateEvidenceSpanInput, CreateMemoryInput, CreateMemoryLinkInput,
-    CreateProceduralRuleInput, CreateRecorderRunInput, CreateSessionInput, CreateWorkspaceInput,
-    EvidenceProducerKind, MemoryLinkRelation, MemoryLinkSource,
+    CreateProceduralRuleInput, CreateRecorderRunInput, CreateSessionInput, CreateTaskEpisodeInput,
+    CreateWorkspaceInput, EvidenceProducerKind, MemoryLinkRelation, MemoryLinkSource,
+    StoredEpisodeAction, StoredTaskEpisode,
 };
 use crate::models::{EvidenceId, MemoryId, RedactionLevel, RuleId, SessionId, WorkspaceId};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ struct Fixture {
     ids: Vec<String>,
     memories: Vec<Vec<String>>,
     rules: Vec<String>,
+    episodes: Vec<StoredTaskEpisode>,
 }
 
 fn fixture() -> Fixture {
@@ -34,6 +36,7 @@ fn fixture() -> Fixture {
         ids: vec![],
         memories: vec![],
         rules: vec![],
+        episodes: vec![],
     };
     for number in 0..2 {
         let name = if number == 0 {
@@ -141,7 +144,7 @@ fn fixture() -> Fixture {
             &EvidenceId::from_uuid(Uuid::from_u128(80 + number)).to_string(),
             &CreateEvidenceSpanInput {
                 workspace_id: id.clone(),
-                session_id: session,
+                session_id: session.clone(),
                 memory_id: None,
                 producer_kind: EvidenceProducerKind::CassImport,
                 cass_span_id: format!("shared-window-{number}"),
@@ -160,6 +163,14 @@ fn fixture() -> Fixture {
         .unwrap();
         audit(&db, &format!("audit_{number:026}"), Some(&id), name);
         recorder(&db, &format!("run_scoped_{number}"), Some(&id));
+        fixture.episodes.push(episode(
+            &db,
+            &format!("ep_{:027}", 100 + number),
+            Some(&id),
+            &session,
+            &memories,
+            name,
+        ));
         fixture.workspaces.push(path);
         fixture.ids.push(id);
         fixture.memories.push(memories);
@@ -172,6 +183,20 @@ fn fixture() -> Fixture {
         "SharedAuditHistory",
     );
     recorder(&db, "run_shared_history", None);
+    // Global history may retain historical references to either workspace.
+    // Those IDs must survive without pulling foreign source rows into a
+    // workspace capsule or pretending that the global episode has an owner.
+    fixture.episodes.push(episode(
+        &db,
+        &format!("ep_{:027}", 199),
+        None,
+        &SessionId::from_uuid(Uuid::from_u128(70)).to_string(),
+        &[
+            fixture.memories[0][0].clone(),
+            fixture.memories[1][0].clone(),
+        ],
+        "SharedTaskHistory",
+    ));
     db.close().unwrap();
     fixture
 }
@@ -210,6 +235,42 @@ fn recorder(db: &DbConnection, id: &str, workspace: Option<&str>) {
         },
     )
     .unwrap();
+}
+
+fn episode(
+    db: &DbConnection,
+    id: &str,
+    workspace: Option<&str>,
+    session: &str,
+    memories: &[String],
+    label: &str,
+) -> StoredTaskEpisode {
+    db.insert_task_episode_with_created_at(
+        id,
+        &CreateTaskEpisodeInput {
+            workspace_id: workspace.map(str::to_owned),
+            session_id: Some(session.to_owned()),
+            task_input: format!("{label}: preserve the failed release attempt."),
+            retrieved_memory_ids: memories.to_vec(),
+            context_pack_id: Some("pack_00000000000000000000000099".to_owned()),
+            actions: vec![StoredEpisodeAction {
+                action_type: "verify".to_owned(),
+                target_id: memories.first().cloned(),
+                details: Some("The release command failed.".to_owned()),
+                timestamp: TIME.to_owned(),
+            }],
+            outcome: "failure".to_owned(),
+            outcome_details: Some("Preserve the original failed outcome.".to_owned()),
+            started_at: TIME.to_owned(),
+            ended_at: Some(TIME.to_owned()),
+            duration_ms: Some(75),
+            agent: Some("SharedHistoryAgent".to_owned()),
+            episode_hash: Some(hash_bytes(label.as_bytes())),
+        },
+        TIME,
+    )
+    .unwrap();
+    db.get_task_episode(id).unwrap().unwrap()
 }
 
 fn link(db: &DbConnection, id: &str, left: &str, right: &str) {
@@ -286,6 +347,28 @@ fn every_required_table_has_executable_source_ownership() {
         2
     );
     assert_eq!(count_rows(&db, "audit_log", &fixture.ids[0]).unwrap(), 2);
+    for workspace in &fixture.ids {
+        assert_eq!(count_rows(&db, "task_episodes", workspace).unwrap(), 2);
+        let episodes = db.list_task_episodes_for_recovery(workspace).unwrap();
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(
+            episodes
+                .iter()
+                .filter(|row| row.workspace_id.is_none())
+                .count(),
+            1
+        );
+        assert!(episodes.iter().all(|row| {
+            row.workspace_id
+                .as_deref()
+                .is_none_or(|owner| owner == workspace)
+        }));
+    }
+    let unknown = db
+        .list_task_episodes_for_recovery("' OR 1=1 --")
+        .unwrap();
+    assert_eq!(unknown.len(), 1);
+    assert!(unknown[0].workspace_id.is_none());
     assert!(count_rows(&db, "curation_ttl_policies", &fixture.ids[0]).unwrap() > 0);
     assert_eq!(count_rows(&db, "memories", "' OR 1=1 --").unwrap(), 0);
     assert!(count_rows(&db, "memories; SELECT 1", &fixture.ids[0]).is_err());
@@ -294,7 +377,7 @@ fn every_required_table_has_executable_source_ownership() {
 }
 
 #[test]
-fn shared_database_workspaces_restore_independently_with_typed_and_learned_history() {
+fn shared_database_workspaces_restore_independently_with_typed_learned_and_global_task_history() {
     let fixture = fixture();
     for number in 0..2 {
         let other = 1 - number;
@@ -313,6 +396,25 @@ fn shared_database_workspaces_restore_independently_with_typed_and_learned_histo
         assert_eq!(inventory_count(&report, "memory_links"), 1);
         assert_eq!(inventory_count(&report, "sessions"), 1);
         assert_eq!(inventory_count(&report, "evidence_spans"), 1);
+        assert_eq!(inventory_count(&report, "task_episodes"), 2);
+        let episode_assets: Vec<_> = report
+            .derived
+            .iter()
+            .filter(|asset| {
+                asset.kind == "lab_episode" && asset.path.starts_with("derived/lab/episodes/")
+            })
+            .collect();
+        assert_eq!(episode_assets.len(), 2);
+        for asset in episode_assets {
+            let bytes = std::fs::read(Path::new(&report.backup_path).join(&asset.path)).unwrap();
+            let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(row["episode"]["workspaceId"], fixture.ids[other]);
+            assert!(!String::from_utf8_lossy(&bytes).contains(if other == 0 {
+                "CopperKestrel"
+            } else {
+                "VioletHeron"
+            }));
+        }
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report.manifest_path).unwrap()).unwrap();
         assert_eq!(
@@ -379,6 +481,20 @@ fn shared_database_workspaces_restore_independently_with_typed_and_learned_histo
         assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 1);
         assert_eq!(db.count_table_rows("recorder_runs").unwrap(), 2);
         assert!(db.get_recorder_run("run_shared_history").unwrap().is_some());
+        assert_eq!(restored.restored_task_episode_count, 2);
+        assert_eq!(db.count_table_rows("task_episodes").unwrap(), 2);
+        for original in &fixture.episodes {
+            let actual = db.get_task_episode(&original.id).unwrap();
+            if original.workspace_id.as_deref() == Some(fixture.ids[other].as_str()) {
+                assert!(actual.is_none(), "foreign task history must stay excluded");
+            } else {
+                assert_eq!(
+                    actual.as_ref(),
+                    Some(original),
+                    "scoped and global task history must retain ownership, references, hashes and failure"
+                );
+            }
+        }
         let audits = db.list_audit_entries(None, None).unwrap();
         assert!(audits.iter().any(|row| {
             row.workspace_id.is_none()
@@ -404,6 +520,13 @@ fn shared_database_workspaces_restore_independently_with_typed_and_learned_histo
     let db = DbConnection::open_file(&fixture.database).unwrap();
     assert_eq!(db.count_table_rows("workspaces").unwrap(), 2);
     assert_eq!(db.count_table_rows("memories").unwrap(), 5);
+    assert_eq!(db.count_table_rows("task_episodes").unwrap(), 3);
+    for episode in &fixture.episodes {
+        assert_eq!(
+            db.get_task_episode(&episode.id).unwrap().as_ref(),
+            Some(episode)
+        );
+    }
     db.close().unwrap();
 }
 
@@ -415,6 +538,7 @@ fn scoped_dry_run_does_not_initialize_keys_or_change_shared_database() {
         let report = create(&fixture, number, true);
         assert!(report.recovery_inventory.snapshot_coverage_complete);
         assert_eq!(inventory_count(&report, "workspaces"), 1);
+        assert_eq!(inventory_count(&report, "task_episodes"), 2);
         assert!(!Path::new(&report.backup_path).exists());
         assert_eq!(
             std::fs::read_dir(fixture.workspaces[number].join(".ee"))

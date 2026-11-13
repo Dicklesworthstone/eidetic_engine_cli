@@ -42120,6 +42120,29 @@ impl DbConnection {
         stored_task_episode_from_row(&rows[0]).map(Some)
     }
 
+    /// Read the selected workspace's task history and explicitly global episodes.
+    ///
+    /// Recovery carries shared history without assigning it to the selected
+    /// workspace or admitting another workspace's rows. Keep this distinct from
+    /// the interactive reader, where `None` means all workspaces, and do not cap
+    /// the durable population with a display limit.
+    pub(crate) fn list_task_episodes_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredTaskEpisode>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                    context_pack_id, actions, outcome, outcome_details, started_at,
+                    ended_at, duration_ms, agent, episode_hash, created_at
+             FROM task_episodes
+             WHERE workspace_id = ?1 OR workspace_id IS NULL
+             ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter().map(stored_task_episode_from_row).collect()
+    }
+
     /// List task episodes with optional filters.
     pub fn list_task_episodes(
         &self,
