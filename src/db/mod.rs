@@ -23796,46 +23796,62 @@ impl DbConnection {
         &self,
         input: PromoteProcedureRecordInput<'_>,
     ) -> Result<Option<StoredProcedureEvent>> {
-        self.with_transaction(|| {
-            let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
-                return Ok(None);
-            };
-            let now = Utc::now().to_rfc3339();
-            let last_validated_at = if matches!(input.to_maturity, "validated" | "mature") {
-                Value::Text(now.clone())
-            } else {
-                Value::Null
-            };
-            let affected = self.execute_for(
-                DbOperation::Execute,
-                "UPDATE procedures SET maturity = ?1, updated_at = ?2, last_promoted_at = ?2, last_validated_at = COALESCE(?3, last_validated_at), retired_at = NULL, retire_reason = NULL WHERE workspace_id = ?4 AND id = ?5",
-                &[
-                    Value::Text(input.to_maturity.to_string()),
-                    Value::Text(now.clone()),
-                    last_validated_at,
-                    Value::Text(input.workspace_id.to_string()),
-                    Value::Text(input.procedure_id.to_string()),
-                ],
-            )?;
-            if affected == 0 {
-                return Ok(None);
-            }
-            self.insert_procedure_event(
-                input.event_id,
-                &CreateProcedureEventInput {
-                    workspace_id: input.workspace_id.to_string(),
-                    procedure_id: input.procedure_id.to_string(),
-                    event_type: "promoted".to_owned(),
-                    from_maturity: Some(before.maturity),
-                    to_maturity: Some(input.to_maturity.to_string()),
-                    reason: input.reason.map(str::to_owned),
-                    evidence_uris: input.evidence_uris.to_vec(),
-                    actor: input.actor.map(str::to_owned),
-                    created_at: Some(now),
-                },
-            )
-            .map(Some)
-        })
+        self.with_transaction(|| self.promote_procedure_record_in_txn(input))
+    }
+
+    /// Promote within the caller's transaction so its required audit commits
+    /// with the state transition and history. Verification and freshness checks
+    /// belong to the caller; this helper must not open a nested transaction.
+    pub(crate) fn promote_procedure_record_in_txn(
+        &self,
+        input: PromoteProcedureRecordInput<'_>,
+    ) -> Result<Option<StoredProcedureEvent>> {
+        let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
+            return Ok(None);
+        };
+        // Retirement is terminal even for standalone database callers. Never
+        // erase retirement markers to satisfy an old promotion request.
+        if matches!(before.maturity.as_str(), "retired" | "deprecated")
+            || before.retired_at.is_some()
+            || before.retire_reason.is_some()
+        {
+            return Ok(None);
+        }
+        let now = Utc::now().to_rfc3339();
+        let last_validated_at = if matches!(input.to_maturity, "validated" | "mature") {
+            Value::Text(now.clone())
+        } else {
+            Value::Null
+        };
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedures SET maturity = ?1, updated_at = ?2, last_promoted_at = ?2, last_validated_at = COALESCE(?3, last_validated_at), retired_at = NULL, retire_reason = NULL WHERE workspace_id = ?4 AND id = ?5",
+            &[
+                Value::Text(input.to_maturity.to_string()),
+                Value::Text(now.clone()),
+                last_validated_at,
+                Value::Text(input.workspace_id.to_string()),
+                Value::Text(input.procedure_id.to_string()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.insert_procedure_event(
+            input.event_id,
+            &CreateProcedureEventInput {
+                workspace_id: input.workspace_id.to_string(),
+                procedure_id: input.procedure_id.to_string(),
+                event_type: "promoted".to_owned(),
+                from_maturity: Some(before.maturity),
+                to_maturity: Some(input.to_maturity.to_string()),
+                reason: input.reason.map(str::to_owned),
+                evidence_uris: input.evidence_uris.to_vec(),
+                actor: input.actor.map(str::to_owned),
+                created_at: Some(now),
+            },
+        )
+        .map(Some)
     }
 
     /// Retire a persisted procedure and record a history event atomically.
@@ -23848,39 +23864,58 @@ impl DbConnection {
         actor: Option<&str>,
     ) -> Result<Option<StoredProcedureEvent>> {
         self.with_transaction(|| {
-            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
-                return Ok(None);
-            };
-            let now = Utc::now().to_rfc3339();
-            let affected = self.execute_for(
-                DbOperation::Execute,
-                "UPDATE procedures SET maturity = 'retired', updated_at = ?1, retired_at = ?1, retire_reason = ?2 WHERE workspace_id = ?3 AND id = ?4",
-                &[
-                    Value::Text(now.clone()),
-                    Value::Text(reason.to_string()),
-                    Value::Text(workspace_id.to_string()),
-                    Value::Text(procedure_id.to_string()),
-                ],
-            )?;
-            if affected == 0 {
-                return Ok(None);
-            }
-            self.insert_procedure_event(
+            self.retire_procedure_record_in_txn(
+                workspace_id,
+                procedure_id,
                 event_id,
-                &CreateProcedureEventInput {
-                    workspace_id: workspace_id.to_string(),
-                    procedure_id: procedure_id.to_string(),
-                    event_type: "retired".to_owned(),
-                    from_maturity: Some(before.maturity),
-                    to_maturity: Some("retired".to_owned()),
-                    reason: Some(reason.to_string()),
-                    evidence_uris: Vec::new(),
-                    actor: actor.map(str::to_owned),
-                    created_at: Some(now),
-                },
+                reason,
+                actor,
             )
-            .map(Some)
         })
+    }
+
+    /// Retire within the caller's transaction, including its required audit.
+    /// Standalone callers use the public wrapper to own the transaction.
+    pub(crate) fn retire_procedure_record_in_txn(
+        &self,
+        workspace_id: &str,
+        procedure_id: &str,
+        event_id: &str,
+        reason: &str,
+        actor: Option<&str>,
+    ) -> Result<Option<StoredProcedureEvent>> {
+        let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+            return Ok(None);
+        };
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedures SET maturity = 'retired', updated_at = ?1, retired_at = ?1, retire_reason = ?2 WHERE workspace_id = ?3 AND id = ?4",
+            &[
+                Value::Text(now.clone()),
+                Value::Text(reason.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(procedure_id.to_string()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.insert_procedure_event(
+            event_id,
+            &CreateProcedureEventInput {
+                workspace_id: workspace_id.to_string(),
+                procedure_id: procedure_id.to_string(),
+                event_type: "retired".to_owned(),
+                from_maturity: Some(before.maturity),
+                to_maturity: Some("retired".to_owned()),
+                reason: Some(reason.to_string()),
+                evidence_uris: Vec::new(),
+                actor: actor.map(str::to_owned),
+                created_at: Some(now),
+            },
+        )
+        .map(Some)
     }
 
     /// Apply one feedback signal to a procedure and optionally auto-retire it.

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::db::{
-    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, DbConnection,
+    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, DbConnection, DbError,
     PromoteProcedureRecordInput, StoredProcedure, StoredProcedureEvent, audit_actions,
     generate_audit_id,
 };
@@ -137,64 +137,67 @@ pub fn propose_procedure(
         )?;
         let evidence_uris = procedure_evidence_uris(&options.source_run_ids, &options.evidence_ids);
         let event_id = format!("pevt_{}", generate_id());
-        let procedure = store
-            .connection
-            .insert_procedure(
-                &procedure_id,
-                &CreateProcedureInput {
-                    workspace_id: store.workspace_id.clone(),
-                    name: options.title.clone(),
-                    body: summary.clone(),
-                    level: "procedural".to_owned(),
-                    maturity: ProcedureMaturity::Provisional.as_str().to_owned(),
-                    confidence: initial_procedure_confidence(evidence_uris.len()),
-                    utility: 0.50,
-                    importance: 0.60,
-                    evidence_uris: evidence_uris.clone(),
-                    created_at: Some(created_at.clone()),
-                },
-            )
-            .map_err(storage_error("failed to persist procedure"))?;
-        store
-            .connection
-            .insert_procedure_event(
-                &event_id,
-                &CreateProcedureEventInput {
-                    workspace_id: store.workspace_id.clone(),
-                    procedure_id: procedure_id.clone(),
-                    event_type: "created".to_owned(),
-                    from_maturity: None,
-                    to_maturity: Some(procedure.maturity),
-                    reason: Some("procedure proposed from explicit evidence".to_owned()),
-                    evidence_uris,
-                    actor: None,
-                    created_at: Some(created_at.clone()),
-                },
-            )
-            .map_err(storage_error("failed to record procedure creation event"))?;
-        let audit_id = generate_audit_id();
-        let audit_details = json!({
-            "eventId": event_id,
-            "title": options.title.as_str(),
-            "sourceRunIds": &options.source_run_ids,
-            "evidenceIds": &options.evidence_ids,
-            "dryRun": false,
-        })
-        .to_string();
-        store
-            .connection
-            .insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(store.workspace_id),
-                    actor: Some("agent".to_owned()),
-                    action: audit_actions::PROCEDURE_CREATE.to_owned(),
-                    target_type: Some("procedure".to_owned()),
-                    target_id: Some(procedure_id.clone()),
-                    details: Some(audit_details),
-                },
-            )
-            .map_err(storage_error("failed to audit procedure creation"))?;
+        with_procedure_transaction(&store.connection, || {
+            let procedure = store
+                .connection
+                .insert_procedure(
+                    &procedure_id,
+                    &CreateProcedureInput {
+                        workspace_id: store.workspace_id.clone(),
+                        name: options.title.clone(),
+                        body: summary.clone(),
+                        level: "procedural".to_owned(),
+                        maturity: ProcedureMaturity::Provisional.as_str().to_owned(),
+                        confidence: initial_procedure_confidence(evidence_uris.len()),
+                        utility: 0.50,
+                        importance: 0.60,
+                        evidence_uris: evidence_uris.clone(),
+                        created_at: Some(created_at.clone()),
+                    },
+                )
+                .map_err(storage_error("failed to persist procedure"))?;
+            store
+                .connection
+                .insert_procedure_event(
+                    &event_id,
+                    &CreateProcedureEventInput {
+                        workspace_id: store.workspace_id.clone(),
+                        procedure_id: procedure_id.clone(),
+                        event_type: "created".to_owned(),
+                        from_maturity: None,
+                        to_maturity: Some(procedure.maturity),
+                        reason: Some("procedure proposed from explicit evidence".to_owned()),
+                        evidence_uris,
+                        actor: None,
+                        created_at: Some(created_at.clone()),
+                    },
+                )
+                .map_err(storage_error("failed to record procedure creation event"))?;
+            let audit_id = generate_audit_id();
+            let audit_details = json!({
+                "eventId": event_id,
+                "title": options.title.as_str(),
+                "sourceRunIds": &options.source_run_ids,
+                "evidenceIds": &options.evidence_ids,
+                "dryRun": false,
+            })
+            .to_string();
+            store
+                .connection
+                .insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(store.workspace_id.clone()),
+                        actor: Some("agent".to_owned()),
+                        action: audit_actions::PROCEDURE_CREATE.to_owned(),
+                        target_type: Some("procedure".to_owned()),
+                        target_id: Some(procedure_id.clone()),
+                        details: Some(audit_details),
+                    },
+                )
+                .map_err(storage_error("failed to audit procedure creation"))?;
+            Ok(())
+        })?;
     }
 
     let report = ProcedureProposeReport {
@@ -1506,6 +1509,20 @@ fn promote_persisted_procedure(
     procedure_id: &str,
     target_maturity: ProcedureMaturity,
 ) -> Result<ProcedurePromoteReport, DomainError> {
+    promote_persisted_procedure_with_verifier(
+        options,
+        procedure_id,
+        target_maturity,
+        verify_procedure_for_promotion,
+    )
+}
+
+fn promote_persisted_procedure_with_verifier(
+    options: &ProcedurePromoteOptions,
+    procedure_id: &str,
+    target_maturity: ProcedureMaturity,
+    verify: impl FnOnce(&Path, &str, &[String]) -> Result<ProcedureVerifyReport, DomainError>,
+) -> Result<ProcedurePromoteReport, DomainError> {
     let store = open_writable_procedure_store(
         &options.workspace,
         "procedure promotion requires an initialized ee workspace database",
@@ -1520,6 +1537,12 @@ fn promote_persisted_procedure(
             message: format!("stored procedure has invalid maturity: {error}"),
             repair: Some("repair the procedure row or re-import the candidate".to_owned()),
         })?;
+    if from_maturity.is_terminal() || stored.retired_at.is_some() || stored.retire_reason.is_some() {
+        return Err(DomainError::PolicyDenied {
+            message: "cannot promote a retired procedure".to_owned(),
+            repair: Some("propose a new procedure with current evidence".to_owned()),
+        });
+    }
     if !from_maturity.can_promote_to(target_maturity) {
         return Err(DomainError::PolicyDenied {
             message: format!(
@@ -1548,8 +1571,10 @@ fn promote_persisted_procedure(
             )),
         });
     }
-    let verification_report =
-        verify_procedure_for_promotion(&options.workspace, procedure_id, &stored.evidence_uris)?;
+    // Evidence verification may read external artifacts or execute checks. Do
+    // not hold the writer fence while it runs; bind its result to this complete
+    // procedure snapshot again inside the eventual write transaction.
+    let verification_report = verify(&options.workspace, procedure_id, &stored.evidence_uris)?;
     // Durable promotion must apply the SAME evidence gate the dry-run path previews.
     // The evidence-URI count threshold above is necessary but not sufficient: a
     // count-sufficient but unresolvable / failed / skipped evidence set must NOT
@@ -1599,42 +1624,52 @@ fn promote_persisted_procedure(
             )
         });
     let event_id = format!("pevt_{}", generate_id());
-    let event = store
-        .connection
-        .promote_procedure_record(PromoteProcedureRecordInput {
-            workspace_id: &store.workspace_id,
-            procedure_id,
-            to_maturity: target_maturity.as_str(),
-            event_id: &event_id,
-            reason: Some(&reason),
-            actor: Some(&actor),
-            evidence_uris: &stored.evidence_uris,
+    let event = with_procedure_transaction(&store.connection, || {
+        let current = store
+            .connection
+            .get_procedure(&store.workspace_id, procedure_id)
+            .map_err(storage_error("failed to recheck procedure before promotion"))?;
+        if current.as_ref() != Some(&stored) {
+            return Err(procedure_state_changed(procedure_id));
+        }
+        let event = store
+            .connection
+            .promote_procedure_record_in_txn(PromoteProcedureRecordInput {
+                workspace_id: &store.workspace_id,
+                procedure_id,
+                to_maturity: target_maturity.as_str(),
+                event_id: &event_id,
+                reason: Some(&reason),
+                actor: Some(&actor),
+                evidence_uris: &stored.evidence_uris,
+            })
+            .map_err(storage_error("failed to promote procedure"))?
+            .ok_or_else(|| procedure_state_changed(procedure_id))?;
+        let audit_details = json!({
+            "promotionId": promotion_id,
+            "eventId": event.id.clone(),
+            "fromMaturity": from_maturity.as_str(),
+            "toMaturity": target_maturity.as_str(),
+            "evidenceUris": stored.evidence_uris.clone(),
+            "reason": reason,
         })
-        .map_err(storage_error("failed to promote procedure"))?
-        .ok_or_else(|| procedure_not_found(procedure_id))?;
-    let audit_details = json!({
-        "promotionId": promotion_id,
-        "eventId": event.id.clone(),
-        "fromMaturity": from_maturity.as_str(),
-        "toMaturity": target_maturity.as_str(),
-        "evidenceUris": stored.evidence_uris.clone(),
-        "reason": reason,
-    })
-    .to_string();
-    store
-        .connection
-        .insert_audit(
-            &operation_id,
-            &CreateAuditInput {
-                workspace_id: Some(store.workspace_id.clone()),
-                actor: Some(actor.clone()),
-                action: audit_actions::PROCEDURE_PROMOTE.to_owned(),
-                target_type: Some("procedure".to_owned()),
-                target_id: Some(procedure_id.to_owned()),
-                details: Some(audit_details),
-            },
-        )
-        .map_err(storage_error("failed to audit procedure promotion"))?;
+        .to_string();
+        store
+            .connection
+            .insert_audit(
+                &operation_id,
+                &CreateAuditInput {
+                    workspace_id: Some(store.workspace_id.clone()),
+                    actor: Some(actor.clone()),
+                    action: audit_actions::PROCEDURE_PROMOTE.to_owned(),
+                    target_type: Some("procedure".to_owned()),
+                    target_id: Some(procedure_id.to_owned()),
+                    details: Some(audit_details),
+                },
+            )
+            .map_err(storage_error("failed to audit procedure promotion"))?;
+        Ok(event)
+    })?;
 
     let verification = ProcedurePromotionVerificationSummary {
         verification_id: verification_report.verification_id.clone(),
@@ -1802,11 +1837,6 @@ pub fn retire_procedure(
         &options.workspace,
         "procedure retirement requires an initialized ee workspace database",
     )?;
-    let before = store
-        .connection
-        .get_procedure(&store.workspace_id, procedure_id)
-        .map_err(storage_error("failed to load procedure"))?
-        .ok_or_else(|| procedure_not_found(procedure_id))?;
     let actor = options
         .actor
         .as_deref()
@@ -1815,39 +1845,42 @@ pub fn retire_procedure(
         .unwrap_or("agent")
         .to_owned();
     let event_id = format!("pevt_{}", generate_id());
-    let event = store
-        .connection
-        .retire_procedure_record(
-            &store.workspace_id,
-            procedure_id,
-            &event_id,
-            reason,
-            Some(&actor),
-        )
-        .map_err(storage_error("failed to retire procedure"))?
-        .ok_or_else(|| procedure_not_found(procedure_id))?;
     let audit_id = generate_audit_id();
-    let audit_details = json!({
-        "eventId": event.id.clone(),
-        "fromMaturity": before.maturity,
-        "toMaturity": "retired",
-        "reason": reason,
-    })
-    .to_string();
-    store
-        .connection
-        .insert_audit(
-            &audit_id,
-            &CreateAuditInput {
-                workspace_id: Some(store.workspace_id),
-                actor: Some(actor),
-                action: audit_actions::PROCEDURE_RETIRE.to_owned(),
-                target_type: Some("procedure".to_owned()),
-                target_id: Some(procedure_id.to_owned()),
-                details: Some(audit_details),
-            },
-        )
-        .map_err(storage_error("failed to audit procedure retirement"))?;
+    let event = with_procedure_transaction(&store.connection, || {
+        let event = store
+            .connection
+            .retire_procedure_record_in_txn(
+                &store.workspace_id,
+                procedure_id,
+                &event_id,
+                reason,
+                Some(&actor),
+            )
+            .map_err(storage_error("failed to retire procedure"))?
+            .ok_or_else(|| procedure_not_found(procedure_id))?;
+        let audit_details = json!({
+            "eventId": event.id.clone(),
+            "fromMaturity": event.from_maturity.clone(),
+            "toMaturity": "retired",
+            "reason": reason,
+        })
+        .to_string();
+        store
+            .connection
+            .insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(store.workspace_id.clone()),
+                    actor: Some(actor),
+                    action: audit_actions::PROCEDURE_RETIRE.to_owned(),
+                    target_type: Some("procedure".to_owned()),
+                    target_id: Some(procedure_id.to_owned()),
+                    details: Some(audit_details),
+                },
+            )
+            .map_err(storage_error("failed to audit procedure retirement"))?;
+        Ok(event)
+    })?;
 
     Ok(ProcedureRetireReport {
         schema: PROCEDURE_RETIRE_REPORT_SCHEMA_V1.to_owned(),
@@ -3604,6 +3637,43 @@ struct ProcedureStore {
     workspace_id: String,
 }
 
+/// Keep policy and lookup errors intact while rolling back every lifecycle
+/// write, including the required audit, on closure or commit failure.
+struct ProcedureTransactionError(DomainError);
+
+impl From<DbError> for ProcedureTransactionError {
+    fn from(error: DbError) -> Self {
+        Self(DomainError::Storage {
+            message: format!("failed to persist procedure lifecycle atomically: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })
+    }
+}
+
+fn with_procedure_transaction<T>(
+    connection: &DbConnection,
+    operation: impl FnOnce() -> Result<T, DomainError>,
+) -> Result<T, DomainError> {
+    connection
+        .with_transaction_error(|| operation().map_err(ProcedureTransactionError))
+        .map_err(|error: ProcedureTransactionError| error.0)
+}
+
+fn procedure_state_changed(procedure_id: &str) -> DomainError {
+    DomainError::PolicyDeniedWithDetails {
+        message: "procedure changed while promotion evidence was being verified".to_owned(),
+        repair: Some(format!(
+            "reload ee procedure show {procedure_id} --json and retry promotion against its current state"
+        )),
+        details_json: json!({
+            "reasonCode": "procedure_state_changed",
+            "procedureId": procedure_id,
+            "conflict": true,
+        })
+        .to_string(),
+    }
+}
+
 fn open_procedure_store(workspace: &Path) -> Result<Option<ProcedureStore>, DomainError> {
     open_procedure_store_with_workspace_mode(workspace, false)
 }
@@ -3893,7 +3963,7 @@ mod tests {
     use super::*;
     use crate::db::{
         CreateEvidenceSpanInput, CreateRecorderRunInput, CreateSessionInput, CreateWorkspaceInput,
-        DbConnection, EvidenceProducerKind,
+        DbConnection, EvidenceProducerKind, StoredAuditEntry,
     };
     use std::fs;
 
@@ -4040,6 +4110,74 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workspace row missing".to_owned())?;
         Ok((connection, workspace_row.id))
+    }
+
+    fn procedure_lifecycle_fixture() -> Result<ProcedurePromoteOptions, String> {
+        let workspace = procedure_store_workspace()?;
+        let evidence_ids = ["pack_lifecycle_a", "pack_lifecycle_b"];
+        for evidence_id in evidence_ids {
+            write_procedure_repro_pack(
+                &workspace
+                    .join(".ee/procedure-verification/repro_pack")
+                    .join(evidence_id),
+            )?;
+        }
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.clone(),
+            title: "Audited release procedure".to_owned(),
+            summary: Some("1. Verify the release artifacts before publishing.".to_owned()),
+            evidence_ids: evidence_ids.into_iter().map(str::to_owned).collect(),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        Ok(ProcedurePromoteOptions {
+            workspace,
+            procedure_id: proposal.procedure_id,
+            to_maturity: Some("validated".to_owned()),
+            dry_run: false,
+            actor: Some("lifecycle-test".to_owned()),
+            reason: Some("release evidence passed verification".to_owned()),
+        })
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ProcedureLifecycleSnapshot {
+        procedure: StoredProcedure,
+        events: Vec<StoredProcedureEvent>,
+        audits: Vec<StoredAuditEntry>,
+    }
+
+    fn procedure_lifecycle_snapshot(
+        workspace: &Path,
+        procedure_id: &str,
+    ) -> Result<ProcedureLifecycleSnapshot, String> {
+        let (connection, workspace_id) = procedure_store_connection(workspace)?;
+        let procedure = connection
+            .get_procedure(&workspace_id, procedure_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "procedure row missing".to_owned())?;
+        let events = connection
+            .list_procedure_events(procedure_id)
+            .map_err(|error| error.to_string())?;
+        let audits = connection
+            .list_audit_by_target("procedure", procedure_id, None)
+            .map_err(|error| error.to_string())?;
+        Ok(ProcedureLifecycleSnapshot {
+            procedure,
+            events,
+            audits,
+        })
+    }
+
+    fn assert_procedure_state_conflict(error: &DomainError) -> TestResult {
+        let DomainError::PolicyDeniedWithDetails { details_json, .. } = error else {
+            return Err(format!("expected a procedure state conflict, got {error:?}"));
+        };
+        let details: Value = serde_json::from_str(details_json).map_err(|error| error.to_string())?;
+        assert_eq!(details["reasonCode"], "procedure_state_changed");
+        assert_eq!(details["conflict"], true);
+        Ok(())
     }
 
     fn insert_procedure_session(
@@ -4238,6 +4376,285 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "retired")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_rolls_back_when_creation_history_or_audit_fails() -> TestResult {
+        for table in ["procedure_events", "audit_log"] {
+            let workspace = procedure_store_workspace()?;
+            let (connection, _) = procedure_store_connection(&workspace)?;
+            connection
+                .execute_raw(&format!(
+                    "CREATE TRIGGER reject_procedure_write BEFORE INSERT ON {table} \
+                     BEGIN SELECT RAISE(ABORT, 'lifecycle write failure'); END"
+                ))
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let options = ProcedureProposeOptions {
+                workspace: workspace.clone(),
+                title: "Atomic proposal".to_owned(),
+                summary: Some("Verify release artifacts.".to_owned()),
+                evidence_ids: vec!["ev_release".to_owned()],
+                dry_run: false,
+                ..Default::default()
+            };
+            let Err(error) = propose_procedure(&options) else {
+                return Err(format!("proposal should fail when {table} rejects its write"));
+            };
+            assert!(error.message().contains("lifecycle write failure"));
+            let (connection, _) = procedure_store_connection(&workspace)?;
+            for surface in ["procedures", "procedure_events", "audit_log"] {
+                assert_eq!(
+                    connection
+                        .count_table_rows(surface)
+                        .map_err(|error| error.to_string())?,
+                    0,
+                    "failure in {table} must roll back {surface}"
+                );
+            }
+            connection
+                .execute_raw("DROP TRIGGER reject_procedure_write")
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let proposal = propose_procedure(&options).map_err(|error| error.message())?;
+            let after = procedure_lifecycle_snapshot(&workspace, &proposal.procedure_id)?;
+            assert_eq!(after.events.len(), 1);
+            assert_eq!(after.events[0].event_type, "created");
+            assert_eq!(after.audits.len(), 1);
+            assert_eq!(after.audits[0].action, audit_actions::PROCEDURE_CREATE);
+            let (connection, _) = procedure_store_connection(&workspace)?;
+            assert_eq!(
+                connection
+                    .count_table_rows("procedures")
+                    .map_err(|error| error.to_string())?,
+                1,
+                "retry must not leave an orphaned first proposal"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promotion_and_retirement_roll_back_if_required_audit_fails() -> TestResult {
+        for action in [
+            audit_actions::PROCEDURE_PROMOTE,
+            audit_actions::PROCEDURE_RETIRE,
+        ] {
+            let options = procedure_lifecycle_fixture()?;
+            if action == audit_actions::PROCEDURE_RETIRE {
+                promote_procedure(&options).map_err(|error| error.message())?;
+            }
+            let retirement = ProcedureRetireOptions {
+                workspace: options.workspace.clone(),
+                procedure_id: options.procedure_id.clone(),
+                reason: "release procedure was superseded".to_owned(),
+                actor: Some("lifecycle-test".to_owned()),
+            };
+            let before = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+            let (connection, _) = procedure_store_connection(&options.workspace)?;
+            connection
+                .execute_raw(&format!(
+                    "CREATE TRIGGER reject_procedure_audit BEFORE INSERT ON audit_log \
+                     WHEN NEW.action = '{action}' \
+                     BEGIN SELECT RAISE(ABORT, 'lifecycle audit failure'); END"
+                ))
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let attempt = if action == audit_actions::PROCEDURE_PROMOTE {
+                promote_procedure(&options).map(|_| ())
+            } else {
+                retire_procedure(&retirement).map(|_| ())
+            };
+            let Err(error) = attempt else {
+                return Err(format!("{action} must fail when its required audit fails"));
+            };
+            assert!(error.message().contains("lifecycle audit failure"));
+            assert_eq!(
+                procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?,
+                before,
+                "{action} must restore all fields, history, and audit hashes"
+            );
+            let (connection, _) = procedure_store_connection(&options.workspace)?;
+            connection
+                .execute_raw("DROP TRIGGER reject_procedure_audit")
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            if action == audit_actions::PROCEDURE_PROMOTE {
+                promote_procedure(&options).map_err(|error| error.message())?;
+            } else {
+                retire_procedure(&retirement).map_err(|error| error.message())?;
+            }
+            let after = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+            assert_eq!(after.events.len(), before.events.len() + 1);
+            assert_eq!(after.audits.len(), before.audits.len() + 1);
+            assert_eq!(
+                after.procedure.maturity,
+                if action == audit_actions::PROCEDURE_PROMOTE {
+                    "validated"
+                } else {
+                    "retired"
+                }
+            );
+            let audit = after
+                .audits
+                .iter()
+                .find(|audit| audit.action == action)
+                .ok_or_else(|| format!("missing {action} audit after retry"))?;
+            let details: Value = serde_json::from_str(
+                audit.details.as_deref().ok_or("missing audit details")?,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(details["fromMaturity"], before.procedure.maturity);
+            assert!(after.events.iter().any(|event| {
+                details["eventId"] == event.id
+                    && event.from_maturity.as_deref() == Some(before.procedure.maturity.as_str())
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verified_promotion_cannot_resurrect_concurrent_retirement() -> TestResult {
+        let options = procedure_lifecycle_fixture()?;
+        let mut retired_snapshot = None;
+        let result = promote_persisted_procedure_with_verifier(
+            &options,
+            &options.procedure_id,
+            ProcedureMaturity::Validated,
+            |workspace, procedure_id, evidence| {
+                let report = verify_procedure_for_promotion(workspace, procedure_id, evidence)?;
+                assert_eq!(report.overall_result, "passed");
+                // This opens an independent writer. It must be able to finish
+                // while the first promotion is still verifying its old state.
+                retire_procedure(&ProcedureRetireOptions {
+                    workspace: workspace.to_path_buf(),
+                    procedure_id: procedure_id.to_owned(),
+                    reason: "concurrent retirement must remain terminal".to_owned(),
+                    actor: Some("independent-writer".to_owned()),
+                })?;
+                retired_snapshot = Some(
+                    procedure_lifecycle_snapshot(workspace, procedure_id)
+                        .map_err(|message| DomainError::Storage {
+                            message,
+                            repair: None,
+                        })?,
+                );
+                Ok(report)
+            },
+        );
+        let Err(error) = result else {
+            return Err("a stale verified promotion must not resurrect retirement".to_owned());
+        };
+        assert_procedure_state_conflict(&error)?;
+        let after = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+        assert_eq!(Some(&after), retired_snapshot.as_ref());
+        assert_eq!(after.procedure.maturity, "retired");
+        assert!(after.procedure.retired_at.is_some());
+        assert_eq!(
+            after.procedure.retire_reason.as_deref(),
+            Some("concurrent retirement must remain terminal")
+        );
+        assert!(after.events.iter().all(|event| event.event_type != "promoted"));
+        assert!(
+            after
+                .audits
+                .iter()
+                .all(|audit| audit.action != audit_actions::PROCEDURE_PROMOTE)
+        );
+
+        // The standalone database wrapper must also preserve terminal state.
+        let (connection, workspace_id) = procedure_store_connection(&options.workspace)?;
+        assert!(
+            connection
+                .promote_procedure_record(PromoteProcedureRecordInput {
+                    workspace_id: &workspace_id,
+                    procedure_id: &options.procedure_id,
+                    to_maturity: "validated",
+                    event_id: "pevt_forbidden_resurrection",
+                    reason: None,
+                    actor: None,
+                    evidence_uris: &after.procedure.evidence_uris,
+                })
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        assert_eq!(
+            procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?,
+            after
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verified_promotion_rejects_changed_content_evidence_and_feedback() -> TestResult {
+        for update in [
+            "UPDATE procedures SET body = 'Changed release instructions' WHERE id = ?1",
+            "UPDATE procedures SET evidence_uris_json = '[\"evidence://replacement\"]' WHERE id = ?1",
+            "UPDATE procedures SET helpful_count = helpful_count + 1 WHERE id = ?1",
+            "UPDATE procedures SET retired_at = '2026-11-13T00:00:00Z' WHERE id = ?1",
+        ] {
+            let options = procedure_lifecycle_fixture()?;
+            let before = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+            let mut changed_snapshot = None;
+            let result = promote_persisted_procedure_with_verifier(
+                &options,
+                &options.procedure_id,
+                ProcedureMaturity::Validated,
+                |workspace, procedure_id, evidence| {
+                    let report = verify_procedure_for_promotion(workspace, procedure_id, evidence)?;
+                    assert_eq!(report.overall_result, "passed");
+                    let (connection, _) = procedure_store_connection(workspace)
+                        .map_err(|message| DomainError::Storage {
+                            message,
+                            repair: None,
+                        })?;
+                    assert_eq!(
+                        connection
+                            .execute(update, &[sqlmodel_core::Value::Text(procedure_id.to_owned())])
+                            .map_err(storage_error("failed to apply concurrent fixture update"))?,
+                        1
+                    );
+                    changed_snapshot = Some(
+                        procedure_lifecycle_snapshot(workspace, procedure_id)
+                            .map_err(|message| DomainError::Storage {
+                                message,
+                                repair: None,
+                            })?,
+                    );
+                    Ok(report)
+                },
+            );
+            let Err(error) = result else {
+                return Err(format!("promotion must reject changed state: {update}"));
+            };
+            assert_procedure_state_conflict(&error)?;
+            let after = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+            assert_eq!(Some(&after), changed_snapshot.as_ref());
+            // Deliberately unchanged timestamps and maturity prove that the
+            // comparison protects the verified contents, not just a status.
+            assert_eq!(after.procedure.maturity, before.procedure.maturity);
+            assert_eq!(after.procedure.updated_at, before.procedure.updated_at);
+            assert_eq!(after.events, before.events);
+            assert_eq!(after.audits, before.audits);
+            assert!(after.procedure.last_promoted_at.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_mature_procedure_can_be_revalidated() -> TestResult {
+        let mut options = procedure_lifecycle_fixture()?;
+        options.to_maturity = Some("mature".to_owned());
+        promote_procedure(&options).map_err(|error| error.message())?;
+        let report = promote_procedure(&options).map_err(|error| error.message())?;
+        assert_eq!(report.from_status, "mature");
+        assert_eq!(report.to_status, "mature");
+        let after = procedure_lifecycle_snapshot(&options.workspace, &options.procedure_id)?;
+        assert_eq!(after.events.len(), 3);
+        assert_eq!(after.audits.len(), 3);
+        assert_eq!(after.procedure.maturity, "mature");
+        assert!(after.procedure.last_validated_at.is_some());
         Ok(())
     }
 
