@@ -1319,7 +1319,12 @@ pub fn promote_procedure(
         });
 
     let already_verified = from_status == ProcedureStatus::Verified.as_str();
-    let blocked = verification.fail_count > 0 || verification.overall_result != "passed";
+    let evidence_count = procedure_verification_evidence_uris(&show.procedure.evidence_ids).len();
+    let evidence_threshold = promotion_evidence_threshold(target_maturity);
+    let insufficient_evidence = evidence_count < evidence_threshold;
+    let verification_failed =
+        verification.fail_count > 0 || verification.overall_result != "passed";
+    let blocked = insufficient_evidence || verification_failed;
     let status = if blocked {
         "blocked"
     } else if already_verified {
@@ -1425,8 +1430,14 @@ pub fn promote_procedure(
         "dry-run only: no procedure status, curation candidate, or audit row was persisted"
             .to_owned(),
     ];
-    if blocked {
+    if verification_failed {
         warnings.push("promotion is blocked until verification passes".to_owned());
+    }
+    if insufficient_evidence {
+        warnings.push(format!(
+            "promotion to {} requires at least {evidence_threshold} distinct evidence source(s); found {evidence_count}",
+            target_maturity.as_str()
+        ));
     }
     if already_verified {
         warnings.push("procedure is already verified; promotion would be idempotent".to_owned());
@@ -1475,12 +1486,45 @@ fn verify_procedure_for_promotion(
         dry_run: true,
         allow_failure: true,
     };
-    let source_results = evidence_ids
+    let source_results = procedure_verification_evidence_uris(evidence_ids)
         .iter()
-        .filter(|source_id| !is_procedure_provenance_uri(source_id))
         .map(|source_id| {
+            let source_id = source_id.trim();
             let source_kind = promotion_evidence_source_kind(workspace, source_id);
-            inspect_named_verification_source(&options, &source_kind, source_id)
+            // A database identity is authority, not a filesystem search hint.
+            // Never let a same-named fixture replace absent, denied or foreign
+            // persisted evidence during promotion.
+            match &source_kind {
+                VerificationSourceKind::ClaimEvidence => {
+                    inspect_persisted_claim_evidence(&options, source_id).unwrap_or_else(|| {
+                        verification_source_result(
+                            source_id,
+                            "claim_evidence",
+                            "failed",
+                            Some(
+                                "named claim evidence was not found in persisted evidence spans"
+                                    .to_owned(),
+                            ),
+                            Vec::new(),
+                        )
+                    })
+                }
+                VerificationSourceKind::RecorderRun => {
+                    inspect_persisted_recorder_run(&options, source_id).unwrap_or_else(|| {
+                        verification_source_result(
+                            source_id,
+                            "recorder_run",
+                            "failed",
+                            Some(
+                                "named recorder run was not found in persisted recorder runs"
+                                    .to_owned(),
+                            ),
+                            Vec::new(),
+                        )
+                    })
+                }
+                _ => inspect_named_verification_source(&options, &source_kind, source_id),
+            }
         })
         .collect::<Vec<_>>();
     build_verification_report(&options, "mixed".to_owned(), source_results)
@@ -1491,6 +1535,20 @@ fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> Verifica
         .trim()
         .strip_prefix("evidence://")
         .unwrap_or_else(|| source_id.trim());
+    // Bare ev_/run_ tokens, including their evidence:// form in the durable
+    // ledger, name database rows even when the row is missing. An explicit
+    // path or filename (./run_..., run_....json) keeps filesystem semantics.
+    if lookup_source_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        if lookup_source_id.starts_with("ev_") {
+            return VerificationSourceKind::ClaimEvidence;
+        }
+        if lookup_source_id.starts_with("run_") {
+            return VerificationSourceKind::RecorderRun;
+        }
+    }
     if verification_source_candidate_paths(workspace, "repro_pack", lookup_source_id)
         .iter()
         .any(|path| {
@@ -2341,7 +2399,8 @@ fn inspect_persisted_recorder_run(
             ));
         }
     };
-    let run = match store.connection.get_recorder_run(source_id) {
+    let run_id = source_id.strip_prefix("evidence://").unwrap_or(source_id);
+    let run = match store.connection.get_recorder_run(run_id) {
         Ok(Some(run)) => run,
         Ok(None) => return None,
         Err(error) => {
@@ -3913,9 +3972,22 @@ fn is_procedure_provenance_uri(uri: &str) -> bool {
 /// (eval fixtures, repro packs, claims, recorder runs) rather than source-run
 /// provenance.
 fn procedure_verification_evidence_uris(evidence_uris: &[String]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
     evidence_uris
         .iter()
         .filter(|uri| !is_procedure_provenance_uri(uri))
+        // Imported ledgers may retain both a bare ID and its evidence:// URI.
+        // They resolve to the same source and cannot count twice toward a
+        // maturity threshold. Keep the original spelling in the report.
+        .filter(|uri| {
+            let source_id = uri.trim();
+            seen.insert(
+                source_id
+                    .strip_prefix("evidence://")
+                    .unwrap_or(source_id)
+                    .to_owned(),
+            )
+        })
         .cloned()
         .collect()
 }
@@ -5701,6 +5773,420 @@ mod tests {
             "expected regular-file failure, got {:?}",
             report.sources_checked[0].message
         );
+        Ok(())
+    }
+
+    fn insert_promotion_claim(
+        connection: &DbConnection,
+        workspace_id: &str,
+        seed: u128,
+    ) -> Result<String, String> {
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+        insert_procedure_session(connection, workspace_id, &session_id)?;
+        let excerpt = "The release verification command completed successfully.";
+        connection
+            .insert_evidence_span(
+                &evidence_id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.to_owned(),
+                    session_id,
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("promotion-claim-{seed}"),
+                    span_kind: "summary".to_owned(),
+                    start_line: 1,
+                    end_line: 2,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: excerpt.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(evidence_id)
+    }
+
+    fn insert_promotion_run(
+        connection: &DbConnection,
+        run_id: &str,
+        workspace_id: Option<&str>,
+        status: &str,
+        event_count: u64,
+        chain_complete: bool,
+    ) -> TestResult {
+        connection
+            .insert_recorder_run(
+                run_id,
+                &CreateRecorderRunInput {
+                    workspace_id: workspace_id.map(str::to_owned),
+                    agent_id: "promotion-test".to_owned(),
+                    session_id: None,
+                    source_type: "synthetic".to_owned(),
+                    source_id: Some("fixture://promotion".to_owned()),
+                    status: status.to_owned(),
+                    started_at: "2026-05-01T00:00:00Z".to_owned(),
+                    ended_at: Some("2026-05-01T00:01:00Z".to_owned()),
+                    event_count,
+                    redacted_count: 0,
+                    payload_bytes: 128,
+                    chain_complete,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn propose_from_promotion_evidence(
+        workspace: &Path,
+        evidence_ids: Vec<String>,
+        source_run_ids: Vec<String>,
+    ) -> Result<ProcedurePromoteOptions, String> {
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.to_path_buf(),
+            title: "Verify a release from persisted evidence".to_owned(),
+            summary: Some("1. Check the release evidence\n2. Verify signatures".to_owned()),
+            evidence_ids,
+            source_run_ids,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        Ok(ProcedurePromoteOptions {
+            workspace: workspace.to_path_buf(),
+            procedure_id: proposal.procedure_id,
+            to_maturity: Some("validated".to_owned()),
+            dry_run: false,
+            actor: Some("promotion-test".to_owned()),
+            reason: Some("Inspect live verification evidence before promotion".to_owned()),
+        })
+    }
+
+    #[test]
+    fn promotion_uses_live_claims_and_explicit_recorder_runs_without_counting_lineage()
+    -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let evidence_id = insert_promotion_claim(&connection, &workspace_id, 701)?;
+        let run_id = "run_promotion_owned";
+        let global_run = "run_promotion_global";
+        insert_promotion_run(&connection, run_id, Some(&workspace_id), "completed", 2, true)?;
+        insert_promotion_run(&connection, global_run, None, "imported", 1, true)?;
+        assert!(
+            connection
+                .get_derivation_admitted_evidence_span(&evidence_id, &workspace_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "claim fixture must pass the real admission gate"
+        );
+        for (source, expected_kind) in [
+            (evidence_id.as_str(), "claim_evidence"),
+            (run_id, "recorder_run"),
+            (global_run, "recorder_run"),
+        ] {
+            for source_ref in [source.to_owned(), format!("evidence://{source}")] {
+                let verified = verify_procedure_for_promotion(
+                    &workspace,
+                    "proc_inspection",
+                    &[source_ref.clone(), format!("cass-run://{run_id}")],
+                )
+                .map_err(|error| error.message())?;
+                assert_eq!(verified.overall_result, "passed");
+                assert_eq!(verified.pass_count, 1);
+                assert_eq!(verified.sources_checked.len(), 1);
+                assert_eq!(verified.sources_checked[0].source_kind, expected_kind);
+                assert_eq!(verified.sources_checked[0].source_id, source_ref);
+            }
+            let options = propose_from_promotion_evidence(
+                &workspace,
+                vec![source.to_owned()],
+                vec![run_id.to_owned()],
+            )?;
+            let before = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+            let preview = promote_procedure(&ProcedurePromoteOptions {
+                dry_run: true,
+                ..options.clone()
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(preview.status, "dry_run");
+            assert_eq!(preview.verification.pass_count, 1);
+            assert_eq!(
+                preview.verification.evidence_checked,
+                [format!("evidence://{source}")]
+            );
+            assert_eq!(
+                procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
+                before
+            );
+            let promoted = promote_procedure(&options).map_err(|error| error.message())?;
+            assert_eq!(promoted.status, "promoted");
+            assert_eq!(promoted.verification.pass_count, 1);
+            assert_eq!(promoted.verification.fail_count, 0);
+            let after = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+            assert_eq!(after.procedure.maturity, "validated");
+            assert!(after.procedure.last_validated_at.is_some());
+            assert_eq!(after.events.len(), before.events.len() + 1);
+            assert_eq!(after.audits.len(), before.audits.len() + 1);
+            assert_eq!(after.procedure.evidence_uris, before.procedure.evidence_uris);
+        }
+        let lineage_only = propose_from_promotion_evidence(
+            &workspace,
+            Vec::new(),
+            vec![run_id.to_owned(), global_run.to_owned()],
+        )?;
+        let before = procedure_lifecycle_snapshot(&workspace, &lineage_only.procedure_id)?;
+        let preview = promote_procedure(&ProcedurePromoteOptions {
+            dry_run: true,
+            ..lineage_only.clone()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(preview.status, "blocked");
+        assert_eq!(preview.verification.pass_count, 0);
+        assert!(preview.verification.evidence_checked.is_empty());
+        let error = promote_procedure(&lineage_only).expect_err("lineage is not verification");
+        assert_eq!(error.code(), "policy_denied");
+        assert_eq!(
+            procedure_lifecycle_snapshot(&workspace, &lineage_only.procedure_id)?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_source_aliases_cannot_satisfy_a_two_source_promotion_threshold() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let evidence_id = insert_promotion_claim(&connection, &workspace_id, 702)?;
+        let original =
+            propose_from_promotion_evidence(&workspace, vec![evidence_id.clone()], Vec::new())?;
+        let mut recovered =
+            procedure_lifecycle_snapshot(&workspace, &original.procedure_id)?.procedure;
+        recovered.id = format!("proc_{}", generate_id());
+        recovered.evidence_uris = vec![evidence_id.clone(), format!("evidence://{evidence_id}")];
+        connection
+            .insert_procedure_for_recovery(&recovered)
+            .map_err(|error| error.to_string())?;
+        let options = ProcedurePromoteOptions {
+            procedure_id: recovered.id,
+            to_maturity: Some("mature".to_owned()),
+            ..original
+        };
+        let before = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+        let preview = promote_procedure(&ProcedurePromoteOptions {
+            dry_run: true,
+            ..options.clone()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(preview.status, "blocked");
+        assert_eq!(preview.verification.overall_result, "passed");
+        assert_eq!(preview.verification.pass_count, 1);
+        assert_eq!(preview.verification.evidence_checked, [evidence_id.clone()]);
+        assert!(
+            preview
+                .planned_effects
+                .iter()
+                .all(|effect| !effect.would_write)
+        );
+        let error = promote_procedure(&options).expect_err("one row cannot supply two sources");
+        assert!(error.message().contains("requires at least 2 evidence URI(s); found 1"));
+        assert_eq!(
+            procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
+            before
+        );
+
+        insert_promotion_run(
+            &connection,
+            "run_independent_proof",
+            Some(&workspace_id),
+            "completed",
+            1,
+            true,
+        )?;
+        let mut distinct = propose_from_promotion_evidence(
+            &workspace,
+            vec![evidence_id, "run_independent_proof".to_owned()],
+            Vec::new(),
+        )?;
+        distinct.to_maturity = Some("mature".to_owned());
+        let preview = promote_procedure(&ProcedurePromoteOptions {
+            dry_run: true,
+            ..distinct.clone()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        let promoted = promote_procedure(&distinct).map_err(|error| error.message())?;
+        assert_eq!(promoted.to_status, "mature");
+        assert_eq!(promoted.verification.pass_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn promotion_never_substitutes_files_for_missing_denied_or_foreign_database_evidence()
+    -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let foreign = crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(703)).to_string();
+        connection
+            .insert_workspace(
+                &foreign,
+                &CreateWorkspaceInput {
+                    path: workspace.join("foreign").display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let quarantined = insert_promotion_claim(&connection, &workspace_id, 704)?;
+        let foreign_claim = insert_promotion_claim(&connection, &foreign, 705)?;
+        let drifted = insert_promotion_claim(&connection, &workspace_id, 706)?;
+        connection.execute_raw(&format!(
+            "UPDATE evidence_spans SET search_eligibility = 'quarantined', pack_eligibility = 'quarantined' WHERE id = '{quarantined}'"
+        )).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET excerpt = 'changed after screening' WHERE id = '{drifted}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let missing = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(707)).to_string();
+        let mut rejected = Vec::new();
+        for source in [quarantined, foreign_claim, drifted, missing] {
+            assert!(
+                connection
+                    .get_derivation_admitted_evidence_span(&source, &workspace_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+                "the real claim admission boundary must reject {source}"
+            );
+            rejected.push((source, "claim_evidence"));
+        }
+        for (source, owner, status, count, complete) in [
+            ("run_foreign_proof", foreign.as_str(), "completed", 1, true),
+            ("run_broken_chain", workspace_id.as_str(), "completed", 1, false),
+            ("run_empty_proof", workspace_id.as_str(), "completed", 0, true),
+            ("run_abandoned_proof", workspace_id.as_str(), "abandoned", 1, true),
+        ] {
+            insert_promotion_run(&connection, source, Some(owner), status, count, complete)?;
+            rejected.push((source.to_owned(), "recorder_run"));
+        }
+        rejected.push(("run_missing_proof".to_owned(), "recorder_run"));
+        for (source, expected_kind) in rejected {
+            let shadow = workspace
+                .join(".ee/procedure-verification/repro_pack")
+                .join(&source);
+            write_procedure_repro_pack(&shadow)?;
+            let verify_options = ProcedureVerifyOptions {
+                workspace: workspace.clone(),
+                procedure_id: "proc_inspection".to_owned(),
+                dry_run: true,
+                allow_failure: true,
+                ..Default::default()
+            };
+            let file = inspect_named_verification_source(
+                &verify_options,
+                &VerificationSourceKind::ReproPack,
+                &source,
+            );
+            assert_eq!(file.result, "passed", "shadow fixture must be valid");
+            let report =
+                verify_procedure_for_promotion(&workspace, "proc_inspection", &[source.clone()])
+                    .map_err(|error| error.message())?;
+            assert_eq!(report.fail_count, 1, "{source}");
+            assert_eq!(report.pass_count, 0, "{source}");
+            assert_eq!(report.sources_checked[0].source_kind, expected_kind);
+            let options =
+                propose_from_promotion_evidence(&workspace, vec![source.clone()], Vec::new())?;
+            let before = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+            let preview = promote_procedure(&ProcedurePromoteOptions {
+                dry_run: true,
+                ..options.clone()
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(preview.status, "blocked", "{source}");
+            assert_eq!(preview.verification.fail_count, 1, "{source}");
+            let error =
+                promote_procedure(&options).expect_err("invalid DB evidence must block promotion");
+            assert_eq!(error.code(), "policy_denied", "{source}");
+            assert_eq!(
+                procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
+                before
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promotion_retains_explicit_filesystem_evidence_and_fails_closed_on_database_errors()
+    -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        write_procedure_repro_pack(&workspace.join("run_filesystem_pack"))?;
+        write_procedure_repro_pack(
+            &workspace.join(".ee/procedure-verification/repro_pack/plain_release_fixture"),
+        )?;
+        fs::write(
+            workspace.join("ev_filesystem.json"),
+            json!({
+                "schema":"ee.eval.report.v1", "status":"passed",
+                "step_results":[{
+                    "step_id":"run_fixture", "sequence":1, "result":"passed",
+                    "expected":"verification command succeeds", "actual":"exit_code=0"
+                }]
+            }).to_string(),
+        ).map_err(|error| error.to_string())?;
+        let options = propose_from_promotion_evidence(
+            &workspace,
+            vec![
+                "./run_filesystem_pack".to_owned(),
+                "plain_release_fixture".to_owned(),
+                "ev_filesystem.json".to_owned(),
+            ],
+            Vec::new(),
+        )?;
+        let report = promote_procedure(&options).map_err(|error| error.message())?;
+        assert_eq!(report.status, "promoted");
+        assert_eq!(report.verification.pass_count, 3);
+
+        for (table, source_kind) in [
+            ("evidence_spans", "claim_evidence"),
+            ("recorder_runs", "recorder_run"),
+        ] {
+            let workspace = procedure_store_workspace()?;
+            let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+            let source = if source_kind == "claim_evidence" {
+                insert_promotion_claim(&connection, &workspace_id, 708)?
+            } else {
+                insert_promotion_run(
+                    &connection,
+                    "run_unreadable_proof",
+                    Some(&workspace_id),
+                    "completed",
+                    1,
+                    true,
+                )?;
+                "run_unreadable_proof".to_owned()
+            };
+            write_procedure_repro_pack(
+                &workspace
+                    .join(".ee/procedure-verification/repro_pack")
+                    .join(&source),
+            )?;
+            connection
+                .execute_raw(&format!("ALTER TABLE {table} RENAME TO {table}_unreadable"))
+                .map_err(|error| error.to_string())?;
+            let report = verify_procedure_for_promotion(
+                &workspace,
+                "proc_inspection",
+                &[format!("evidence://{source}")],
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(report.overall_result, "failed");
+            assert_eq!(report.fail_count, 1);
+            assert_eq!(report.sources_checked[0].source_kind, source_kind);
+            assert!(report.sources_checked[0].message.as_deref().is_some_and(|message| {
+                message.contains("failed to load persisted") && !message.contains("not found")
+            }));
+        }
         Ok(())
     }
 
