@@ -87,6 +87,62 @@ fn projections(
     .flatten() else {
         return BTreeMap::new();
     };
+    projections_for_workspace(connection, &workspace, ids, after_rule_rows)
+}
+
+/// Rehydrate pack candidates from its already-pinned source view. The search
+/// report may have been cached, so native lineage and pending review holds must
+/// be checked again before a rule can enter the pack. Resolve the workspace and
+/// its path once, then share search's bind-safe body and relationship reads.
+pub(crate) fn load_pack_rule_projections(
+    connection: &DbConnection,
+    workspace_path: &std::path::Path,
+    workspace_id: Option<&str>,
+    hits: &[SearchHit],
+) -> BTreeMap<String, RuleIndexProjection> {
+    let canonical_ids: BTreeSet<_> = hits
+        .iter()
+        .filter(|hit| {
+            is_rule_hit(hit)
+                && !matches!(
+                    super::mesh_query_visibility(hit.metadata.as_ref()),
+                    MeshQueryVisibility::Blocked
+                )
+        })
+        .filter_map(|hit| RuleId::from_str(&hit.doc_id).ok().map(|id| id.to_string()))
+        .collect();
+    if canonical_ids.is_empty() {
+        return BTreeMap::new();
+    }
+    let Some(workspace_id) = workspace_id else {
+        return BTreeMap::new();
+    };
+    let Some(workspace) = connection.get_workspace(workspace_id).ok().flatten() else {
+        return BTreeMap::new();
+    };
+    let stored_path = std::path::Path::new(&workspace.path);
+    let same_workspace = match (
+        std::fs::canonicalize(stored_path),
+        std::fs::canonicalize(workspace_path),
+    ) {
+        (Ok(stored), Ok(requested)) => stored == requested,
+        _ => stored_path == workspace_path,
+    };
+    if !same_workspace {
+        return BTreeMap::new();
+    }
+    let ids = canonical_ids.iter().map(String::as_str).collect();
+    // The context caller owns the snapshot; never open a second connection or
+    // nest/release its transaction while assembling the rule revision.
+    projections_for_workspace(connection, &workspace, &ids, || {})
+}
+
+fn projections_for_workspace(
+    connection: &DbConnection,
+    workspace: &crate::db::StoredWorkspace,
+    ids: &BTreeSet<&str>,
+    after_rule_rows: impl FnOnce(),
+) -> BTreeMap<String, RuleIndexProjection> {
     let canonical_ids: Vec<_> = ids
         .iter()
         .filter_map(|id| {

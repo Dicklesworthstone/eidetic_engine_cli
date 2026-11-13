@@ -11061,6 +11061,12 @@ fn candidates_from_search_for_task_paths(
     )> = Vec::new();
     let evidence_batch =
         preload_evidence_pack_hits(connection, workspace_path, search_report, degraded);
+    let rule_projections = crate::core::search::load_pack_rule_projections(
+        connection,
+        workspace_path,
+        bound_workspace_id.as_deref(),
+        &search_report.results,
+    );
     for hit in &search_report.results {
         let mesh_provenance = match mesh_query_visibility(hit.metadata.as_ref()) {
             MeshQueryVisibility::Local => None,
@@ -11092,9 +11098,8 @@ fn candidates_from_search_for_task_paths(
                     // admission, then enter the native rule lane.
                     .or_else(|| {
                         match rule_linked_memory_id(
-                            connection,
+                            &rule_projections,
                             targets,
-                            workspace_path,
                             hit,
                             degraded,
                         ) {
@@ -15415,9 +15420,8 @@ enum RuleHitResolution {
 }
 
 fn rule_linked_memory_id(
-    connection: &DbConnection,
+    projections: &BTreeMap<String, RuleIndexProjection>,
     targets: &[String],
-    workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<RuleHitResolution> {
@@ -15445,105 +15449,16 @@ fn rule_linked_memory_id(
         }
     };
 
-    let rule = match connection.get_procedural_rule(&rule_id) {
-        Ok(Some(rule)) => rule,
-        Ok(None) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!("Rule {rule_id} matched a stale index but no live source row exists."),
-                Some("ee index rebuild --json".to_owned()),
-            );
-            return None;
-        }
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Rule {} matched search but could not be loaded for context packing: {error}",
-                    rule_id
-                ),
-                Some(format!("ee rule show {rule_id} --json")),
-            );
-            return None;
-        }
-    };
-
-    let workspace = match connection.get_workspace(&rule.workspace_id) {
-        Ok(Some(workspace)) => workspace,
-        Ok(None) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!("Rule {rule_id} has no live workspace for context admission."),
-                Some("ee doctor --json".to_owned()),
-            );
-            return None;
-        }
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!("Rule {rule_id} workspace admission failed: {error}"),
-                Some("ee doctor --json".to_owned()),
-            );
-            return None;
-        }
-    };
-    let stored_workspace_path = Path::new(&workspace.path);
-    let same_workspace = match (
-        std::fs::canonicalize(stored_workspace_path),
-        std::fs::canonicalize(workspace_path),
-    ) {
-        (Ok(stored), Ok(requested)) => stored == requested,
-        _ => stored_workspace_path == workspace_path,
-    };
-    if !same_workspace {
+    let Some(projection) = projections.get(&rule_id).cloned() else {
         push_degradation(
             degraded,
             "context_rule_hit_unhydrated",
             ContextResponseSeverity::Low,
-            format!("Rule {rule_id} belongs to a different workspace and was excluded."),
-            Some("ee index rebuild --json".to_owned()),
+            format!("Rule {rule_id} could not be admitted from the current native source snapshot."),
+            Some("Inspect ee outcome quarantine list and ee doctor --json; rebuild the index after resolving source admission failures.".to_owned()),
         );
         return None;
-    }
-
-    let tags = match connection.get_rule_tags(&rule_id) {
-        Ok(tags) => tags,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!("Tags for rule {rule_id} could not be loaded: {error}"),
-                Some(format!("ee rule show {rule_id} --json")),
-            );
-            return None;
-        }
     };
-    let source_memory_ids = match connection.get_rule_source_memory_ids(&rule_id) {
-        Ok(ids) => ids,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_rule_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Source memories for rule {} could not be loaded for context packing: {error}",
-                    rule_id
-                ),
-                Some(format!("ee rule show {rule_id} --json")),
-            );
-            return None;
-        }
-    };
-    let projection = RuleIndexProjection::new(rule, stored_workspace_path, tags, source_memory_ids);
     if !projection.is_pack_admissible() {
         push_degradation(
             degraded,

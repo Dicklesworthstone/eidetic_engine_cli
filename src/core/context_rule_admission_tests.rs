@@ -148,8 +148,11 @@ impl Fixture {
     }
 
     fn resolve(&self, ids: &[&str], filters: &QueryFilters) -> Resolution {
+        self.resolve_report(report(ids), filters)
+    }
+
+    fn resolve_report(&self, search: SearchReport, filters: &QueryFilters) -> Resolution {
         let mut degraded = Vec::new();
-        let search = report(ids);
         let mut hits = Vec::new();
         let (memories, metrics) = candidates_from_search_for_task_paths(
             &self.db,
@@ -315,6 +318,227 @@ fn rule_scope_context(scope: MemoryScope) -> MemoryScopeContext {
         team_members: BTreeSet::from(["Bob".to_owned()]),
         team_roster_read_error: None,
     }
+}
+
+#[test]
+fn native_rule_pack_hydration_batches_bodies_and_relations_without_changing_items() {
+    let f = Fixture::new();
+    let pairs = (1..=257)
+        .map(|seed| {
+            f.add(
+                seed,
+                |_| {},
+                |rule| {
+                    rule.tags = vec!["release".to_owned(), format!("batch-{seed}")];
+                    if seed % 3 == 0 {
+                        rule.source_memory_ids.clear();
+                    }
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    for count in [0_usize, 1, 32, 257] {
+        let ids = pairs[..count]
+            .iter()
+            .map(|pair| pair.rule.as_str())
+            .collect::<Vec<_>>();
+        let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+            f.resolve(&ids, &QueryFilters::default())
+        });
+        assert_eq!(
+            sources(&resolved.candidates),
+            ids.iter().map(|id| (*id).to_owned()).collect::<BTreeSet<_>>()
+        );
+        assert_eq!(resolved.hits.len(), count);
+        assert!(resolved.memories.is_empty());
+        assert!(
+            !resolved
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "context_rule_hit_unhydrated"),
+            "{:?}",
+            resolved.degraded
+        );
+        let pages = count.div_ceil(256);
+        for relation in [
+            "FROM procedural_rules WHERE",
+            "FROM rule_tags WHERE",
+            "FROM rule_source_memories AS rsm",
+            "FROM procedural_rules AS r JOIN feedback_quarantine AS q",
+        ] {
+            let reads = queries
+                .iter()
+                .filter(|sql| sql.contains(relation))
+                .collect::<Vec<_>>();
+            assert_eq!(reads.len(), pages, "{relation}: {reads:?}");
+            assert!(
+                reads.iter().all(|sql| sql.contains(" IN (")),
+                "candidate hydration must not issue per-rule point reads: {reads:?}"
+            );
+        }
+        assert!(
+            !queries
+                .iter()
+                .any(|sql| sql.contains("FROM rule_source_memories WHERE")),
+            "lineage must use the shared paged admission query"
+        );
+        for (item, pair) in resolved.candidates.iter().zip(&pairs[..count]) {
+            let expected = f.projection(pair);
+            assert_eq!(item.rule_id, pair.rule);
+            assert_eq!(item.content, expected.rule().content);
+            assert_eq!(item.entity_revision, expected.entity_revision());
+            assert_eq!(item.trust.posture(), PackTrustPosture::Advisory);
+            let expected_provenance = std::iter::once(format!("ee://rule/{}", pair.rule))
+                .chain(
+                    expected
+                        .source_memory_ids()
+                        .iter()
+                        .map(|id| format!("ee://memory/{id}")),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(
+                item.rendered_provenance()
+                    .into_iter()
+                    .map(|entry| entry.uri)
+                    .collect::<Vec<_>>(),
+                expected_provenance
+            );
+        }
+    }
+}
+
+#[test]
+fn cached_rule_hits_cannot_bypass_current_native_review_holds() {
+    let f = Fixture::new();
+    let admitted = f.add(1, |_| {}, |_| {});
+    let sourced = f.add(2, |_| {}, |_| {});
+    let sourceless = f.add(
+        3,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids.clear();
+            rule.protected = true;
+            rule.maturity = "validated".to_owned();
+            rule.trust_class = "human_explicit".to_owned();
+        },
+    );
+    let ids = [
+        &*admitted.rule,
+        &*sourced.rule,
+        &*sourceless.rule,
+        &*admitted.memory,
+    ];
+    let mut cached = report(&ids);
+    for (hit, pair) in cached
+        .results
+        .iter_mut()
+        .zip([&admitted, &sourced, &sourceless])
+    {
+        let projection = f.projection(pair);
+        hit.metadata = Some(serde_json::json!({
+            "source": "rule",
+            "content": projection.rule().content,
+            "entity_revision": projection.entity_revision(),
+            "quarantined": false
+        }));
+    }
+    let filters = QueryFilters::default();
+    let before = f.resolve_report(cached.clone(), &filters);
+    let expected = BTreeSet::from([
+        admitted.rule.clone(),
+        sourced.rule.clone(),
+        sourceless.rule.clone(),
+    ]);
+    assert_eq!(sources(&before.candidates), expected);
+    for (index, pair) in [&sourced, &sourceless].into_iter().enumerate() {
+        f.db.insert_feedback_quarantine_for_recovery(&crate::db::StoredFeedbackQuarantine {
+            id: format!("fq_{index:026}"),
+            workspace_id: f.workspace_id.clone(),
+            source_id: "private-pack-hold-source-canary".to_owned(),
+            target_type: "rule".to_owned(),
+            target_id: pair.rule.clone(),
+            signal: "harmful".to_owned(),
+            weight: 0.5,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: Some(format!("fb_{index:026}")),
+            recorded_at: NEW.to_owned(),
+            reason: "private-pack-hold-reason-canary".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{index:064x}"),
+            status: "pending".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            released_feedback_event_id: None,
+        })
+        .unwrap();
+    }
+    let held = f.resolve_report(cached.clone(), &filters);
+    assert_eq!(
+        sources(&held.candidates),
+        BTreeSet::from([admitted.rule.clone()])
+    );
+    assert_eq!(held.memories.len(), 1);
+    assert_eq!(held.memories[0].memory_id.to_string(), admitted.memory);
+    assert!(
+        held.degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated")
+    );
+    assert!(!format!("{:?}", held.degraded).contains("private-pack-hold"));
+
+    f.db.execute_raw(&format!(
+        "UPDATE feedback_quarantine SET status = 'rejected', reviewed_at = '{NEW}', reviewed_by = 'pack-test-reviewer' WHERE status = 'pending'"
+    ))
+    .unwrap();
+    let released = f.resolve_report(cached, &filters);
+    assert_eq!(sources(&released.candidates), expected);
+    assert_eq!(released.memories.len(), 1);
+}
+
+#[test]
+fn native_rule_pack_batch_failures_preserve_valid_neighbors_and_memory_hits() {
+    let f = Fixture::new();
+    let admitted = f.add(1, |_| {}, |_| {});
+    let malformed = f.add(2, |_| {}, |_| {});
+    f.db.execute_raw(&format!(
+        "UPDATE procedural_rules SET validation_passes = 4294967296 WHERE id = '{}'",
+        malformed.rule
+    ))
+    .unwrap();
+    assert!(f.db.get_procedural_rule(&malformed.rule).is_err());
+    let filters = QueryFilters::default();
+    let resolved = f.resolve(
+        &[&admitted.rule, &malformed.rule, &admitted.memory],
+        &filters,
+    );
+    assert_eq!(
+        sources(&resolved.candidates),
+        BTreeSet::from([admitted.rule.clone()])
+    );
+    assert_eq!(resolved.memories.len(), 1);
+    assert_eq!(resolved.memories[0].memory_id.to_string(), admitted.memory);
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated")
+    );
+
+    f.db.execute_raw("ALTER TABLE rule_tags RENAME TO unavailable_pack_rule_tags")
+        .unwrap();
+    let unresolved = f.resolve(&[&admitted.rule, &admitted.memory], &filters);
+    assert!(unresolved.candidates.is_empty());
+    assert_eq!(unresolved.memories.len(), 1);
+    assert_eq!(unresolved.memories[0].memory_id.to_string(), admitted.memory);
+    assert!(
+        unresolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated")
+    );
+    assert!(!format!("{:?}", unresolved.degraded).contains("unavailable_pack_rule_tags"));
 }
 
 #[test]
@@ -718,14 +942,19 @@ fn native_rule_attribution_rejects_missing_foreign_and_unreadable_sources() {
     ))
     .unwrap();
     let resolved = f.resolve(&[&derived.rule], &QueryFilters::default());
-    assert_eq!(
-        resolved.hits.len(),
-        1,
-        "first source is still local and live"
+    assert!(
+        resolved.hits.is_empty(),
+        "every source must belong to the native workspace before pack admission"
+    );
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated")
     );
     let (resolved, stats) = f.apply_scope(resolved, &context);
     assert!(resolved.candidates.is_empty());
-    assert_eq!(stats.excluded_memory_ids, vec![derived.rule.clone()]);
+    assert_eq!(stats.candidates_total, 0);
 
     f.db.execute_raw("PRAGMA foreign_keys = OFF").unwrap();
     f.db.execute_raw(&format!(
@@ -734,14 +963,19 @@ fn native_rule_attribution_rejects_missing_foreign_and_unreadable_sources() {
     ))
     .unwrap();
     let resolved = f.resolve(&[&derived.rule], &QueryFilters::default());
-    assert_eq!(
-        resolved.hits.len(),
-        1,
+    assert!(
+        resolved.hits.is_empty(),
         "missing later sources cannot inherit the first source's attribution"
+    );
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_rule_hit_unhydrated")
     );
     let (resolved, stats) = f.apply_scope(resolved, &context);
     assert!(resolved.candidates.is_empty());
-    assert_eq!(stats.excluded_memory_ids, vec![derived.rule]);
+    assert_eq!(stats.candidates_total, 0);
 
     let resolved = f.resolve(&[&alice.rule], &QueryFilters::default());
     assert_eq!(resolved.hits.len(), 1);
