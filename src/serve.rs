@@ -612,32 +612,22 @@ pub fn serve_dispatch_plan(request: &ServeHttpRequest) -> Result<ServeDispatchPl
             vec!["ee", "doctor", "--json"],
         )),
         ServeEndpoint::Search => {
-            let query = require_single_query_value(request, "q", "/v1/search")?;
+            let options = serve_search_options(request, PathBuf::new())?;
             Ok(ServeDispatchPlan {
                 endpoint: ServeEndpoint::Search,
                 handler_surface: "cli.search",
-                cli_argv: vec![
-                    "ee".to_owned(),
-                    "search".to_owned(),
-                    query,
-                    "--json".to_owned(),
-                ],
+                cli_argv: serve_retrieval_cli_argv(request, "search", options.query),
                 payload_schema: "ee.response.v2",
                 mutable: false,
                 sse_stream: false,
             })
         }
         ServeEndpoint::Context => {
-            let task = require_single_query_value(request, "task", "/v1/context")?;
+            let options = serve_context_options(request, PathBuf::new())?;
             Ok(ServeDispatchPlan {
                 endpoint: ServeEndpoint::Context,
                 handler_surface: "cli.pack",
-                cli_argv: vec![
-                    "ee".to_owned(),
-                    "pack".to_owned(),
-                    task,
-                    "--json".to_owned(),
-                ],
+                cli_argv: serve_retrieval_cli_argv(request, "pack", options.query),
                 payload_schema: "ee.response.v2",
                 mutable: false,
                 sse_stream: false,
@@ -1819,31 +1809,12 @@ fn serve_search_payload_json(
     let workspace_path = serve_current_workspace_path()?;
     let advisory_workspace_key =
         crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
-    let query = require_single_query_value(request, "q", "/v1/search")?;
-    let report = run_search(&SearchOptions {
-        workspace_path,
-        database_path: None,
-        index_dir: None,
-        query,
-        limit: 10,
-        speed: crate::search::SpeedMode::Default,
-        explain: false,
-        as_of: None,
-        include_tombstoned: false,
-        include_expired: false,
-        include_future: false,
-        include_stale: false,
-        relevance_floor: None,
-        dedup_mode: SearchDedupMode::DocId,
-        source_mode: SearchSourceMode::Hybrid,
-        strict_source_mode: false,
-        memory_scope: MemoryScope::Swarm,
-        strict_scope: false,
-    })
-    .map_err(|error| DomainError::SearchIndex {
-        message: error.to_string(),
-        repair: error.repair_hint().map(str::to_owned),
-    })?;
+    let options = serve_search_options(request, workspace_path)?;
+    let report = run_search(&options)
+        .map_err(|error| DomainError::SearchIndex {
+            message: error.to_string(),
+            repair: error.repair_hint().map(str::to_owned),
+        })?;
     let (data, advisory_delivery) =
         advisory_state.render_for_delivery(&report, &advisory_workspace_key)?;
     let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
@@ -1853,50 +1824,56 @@ fn serve_search_payload_json(
     })
 }
 
+fn serve_search_options(
+    request: &ServeHttpRequest,
+    workspace_path: PathBuf,
+) -> Result<SearchOptions, DomainError> {
+    let endpoint = "/v1/search";
+    validate_serve_retrieval_query(request, endpoint, "q", SERVE_SEARCH_QUERY_PARAMS)?;
+    let retrieval = ServeRetrievalOptions::parse(request, endpoint)?;
+    let dedup_mode = optional_single_query_value(request, "dedupe", endpoint)?
+        .map(|raw| match raw.as_str() {
+            "doc_id" => Ok(SearchDedupMode::DocId),
+            "mi" => Ok(SearchDedupMode::MutualInformation),
+            _ => Err(serve_usage_error(
+                "/v1/search query parameter `dedupe` must be doc_id or mi.",
+            )),
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SearchOptions {
+        workspace_path,
+        database_path: None,
+        index_dir: None,
+        query: require_single_query_value(request, "q", endpoint)?,
+        limit: optional_positive_query_u32(request, "limit", endpoint)?.unwrap_or(10),
+        speed: retrieval.speed,
+        explain: optional_query_bool(request, "explain", endpoint)?,
+        as_of: retrieval.as_of,
+        include_tombstoned: optional_query_bool(request, "includeTombstoned", endpoint)?,
+        include_expired: retrieval.include_expired,
+        include_future: retrieval.include_future,
+        include_stale: retrieval.include_stale,
+        relevance_floor: retrieval.relevance_floor,
+        dedup_mode,
+        source_mode: retrieval.source_mode,
+        strict_source_mode: retrieval.strict_source_mode,
+        memory_scope: retrieval.memory_scope,
+        strict_scope: retrieval.strict_scope,
+    })
+}
+
 fn serve_context_payload_json(
     request: &ServeHttpRequest,
     advisory_state: &ServeSearchAdvisoryState,
 ) -> Result<ServeDispatchPayload, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
-    let task = require_single_query_value(request, "task", "/v1/context")?;
-    let output_options = ContextPackOutputOptions::default();
-    let options = ContextPackOptions {
-        bead_id: None,
-        task_paths: Vec::new(),
-        workspace_path,
-        database_path: None,
-        index_dir: None,
-        query: task,
-        speed: crate::search::SpeedMode::Default,
-        source_mode: SearchSourceMode::Hybrid,
-        strict_source_mode: false,
-        filters: QueryFilters::default(),
-        profile: None,
-        max_tokens: None,
-        candidate_pool: None,
-        max_results: None,
-        include_tombstoned: false,
-        as_of: None,
-        include_expired: false,
-        include_future: false,
-        include_stale: false,
-        relevance_floor: None,
-        redaction_level: RedactionLevel::Minimal,
-        memory_scope: MemoryScope::Swarm,
-        strict_scope: false,
-        ppr_weight: None,
-        changed_symbols: Vec::new(),
-        changed_symbols_from_git: false,
-        pagination: None,
-        coordination_snapshot_path: None,
-        coordination_stale_after_ms: 0,
-        task_lens: None,
-        require_fresh_sentinels: false,
-        output_options,
-        persist_pack: false,
-        baseline_write: None,
-        no_lod: false,
-    };
+    let mut options = serve_context_options(request, workspace_path)?;
+    options.task_paths = crate::core::context::normalize_context_task_paths(
+        &options.workspace_path,
+        &options.task_paths,
+    )
+    .map_err(|error| serve_usage_error(error.to_string()))?;
     let run = run_context_pack_with_performance(&options, "pack")
         .map_err(serve_context_error_to_domain)?;
     let payload = parse_rendered_response_json(
@@ -1917,6 +1894,72 @@ fn serve_context_payload_json(
     Ok(ServeDispatchPayload {
         payload,
         advisory_delivery,
+    })
+}
+
+fn serve_context_options(
+    request: &ServeHttpRequest,
+    workspace_path: PathBuf,
+) -> Result<ContextPackOptions, DomainError> {
+    let endpoint = "/v1/context";
+    validate_serve_retrieval_query(request, endpoint, "task", SERVE_CONTEXT_QUERY_PARAMS)?;
+    let retrieval = ServeRetrievalOptions::parse(request, endpoint)?;
+    let profile = optional_single_query_value(request, "profile", endpoint)?
+        .map(|raw| {
+            crate::pack::ContextPackProfile::parse(&raw).ok_or_else(|| {
+                serve_usage_error(
+                    "/v1/context query parameter `profile` must be compact, balanced, grounding, orientation, thorough, or submodular.",
+                )
+            })
+        })
+        .transpose()?;
+    let task_paths = request.query.get("taskPath").cloned().unwrap_or_default();
+    if task_paths
+        .iter()
+        .any(|value| is_effectively_empty_query_value(value))
+    {
+        return Err(serve_usage_error(
+            "/v1/context query parameter `taskPath` must contain a non-empty literal path.",
+        ));
+    }
+    // The core owns containment, path normalization, and the bounded task-path
+    // contract. Keep literal paths intact rather than interpreting them as globs.
+    Ok(ContextPackOptions {
+        bead_id: None,
+        task_paths,
+        workspace_path,
+        database_path: None,
+        index_dir: None,
+        query: require_single_query_value(request, "task", endpoint)?,
+        speed: retrieval.speed,
+        source_mode: retrieval.source_mode,
+        strict_source_mode: retrieval.strict_source_mode,
+        filters: QueryFilters::default(),
+        profile,
+        max_tokens: optional_positive_query_u32(request, "maxTokens", endpoint)?,
+        candidate_pool: optional_positive_query_u32(request, "candidatePool", endpoint)?,
+        max_results: None,
+        include_tombstoned: false,
+        as_of: retrieval.as_of,
+        include_expired: retrieval.include_expired,
+        include_future: retrieval.include_future,
+        include_stale: retrieval.include_stale,
+        relevance_floor: retrieval.relevance_floor,
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: retrieval.memory_scope,
+        strict_scope: retrieval.strict_scope,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: 0,
+        task_lens: None,
+        require_fresh_sentinels: optional_query_bool(request, "requireFreshSentinels", endpoint)?,
+        output_options: ContextPackOutputOptions::default(),
+        persist_pack: false,
+        baseline_write: None,
+        no_lod: false,
     })
 }
 
@@ -2354,6 +2397,199 @@ fn require_single_query_value(
             "{endpoint_path} requires a `{name}` query parameter."
         ))),
     }
+}
+
+// The parameter catalog also drives diagnostic CLI argv, so a recognized
+// constraint cannot disappear from the dispatch plan. `true` denotes a flag.
+const SERVE_RETRIEVAL_QUERY_PARAMS: &[(&str, &str, bool)] = &[
+    ("speed", "--speed", false),
+    ("sourceMode", "--source-mode", false),
+    ("strictSourceMode", "--strict-source-mode", true),
+    ("memoryScope", "--memory-scope", false),
+    ("strictScope", "--strict-scope", true),
+    ("asOf", "--as-of", false),
+    ("includeExpired", "--include-expired", true),
+    ("includeFuture", "--include-future", true),
+    ("includeStale", "--include-stale", true),
+    ("relevanceFloor", "--relevance-floor", false),
+];
+
+const SERVE_SEARCH_QUERY_PARAMS: &[(&str, &str, bool)] = &[
+    ("limit", "--limit", false),
+    ("explain", "--explain", true),
+    ("includeTombstoned", "--include-tombstoned", true),
+    ("dedupe", "--dedupe", false),
+];
+
+const SERVE_CONTEXT_QUERY_PARAMS: &[(&str, &str, bool)] = &[
+    ("maxTokens", "--max-tokens", false),
+    ("candidatePool", "--candidate-pool", false),
+    ("profile", "--profile", false),
+    ("taskPath", "--task-path", false),
+    ("requireFreshSentinels", "--require-fresh-sentinels", true),
+];
+
+fn validate_serve_retrieval_query(
+    request: &ServeHttpRequest,
+    endpoint: &str,
+    query_name: &str,
+    parameters: &[(&str, &str, bool)],
+) -> Result<(), DomainError> {
+    for name in request.query.keys() {
+        if name != query_name
+            && !SERVE_RETRIEVAL_QUERY_PARAMS
+                .iter()
+                .chain(parameters)
+                .any(|(known, _, _)| name.as_str() == *known)
+        {
+            return Err(serve_usage_error(format!(
+                "{endpoint} has an unsupported query parameter; use the documented retrieval controls."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn serve_retrieval_cli_argv(
+    request: &ServeHttpRequest,
+    command: &str,
+    query: String,
+) -> Vec<String> {
+    let mut argv = vec!["ee".to_owned(), command.to_owned(), "--json".to_owned()];
+    if request.endpoint == ServeEndpoint::Context {
+        argv.push("--read-only".to_owned());
+    }
+    let parameters = if request.endpoint == ServeEndpoint::Search {
+        SERVE_SEARCH_QUERY_PARAMS
+    } else {
+        SERVE_CONTEXT_QUERY_PARAMS
+    };
+    for (name, flag, is_bool) in SERVE_RETRIEVAL_QUERY_PARAMS.iter().chain(parameters) {
+        if let Some(values) = request.query.get(*name) {
+            for value in values {
+                if *is_bool {
+                    if value == "true" {
+                        argv.push((*flag).to_owned());
+                    }
+                } else {
+                    // An equals sign keeps a literal value beginning with `-`
+                    // from becoming a second option when the plan is replayed.
+                    argv.push(format!("{flag}={value}"));
+                }
+            }
+        }
+    }
+    argv.push("--".to_owned());
+    argv.push(query);
+    argv
+}
+
+struct ServeRetrievalOptions {
+    speed: crate::search::SpeedMode,
+    source_mode: SearchSourceMode,
+    strict_source_mode: bool,
+    memory_scope: MemoryScope,
+    strict_scope: bool,
+    as_of: Option<chrono::DateTime<Utc>>,
+    include_expired: bool,
+    include_future: bool,
+    include_stale: bool,
+    relevance_floor: Option<f32>,
+}
+
+impl ServeRetrievalOptions {
+    fn parse(request: &ServeHttpRequest, endpoint: &str) -> Result<Self, DomainError> {
+        let speed = optional_single_query_value(request, "speed", endpoint)?
+            .map(|raw| {
+                raw.parse::<crate::search::SpeedMode>().map_err(|error| {
+                    serve_usage_error(format!("{endpoint} query parameter `speed`: {error}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let source_mode = optional_single_query_value(request, "sourceMode", endpoint)?
+            .map(|raw| {
+                serde_json::from_value::<SearchSourceMode>(JsonValue::String(raw)).map_err(|_| {
+                    serve_usage_error(format!(
+                        "{endpoint} query parameter `sourceMode` must be lexical_only, semantic_only, or hybrid."
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let memory_scope = optional_single_query_value(request, "memoryScope", endpoint)?
+            .map(|raw| {
+                MemoryScope::parse(&raw).ok_or_else(|| {
+                    serve_usage_error(format!(
+                        "{endpoint} query parameter `memoryScope` must be self, team, global, workspace, verified, or swarm."
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let as_of = optional_single_query_value(request, "asOf", endpoint)?
+            .map(|raw| {
+                chrono::DateTime::parse_from_rfc3339(&raw)
+                    .map(|value| value.with_timezone(&Utc))
+                    .map_err(|_| {
+                        serve_usage_error(format!(
+                            "{endpoint} query parameter `asOf` must be an RFC3339 timestamp."
+                        ))
+                    })
+            })
+            .transpose()?;
+        let relevance_floor = optional_single_query_value(request, "relevanceFloor", endpoint)?
+            .map(|raw| match raw.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Ok(value),
+                _ => Err(serve_usage_error(format!(
+                    "{endpoint} query parameter `relevanceFloor` must be a finite number between 0 and 1."
+                ))),
+            })
+            .transpose()?;
+        Ok(Self {
+            speed,
+            source_mode,
+            strict_source_mode: optional_query_bool(request, "strictSourceMode", endpoint)?,
+            memory_scope,
+            strict_scope: optional_query_bool(request, "strictScope", endpoint)?,
+            as_of,
+            include_expired: optional_query_bool(request, "includeExpired", endpoint)?,
+            include_future: optional_query_bool(request, "includeFuture", endpoint)?,
+            include_stale: optional_query_bool(request, "includeStale", endpoint)?,
+            relevance_floor,
+        })
+    }
+}
+
+fn optional_query_bool(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint: &str,
+) -> Result<bool, DomainError> {
+    optional_single_query_value(request, name, endpoint)?
+        .map(|raw| {
+            raw.parse::<bool>().map_err(|_| {
+                serve_usage_error(format!(
+                    "{endpoint} query parameter `{name}` must be true or false."
+                ))
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+}
+
+fn optional_positive_query_u32(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint: &str,
+) -> Result<Option<u32>, DomainError> {
+    let value = optional_query_u32(request, name, endpoint)?;
+    if value == Some(0) {
+        return Err(serve_usage_error(format!(
+            "{endpoint} query parameter `{name}` must be greater than zero."
+        )));
+    }
+    Ok(value)
 }
 
 fn optional_single_query_value(
@@ -4149,7 +4385,7 @@ mod tests {
         )?;
         ensure(
             healthy.cli_argv,
-            argv(&["ee", "search", "release ci", "--json"]),
+            argv(&["ee", "search", "--json", "--", "release ci"]),
             "legitimate non-empty query argv",
         )
     }
@@ -4169,7 +4405,7 @@ mod tests {
         ensure(search.handler_surface, "cli.search", "search handler")?;
         ensure(
             search.cli_argv,
-            argv(&["ee", "search", "release check", "--json"]),
+            argv(&["ee", "search", "--json", "--", "release check"]),
             "search argv",
         )?;
 
@@ -4179,7 +4415,9 @@ mod tests {
         ensure(context.handler_surface, "cli.pack", "context handler")?;
         ensure(
             context.cli_argv,
-            argv(&["ee", "pack", "prepare release", "--json"]),
+            argv(&[
+                "ee", "pack", "--json", "--read-only", "--", "prepare release",
+            ]),
             "context argv",
         )?;
 
@@ -4585,6 +4823,344 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn serve_retrieval_controls_reach_core_options_and_dispatch_plan() -> TestResult {
+        use clap::Parser;
+
+        let request = parse_request(concat!(
+            "GET /v1/search?q=release&limit=3&speed=instant&sourceMode=lexical_only",
+            "&strictSourceMode=true&memoryScope=verified&strictScope=true",
+            "&asOf=2030-05-01T12%3A30%3A00%2B02%3A00&includeExpired=true",
+            "&includeFuture=true&includeStale=true&includeTombstoned=true",
+            "&relevanceFloor=0.25&dedupe=mi&explain=true HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n\r\n",
+        ))?;
+        let options = serve_search_options(&request, PathBuf::from("/workspace"))
+            .map_err(|error| error.to_string())?;
+        ensure(options.limit, 3, "HTTP search limit")?;
+        ensure(options.speed, crate::search::SpeedMode::Instant, "HTTP speed")?;
+        ensure(
+            options.source_mode,
+            SearchSourceMode::LexicalOnly,
+            "HTTP source",
+        )?;
+        ensure(options.memory_scope, MemoryScope::Verified, "HTTP scope")?;
+        ensure(options.relevance_floor, Some(0.25), "HTTP relevance floor")?;
+        ensure(
+            options.dedup_mode,
+            SearchDedupMode::MutualInformation,
+            "HTTP dedupe",
+        )?;
+        ensure(
+            options.as_of.map(|value| value.to_rfc3339()),
+            Some("2030-05-01T10:30:00+00:00".to_owned()),
+            "HTTP as-of offset",
+        )?;
+        assert!(options.strict_scope && options.strict_source_mode && options.explain);
+        assert!(options.include_expired && options.include_future && options.include_stale);
+        assert!(options.include_tombstoned);
+        let plan = serve_dispatch_plan(&request).map_err(|error| error.to_string())?;
+        for flag in [
+            "--memory-scope=verified",
+            "--strict-scope",
+            "--dedupe=mi",
+            "--limit=3",
+        ] {
+            assert!(plan.cli_argv.iter().any(|value| value == flag), "{plan:?}");
+        }
+
+        let request = parse_request(concat!(
+            "GET /v1/context?task=release&memoryScope=workspace&strictScope=false",
+            "&sourceMode=lexical_only&speed=instant&maxTokens=1200&candidatePool=20",
+            "&profile=compact&requireFreshSentinels=true&taskPath=src%2Fa%2Cb.rs",
+            "&taskPath=tests%2Fcaf%C3%A9+notes.rs&includeExpired=true",
+            "&asOf=2030-05-01T00%3A00%3A00Z HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        ))?;
+        let options = serve_context_options(&request, PathBuf::from("/workspace"))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            options.memory_scope,
+            MemoryScope::Workspace,
+            "HTTP pack scope",
+        )?;
+        ensure(options.max_tokens, Some(1200), "HTTP pack budget")?;
+        ensure(options.candidate_pool, Some(20), "HTTP pack candidate pool")?;
+        ensure(
+            options.profile,
+            Some(crate::pack::ContextPackProfile::Compact),
+            "HTTP profile",
+        )?;
+        ensure(
+            options.task_paths,
+            argv(&["src/a,b.rs", "tests/café notes.rs"]),
+            "HTTP literal target paths",
+        )?;
+        assert!(options.require_fresh_sentinels && options.include_expired);
+        assert!(!options.strict_scope && !options.persist_pack);
+        assert!(options.baseline_write.is_none());
+        let plan = serve_dispatch_plan(&request).map_err(|error| error.to_string())?;
+        assert!(plan.cli_argv.contains(&"--task-path=src/a,b.rs".to_owned()));
+        assert!(plan.cli_argv.contains(&"--task-path=tests/café notes.rs".to_owned()));
+        assert!(!plan.cli_argv.contains(&"--strict-scope".to_owned()));
+        for target in [
+            "/v1/search?q=--memory-scope%3Dswarm&memoryScope=verified",
+            "/v1/context?task=replay&memoryScope=verified",
+        ] {
+            let raw = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            let plan = plan_request(&raw)?;
+            let cli = crate::cli::Cli::try_parse_from(plan.cli_argv)
+                .map_err(|error| error.to_string())?;
+            match cli.command {
+                Some(crate::cli::Command::Search(args)) => {
+                    assert_eq!(args.query.as_deref(), Some("--memory-scope=swarm"));
+                    assert_eq!(args.memory_scope, MemoryScope::Verified);
+                }
+                Some(crate::cli::Command::Pack(args)) => {
+                    assert_eq!(args.query.as_deref(), Some("replay"));
+                    assert!(args.command.is_none() && args.read_only);
+                    assert_eq!(args.memory_scope, Some(MemoryScope::Verified));
+                }
+                other => {
+                    return Err(format!("retrieval plan selected another command: {other:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serve_retrieval_rejects_ambiguous_constraints_before_store_access() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let _current_dir = enter_current_dir(workspace.path())?;
+        let token = "01234567890123456789012345678901";
+        for target in [
+            "/v1/search?q=release&memoryScope=typo",
+            "/v1/search?q=release&memoryScope=verified&memoryScope=swarm",
+            "/v1/search?q=release&strictScope=yes",
+            "/v1/search?q=release&sourceMode=unsupported",
+            "/v1/search?q=release&strictSourceMode=1",
+            "/v1/search?q=release&asOf=yesterday",
+            "/v1/search?q=release&includeFuture=null",
+            "/v1/search?q=release&relevanceFloor=NaN",
+            "/v1/search?q=release&relevanceFloor=1.1",
+            "/v1/search?q=release&limit=0",
+            "/v1/search?q=release&limit=4294967296",
+            "/v1/search?q=release&dedupe=unknown",
+            "/v1/search?q=release&memory_scope=verified",
+            "/v1/context?task=release&maxTokens=0",
+            "/v1/context?task=release&candidatePool=-1",
+            "/v1/context?task=release&profile=unknown",
+            "/v1/context?task=release&taskPath=src%2Flib.rs&taskPath=+",
+            "/v1/context?task=release&taskPath=..%2Fprivate.rs",
+            "/v1/context?task=release&taskPath=src%2F*.rs",
+            "/v1/context?task=release&requireFreshSentinels=false&requireFreshSentinels=true",
+            "/v1/context?task=release&changedSymbols=unsupported",
+        ] {
+            let raw = format!(
+                "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            );
+            let wire = render_serve_transport_exchange(
+                "req-invalid-constraint",
+                raw.as_bytes(),
+                &ServeLimits::default(),
+                Some(token),
+                0,
+            );
+            assert!(
+                wire.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{target}: {wire}"
+            );
+            assert!(!workspace.path().join(".ee").exists(), "{target}");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn serve_retrieval_applies_scope_time_and_literal_rule_targets() -> TestResult {
+        use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+        use crate::db::{
+            CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
+        };
+        use std::collections::BTreeSet;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = workspace
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = root.join(".ee/ee.db");
+        for directory in [".ee", "src", "tests"] {
+            fs::create_dir_all(root.join(directory)).map_err(|error| error.to_string())?;
+        }
+        let workspace_id = crate::core::workspace::stable_workspace_id(&root);
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: root.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let memory_ids = [781, 782, 783].map(|number| format!("mem_{number:026}"));
+        for (id, content, trust, valid_from) in [
+            (
+                &memory_ids[0],
+                "Quasar release verification checks detached artifact signatures.",
+                "human_explicit",
+                None,
+            ),
+            (
+                &memory_ids[1],
+                "Quasar release investigation suspects truncation by the upload gateway.",
+                "agent_assertion",
+                None,
+            ),
+            (
+                &memory_ids[2],
+                "Quasar release distribution will migrate to the signed OCI registry.",
+                "human_explicit",
+                Some("2031-01-01T00:00:00Z"),
+            ),
+        ] {
+            db.insert_memory_with_timestamps(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://serve-retrieval-controls".to_owned()),
+                    trust_class: trust.to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: valid_from.map(str::to_owned),
+                    valid_to: None,
+                },
+                "2020-01-01T00:00:00Z",
+                "2020-01-01T00:00:00Z",
+                id,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let rule_ids = [781, 782].map(|number| format!("rule_{number:026}"));
+        for (id, directory) in [(&rule_ids[0], "src"), (&rule_ids[1], "tests")] {
+            db.insert_procedural_rule(
+                id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: format!("For quasar release changes in {directory}, verify detached signatures before publication."),
+                    confidence: 0.95,
+                    utility: 0.9,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "directory".to_owned(),
+                    scope_pattern: Some(directory.to_owned()),
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: vec![memory_ids[0].clone()],
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        db.close().map_err(|error| error.to_string())?;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let rebuilt = rebuild_index(&IndexRebuildOptions {
+            workspace_path: root.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(rebuilt.status, IndexRebuildStatus::Success, "HTTP fixture index")?;
+        let before = fs::read(&database).map_err(|error| error.to_string())?;
+        let _current_dir = enter_current_dir(&root)?;
+        let token = "01234567890123456789012345678901";
+        let fetch = |target: &str| -> Result<JsonValue, String> {
+            let raw = format!(
+                "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            );
+            let wire = render_serve_transport_exchange(
+                "req-scoped-retrieval",
+                raw.as_bytes(),
+                &ServeLimits::default(),
+                Some(token),
+                0,
+            );
+            if !wire.starts_with("HTTP/1.1 200 OK\r\n") {
+                return Err(format!("{target}: {wire}"));
+            }
+            let (_, body) = split_http_response(&wire)?;
+            let envelope: JsonValue =
+                serde_json::from_str(body).map_err(|error| error.to_string())?;
+            Ok(envelope["response"]["payload"].clone())
+        };
+        let search = "/v1/search?q=quasar+release&speed=instant&sourceMode=lexical_only&strictSourceMode=true&relevanceFloor=0&asOf=2030-01-01T00%3A00%3A00Z";
+        for (controls, expected) in [
+            ("&memoryScope=verified", vec![memory_ids[0].clone()]),
+            (
+                "&memoryScope=workspace",
+                vec![memory_ids[0].clone(), memory_ids[1].clone()],
+            ),
+            (
+                "&memoryScope=verified&includeFuture=true",
+                vec![memory_ids[0].clone(), memory_ids[2].clone()],
+            ),
+        ] {
+            let payload = fetch(&format!("{search}{controls}"))?;
+            let actual: BTreeSet<_> = payload["data"]["results"]
+                .as_array()
+                .ok_or_else(|| format!("missing search results: {payload}"))?
+                .iter()
+                .filter_map(|hit| hit["docId"].as_str())
+                .filter(|id| id.starts_with("mem_"))
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                actual,
+                expected.into_iter().collect::<BTreeSet<_>>(),
+                "{controls}: {payload}"
+            );
+            assert_eq!(
+                payload["data"]["metrics"]["sourceModeApplied"],
+                "lexical_only"
+            );
+        }
+        let context = "/v1/context?task=quasar+release&speed=instant&sourceMode=lexical_only&memoryScope=verified&relevanceFloor=0&maxTokens=4000";
+        for (targets, expected) in [
+            ("&taskPath=src%2Fa%2Cb.rs", vec![rule_ids[0].clone()]),
+            ("&taskPath=tests%2Fcaf%C3%A9+notes.rs", vec![rule_ids[1].clone()]),
+            ("&taskPath=src-other%2Flib.rs", Vec::new()),
+            ("", Vec::new()),
+        ] {
+            let payload = fetch(&format!("{context}{targets}"))?;
+            let actual: BTreeSet<_> = payload["data"]["pack"]["items"]
+                .as_array()
+                .ok_or_else(|| format!("missing pack items: {payload}"))?
+                .iter()
+                .filter_map(|item| item["ruleId"].as_str())
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                actual,
+                expected.into_iter().collect::<BTreeSet<_>>(),
+                "{targets}: {payload}"
+            );
+        }
+        ensure(
+            fs::read(database).map_err(|error| error.to_string())?,
+            before,
+            "read-only HTTP source",
+        )
     }
 
     #[test]

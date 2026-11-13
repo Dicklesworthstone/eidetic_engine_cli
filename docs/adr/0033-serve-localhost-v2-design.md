@@ -77,6 +77,48 @@ policy checks, audit metadata, and index-job reporting. Each additional write
 operation still needs its own design, policy checks, audit behavior, and parity
 tests before it can be accepted by this endpoint.
 
+### Retrieval Query Controls
+
+`/v1/search` and `/v1/context` address the server's current workspace and pass
+selection controls to the same core services as the CLI. Query parameter names
+are case-sensitive. Every parameter is a singleton except the repeatable
+`taskPath`; unknown names, duplicate singleton values, blank values, invalid
+types, and invalid enum values return HTTP 400 instead of silently discarding a
+constraint. Boolean values must be `true` or `false`.
+
+Both endpoints accept:
+
+| Parameter | Values and behavior |
+| --- | --- |
+| `speed` | `instant`, `default`, or `quality`; omitted keeps `default`. |
+| `sourceMode` | `lexical_only`, `semantic_only`, or `hybrid`; omitted keeps `hybrid`. |
+| `strictSourceMode` | Preserve the core refusal when the requested source is unavailable. |
+| `memoryScope` | `self`, `team`, `global`, `workspace`, `verified`, or `swarm`; omitted keeps `swarm`. |
+| `strictScope` | Preserve the core all-results-withheld behavior when relevant evidence falls outside the requested scope. |
+| `asOf` | RFC3339 reference time, normalized to UTC; URL-encode a positive offset's `+` as `%2B`. |
+| `includeExpired`, `includeFuture`, `includeStale` | Opt into the corresponding temporal validity classes. |
+| `relevanceFloor` | Finite number in `[0, 1]`; zero disables the cutoff. |
+
+Search additionally accepts `limit` (positive unsigned 32-bit integer, default
+10), `explain`, `includeTombstoned`, and `dedupe` (`doc_id` or `mi`). Context
+additionally accepts `maxTokens` and `candidatePool` (positive unsigned 32-bit
+integers), `profile` (`compact`, `balanced`, `grounding`, `orientation`,
+`thorough`, or `submodular`), `requireFreshSentinels`, and repeated `taskPath`
+values. Omitted budgets and profile retain the core configuration defaults.
+
+Each `taskPath` is one literal workspace-relative path, including any spaces,
+commas, or Unicode characters after URL decoding. For example,
+`/v1/context?task=release&memoryScope=verified&taskPath=src%2Fa%2Cb.rs&taskPath=tests%2Fsigning.rs`
+selects guidance for two files. The core validates count and length limits,
+traversal, globs, private paths, and symlink containment before retrieval. A
+query mentioning a path does not replace an explicit `taskPath`.
+
+HTTP context assembly remains read-only: it does not persist packs, baselines,
+or cache entries. Diagnostic CLI argv includes `--read-only` and places the
+literal query after `--`, so an option-like query or a word such as `replay`
+cannot change the command when the plan is replayed. Core-only controls that
+have no canonical pack CLI equivalent are rejected by this HTTP contract.
+
 ## Security Policy
 
 The server is local by default and hostile-by-default toward network exposure.
