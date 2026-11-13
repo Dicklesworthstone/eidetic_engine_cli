@@ -5736,6 +5736,8 @@ fn execute_daemon_txn_batch(
 #[derive(Clone, Debug, PartialEq)]
 struct DaemonContextParams {
     query: String,
+    bead_id: Option<String>,
+    task_paths: Vec<String>,
     workspace_path: PathBuf,
     database_path: Option<PathBuf>,
     index_dir: Option<PathBuf>,
@@ -5746,6 +5748,20 @@ struct DaemonContextParams {
     speed: SpeedMode,
     source_mode: SearchSourceMode,
     strict_source_mode: bool,
+    memory_scope: MemoryScope,
+    strict_scope: bool,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+    include_tombstoned: bool,
+    include_expired: bool,
+    include_future: bool,
+    include_stale: bool,
+    require_fresh_sentinels: bool,
+    relevance_floor: Option<f32>,
+    ppr_weight: Option<f32>,
+    changed_symbols: Vec<String>,
+    changed_symbols_from_git: bool,
+    redaction_level: RedactionLevel,
+    no_lod: bool,
     pack_profile: crate::core::context::ContextPackOutputProfile,
     resource_profile: PackResourceProfile,
     no_coverage_fill: Option<bool>,
@@ -5764,6 +5780,63 @@ impl DaemonContextParams {
         let object = value
             .as_object()
             .ok_or_else(|| "`params` must be a JSON object for ee.daemon.context".to_string())?;
+        // An ignored scope/freshness control changes which evidence may be
+        // disclosed. Reject unknown or ambiguous controls before any store,
+        // scheduler, model or pack work, including conflicting aliases.
+        const FIELD_GROUPS: &[&[&str]] = &[
+            &["task", "query"],
+            &["beadId", "bead_id"],
+            &["taskPaths", "task_paths"],
+            &["workspacePath", "workspace_path", "workspace"],
+            &["databasePath", "database_path", "database"],
+            &["indexDir", "index_dir"],
+            &["maxTokens", "max_tokens"],
+            &["candidatePool", "candidate_pool"],
+            &["maxResults", "max_results"],
+            &["profile"],
+            &["speed"],
+            &["sourceMode", "source_mode"],
+            &["strictSourceMode", "strict_source_mode"],
+            &["memoryScope", "memory_scope"],
+            &["strictScope", "strict_scope"],
+            &["asOf", "as_of"],
+            &["includeTombstoned", "include_tombstoned"],
+            &["includeExpired", "include_expired"],
+            &["includeFuture", "include_future"],
+            &["includeStale", "include_stale"],
+            &["requireFreshSentinels", "require_fresh_sentinels"],
+            &["relevanceFloor", "relevance_floor"],
+            &["pprWeight", "ppr_weight"],
+            &["changedSymbols", "changed_symbols"],
+            &["changedSymbolsFromGit", "changed_symbols_from_git"],
+            &["redaction", "redactionLevel", "redaction_level"],
+            &["noLod", "no_lod"],
+            &["packProfile", "pack_profile"],
+            &["resourceProfile", "resource_profile"],
+            &["noCoverageFill", "no_coverage_fill"],
+            &["noRenderedText", "no_rendered_text"],
+            &["noSkipped", "no_skipped"],
+            &["noMeta", "no_meta"],
+            &[
+                "includeNonAffectingDegradations",
+                "include_non_affecting_degradations",
+            ],
+            &["explain"],
+            &["noPackDna", "no_pack_dna"],
+            &["readOnly", "read_only"],
+            &["timeoutMs", "timeout_ms", "deadlineMs", "deadline_ms"],
+        ];
+        if let Some(field) = object
+            .keys()
+            .find(|field| !FIELD_GROUPS.iter().any(|keys| keys.contains(&field.as_str())))
+        {
+            return Err(format!("unknown ee.daemon.context field `{field}`"));
+        }
+        for keys in FIELD_GROUPS {
+            if keys.iter().filter(|key| object.contains_key(**key)).count() > 1 {
+                return Err(format!("field `{}` must use only one alias", keys[0]));
+            }
+        }
         let query = required_string_any(object, &["task", "query"])?;
         let workspace_path =
             required_path_any(object, &["workspacePath", "workspace_path", "workspace"])?;
@@ -5781,6 +5854,37 @@ impl DaemonContextParams {
             .map(|value| parse_daemon_source_mode(&value))
             .transpose()?
             .unwrap_or_default();
+        let memory_scope =
+            context_optional_string_any(object, &["memoryScope", "memory_scope"])?
+                .map(|value| {
+                    MemoryScope::parse(&value).ok_or_else(|| {
+                        "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
+                            .to_owned()
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
+        let as_of = context_optional_string_any(object, &["asOf", "as_of"])?
+            .map(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+                    .map_err(|_| "field `asOf` must be an RFC3339 timestamp".to_owned())
+            })
+            .transpose()?;
+        let redaction_level = context_optional_string_any(
+            object,
+            &["redaction", "redactionLevel", "redaction_level"],
+        )?
+        .map(|value| {
+            serde_json::from_value::<RedactionLevel>(serde_json::Value::String(value)).map_err(
+                |_| {
+                    "field `redaction` must be none, minimal, standard, strict, paranoid, or full"
+                        .to_owned()
+                },
+            )
+        })
+        .transpose()?
+        .unwrap_or(RedactionLevel::Minimal);
         let pack_profile = optional_string_any(object, &["packProfile", "pack_profile"])?
             .map(|value| parse_daemon_pack_output_profile(&value))
             .transpose()?
@@ -5797,6 +5901,8 @@ impl DaemonContextParams {
 
         Ok(Self {
             query,
+            bead_id: context_optional_string_any(object, &["beadId", "bead_id"])?,
+            task_paths: context_string_list_any(object, &["taskPaths", "task_paths"])?,
             workspace_path,
             database_path: optional_path_any(
                 object,
@@ -5814,6 +5920,42 @@ impl DaemonContextParams {
                 &["strictSourceMode", "strict_source_mode"],
             )?
             .unwrap_or(false),
+            memory_scope,
+            strict_scope: optional_bool_any(object, &["strictScope", "strict_scope"])?
+                .unwrap_or(false),
+            as_of,
+            include_tombstoned: optional_bool_any(
+                object,
+                &["includeTombstoned", "include_tombstoned"],
+            )?
+            .unwrap_or(false),
+            include_expired: optional_bool_any(object, &["includeExpired", "include_expired"])?
+                .unwrap_or(false),
+            include_future: optional_bool_any(object, &["includeFuture", "include_future"])?
+                .unwrap_or(false),
+            include_stale: optional_bool_any(object, &["includeStale", "include_stale"])?
+                .unwrap_or(false),
+            require_fresh_sentinels: optional_bool_any(
+                object,
+                &["requireFreshSentinels", "require_fresh_sentinels"],
+            )?
+            .unwrap_or(false),
+            relevance_floor: context_unit_interval_any(
+                object,
+                &["relevanceFloor", "relevance_floor"],
+            )?,
+            ppr_weight: context_unit_interval_any(object, &["pprWeight", "ppr_weight"])?,
+            changed_symbols: context_string_list_any(
+                object,
+                &["changedSymbols", "changed_symbols"],
+            )?,
+            changed_symbols_from_git: optional_bool_any(
+                object,
+                &["changedSymbolsFromGit", "changed_symbols_from_git"],
+            )?
+            .unwrap_or(false),
+            redaction_level,
+            no_lod: optional_bool_any(object, &["noLod", "no_lod"])?.unwrap_or(false),
             pack_profile,
             resource_profile,
             no_coverage_fill: optional_bool_any(object, &["noCoverageFill", "no_coverage_fill"])?,
@@ -5870,9 +6012,12 @@ impl DaemonContextParams {
             .as_deref()
             .map(|path| canonical_contained_path(&workspace_path, path, "indexDir"))
             .transpose()?;
+        let task_paths =
+            crate::core::context::normalize_context_task_paths(&workspace_path, &self.task_paths)
+                .map_err(|error| error.to_string())?;
         Ok(ContextPackOptions {
-            bead_id: None,
-            task_paths: Vec::new(),
+            bead_id: self.bead_id.clone(),
+            task_paths,
             workspace_path,
             database_path,
             index_dir,
@@ -5885,19 +6030,19 @@ impl DaemonContextParams {
             max_tokens: self.max_tokens,
             candidate_pool: self.candidate_pool,
             max_results: self.max_results,
-            include_tombstoned: false,
-            as_of: None,
-            include_expired: false,
-            include_future: false,
-            include_stale: false,
-            require_fresh_sentinels: false,
-            relevance_floor: None,
-            redaction_level: RedactionLevel::Minimal,
-            memory_scope: MemoryScope::Swarm,
-            strict_scope: false,
-            ppr_weight: None,
-            changed_symbols: Vec::new(),
-            changed_symbols_from_git: false,
+            include_tombstoned: self.include_tombstoned,
+            as_of: self.as_of,
+            include_expired: self.include_expired,
+            include_future: self.include_future,
+            include_stale: self.include_stale,
+            require_fresh_sentinels: self.require_fresh_sentinels,
+            relevance_floor: self.relevance_floor,
+            redaction_level: self.redaction_level,
+            memory_scope: self.memory_scope,
+            strict_scope: self.strict_scope,
+            ppr_weight: self.ppr_weight,
+            changed_symbols: self.changed_symbols.clone(),
+            changed_symbols_from_git: self.changed_symbols_from_git,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -5905,11 +6050,68 @@ impl DaemonContextParams {
             output_options: self.output_options(),
             persist_pack: !self.read_only,
             baseline_write: None,
-            // bd-1n0np.5.8: the daemon does not expose `--no-lod`; keep LOD
-            // tiering on (the default), matching the one-shot CLI default.
-            no_lod: false,
+            no_lod: self.no_lod,
         })
     }
+}
+
+/// New selection controls must be explicitly typed; null cannot silently
+/// widen a requested scope or remove a temporal bound. Older optional display
+/// strings retain their established null-as-omitted behavior.
+fn context_optional_string_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<String>, String> {
+    if let Some(key) = keys.iter().find(|key| object.contains_key(**key)) {
+        let value = object[*key]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("field `{key}` must be a nonblank string"))?;
+        return Ok(Some(value.to_owned()));
+    }
+    Ok(None)
+}
+
+fn context_string_list_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Vec<String>, String> {
+    let Some(key) = keys.iter().find(|key| object.contains_key(**key)) else {
+        return Ok(Vec::new());
+    };
+    let invalid = || {
+        format!("field `{key}` must be a nonblank string or an array of nonblank strings")
+    };
+    match &object[*key] {
+        serde_json::Value::String(value) if !value.trim().is_empty() => Ok(vec![value.clone()]),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(&invalid)
+            })
+            .collect(),
+        _ => Err(invalid()),
+    }
+}
+
+fn context_unit_interval_any(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<f32>, String> {
+    let Some(key) = keys.iter().find(|key| object.contains_key(**key)) else {
+        return Ok(None);
+    };
+    let value = object[*key]
+        .as_f64()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .ok_or_else(|| format!("field `{key}` must be a number between 0 and 1"))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let value = value as f32;
+    Ok(Some(value))
 }
 
 fn dispatch_context(
@@ -11160,6 +11362,419 @@ mod tests {
                 "null must match omission for {field}"
             );
         }
+    }
+
+    #[test]
+    fn daemon_context_forwards_scope_temporal_and_task_controls_with_aliases() {
+        let workspace = private_tempdir();
+        let workspace_path = workspace.path().canonicalize().expect("canonical workspace");
+        let workspace_id = workspace_path.to_string_lossy().into_owned();
+        let value = serde_json::json!({
+            "workspacePath": workspace_path,
+            "task": "Verify release provenance",
+            "beadId": "bd-release",
+            "taskPaths": ["src/signing.rs", "src/release.rs", "src/release.rs"],
+            "memoryScope": "verified",
+            "strictScope": true,
+            "sourceMode": "lexical_only",
+            "strictSourceMode": true,
+            "asOf": "2030-01-01T02:00:00+02:00",
+            "includeTombstoned": true,
+            "includeExpired": true,
+            "includeFuture": true,
+            "includeStale": true,
+            "requireFreshSentinels": true,
+            "relevanceFloor": 0.0,
+            "pprWeight": 0.25,
+            "changedSymbols": ["src/signing.rs::verify", "validate_release"],
+            "changedSymbolsFromGit": true,
+            "redaction": "strict",
+            "noLod": true,
+            "readOnly": true,
+        });
+        let params = DaemonContextParams::from_value(&value).expect("typed context controls");
+        let options = params.context_options(&workspace_id).expect("authorized controls");
+        assert_eq!(options.bead_id.as_deref(), Some("bd-release"));
+        assert_eq!(options.task_paths, ["src/release.rs", "src/signing.rs"]);
+        assert_eq!(options.memory_scope, MemoryScope::Verified);
+        assert!(options.strict_scope);
+        assert_eq!(options.source_mode, SearchSourceMode::LexicalOnly);
+        assert!(options.strict_source_mode);
+        assert_eq!(
+            options.as_of.expect("temporal bound").to_rfc3339(),
+            "2030-01-01T00:00:00+00:00"
+        );
+        assert!(options.include_tombstoned);
+        assert!(options.include_expired);
+        assert!(options.include_future);
+        assert!(options.include_stale);
+        assert!(options.require_fresh_sentinels);
+        assert_eq!(options.relevance_floor, Some(0.0));
+        assert_eq!(options.ppr_weight, Some(0.25));
+        assert_eq!(
+            options.changed_symbols,
+            ["src/signing.rs::verify", "validate_release"]
+        );
+        assert!(options.changed_symbols_from_git);
+        assert_eq!(options.redaction_level, RedactionLevel::Strict);
+        assert!(options.no_lod);
+        assert!(!options.persist_pack);
+
+        for (canonical, alias) in [
+            ("beadId", "bead_id"),
+            ("taskPaths", "task_paths"),
+            ("memoryScope", "memory_scope"),
+            ("strictScope", "strict_scope"),
+            ("sourceMode", "source_mode"),
+            ("strictSourceMode", "strict_source_mode"),
+            ("asOf", "as_of"),
+            ("includeTombstoned", "include_tombstoned"),
+            ("includeExpired", "include_expired"),
+            ("includeFuture", "include_future"),
+            ("includeStale", "include_stale"),
+            ("requireFreshSentinels", "require_fresh_sentinels"),
+            ("relevanceFloor", "relevance_floor"),
+            ("pprWeight", "ppr_weight"),
+            ("changedSymbols", "changed_symbols"),
+            ("changedSymbolsFromGit", "changed_symbols_from_git"),
+            ("redaction", "redactionLevel"),
+            ("redaction", "redaction_level"),
+            ("noLod", "no_lod"),
+        ] {
+            let mut aliased = value.clone();
+            let object = aliased.as_object_mut().expect("context object");
+            let field = object.remove(canonical).expect("canonical control");
+            object.insert(alias.to_owned(), field);
+            assert_eq!(
+                DaemonContextParams::from_value(&aliased).expect("supported alias"),
+                params,
+                "{alias} must carry the same core control"
+            );
+        }
+        let literal = DaemonContextParams::from_value(&serde_json::json!({
+            "workspacePath": workspace_path,
+            "task": "literal selectors",
+            "taskPaths": "src/path with spaces.rs",
+            "changedSymbols": "module::method with spaces",
+        }))
+        .expect("single literal selectors");
+        assert_eq!(literal.task_paths, ["src/path with spaces.rs"]);
+        assert_eq!(literal.changed_symbols, ["module::method with spaces"]);
+    }
+
+    #[test]
+    fn daemon_context_rejects_ambiguous_or_invalid_constraints_before_admission() {
+        let workspace = private_tempdir();
+        let workspace_path = workspace.path().canonicalize().expect("canonical workspace");
+        let policy = DaemonDispatchPolicy::for_workspace(workspace_path.display().to_string());
+        let shutdown = AtomicBool::new(false);
+        let mut invalid_controls = vec![
+            serde_json::json!({"memoryScope": "everywhere"}),
+            serde_json::json!({"memoryScope": null}),
+            serde_json::json!({"memoryScope": "verified", "memory_scope": "swarm"}),
+            serde_json::json!({"strictScope": "true"}),
+            serde_json::json!({"strictScope": null}),
+            serde_json::json!({"strictSourceMode": true, "strict_source_mode": false}),
+            serde_json::json!({"asOf": "2030-01-01"}),
+            serde_json::json!({"asOf": null}),
+            serde_json::json!({"asOf": true}),
+            serde_json::json!({"taskPaths": null}),
+            serde_json::json!({"taskPaths": ["src/main.rs", 1]}),
+            serde_json::json!({"taskPaths": [""]}),
+            serde_json::json!({"taskPaths": ["../outside.rs"]}),
+            serde_json::json!({"taskPaths": ["/tmp/outside.rs"]}),
+            serde_json::json!({"taskPaths": ["src/**/*.rs"]}),
+            serde_json::json!({"taskPaths": vec!["src/main.rs"; 65]}),
+            serde_json::json!({"changedSymbols": {"symbol": "verify"}}),
+            serde_json::json!({"changedSymbols": ["verify", null]}),
+            serde_json::json!({"changedSymbolsFromGit": 1}),
+            serde_json::json!({"relevanceFloor": -0.001}),
+            serde_json::json!({"relevanceFloor": "0.5"}),
+            serde_json::json!({"relevanceFloor": null}),
+            serde_json::json!({"pprWeight": 1.0000000001}),
+            serde_json::json!({"pprWeight": 1e100}),
+            serde_json::json!({"redaction": "invalid"}),
+            serde_json::json!({"redaction": null}),
+            serde_json::json!({"noLod": "false"}),
+            serde_json::json!({"memoryScpoe": "verified"}),
+            serde_json::json!({"filters": {"tags": ["private"]}}),
+        ];
+        for field in [
+            "includeTombstoned",
+            "includeExpired",
+            "includeFuture",
+            "includeStale",
+            "requireFreshSentinels",
+        ] {
+            let mut controls = serde_json::Map::new();
+            controls.insert(field.to_owned(), serde_json::Value::Null);
+            invalid_controls.push(serde_json::Value::Object(controls));
+        }
+        for controls in invalid_controls {
+            let mut params = serde_json::json!({
+                "workspacePath": workspace_path,
+                "task": "Reject invalid context before touching the store",
+            });
+            params
+                .as_object_mut()
+                .expect("context params")
+                .extend(controls.as_object().expect("control object").clone());
+            let mut request = DaemonRequest::new(
+                "req-invalid-context-control",
+                TEST_AGENT_ID,
+                METHOD_CONTEXT,
+                params,
+            );
+            request.workspace_id = Some(workspace_path.display().to_string());
+            let response = dispatch_context_with_admission(
+                &request,
+                &shutdown,
+                &policy,
+                false,
+                None,
+                |_, _, _, _| panic!("invalid controls reached admission: {controls}"),
+            );
+            let error = response.error.expect("reject invalid control");
+            assert_eq!(error.code, DAEMON_CONTEXT_PARAMS_INVALID_CODE, "{controls}");
+            assert!(response.result.is_none());
+            assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.agent_id, request.agent_id);
+            assert_eq!(response.workspace_id, request.workspace_id);
+        }
+        assert!(
+            fs::read_dir(&workspace_path)
+                .expect("inspect rejected context workspace")
+                .next()
+                .is_none(),
+            "invalid context controls must not create database/index/pack artifacts"
+        );
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_context_matches_core_scope_temporal_and_native_rule_admission() {
+        use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus};
+        use std::collections::BTreeSet;
+
+        const VERIFIED: &str = "mem_00000000000000000000005911";
+        const ASSERTED: &str = "mem_00000000000000000000005912";
+        const EXPIRED: &str = "mem_00000000000000000000005913";
+        const FUTURE: &str = "mem_00000000000000000000005914";
+        const RULE: &str = "rule_00000000000000000000005911";
+        const QUERY: &str = "quasar release";
+        const AS_OF: &str = "2030-01-01T00:00:00Z";
+
+        let fixture = DaemonRememberReportFixture::new();
+        fs::create_dir_all(fixture.workspace_path.join("src/signing"))
+            .expect("native rule directory");
+        let connection = crate::db::DbConnection::open_file(&fixture.database_path)
+            .expect("fixture connection");
+        for (id, content, trust, valid_from, valid_to) in [
+            (
+                VERIFIED,
+                "Quasar release validation uses detached artifact signatures from the release key.",
+                "human_explicit",
+                None,
+                None,
+            ),
+            (
+                ASSERTED,
+                "Quasar release investigation hypothesizes the old upload gateway truncates large payloads.",
+                "agent_assertion",
+                None,
+                None,
+            ),
+            (
+                EXPIRED,
+                "Quasar release migration previously required manual FTP upload to the legacy mirror.",
+                "human_explicit",
+                None,
+                Some("2029-01-01T00:00:00Z"),
+            ),
+            (
+                FUTURE,
+                "Quasar release distribution will move to signed OCI registries after platform approval.",
+                "human_explicit",
+                Some("2031-01-01T00:00:00Z"),
+                None,
+            ),
+        ] {
+            connection
+                .insert_memory_with_timestamps(
+                    id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: fixture.workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some("test://daemon-context-controls".to_owned()),
+                        trust_class: trust.to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: valid_from.map(str::to_owned),
+                        valid_to: valid_to.map(str::to_owned),
+                    },
+                    "2020-01-01T00:00:00Z",
+                    "2020-01-01T00:00:00Z",
+                    id,
+                )
+                .expect("fixture memory");
+        }
+        connection
+            .insert_procedural_rule(
+                RULE,
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    content: "For quasar release signing changes, compare both detached signatures before publishing artifacts.".to_owned(),
+                    confidence: 0.95,
+                    utility: 0.9,
+                    importance: 0.8,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "directory".to_owned(),
+                    scope_pattern: Some("src/signing".to_owned()),
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: vec![VERIFIED.to_owned()],
+                    tags: Vec::new(),
+                },
+            )
+            .expect("directory-scoped native rule");
+        connection.close().expect("close fixture writer");
+        let rebuilt = crate::core::index::rebuild_index(&IndexRebuildOptions {
+            workspace_path: fixture.workspace_path.clone(),
+            database_path: Some(fixture.database_path.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .expect("rebuild fixture index");
+        assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+        let database_before = fs::read(&fixture.database_path).expect("source before retrieval");
+
+        let base = serde_json::json!({
+            "workspacePath": fixture.workspace_path,
+            "databasePath": fixture.database_path,
+            "task": QUERY,
+            "sourceMode": "lexical_only",
+            "strictSourceMode": true,
+            "speed": "instant",
+            "candidatePool": 20,
+            "maxTokens": 4000,
+            "relevanceFloor": 0.0,
+            "noCoverageFill": true,
+            "noLod": true,
+            "readOnly": true,
+        });
+        let workspace_id = fixture.workspace_path.display().to_string();
+        let policy = DaemonDispatchPolicy::for_workspace(workspace_id.clone());
+        let shutdown = AtomicBool::new(false);
+        for (scope, include_temporal, task_paths, expected) in [
+            (MemoryScope::Workspace, false, Vec::new(), vec![VERIFIED, ASSERTED]),
+            (MemoryScope::Verified, false, Vec::new(), vec![VERIFIED]),
+            (
+                MemoryScope::Verified,
+                true,
+                vec!["src/signing/check.rs"],
+                vec![VERIFIED, EXPIRED, FUTURE, RULE],
+            ),
+        ] {
+            // Set the reference controls independently of daemon decoding so
+            // a dropped wire field cannot make two equally wrong packs pass.
+            let mut core_options = DaemonContextParams::from_value(&base)
+                .expect("base params")
+                .context_options(&workspace_id)
+                .expect("base options");
+            core_options.memory_scope = scope;
+            core_options.as_of = Some(
+                chrono::DateTime::parse_from_rfc3339(AS_OF)
+                    .expect("reference timestamp")
+                    .with_timezone(&chrono::Utc),
+            );
+            core_options.include_expired = include_temporal;
+            core_options.include_future = include_temporal;
+            core_options.task_paths = task_paths.iter().map(|path| (*path).to_owned()).collect();
+            let direct = crate::core::context::run_context_pack(&core_options)
+                .expect("canonical scoped pack");
+            let direct_ids: BTreeSet<_> = direct
+                .data
+                .pack
+                .items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .chain(direct.data.pack.rule_items.iter().map(|item| item.rule_id.clone()))
+                .collect();
+            let expected: BTreeSet<_> = expected.into_iter().map(str::to_owned).collect();
+            assert_eq!(direct_ids, expected, "fixture must exercise each admission control");
+
+            let mut params = base.clone();
+            params["memoryScope"] = serde_json::json!(scope.as_str());
+            params["asOf"] = serde_json::json!(AS_OF);
+            params["includeExpired"] = serde_json::json!(include_temporal);
+            params["includeFuture"] = serde_json::json!(include_temporal);
+            params["taskPaths"] = serde_json::json!(task_paths);
+            let mut request = DaemonRequest::new(
+                "req-context-admission-parity",
+                TEST_AGENT_ID,
+                METHOD_CONTEXT,
+                params,
+            );
+            request.workspace_id = Some(workspace_id.clone());
+            let response = dispatch_with_echo_policy_and_workspace_inner(
+                &request, false, &policy, &shutdown, false, None,
+            );
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.expect("daemon context result");
+            assert_eq!(result["success"], true, "{result}");
+            let daemon_ids: BTreeSet<_> = result["data"]["pack"]["items"]
+                .as_array()
+                .expect("pack items")
+                .iter()
+                .map(|item| {
+                    item["memoryId"]
+                        .as_str()
+                        .or_else(|| item["ruleId"].as_str())
+                        .expect("native item identity")
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(daemon_ids, direct_ids, "{result}");
+        }
+
+        let mut strict_params = base;
+        strict_params["memoryScope"] = serde_json::json!("verified");
+        strict_params["strictScope"] = serde_json::json!(true);
+        let mut strict_request = DaemonRequest::new(
+            "req-context-strict-scope",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            strict_params,
+        );
+        strict_request.workspace_id = Some(workspace_id);
+        let withheld = dispatch_with_echo_policy_and_workspace_inner(
+            &strict_request, false, &policy, &shutdown, false, None,
+        );
+        assert!(withheld.error.is_none(), "{withheld:?}");
+        assert!(
+            withheld
+                .degraded_codes
+                .iter()
+                .any(|code| code == "scope_strict_excluded_evidence")
+        );
+        assert!(
+            withheld.result.expect("strict scope report")["data"]["pack"]["items"]
+                .as_array()
+                .expect("withheld pack items")
+                .is_empty(),
+            "strict scope must preserve core's all-results-withheld contract"
+        );
+        assert_eq!(
+            fs::read(&fixture.database_path).expect("source after read-only packs"),
+            database_before,
+            "scope/temporal/path requests and strict rejection must leave the source unchanged"
+        );
     }
 
     #[test]
