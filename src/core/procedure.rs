@@ -3762,15 +3762,52 @@ fn open_procedure_store_with_workspace_mode(
     if !database_path.is_file() {
         return Ok(None);
     }
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("failed to open procedure database: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    connection.migrate().map_err(|error| DomainError::Storage {
-        message: format!("failed to migrate procedure database: {error}"),
-        repair: Some("ee init --workspace . --json".to_owned()),
+    let connection = if create_workspace_row {
+        DbConnection::open_file(&database_path)
+    } else {
+        DbConnection::open_file_read_only(&database_path)
+    }
+    .map_err(|error| DomainError::Storage {
+        message: format!("failed to open procedure database: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
     })?;
+    if create_workspace_row {
+        connection.migrate().map_err(|error| DomainError::Storage {
+            message: format!("failed to migrate procedure database: {error}"),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        })?;
+    } else {
+        // Inspection and promotion previews must not migrate the store or
+        // enter its writer gate. Keep schema, workspace, and procedure reads
+        // on the same snapshot until this connection is dropped.
+        connection
+            .begin_read_snapshot()
+            .map_err(storage_error("failed to open procedure read snapshot"))?;
+        let addressed_args = format!(
+            "--workspace {} --database {} --json",
+            super::shell_quote_repair_arg(&workspace_path.to_string_lossy()),
+            super::shell_quote_repair_arg(&database_path.to_string_lossy()),
+        );
+        match connection.needs_migration() {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(DomainError::MigrationRequired {
+                    message: "Database schema migration is required before inspecting procedures."
+                        .to_owned(),
+                    repair: Some(format!("ee migrate run {addressed_args}")),
+                });
+            }
+            Err(error @ DbError::MigrationDrift { .. }) => {
+                return Err(DomainError::MigrationDrift {
+                    message: format!("failed to inspect procedure database schema: {error}"),
+                    repair: Some(format!("ee migrate status {addressed_args}")),
+                });
+            }
+            Err(error) => {
+                return Err(storage_error("failed to inspect procedure database schema")(error));
+            }
+        }
+    }
     let requested = crate::core::workspace::stable_workspace_id(&workspace_path);
     let workspace_id = if create_workspace_row {
         ensure_procedure_workspace(&connection, &workspace_path)?
@@ -4355,6 +4392,216 @@ mod tests {
         assert_eq!(report.total_count, 0);
         assert_eq!(report.filtered_count, 0);
         assert!(report.procedures.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_reads_and_promotion_preview_refuse_migration_without_changing_store()
+    -> TestResult {
+        let workspace = std::env::temp_dir()
+            .join(format!("ee-procedure-read-schema-{}", uuid::Uuid::now_v7()))
+            .join("operator's workspace");
+        let database_path = workspace.join(".ee/ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE procedure_read_sentinel (value TEXT NOT NULL)")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("INSERT INTO procedure_read_sentinel VALUES ('preserve this store')")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = fs::read(&database_path).map_err(|error| error.to_string())?;
+        let expected_repair = format!(
+            "ee migrate run --workspace {} --database {} --json",
+            crate::core::shell_quote_repair_arg(&workspace.to_string_lossy()),
+            crate::core::shell_quote_repair_arg(&database_path.to_string_lossy()),
+        );
+        let procedure_id = "proc_read_schema";
+        for (surface, result) in [
+            (
+                "list",
+                list_procedures(&ProcedureListOptions {
+                    workspace: workspace.clone(),
+                    ..Default::default()
+                })
+                .map(|_| ()),
+            ),
+            (
+                "show",
+                show_procedure(&ProcedureShowOptions {
+                    workspace: workspace.clone(),
+                    procedure_id: procedure_id.to_owned(),
+                    ..Default::default()
+                })
+                .map(|_| ()),
+            ),
+            (
+                "export",
+                export_procedure(&ProcedureExportOptions {
+                    workspace: workspace.clone(),
+                    procedure_id: procedure_id.to_owned(),
+                    format: "markdown".to_owned(),
+                    ..Default::default()
+                })
+                .map(|_| ()),
+            ),
+            (
+                "promotion preview",
+                promote_procedure(&ProcedurePromoteOptions {
+                    workspace: workspace.clone(),
+                    procedure_id: procedure_id.to_owned(),
+                    dry_run: true,
+                    ..Default::default()
+                })
+                .map(|_| ()),
+            ),
+        ] {
+            match result {
+                Err(DomainError::MigrationRequired { repair, .. }) => {
+                    assert_eq!(repair.as_deref(), Some(expected_repair.as_str()), "{surface}");
+                }
+                other => {
+                    return Err(format!("{surface}: expected migration refusal, got {other:?}"));
+                }
+            }
+        }
+        // Evidence inspection reports a failed source instead of turning a
+        // storage error into successful verification or a schema upgrade.
+        for source_kind in ["claim_evidence", "recorder_run"] {
+            for dry_run in [false, true] {
+                let report = verify_procedure(&ProcedureVerifyOptions {
+                    workspace: workspace.clone(),
+                    procedure_id: procedure_id.to_owned(),
+                    source_kind: Some(source_kind.to_owned()),
+                    source_ids: vec!["unmigrated_source".to_owned()],
+                    dry_run,
+                    ..Default::default()
+                })
+                .map_err(|error| error.message())?;
+                assert_eq!(report.overall_result, "failed", "{source_kind}");
+                assert_eq!(report.fail_count, 1, "{source_kind}");
+                let message = report.sources_checked[0]
+                    .message
+                    .as_deref()
+                    .unwrap_or_default();
+                assert!(
+                    message.contains("migration is required"),
+                    "{source_kind}: {message}"
+                );
+                assert!(message.contains(&expected_repair), "{source_kind}: {message}");
+            }
+        }
+        assert_eq!(
+            before,
+            fs::read(&database_path).map_err(|error| error.to_string())?
+        );
+        let connection =
+            DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .needs_migration()
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            connection
+                .count_table_rows("procedure_read_sentinel")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_read_store_preserves_migration_drift_and_names_the_addressed_store()
+    -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let database_path = workspace.join(".ee/ee.db");
+        let (connection, _) = procedure_store_connection(&workspace)?;
+        connection
+            .execute_raw(
+                "UPDATE ee_schema_migrations SET checksum = 'blake3:drifted_checksum' WHERE version = 1",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = fs::read(&database_path).map_err(|error| error.to_string())?;
+        let result = list_procedures(&ProcedureListOptions {
+            workspace: workspace.clone(),
+            ..Default::default()
+        });
+        match result {
+            Err(DomainError::MigrationDrift { repair, .. }) => {
+                let expected = format!(
+                    "ee migrate status --workspace {} --database {} --json",
+                    crate::core::shell_quote_repair_arg(&workspace.to_string_lossy()),
+                    crate::core::shell_quote_repair_arg(&database_path.to_string_lossy()),
+                );
+                assert_eq!(repair.as_deref(), Some(expected.as_str()));
+            }
+            other => return Err(format!("expected typed migration drift, got {other:?}")),
+        }
+        assert_eq!(
+            before,
+            fs::read(&database_path).map_err(|error| error.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_read_store_enforces_read_only_while_current_procedures_remain_readable()
+    -> TestResult {
+        let options = procedure_lifecycle_fixture()?;
+        let workspace = options.workspace.clone();
+        let database_path = workspace.join(".ee/ee.db");
+        let before = fs::read(&database_path).map_err(|error| error.to_string())?;
+        let store = open_procedure_store(&workspace)
+            .map_err(|error| error.message())?
+            .ok_or("expected an initialized procedure store")?;
+        assert_eq!(store.connection.mode(), crate::db::DatabaseOpenMode::ReadOnly);
+        let error = store
+            .connection
+            .execute_raw("CREATE TABLE forbidden_procedure_read_write (value TEXT)")
+            .expect_err("a procedure reader must reject writes");
+        assert!(matches!(error, DbError::InvalidMode { .. }));
+        drop(store);
+
+        let shown = show_procedure(&ProcedureShowOptions {
+            workspace: workspace.clone(),
+            procedure_id: options.procedure_id.clone(),
+            include_steps: true,
+            include_verification: true,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(shown.procedure.procedure_id, options.procedure_id);
+        assert!(!shown.history.is_empty());
+        let listed = list_procedures(&ProcedureListOptions {
+            workspace: workspace.clone(),
+            limit: 10,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(listed.total_count, 1);
+        assert_eq!(listed.procedures[0].procedure_id, options.procedure_id);
+        let exported = export_procedure(&ProcedureExportOptions {
+            workspace: workspace.clone(),
+            procedure_id: options.procedure_id.clone(),
+            format: "markdown".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert!(exported.content.contains(&shown.procedure.title));
+        let preview = promote_procedure(&ProcedurePromoteOptions {
+            dry_run: true,
+            ..options
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        assert_eq!(
+            before,
+            fs::read(&database_path).map_err(|error| error.to_string())?
+        );
         Ok(())
     }
 
