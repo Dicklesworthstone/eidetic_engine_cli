@@ -1508,6 +1508,319 @@ fn global_memory_filters_use_the_global_snapshot_before_top_one() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }
 
+struct GlobalQualityFixture {
+    paths: crate::core::global_store::GlobalStorePaths,
+    db: DbConnection,
+    workspace: String,
+}
+
+impl GlobalQualityFixture {
+    fn new(paths: crate::core::global_store::GlobalStorePaths) -> Self {
+        let (db, workspace) =
+            crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+        Self {
+            paths,
+            db,
+            workspace,
+        }
+    }
+
+    fn memory(&self, number: u128, created: DateTime<Utc>) -> String {
+        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        let created = created.to_rfc3339();
+        self.db
+            .insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: self.workspace.clone(),
+                    content: BODY.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    workflow_id: None,
+                    confidence: 1.0,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://global-feedback-quality".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: Some(created.clone()),
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        self.db.execute_raw(&format!(
+            "UPDATE memories SET created_at = '{created}', updated_at = '{created}' WHERE id = '{id}'"
+        )).unwrap();
+        id
+    }
+
+    fn feedback(&self, number: u128, target_type: &str, id: &str, signal: &str, at: DateTime<Utc>) {
+        self.db
+            .insert_feedback_event_for_recovery(&StoredFeedbackEvent {
+                id: format!("fb_{number:026}"),
+                workspace_id: self.workspace.clone(),
+                target_type: target_type.to_owned(),
+                target_id: id.to_owned(),
+                signal: signal.to_owned(),
+                weight: 1.0,
+                source_type: "human_explicit".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+                applied_at: None,
+                created_at: at.to_rfc3339(),
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn global_feedback_changes_search_quality_and_preserves_local_collisions() {
+    const GLOBAL_CHILD: &str = "EE_TEST_GLOBAL_FEEDBACK_QUALITY";
+    if std::env::var_os(GLOBAL_CHILD).is_none() {
+        let global_root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("core::search::quality_tests::global_feedback_changes_search_quality_and_preserves_local_collisions")
+            .arg("--nocapture")
+            .env(GLOBAL_CHILD, "1")
+            .env("XDG_DATA_HOME", global_root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "global feedback search child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let fixture = Fixture::new();
+    let created = Utc::now() - chrono::Duration::days(1);
+    let local_clean = fixture.memory(301, 1.0, 1.0, created);
+    let local_harmful = fixture.memory(302, 1.0, 1.0, created);
+    fixture.harmful(&local_harmful, 1);
+    let _local_embedder = fixture.publish_index();
+    let local_handoff = run_pack_search(&fixture.options()).unwrap();
+    assert!(local_handoff.snapshot_matches(&fixture.options(), &fixture.db));
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = true\n",
+    )
+    .unwrap();
+    let global = GlobalQualityFixture::new(
+        crate::core::global_store::default_global_store_paths_from_env().unwrap(),
+    );
+    assert_eq!(global.memory(301, created), local_clean);
+    assert_eq!(global.memory(302, created), local_harmful);
+    let harmful = global.memory(303, created);
+    let helpful = global.memory(304, created);
+    let clean = global.memory(305, created);
+    let future = global.memory(306, created);
+    for (number, signal) in ["negative", "harmful", "contradiction", "inaccurate"]
+        .into_iter()
+        .enumerate()
+    {
+        global.feedback(number as u128, "memory", &harmful, signal, created);
+        global.feedback(number as u128 + 10, "memory", &local_clean, signal, created);
+    }
+    global.feedback(20, "memory", &helpful, "helpful", created);
+    global.feedback(21, "memory", &helpful, "positive", created);
+    global.feedback(22, "rule", &clean, "harmful", created);
+    global.feedback(23, "memory", &local_harmful, "helpful", created);
+    global.feedback(
+        24,
+        "memory",
+        &future,
+        "harmful",
+        Utc::now() + chrono::Duration::days(1),
+    );
+    let _global_embedder =
+        crate::core::index::install_test_hash_workspace_embedder(&global.workspace);
+    assert!(
+        !local_handoff.snapshot_matches(&fixture.options(), &fixture.db),
+        "a local handoff cannot prove an enabled global store or its outcomes"
+    );
+    for published in [false, true] {
+        if published {
+            crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+                workspace_path: global.paths.root.clone(),
+                database_path: Some(global.paths.database_path.clone()),
+                index_dir: Some(global.paths.index_dir.clone()),
+                dry_run: false,
+            })
+            .unwrap();
+        }
+        // Retrieval-only handoffs never reconcile the absent index, so both
+        // the live source and published global retrieval paths are covered.
+        let handoff = run_pack_search(&fixture.options()).unwrap();
+        assert!(!handoff.snapshot_matches(&fixture.options(), &fixture.db));
+        let report = &handoff.report;
+        assert_eq!(report.status, SearchStatus::Success);
+        assert_eq!(report.results.len(), 6);
+        let by_id = report
+            .results
+            .iter()
+            .map(|hit| (hit.doc_id.as_str(), hit))
+            .collect::<BTreeMap<_, _>>();
+        for (id, count) in [
+            (&local_clean, 0),
+            (&local_harmful, 1),
+            (&harmful, 4),
+            (&helpful, 0),
+            (&clean, 0),
+            (&future, 0),
+        ] {
+            let scoring = by_id[id.as_str()].ranking_components_json().unwrap();
+            assert_eq!(
+                scoring["inputs"]["harmfulCount"], count,
+                "{id}, published={published}"
+            );
+            assert_eq!(scoring["observedSignals"]["harmfulPenalty"], true);
+            assert_eq!(scoring["inputs"]["confidence"], 1.0);
+        }
+        let harmed = by_id[harmful.as_str()];
+        for id in [&helpful, &clean, &future] {
+            let positive_control = by_id[id.as_str()];
+            assert_eq!(harmed.relevance_score(), positive_control.relevance_score());
+            assert!(harmed.ranking_score() < positive_control.ranking_score());
+        }
+        assert!(
+            !report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_quality_signals_unavailable")
+        );
+    }
+    // The public read-connection route does not request a preload output.
+    // Global bodies, confidence and feedback must still reach its scorer.
+    let report = fixture.search();
+    let scoring = report
+        .results
+        .iter()
+        .find(|hit| hit.doc_id == harmful)
+        .unwrap()
+        .ranking_components_json()
+        .unwrap();
+    assert_eq!(scoring["inputs"]["harmfulCount"], 4);
+    assert_eq!(scoring["inputs"]["confidence"], 1.0);
+}
+
+#[test]
+fn global_feedback_projection_uses_the_body_snapshot_and_exact_cutoff() {
+    let fixture = Fixture::new();
+    let directory = tempfile::tempdir().unwrap();
+    let global = GlobalQualityFixture::new(crate::core::global_store::GlobalStorePaths::from_root(
+        directory.path(),
+    ));
+    let reference = DateTime::parse_from_rfc3339("2026-09-28T12:00:00.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let id = global.memory(401, reference - chrono::Duration::days(1));
+    global.feedback(1, "memory", &id, "harmful", reference);
+    global.feedback(
+        2,
+        "memory",
+        &id,
+        "negative",
+        reference + chrono::Duration::nanoseconds(1),
+    );
+    global.feedback(3, "memory", &id, "helpful", reference);
+    let mut feedback = None;
+    let memories = crate::core::global_store::read_global_store_memories_with_observer_at(
+        &global.paths,
+        false,
+        Some(reference),
+        |_, _| {
+            // Another connection commits after body admission. The following
+            // batched observation must retain both the old body and old harm.
+            global
+                .db
+                .execute_raw("UPDATE feedback_events SET signal = 'helpful'")
+                .map_err(|error| error.to_string())?;
+            global
+                .db
+                .execute_raw("UPDATE memories SET confidence = 0.5")
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        },
+        |connection, memories| {
+            feedback = Some(GlobalMemoryFeedbackSnapshot::read(
+                connection, memories, reference,
+            )?);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let feedback = feedback.unwrap();
+    assert_eq!(feedback.harmful_count(&memories[0], reference), Some(1));
+    assert_eq!(memories[0].confidence, 1.0);
+    assert_eq!(
+        feedback.harmful_count(&memories[0], reference + chrono::Duration::nanoseconds(1)),
+        None
+    );
+    let global_ids = [id.clone()].into_iter().collect();
+    let preloaded = memories
+        .into_iter()
+        .map(|memory| (memory.id.clone(), memory))
+        .collect();
+    let mut hits = vec![SearchHit {
+        doc_id: id.clone(),
+        score: 0.8,
+        source: ScoreSource::Lexical,
+        fast_score: None,
+        quality_score: None,
+        lexical_score: Some(0.8),
+        rerank_score: None,
+        metadata: Some(
+            serde_json::json!({"harmfulCount": 0, "qualityScoring": {"inputs": {"harmfulCount": 0}}}),
+        ),
+        explanation: None,
+    }];
+    apply_quality_scoring_with_feedback(
+        &fixture.options(),
+        &mut hits,
+        SearchScoringConfig::default(),
+        reference,
+        Some(&fixture.db),
+        Some(&preloaded),
+        Some(&global_ids),
+        None,
+        Some(&feedback),
+        &mut Vec::new(),
+    );
+    let scoring = hits[0].ranking_components_json().unwrap();
+    assert_eq!(scoring["inputs"]["harmfulCount"], 1);
+    assert_eq!(scoring["inputs"]["confidence"], 1.0);
+    assert!(scoring["components"]["harmfulPenalty"].as_f64().unwrap() < 1.0);
+    let (fresh, fresh_feedback) = read_global_search_memories(
+        &global.paths,
+        &fixture.options(),
+        SearchMemoryFilters::default(),
+        reference,
+    )
+    .unwrap();
+    assert_eq!(fresh[0].confidence, 0.5);
+    assert_eq!(fresh_feedback.harmful_count(&fresh[0], reference), Some(0));
+    // A matching ID from another workspace cannot borrow observed zero.
+    let mut foreign = fresh[0].clone();
+    foreign.workspace_id = fixture.workspace.clone();
+    assert_eq!(fresh_feedback.harmful_count(&foreign, reference), None);
+    global.db.execute_raw("UPDATE feedback_events SET signal = 'harmful', created_at = 'PRIVATE-BAD-FEEDBACK-TIME'").unwrap();
+    let error = read_global_search_memories(
+        &global.paths,
+        &fixture.options(),
+        SearchMemoryFilters::default(),
+        reference,
+    )
+    .unwrap_err();
+    assert!(error.contains("optional global lane was withheld"));
+    assert!(!error.contains("PRIVATE-BAD-FEEDBACK-TIME"));
+}
+
 fn assert_global_memory_filters_use_the_global_snapshot() {
     let fixture = Fixture::new();
     fixture.memory(1, 1.0, 1.0, Utc::now());
@@ -2070,6 +2383,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         None,
         None,
         Some(&feedback),
+        None,
         &mut reused_degraded,
     );
     assert_eq!(
@@ -2116,6 +2430,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         None,
         None,
         Some(&foreign),
+        None,
         &mut Vec::new(),
     );
     assert_eq!(
@@ -2155,6 +2470,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         None,
         None,
         Some(&feedback),
+        None,
         &mut Vec::new(),
     );
     assert_eq!(
@@ -2189,6 +2505,7 @@ fn evidence_feedback_scoring_reuses_only_its_source_snapshot_and_preserves_unkno
         None,
         None,
         Some(&feedback),
+        None,
         &mut unknown_degraded,
     );
     let mut unavailable_sql = hits;
@@ -2352,6 +2669,7 @@ fn pinned_feedback_rows_match_sql_counts_and_quality_scores() {
         None,
         None,
         Some(&feedback),
+        None,
         &mut reused_degraded,
     );
     assert_eq!(
@@ -2377,6 +2695,7 @@ fn pinned_feedback_rows_match_sql_counts_and_quality_scores() {
         None,
         None,
         Some(&foreign_feedback),
+        None,
         &mut Vec::new(),
     );
     assert_eq!(
@@ -2424,6 +2743,7 @@ fn feedback_reuse_rejects_malformed_matching_time_and_different_source_views() {
         None,
         None,
         Some(&feedback),
+        None,
         &mut Vec::new(),
     );
     assert_eq!(
@@ -2474,6 +2794,7 @@ fn feedback_reuse_rejects_malformed_matching_time_and_different_source_views() {
         None,
         None,
         Some(&feedback),
+        None,
         &mut reused_degraded,
     );
     let mut sql_hits = hits;

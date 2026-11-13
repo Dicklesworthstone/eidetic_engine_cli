@@ -3266,6 +3266,7 @@ mod tests {
             &connection,
             &search_options,
             Vec::new(),
+            None,
             &mut degraded,
         )
         .map_err(|error| error.to_string())?;
@@ -13526,6 +13527,7 @@ pub fn unrelated_context() -> u64 {{
                 &connection,
                 options,
                 Vec::new(),
+                None,
                 &mut Vec::new(),
             )
             .map_err(|error| error.to_string())
@@ -13626,6 +13628,172 @@ pub fn unrelated_context() -> u64 {{
             first.digests.reference_time
         );
         assert_eq!(identity["digest"], first.composite_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn global_feedback_changes_lexical_pack_fallback_before_limit() -> TestResult {
+        const CHILD: &str = "EE_TEST_GLOBAL_PACK_FALLBACK_FEEDBACK";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .arg("--exact")
+            .arg("core::context::tests::global_feedback_changes_lexical_pack_fallback_before_limit")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .env("XDG_DATA_HOME", directory.path())
+            .output()
+            .map_err(|error| error.to_string())?;
+            assert!(
+                output.status.success(),
+                "global pack feedback child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return Ok(());
+        }
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = root.join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            "[memory]\ninclude_global = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let local = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        local.migrate().map_err(|error| error.to_string())?;
+        let local_workspace = crate::core::workspace::stable_workspace_id(&root);
+        local
+            .insert_workspace(
+                &local_workspace,
+                &CreateWorkspaceInput {
+                    path: root.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let paths = crate::core::global_store::default_global_store_paths_from_env()?;
+        let (global, global_workspace) =
+            crate::core::global_store::open_or_create_global_store(&paths)?;
+        let reference = query_time("2026-05-01T12:00:00Z");
+        let harmful = MemoryId::from_uuid(uuid::Uuid::from_u128(0x501)).to_string();
+        let helpful = MemoryId::from_uuid(uuid::Uuid::from_u128(0x502)).to_string();
+        for (number, id, signal) in [(1, &harmful, "harmful"), (2, &helpful, "helpful")] {
+            global
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: global_workspace.clone(),
+                        content: "sharedfeedbacktoken deployment guidance".to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "note".to_owned(),
+                        workflow_id: None,
+                        confidence: 1.0,
+                        utility: 1.0,
+                        importance: 0.5,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        provenance_uri: Some("manual://global-pack-feedback".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: Some("2026-05-01T11:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            global
+                .insert_feedback_event_for_recovery(&crate::db::StoredFeedbackEvent {
+                    id: format!("fb_{number:026}"),
+                    workspace_id: global_workspace.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: id.clone(),
+                    signal: signal.to_owned(),
+                    weight: 1.0,
+                    source_type: "human_explicit".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    applied_at: None,
+                    created_at: reference.to_rfc3339(),
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        global.execute_raw("UPDATE memories SET created_at = '2026-05-01T11:00:00Z', updated_at = '2026-05-01T11:00:00Z'").map_err(|error| error.to_string())?;
+        let mut options = SearchOptions {
+            workspace_path: root,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "sharedfeedbacktoken".to_owned(),
+            limit: 2,
+            speed: crate::search::SpeedMode::Instant,
+            explain: true,
+            as_of: Some(reference),
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+        let mut degraded = Vec::new();
+        let mut preloaded = BTreeMap::new();
+        let (memories, feedback) =
+            super::global_store_fallback_memories(&options, &mut degraded, &mut preloaded)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(preloaded.len(), 2);
+        let (hits, _) = super::quality_scored_lexical_memory_fallback_hits(
+            &local,
+            &options,
+            memories.clone(),
+            feedback.as_ref(),
+            &mut degraded,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].doc_id, helpful);
+        assert_eq!(hits[1].doc_id, harmful);
+        assert_eq!(hits[0].relevance_score(), hits[1].relevance_score());
+        assert!(hits[0].ranking_score() > hits[1].ranking_score());
+        assert_eq!(
+            hits[0]
+                .ranking_components_json()
+                .ok_or("missing helpful score")?["inputs"]["harmfulCount"],
+            0
+        );
+        assert_eq!(
+            hits[1]
+                .ranking_components_json()
+                .ok_or("missing harmful score")?["inputs"]["harmfulCount"],
+            1
+        );
+        options.limit = 1;
+        let (limited, _) = super::quality_scored_lexical_memory_fallback_hits(
+            &local,
+            &options,
+            memories,
+            feedback.as_ref(),
+            &mut degraded,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].doc_id, helpful);
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry.code == "search_quality_signals_unavailable")
+        );
         Ok(())
     }
 

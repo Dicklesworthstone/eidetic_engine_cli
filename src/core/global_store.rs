@@ -764,7 +764,26 @@ pub(crate) fn read_global_store_memories_filtered_at(
     paths: &GlobalStorePaths,
     include_tombstoned: bool,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
+    include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
+) -> Result<Vec<StoredMemory>, String> {
+    read_global_store_memories_with_observer_at(
+        paths,
+        include_tombstoned,
+        as_of,
+        include_memory,
+        |_, _| Ok(()),
+    )
+}
+
+/// Observe the complete admitted set before releasing its source snapshot.
+/// This permits batched sidecar reads without reopening a later source view
+/// or turning a per-row admission filter into one query per candidate.
+pub(crate) fn read_global_store_memories_with_observer_at(
+    paths: &GlobalStorePaths,
+    include_tombstoned: bool,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
     mut include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
+    observe_memories: impl FnOnce(&DbConnection, &[StoredMemory]) -> Result<(), String>,
 ) -> Result<Vec<StoredMemory>, String> {
     if !paths
         .database_path
@@ -788,6 +807,7 @@ pub(crate) fn read_global_store_memories_filtered_at(
                     filtered.push(memory);
                 }
             }
+            observe_memories(&connection, &filtered).map_err(global_read_error)?;
             Ok(filtered)
         });
     let released = connection

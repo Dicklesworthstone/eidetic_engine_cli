@@ -3351,7 +3351,7 @@ async fn run_context_pack_attempt(
     ) {
         // The user-global lane is a separate store with its own index; a
         // workspace index that cannot serve this request must not hide it.
-        let global_memories = global_store_fallback_memories(
+        let (global_memories, global_feedback) = global_store_fallback_memories(
             &search_options,
             &mut degraded,
             &mut search_preloaded_memories,
@@ -3364,6 +3364,7 @@ async fn run_context_pack_attempt(
             read_connection,
             &search_options,
             global_memories,
+            global_feedback.as_ref(),
             &mut degraded,
         )?;
         request.quality_scoring_policy = Some(quality_policy);
@@ -5480,11 +5481,14 @@ fn quality_scored_lexical_memory_fallback_hits(
     connection: &DbConnection,
     options: &SearchOptions,
     global_memories: Vec<StoredMemory>,
+    global_feedback: Option<&crate::core::search::GlobalMemoryFeedbackSnapshot>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Result<(Vec<SearchHit>, String), ContextPackError> {
     let config = crate::core::search::resolved_search_scoring_config(&options.workspace_path)
         .map_err(ContextPackError::Search)?;
-    let reference_time = options.as_of.unwrap_or_else(Utc::now);
+    let reference_time = global_feedback
+        .map(|feedback| feedback.reference_time)
+        .unwrap_or_else(|| options.as_of.unwrap_or_else(Utc::now));
     let global_ids = global_memories
         .iter()
         .map(|memory| memory.id.clone())
@@ -5507,7 +5511,7 @@ fn quality_scored_lexical_memory_fallback_hits(
         degraded,
     );
     let mut search_degraded = Vec::new();
-    crate::core::search::apply_quality_scoring(
+    crate::core::search::apply_quality_scoring_with_feedback(
         options,
         &mut hits,
         config,
@@ -5515,6 +5519,8 @@ fn quality_scored_lexical_memory_fallback_hits(
         Some(connection),
         Some(&preloaded),
         Some(&global_ids),
+        None,
+        global_feedback,
         &mut search_degraded,
     );
     push_search_degradations(degraded, &search_degraded);
@@ -5602,9 +5608,15 @@ fn global_store_fallback_memories(
     search_options: &SearchOptions,
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded: &mut BTreeMap<String, StoredMemory>,
-) -> Result<Vec<StoredMemory>, ContextPackError> {
+) -> Result<
+    (
+        Vec<StoredMemory>,
+        Option<crate::core::search::GlobalMemoryFeedbackSnapshot>,
+    ),
+    ContextPackError,
+> {
     let mut search_degraded = Vec::new();
-    let memories =
+    let (memories, feedback) =
         crate::core::search::global_store_fallback_memories(search_options, &mut search_degraded)
             .map_err(ContextPackError::Search)?;
     push_search_degradations(degraded, &search_degraded);
@@ -5613,7 +5625,7 @@ fn global_store_fallback_memories(
             .entry(memory.id.clone())
             .or_insert_with(|| memory.clone());
     }
-    Ok(memories)
+    Ok((memories, feedback))
 }
 
 fn sort_scored_memories_by_score_then_memory_id(scored: &mut Vec<(StoredMemory, f32)>) {
@@ -15646,8 +15658,8 @@ fn rule_sources_admission(
             {
                 temporal = TemporalCandidateOutcome::IncludeRelaxedInvalid;
             }
-            TemporalCandidateOutcome::Include
-            | TemporalCandidateOutcome::IncludeRelaxedInvalid => {}
+            TemporalCandidateOutcome::Include | TemporalCandidateOutcome::IncludeRelaxedInvalid => {
+            }
         }
     }
     Some(temporal)

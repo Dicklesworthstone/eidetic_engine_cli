@@ -1929,6 +1929,19 @@ impl PackSearchHandoff {
         options: &SearchOptions,
         connection: &'a DbConnection,
     ) -> Option<ValidatedPackSearchSnapshot<'a>> {
+        if global_store_participates_in_scope(options.memory_scope) {
+            let policy = crate::config::workspace_memory_policy(&options.workspace_path).ok()?;
+            if policy.participate.unwrap_or(true) && policy.include_global.unwrap_or(true) {
+                let paths = super::global_store::default_global_store_paths_from_env().ok()?;
+                if paths.database_path.try_exists().ok()? {
+                    // This wire witness covers only the local source and its
+                    // feedback ledger. Global outcomes may change independently,
+                    // even when no global candidate survived the old limit.
+                    // Canonical retrieval must admit and score that store again.
+                    return None;
+                }
+            }
+        }
         if !self.matches_request(options)
             || self.snapshot.workspace_id
                 != bound_search_workspace_id(
@@ -2056,6 +2069,7 @@ impl PackSearchHandoff {
                     Some(&memories),
                     None,
                     validated.map(|snapshot| &snapshot.feedback),
+                    None,
                     &mut self.report.degraded,
                 );
             }
@@ -4968,6 +4982,52 @@ pub(crate) struct SearchFeedbackSnapshot<'a> {
     connection: &'a DbConnection,
     workspace_id: String,
     events: Vec<StoredFeedbackEvent>,
+}
+
+/// Accepted harmful feedback projected while the owning global store's body,
+/// revision and seal snapshot is held. Neither indexed metadata nor a local
+/// workspace's ledger can establish this separate source's observations.
+#[derive(Debug)]
+pub(crate) struct GlobalMemoryFeedbackSnapshot {
+    pub(crate) reference_time: DateTime<Utc>,
+    workspace_id: String,
+    harmful_counts: BTreeMap<String, u32>,
+}
+
+impl GlobalMemoryFeedbackSnapshot {
+    fn read(
+        connection: &DbConnection,
+        memories: &[StoredMemory],
+        reference_time: DateTime<Utc>,
+    ) -> Result<Self, String> {
+        let mut snapshot = Self {
+            reference_time,
+            workspace_id: String::new(),
+            harmful_counts: BTreeMap::new(),
+        };
+        if let Some(first) = memories.first() {
+            snapshot.workspace_id = first.workspace_id.clone();
+            let memory_ids = memories
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<Vec<_>>();
+            snapshot.harmful_counts = connection
+                .memory_harmful_feedback_counts_at(
+                    &snapshot.workspace_id,
+                    &memory_ids,
+                    reference_time,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(snapshot)
+    }
+
+    fn harmful_count(&self, memory: &StoredMemory, reference_time: DateTime<Utc>) -> Option<u32> {
+        if self.reference_time != reference_time || self.workspace_id != memory.workspace_id {
+            return None;
+        }
+        self.harmful_counts.get(&memory.id).copied()
+    }
 }
 
 /// The exact calibration and ledger accepted for a pack handoff. Keeping both
@@ -11159,6 +11219,7 @@ async fn run_search_inner_with_performance(
             // An index can claim `storeLane=global`; only rows admitted by the
             // actual global-store read may carry this request-local authority.
             let mut global_source_memories = BTreeMap::new();
+            let mut global_feedback_snapshot = None;
             let global_hits = global_store_frankensearch_hits(
                 cx,
                 options,
@@ -11168,6 +11229,8 @@ async fn run_search_inner_with_performance(
                 scoring_candidate_limit,
                 &mut degraded,
                 Some(&mut global_source_memories),
+                &mut global_feedback_snapshot,
+                scoring_reference_time,
                 &mut trace,
                 !retrieval_only,
                 unpublished_source,
@@ -11177,7 +11240,7 @@ async fn run_search_inner_with_performance(
             let admitted_global_ids: BTreeSet<String> =
                 global_source_memories.keys().cloned().collect();
             if let Some(preloaded) = preloaded_memories.as_deref_mut() {
-                for (id, memory) in global_source_memories {
+                for (id, memory) in std::mem::take(&mut global_source_memories) {
                     preloaded.entry(id).or_insert(memory);
                 }
             }
@@ -11298,9 +11361,12 @@ async fn run_search_inner_with_performance(
                 scoring_config,
                 scoring_reference_time,
                 read_connection,
-                preloaded_memories.as_deref(),
+                preloaded_memories
+                    .as_deref()
+                    .or(Some(&global_source_memories)),
                 Some(&admitted_global_ids),
                 feedback_snapshot.as_ref(),
+                global_feedback_snapshot.as_ref(),
                 &mut degraded,
             );
             drop(feedback_snapshot);
@@ -14010,12 +14076,13 @@ pub(crate) fn apply_quality_scoring(
         preloaded_memories,
         admitted_global_ids,
         None,
+        None,
         degraded,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_quality_scoring_with_feedback(
+pub(crate) fn apply_quality_scoring_with_feedback(
     options: &SearchOptions,
     hits: &mut [SearchHit],
     config: SearchScoringConfig,
@@ -14024,6 +14091,7 @@ fn apply_quality_scoring_with_feedback(
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
     admitted_global_ids: Option<&BTreeSet<String>>,
     feedback_snapshot: Option<&SearchFeedbackSnapshot<'_>>,
+    global_feedback_snapshot: Option<&GlobalMemoryFeedbackSnapshot>,
     degraded: &mut Vec<SearchDegradation>,
 ) {
     let workspace_id = bound_search_workspace_id(
@@ -14156,8 +14224,12 @@ fn apply_quality_scoring_with_feedback(
                     .as_ref()
                     .and_then(|counts| counts.get(&hit.doc_id).copied());
                 scope_match = Some(true);
-            } else if admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)) {
-                // A workspace DB cannot observe a separate store's feedback.
+            } else if !local_memories.contains_key(&hit.doc_id)
+                && admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id))
+            {
+                harmful_count = global_feedback_snapshot
+                    .and_then(|feedback| feedback.harmful_count(memory, reference_time));
+                unavailable |= harmful_count.is_none();
                 scope_match = Some(options.memory_scope == MemoryScope::Global);
             }
             let admitted_anchor_source = local_ids.contains(hit.doc_id.as_str())
@@ -14497,8 +14569,13 @@ fn admitted_global_store_memories(
     options: &SearchOptions,
     memory_config: &crate::config::MemoryConfig,
     memory_filters: SearchMemoryFilters<'_>,
+    reference_time: DateTime<Utc>,
     degraded: &mut Vec<SearchDegradation>,
-) -> Option<(super::global_store::GlobalStorePaths, Vec<StoredMemory>)> {
+) -> Option<(
+    super::global_store::GlobalStorePaths,
+    Vec<StoredMemory>,
+    GlobalMemoryFeedbackSnapshot,
+)> {
     let paths = match super::global_store::default_global_store_paths_from_env() {
         Ok(paths) => paths,
         Err(error) => {
@@ -14532,24 +14609,8 @@ fn admitted_global_store_memories(
         }
         return None;
     }
-    match super::global_store::read_global_store_memories_filtered_at(
-        &paths,
-        options.include_tombstoned,
-        Some(options.as_of.unwrap_or_else(Utc::now)),
-        |connection, memory| {
-            if memory_filters.is_empty() {
-                return Ok(true);
-            }
-            typed_memory_matches(
-                connection,
-                memory,
-                memory_filters.kind,
-                memory_filters.fields,
-            )
-            .map_err(|error| error.to_string())
-        },
-    ) {
-        Ok(memories) => Some((paths, memories)),
+    match read_global_search_memories(&paths, options, memory_filters, reference_time) {
+        Ok((memories, feedback)) => Some((paths, memories, feedback)),
         Err(error) => {
             // A global store that merely needs migration is an optional lane
             // being skipped, not a failure to verify the scope of the results
@@ -14568,6 +14629,44 @@ fn admitted_global_store_memories(
     }
 }
 
+fn read_global_search_memories(
+    paths: &super::global_store::GlobalStorePaths,
+    options: &SearchOptions,
+    memory_filters: SearchMemoryFilters<'_>,
+    reference_time: DateTime<Utc>,
+) -> Result<(Vec<StoredMemory>, GlobalMemoryFeedbackSnapshot), String> {
+    let mut feedback = GlobalMemoryFeedbackSnapshot {
+        reference_time,
+        workspace_id: String::new(),
+        harmful_counts: BTreeMap::new(),
+    };
+    let memories = super::global_store::read_global_store_memories_with_observer_at(
+        paths,
+        options.include_tombstoned,
+        Some(reference_time),
+        |connection, memory| {
+            if memory_filters.is_empty() {
+                return Ok(true);
+            }
+            typed_memory_matches(
+                connection,
+                memory,
+                memory_filters.kind,
+                memory_filters.fields,
+            )
+            .map_err(|error| error.to_string())
+        },
+        |connection, memories| {
+            // The DB helper batches the complete owned set. Read failure
+            // withholds this lane through the same sanitized admission error;
+            // it must never manufacture observed zeroes for shared rows.
+            feedback = GlobalMemoryFeedbackSnapshot::read(connection, memories, reference_time)?;
+            Ok(())
+        },
+    )?;
+    Ok((memories, feedback))
+}
+
 /// User-global rows for a context pack whose workspace retrieval could not
 /// run (no index, or a stale, corrupt or incompatible one). The global lane is
 /// a separate store (ADR 0083), so a workspace index problem must not hide it;
@@ -14577,10 +14676,10 @@ fn admitted_global_store_memories(
 pub(crate) fn global_store_fallback_memories(
     options: &SearchOptions,
     degraded: &mut Vec<SearchDegradation>,
-) -> Result<Vec<StoredMemory>, SearchError> {
+) -> Result<(Vec<StoredMemory>, Option<GlobalMemoryFeedbackSnapshot>), SearchError> {
     if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
     {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let memory_config = crate::config::workspace_memory_policy(&options.workspace_path)
         .map_err(SearchError::Configuration)?;
@@ -14588,9 +14687,10 @@ pub(crate) fn global_store_fallback_memories(
         options,
         &memory_config,
         SearchMemoryFilters::default(),
+        options.as_of.unwrap_or_else(Utc::now),
         degraded,
     )
-    .map(|(_, memories)| memories)
+    .map(|(_, memories, feedback)| (memories, Some(feedback)))
     .unwrap_or_default())
 }
 
@@ -14603,6 +14703,8 @@ async fn global_store_frankensearch_hits(
     effective_limit: u32,
     degraded: &mut Vec<SearchDegradation>,
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    feedback_snapshot: &mut Option<GlobalMemoryFeedbackSnapshot>,
+    reference_time: DateTime<Utc>,
     trace: &mut SearchPerformanceTrace,
     reconcile: bool,
     source_only: bool,
@@ -14613,9 +14715,13 @@ async fn global_store_frankensearch_hits(
     if options.query.trim().is_empty() {
         return Vec::new();
     }
-    let Some((paths, mut memories)) =
-        admitted_global_store_memories(options, memory_config, memory_filters, degraded)
-    else {
+    let Some((paths, mut memories, feedback)) = admitted_global_store_memories(
+        options,
+        memory_config,
+        memory_filters,
+        reference_time,
+        degraded,
+    ) else {
         return Vec::new();
     };
     if !memory_filters.is_empty() && !memories.is_empty() {
@@ -14634,6 +14740,7 @@ async fn global_store_frankensearch_hits(
     if memories.is_empty() {
         return Vec::new();
     }
+    *feedback_snapshot = Some(feedback);
 
     let global_options = SearchOptions {
         workspace_path: paths.root.clone(),
