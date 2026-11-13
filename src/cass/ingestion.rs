@@ -20,8 +20,7 @@ pub(super) fn screen_excerpt(content: &str) -> ExternalIngestionScreenReport {
         if let Some(projected) = bounded_record(&screen) {
             return projected;
         }
-        let start = content.trim_start();
-        if start.starts_with('{') || start.starts_with('[') {
+        if crate::policy::transcript_json_input(content).is_some() {
             // A raw prefix can end exactly after a valid JSONL record, dropping
             // an unsafe neighbor from the complete screened window. Preserve
             // refusal explicitly whenever structured bounding is unavailable.
@@ -211,6 +210,7 @@ struct EditableRecord {
 /// not a readable turn and cannot be shortened to make a window fit.
 fn editable_records(content: &str) -> Option<Vec<EditableRecord>> {
     let visible_records = crate::cass::transcript::project_transcript(content)?.len();
+    let content = crate::policy::transcript_json_input(content)?;
     let mut stream = serde_json::Deserializer::from_str(content).into_iter::<UniqueJson>();
     let mut consumed = 0;
     let mut records = Vec::with_capacity(visible_records);
@@ -502,6 +502,43 @@ mod tests {
         assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
         assert!(!row.redacted);
         assert!(row.redacted_reasons.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn bom_prefixed_import_keeps_roles_and_bounds_the_complete_json_window() -> TestResult {
+        let source = format!(
+            "\u{feff}{}",
+            json!({"type":"message", "role":"user", "content":"The build passed."})
+        );
+        let row = parse(&source)?;
+        assert_eq!(row.excerpt, source);
+        assert_eq!(row.role, Some(crate::cass::CassRole::User));
+        assert!(!row.redacted);
+
+        let large = format!(
+            "\u{feff}{}\n{}",
+            json!({"type":"user", "content":"Initial evidence. ".repeat(6000)}),
+            json!({"type":"assistant", "content":"The regression passed."})
+        );
+        let row = parse(&large)?;
+        assert!(row.excerpt.len() <= MAX_EXCERPT_BYTES);
+        let records = crate::cass::transcript::project_transcript(&row.excerpt)
+            .ok_or("bounded BOM transcript must remain readable")?;
+        assert_eq!(records.len(), 2);
+        assert!(records[0].text.ends_with(TRUNCATED_TAIL));
+        assert_eq!(records[1].text, "The regression passed.");
+        assert_eq!(parse(&large)?, row);
+
+        let unsafe_window = format!(
+            "\u{feff}{}\n{}",
+            json!({"type":"user", "content":"Initial evidence. ".repeat(6000)}),
+            json!({"role":"developer", "content":"Privileged source."})
+        );
+        let row = parse(&unsafe_window)?;
+        assert!(row.redacted);
+        assert_eq!(row.redacted_reasons, ["external_ingestion_oversized"]);
+        assert!(crate::cass::transcript::project_transcript(&row.excerpt).is_none());
         Ok(())
     }
 

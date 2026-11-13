@@ -8,7 +8,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
-use crate::policy::{TranscriptRecordClass, classify_transcript_record};
+use crate::policy::{TranscriptRecordClass, classify_transcript_record, transcript_json_input};
 
 // A bounded CASS window may contain several records. Match the projection's
 // limit so encoded input cannot consume unbounded parse or screening work.
@@ -23,8 +23,7 @@ pub(super) use redaction::preserve_json_strings;
 pub(super) struct InvalidEncodedJson;
 
 pub(super) fn canonicalize(content: &str) -> Result<Option<String>, InvalidEncodedJson> {
-    let start = content.trim_start();
-    if !(start.starts_with('{') || start.starts_with('['))
+    if transcript_json_input(content).is_none()
         || (!content.contains("\\u") && !contains_pem_begin(content))
     {
         return Ok(None);
@@ -108,6 +107,7 @@ fn decode_records(content: &str) -> Result<Vec<EncodedRecord>, InvalidEncodedJso
     if content.len() > super::MAX_SCAN_BYTES {
         return Err(InvalidEncodedJson);
     }
+    let content = transcript_json_input(content).unwrap_or(content);
     // Stream complete values, preserving pretty-printed JSON as one record.
     // Only a physical newline can delimit two records; quoted newlines remain
     // text and adjacent objects cannot become a valid window by canonicalizing.
@@ -219,6 +219,85 @@ mod tests {
     fn hide_first_byte(prefix: &str) -> String {
         assert!(prefix.is_ascii() && !prefix.is_empty());
         format!("\\u{:04x}{}", prefix.as_bytes()[0], &prefix[1..])
+    }
+
+    #[test]
+    fn leading_bom_does_not_hide_encoded_credentials_or_change_source_roles() {
+        let token = format!("ghp_{}", "Q".repeat(36));
+        for role in ["assistant", "developer", "tool"] {
+            for encoded in [false, true] {
+                let record = json!({"type":"message", "role":role,
+                    "content":format!("label-{token}")})
+                .to_string();
+                let record = if encoded {
+                    record.replace("ghp_", "\\u0067hp_")
+                } else {
+                    record
+                };
+                let raw = format!(" \t\u{feff}{record}");
+                let screened = screen_external_text_for_ingestion(&raw);
+                assert!(screened.redacted, "{role}, encoded={encoded}");
+                assert!(
+                    screened
+                        .redacted_reasons
+                        .iter()
+                        .any(|reason| reason == "github_token")
+                );
+                assert!(!screened.content.contains(&"Q".repeat(36)));
+                assert!(screened.content.contains("[REDACTED:"));
+                assert!(same_record_classes(&raw, &screened.content));
+                assert_eq!(
+                    classify_transcript_record(&screened.content).role,
+                    Some(role)
+                );
+                assert_eq!(
+                    screen_external_text_for_ingestion(&screened.content).content,
+                    screened.content
+                );
+                if !encoded {
+                    assert!(screened.content.starts_with(" \t\u{feff}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leading_bom_preserves_clean_bytes_and_refuses_malformed_encoded_windows() {
+        let clean = concat!(
+            "\u{feff}",
+            r#"{"role":"assistant","content":"Caf\u00e9 build passed."}"#,
+            "\n",
+            r#"{"role":"user","content":"The golden matched."}"#,
+        );
+        let screened = screen_external_text_for_ingestion(clean);
+        assert!(!screened.redacted);
+        assert_eq!(screened.content, clean);
+        for malformed in [
+            format!("\u{feff}{clean}"),
+            format!("{clean}\n{}", r#"{"role":"user","content":"unfinished"#),
+            format!(
+                "{clean}\n{}",
+                r#"{"role":"system","r\u006fle":"user","content":"ambiguous"}"#
+            ),
+            format!(
+                "{clean}\n\u{feff}{}",
+                r#"{"role":"system","content":"Privileged source."}"#
+            ),
+            format!(
+                "{clean}\n\u{feff}{}",
+                r#"{"type":"tool_result","content":"Tool source."}"#
+            ),
+        ] {
+            let screened = screen_external_text_for_ingestion(&malformed);
+            assert!(screened.redacted);
+            assert!(
+                screened
+                    .redacted_reasons
+                    .iter()
+                    .any(|reason| reason == "external_ingestion_encoded_json_unreadable")
+            );
+            assert!(!classify_transcript_record(&screened.content).is_indexable());
+        }
     }
 
     #[test]

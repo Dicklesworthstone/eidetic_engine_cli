@@ -24,10 +24,9 @@ impl EvidenceReaderProjection {
     /// Derive both reader views in a single projector pass. A refusal is a
     /// materialized empty view, so it also avoids repeated decoding on reads.
     pub(super) fn derive(span: &StoredEvidenceSpan) -> Self {
-        let start = span.excerpt.trim_start();
         let structured_cass = EvidenceProducerKind::parse(&span.producer_kind)
             == Some(EvidenceProducerKind::CassImport)
-            && (start.starts_with('{') || start.starts_with('['));
+            && crate::policy::transcript_json_input(&span.excerpt).is_some();
         let (reader_body, reader_text) = if structured_cass {
             crate::cass::transcript::materialized_reader_views(&span.excerpt).unwrap_or_default()
         } else {

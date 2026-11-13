@@ -23,7 +23,7 @@ pub(crate) const MAX_TRANSCRIPT_RECORDS: usize = 256;
 pub(crate) const MAX_ENVELOPE_DEPTH: usize = 8;
 
 /// Interpretation version for projections derived from stored source bytes.
-pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 2;
+pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 3;
 
 /// Kinds currently admitted into a reader projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,7 +97,8 @@ pub(crate) fn decode_unique_object(text: &str) -> Option<Value> {
     if text.len() > MAX_SOURCE_BYTES {
         return None;
     }
-    let value = serde_json::from_str::<UniqueValue>(text).ok()?.0;
+    let input = crate::policy::transcript_json_input(text).unwrap_or(text);
+    let value = serde_json::from_str::<UniqueValue>(input).ok()?.0;
     value.is_object().then_some(value)
 }
 
@@ -186,8 +187,7 @@ fn project_with(
     if excerpt.len() > MAX_SOURCE_BYTES || excerpt.trim().is_empty() {
         return None;
     }
-    let start = excerpt.trim_start();
-    if !start.starts_with('{') && !start.starts_with('[') {
+    if crate::policy::transcript_json_input(excerpt).is_none() {
         // Plain evidence keeps its exact historical interpretation and bytes.
         return Some(vec![TranscriptProjection {
             role: None,
@@ -208,6 +208,7 @@ fn project_structured(
     excerpt: &str,
     purpose: ProjectionPurpose,
 ) -> Option<Vec<TranscriptProjection<'_>>> {
+    let excerpt = crate::policy::transcript_json_input(excerpt)?;
     // Stream values rather than splitting lines: pretty-printed envelopes and
     // escaped newlines inside a body are not additional conversation turns.
     let mut records = serde_json::Deserializer::from_str(excerpt).into_iter::<UniqueValue>();
@@ -515,5 +516,69 @@ mod tests {
             reader_text(raw).as_deref(),
             Some("user: The cache failed.\nassistant: Use stable ids.")
         );
+    }
+
+    #[test]
+    fn leading_bom_projects_jsonl_without_rewriting_source_or_body_boms() {
+        let records = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"The cache failed."}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Use stable ids.\uFEFF"}]}}"#,
+        );
+        for prefix in ["\u{feff}", " \t\u{feff}\r\n"] {
+            let raw = format!("{prefix}{records}");
+            let original_hash = blake3::hash(raw.as_bytes());
+            let projections = project_transcript(&raw).expect("BOM-prefixed reader records");
+            assert_eq!(projections.len(), 2);
+            assert_eq!(projections[0].role, Some(CassRole::User));
+            assert_eq!(projections[1].role, Some(CassRole::Assistant));
+            assert_eq!(projections[1].text, "Use stable ids.\u{feff}");
+            assert_eq!(
+                reader_text(&raw).as_deref(),
+                Some("user: The cache failed.\nassistant: Use stable ids.\u{feff}")
+            );
+            assert_eq!(
+                message_text(&raw).as_deref(),
+                Some("The cache failed.\nUse stable ids.\u{feff}")
+            );
+            assert_eq!(blake3::hash(raw.as_bytes()), original_hash);
+        }
+        let plain = "\u{feff}An ordinary note, not a JSON record.";
+        assert!(matches!(display_text(plain), Some(Cow::Borrowed(text)) if text == plain));
+    }
+
+    #[test]
+    fn leading_bom_cannot_make_refused_records_or_encoded_secrets_plain_text() {
+        let token = format!("\\u0067hp_{}", "Q".repeat(36));
+        for record in [
+            r#"{"role":"developer","content":"Privileged source."}"#.to_owned(),
+            r#"{"type":"tool_result","content":"Tool source."}"#.to_owned(),
+            r#"{"type":"future_record","content":"Unknown source."}"#.to_owned(),
+            r#"{"role":"assistant","content":"first","content":"second"}"#.to_owned(),
+            r#"{"role":"assistant","content":"unfinished"#.to_owned(),
+            format!(r#"{{"role":"assistant","content":"label-{token}"}}"#),
+            format!(
+                "\u{feff}{}",
+                r#"{"role":"assistant","content":"Repeated BOM."}"#
+            ),
+        ] {
+            let raw = format!("\u{feff}{record}");
+            assert!(project_transcript(&raw).is_none(), "{raw}");
+            assert!(display_text(&raw).is_none(), "{raw}");
+            assert!(reader_text(&raw).is_none(), "{raw}");
+            assert!(message_text(&raw).is_none(), "{raw}");
+        }
+        for refused in [
+            r#"{"role":"system","content":"Privileged source."}"#,
+            r#"{"type":"tool_result","content":"Tool source."}"#,
+        ] {
+            let window = format!(
+                "{}\n\u{feff}{refused}",
+                r#"{"role":"user","content":"Observed result."}"#
+            );
+            assert!(project_transcript(&window).is_none());
+            assert!(reader_text(&window).is_none());
+            assert!(message_text(&window).is_none());
+        }
     }
 }

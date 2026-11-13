@@ -15141,7 +15141,7 @@ where
 /// classification, reader projection, ingestion screening or any admission
 /// clause changes meaning: every recorded verdict then stops matching, rows
 /// revalidate in full, and the next write-side backfill records fresh verdicts.
-pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 4;
+pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 5;
 
 /// Closed producer vocabulary for the shared evidence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15582,10 +15582,9 @@ impl StoredEvidenceSpan {
         if let Some(projection) = self.current_reader_projection() {
             return std::borrow::Cow::Borrowed(projection.reader_text());
         }
-        let start = self.excerpt.trim_start();
         if EvidenceProducerKind::parse(&self.producer_kind)
             != Some(EvidenceProducerKind::CassImport)
-            || (!start.starts_with('{') && !start.starts_with('['))
+            || crate::policy::transcript_json_input(&self.excerpt).is_none()
         {
             return std::borrow::Cow::Borrowed(&self.excerpt);
         }
@@ -15615,10 +15614,9 @@ impl StoredEvidenceSpan {
         if let Some(projection) = self.current_reader_projection() {
             return std::borrow::Cow::Borrowed(projection.reader_body());
         }
-        let start = self.excerpt.trim_start();
         if EvidenceProducerKind::parse(&self.producer_kind)
             != Some(EvidenceProducerKind::CassImport)
-            || (!start.starts_with('{') && !start.starts_with('['))
+            || crate::policy::transcript_json_input(&self.excerpt).is_none()
         {
             return std::borrow::Cow::Borrowed(&self.excerpt);
         }
@@ -23864,13 +23862,7 @@ impl DbConnection {
         actor: Option<&str>,
     ) -> Result<Option<StoredProcedureEvent>> {
         self.with_transaction(|| {
-            self.retire_procedure_record_in_txn(
-                workspace_id,
-                procedure_id,
-                event_id,
-                reason,
-                actor,
-            )
+            self.retire_procedure_record_in_txn(workspace_id, procedure_id, event_id, reason, actor)
         })
     }
 
@@ -55836,6 +55828,48 @@ UPDATE memories
     }
 
     #[test]
+    fn cass_bom_projection_and_cached_admission_never_reuse_raw_envelope_authority() {
+        for (record, body, text) in [
+            (
+                r#"{"role":"assistant","content":"The build passed."}"#,
+                "The build passed.",
+                "assistant: The build passed.",
+            ),
+            (
+                r#"{"role":"developer","content":"Privileged source."}"#,
+                "",
+                "",
+            ),
+            (r#"{"type":"tool_result","content":"Tool source."}"#, "", ""),
+        ] {
+            let source = format!("\u{feff}{record}");
+            let mut span = reader_evidence_span(&source, None);
+            let original = span.clone();
+            let revision = span.pack_entity_revision();
+            let provenance = span.canonical_provenance_uri();
+            assert_eq!(span.reader_body(), body);
+            assert_eq!(span.reader_text(), text);
+
+            let old_binding = super::admission_verdict_binding(
+                span.admission_verdict_hasher(super::EVIDENCE_ADMISSION_VERDICT_REVISION - 1),
+                true,
+            );
+            assert_eq!(span.recorded_admission_verdict(Some(&old_binding)), None);
+
+            span.reader_projection = Some(super::EvidenceReaderProjection::derive(&span));
+            assert_eq!(span.reader_body(), body);
+            assert_eq!(span.reader_text(), text);
+            if body.is_empty() {
+                assert!(!span.row_admission_verdict());
+            }
+            assert_eq!(span, original);
+            assert_eq!(span.pack_entity_revision(), revision);
+            assert_eq!(span.canonical_provenance_uri(), provenance);
+            assert_eq!(span.excerpt, source);
+        }
+    }
+
+    #[test]
     fn cass_reader_projection_never_falls_back_to_refused_structured_source() {
         for excerpt in [
             r#"{"type":"future_record","payload":{"content":"Unknown source scaffolding."}}"#,
@@ -55883,6 +55917,7 @@ UPDATE memories
     fn cass_reader_projection_durable_cache_survives_reopen_without_decoding() -> TestResult {
         const WORKSPACE: &str = "wsp_01234567890123456789012345";
         const SOURCE: &str = concat!(
+            "\u{feff}",
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Did the Caf\\u00e9 release pass?\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Private intermediate reasoning.\"},{\"type\":\"text\",\"text\":\"The release passed.\\nThe golden fixture matched.\"}]}}"
         );

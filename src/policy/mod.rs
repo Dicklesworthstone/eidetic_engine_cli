@@ -2139,9 +2139,10 @@ impl TranscriptRecordClass {
 /// inside message text. Unknown or truncated structured records remain durable
 /// but cannot silently acquire user-message authority.
 pub(crate) fn classify_transcript_record(content: &str) -> TranscriptRecordClass {
-    match serde_json::from_str::<serde_json::Value>(content) {
+    let structured = transcript_json_input(content);
+    match serde_json::from_str::<serde_json::Value>(structured.unwrap_or(content)) {
         Ok(value) if value.is_object() => classify_transcript_object(&value, 0),
-        Err(_) if content.trim_start().starts_with('{') => TranscriptRecordClass {
+        Err(_) if structured.is_some() => TranscriptRecordClass {
             span_kind: "unknown",
             role: None,
         },
@@ -2150,6 +2151,21 @@ pub(crate) fn classify_transcript_record(content: &str) -> TranscriptRecordClass
             role: None,
         },
     }
+}
+
+/// Recognize structured transcript input, including a leading UTF-8 BOM.
+///
+/// Only the parser view omits the BOM; callers retain the complete source for
+/// hashes, bounds and provenance. A second BOM remains in the parser view so
+/// malformed structured input is refused, never reinterpreted as plain text.
+/// Ordinary prose, including a BOM inside a message body, is not rewritten.
+pub(crate) fn transcript_json_input(content: &str) -> Option<&str> {
+    let input = content
+        .trim_start()
+        .strip_prefix('\u{feff}')
+        .unwrap_or(content);
+    let start = input.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+    (start.starts_with('{') || start.starts_with('[')).then_some(input)
 }
 
 fn transcript_token(value: &str) -> String {
@@ -4696,6 +4712,31 @@ mod tests {
             nested = serde_json::json!({"type":"response_item", "payload":nested});
         }
         assert!(!super::classify_transcript_record(&nested.to_string()).is_indexable());
+    }
+
+    #[test]
+    fn transcript_classification_preserves_authority_after_a_leading_bom() {
+        for record in [
+            r#"{"role":"user","content":"Observed result."}"#,
+            r#"{"role":"assistant","content":"Observed result."}"#,
+            r#"{"role":"developer","content":"Privileged source."}"#,
+            r#"{"type":"tool_result","content":"Tool source."}"#,
+            r#"{"type":"future_record","content":"Unknown source."}"#,
+        ] {
+            let expected = super::classify_transcript_record(record);
+            for prefix in ["\u{feff}", " \t\u{feff}\r\n"] {
+                let source = format!("{prefix}{record}");
+                assert_eq!(super::classify_transcript_record(&source), expected);
+            }
+        }
+        for source in [
+            "\u{feff}{\"role\":\"developer\",\"content\":\"unfinished",
+            "\u{feff}\u{feff}{\"role\":\"assistant\",\"content\":\"Repeated BOM.\"}",
+        ] {
+            assert!(!super::classify_transcript_record(source).is_indexable());
+        }
+        assert!(super::transcript_json_input("\u{feff}Ordinary prose.").is_none());
+        assert!(super::transcript_json_input("Example: {\"role\":\"system\"}").is_none());
     }
 
     #[test]

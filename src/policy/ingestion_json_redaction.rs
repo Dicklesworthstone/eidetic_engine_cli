@@ -16,8 +16,7 @@ pub(in crate::policy::ingestion) fn preserve_json_strings(
     input: &str,
     original: SecretRedactionReport,
 ) -> Result<SecretRedactionReport, InvalidEncodedJson> {
-    let start = input.trim_start();
-    if !original.redacted || !(start.starts_with('{') || start.starts_with('[')) {
+    if !original.redacted || crate::policy::transcript_json_input(input).is_none() {
         return Ok(original);
     }
     // The shared validator enforces the 1 MiB input, 256-record, unique-key,
