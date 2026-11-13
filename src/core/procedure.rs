@@ -1322,8 +1322,7 @@ pub fn promote_procedure(
     let evidence_count = procedure_verification_evidence_uris(&show.procedure.evidence_ids).len();
     let evidence_threshold = promotion_evidence_threshold(target_maturity);
     let insufficient_evidence = evidence_count < evidence_threshold;
-    let verification_failed =
-        verification.fail_count > 0 || verification.overall_result != "passed";
+    let verification_failed = !promotion_verification_passed(&verification, evidence_count);
     let blocked = insufficient_evidence || verification_failed;
     let status = if blocked {
         "blocked"
@@ -1431,7 +1430,9 @@ pub fn promote_procedure(
             .to_owned(),
     ];
     if verification_failed {
-        warnings.push("promotion is blocked until verification passes".to_owned());
+        warnings.push(
+            "promotion is blocked until every evidence source and reported step passes".to_owned(),
+        );
     }
     if insufficient_evidence {
         warnings.push(format!(
@@ -1471,6 +1472,29 @@ pub fn promote_procedure(
         next_actions,
         generated_at,
     })
+}
+
+/// A partial or contradictory report cannot authorize a maturity transition.
+/// Source-count thresholds describe distinct passing evidence, not declarations
+/// or a passing summary that conceals failed or unexecuted steps.
+fn promotion_verification_passed(
+    verification: &ProcedureVerifyReport,
+    expected_sources: usize,
+) -> bool {
+    expected_sources > 0
+        && verification.status == ProcedureVerificationStatus::Passed.as_str()
+        && verification.overall_result == "passed"
+        && verification.fail_count == 0
+        && verification.skip_count == 0
+        && u32_to_usize_saturating(verification.pass_count) == expected_sources
+        && verification.sources_checked.len() == expected_sources
+        && verification.sources_checked.iter().all(|source| {
+            source.result == "passed"
+                && source
+                    .step_results
+                    .iter()
+                    .all(|step| step.result == "passed")
+        })
 }
 
 fn verify_procedure_for_promotion(
@@ -1530,7 +1554,7 @@ fn verify_procedure_for_promotion(
     build_verification_report(&options, "mixed".to_owned(), source_results)
 }
 
-fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> VerificationSourceKind {
+fn persisted_promotion_source_kind(source_id: &str) -> Option<VerificationSourceKind> {
     let lookup_source_id = source_id
         .trim()
         .strip_prefix("evidence://")
@@ -1543,12 +1567,23 @@ fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> Verifica
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         if lookup_source_id.starts_with("ev_") {
-            return VerificationSourceKind::ClaimEvidence;
+            return Some(VerificationSourceKind::ClaimEvidence);
         }
         if lookup_source_id.starts_with("run_") {
-            return VerificationSourceKind::RecorderRun;
+            return Some(VerificationSourceKind::RecorderRun);
         }
     }
+    None
+}
+
+fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> VerificationSourceKind {
+    if let Some(kind) = persisted_promotion_source_kind(source_id) {
+        return kind;
+    }
+    let lookup_source_id = source_id
+        .trim()
+        .strip_prefix("evidence://")
+        .unwrap_or_else(|| source_id.trim());
     if verification_source_candidate_paths(workspace, "repro_pack", lookup_source_id)
         .iter()
         .any(|path| {
@@ -1560,6 +1595,66 @@ fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> Verifica
     } else {
         VerificationSourceKind::EvalFixture
     }
+}
+
+/// Only authoritative source rows enter the comparison. Reader projections
+/// and cached admission verdicts remain derived state, never proof identity.
+#[derive(Debug, PartialEq, Eq)]
+enum PersistedPromotionEvidence {
+    Claim {
+        span: Box<crate::db::StoredEvidenceSpan>,
+        session: crate::db::StoredSession,
+    },
+    Recorder(crate::db::StoredRecorderRun),
+}
+
+type PersistedPromotionSources = Vec<(String, Option<PersistedPromotionEvidence>)>;
+
+/// The caller owns a source snapshot or the final writer transaction. This
+/// helper never opens another connection, probes paths, or runs verification.
+fn capture_persisted_promotion_sources(
+    store: &ProcedureStore,
+    evidence_uris: &[String],
+) -> Result<PersistedPromotionSources, DomainError> {
+    let mut sources = Vec::new();
+    for uri in evidence_uris {
+        let Some(kind) = persisted_promotion_source_kind(uri) else {
+            continue;
+        };
+        let source_id = uri
+            .trim()
+            .strip_prefix("evidence://")
+            .unwrap_or_else(|| uri.trim());
+        let source = match kind {
+            VerificationSourceKind::ClaimEvidence => store
+                .connection
+                .get_evidence_span_with_session(source_id, Some(&store.workspace_id))
+                .map_err(storage_error("failed to inspect procedure claim authority"))?
+                .filter(|evidence| {
+                    evidence.is_derivation_admitted(&store.workspace_id)
+                        && !evidence.span.excerpt.trim().is_empty()
+                })
+                .and_then(|evidence| {
+                    evidence
+                        .session
+                        .map(|session| PersistedPromotionEvidence::Claim {
+                            span: Box::new(evidence.span),
+                            session,
+                        })
+                }),
+            VerificationSourceKind::RecorderRun => store
+                .connection
+                .get_recorder_run(source_id)
+                .map_err(storage_error(
+                    "failed to inspect procedure recorder authority",
+                ))?
+                .filter(|run| recorder_run_is_verification_evidence(run, &store.workspace_id))
+                .map(PersistedPromotionEvidence::Recorder),
+            VerificationSourceKind::EvalFixture | VerificationSourceKind::ReproPack => continue,
+        };
+        sources.push((uri.clone(), source));
+    }
+    Ok(sources)
 }
 
 fn promote_persisted_procedure(
@@ -1595,7 +1690,8 @@ fn promote_persisted_procedure_with_verifier(
             message: format!("stored procedure has invalid maturity: {error}"),
             repair: Some("repair the procedure row or re-import the candidate".to_owned()),
         })?;
-    if from_maturity.is_terminal() || stored.retired_at.is_some() || stored.retire_reason.is_some() {
+    if from_maturity.is_terminal() || stored.retired_at.is_some() || stored.retire_reason.is_some()
+    {
         return Err(DomainError::PolicyDenied {
             message: "cannot promote a retired procedure".to_owned(),
             repair: Some("propose a new procedure with current evidence".to_owned()),
@@ -1629,21 +1725,34 @@ fn promote_persisted_procedure_with_verifier(
             )),
         });
     }
+    // Capture persisted authority in one short transaction, then release the
+    // writer fence before filesystem verification. No fixture/repro path is
+    // inspected in either capture; only pure native-ID recognition is used.
+    let persisted_sources = if verification_evidence
+        .iter()
+        .any(|source| persisted_promotion_source_kind(source).is_some())
+    {
+        with_procedure_transaction(&store.connection, || {
+            capture_persisted_promotion_sources(&store, &verification_evidence)
+        })?
+    } else {
+        Vec::new()
+    };
     // Evidence verification may read external artifacts or execute checks. Do
-    // not hold the writer fence while it runs; bind its result to this complete
-    // procedure snapshot again inside the eventual write transaction.
+    // not hold the writer fence while it runs; bind its result to the complete
+    // procedure and persisted-source snapshots in the eventual transaction.
     let verification_report = verify(&options.workspace, procedure_id, &stored.evidence_uris)?;
     // Durable promotion must apply the SAME evidence gate the dry-run path previews.
     // The evidence-URI count threshold above is necessary but not sufficient: a
     // count-sufficient but unresolvable / failed / skipped evidence set must NOT
     // promote a procedure to a higher maturity or stamp last_validated_at. This
-    // mirrors the dry-run `blocked` predicate (fail_count > 0 || overall_result !=
-    // "passed") so `ee procedure promote --dry-run` and the durable run can never
-    // disagree. See bd-d67os.24.
-    if verification_report.fail_count > 0 || verification_report.overall_result != "passed" {
+    // shares the dry-run predicate so skipped sources and failed/skipped steps
+    // hidden under a passing summary cannot authorize either path.
+    // See bd-d67os.24.
+    if !promotion_verification_passed(&verification_report, verification_evidence.len()) {
         return Err(DomainError::PolicyDenied {
             message: format!(
-                "procedure promotion to {} requires passing verification evidence; verification reported {} ({} passed, {} failed, {} skipped)",
+                "procedure promotion to {} requires every evidence source and reported step to pass; verification reported {} ({} passed, {} failed, {} skipped)",
                 target_maturity.as_str(),
                 verification_report.overall_result,
                 verification_report.pass_count,
@@ -1686,9 +1795,17 @@ fn promote_persisted_procedure_with_verifier(
         let current = store
             .connection
             .get_procedure(&store.workspace_id, procedure_id)
-            .map_err(storage_error("failed to recheck procedure before promotion"))?;
+            .map_err(storage_error(
+                "failed to recheck procedure before promotion",
+            ))?;
         if current.as_ref() != Some(&stored) {
             return Err(procedure_state_changed(procedure_id));
+        }
+        let current_sources = capture_persisted_promotion_sources(&store, &verification_evidence)?;
+        if current_sources != persisted_sources
+            || current_sources.iter().any(|(_, source)| source.is_none())
+        {
+            return Err(procedure_evidence_changed(procedure_id));
         }
         let event = store
             .connection
@@ -2412,14 +2529,7 @@ fn inspect_persisted_recorder_run(
             ));
         }
     };
-    let workspace_matches = run
-        .workspace_id
-        .as_deref()
-        .is_none_or(|workspace_id| workspace_id == store.workspace_id);
-    let passed = workspace_matches
-        && run.chain_complete
-        && run.event_count > 0
-        && matches!(run.status.as_str(), "completed" | "imported");
+    let passed = recorder_run_is_verification_evidence(&run, &store.workspace_id);
     let result = if passed { "passed" } else { "failed" };
     Some(verification_source_result(
         source_id,
@@ -2467,6 +2577,18 @@ fn inspect_persisted_recorder_run(
             },
         ],
     ))
+}
+
+fn recorder_run_is_verification_evidence(
+    run: &crate::db::StoredRecorderRun,
+    workspace_id: &str,
+) -> bool {
+    run.workspace_id
+        .as_deref()
+        .is_none_or(|owner| owner == workspace_id)
+        && run.chain_complete
+        && run.event_count > 0
+        && matches!(run.status.as_str(), "completed" | "imported")
 }
 
 fn persisted_source_storage_failure(
@@ -3733,6 +3855,22 @@ fn procedure_state_changed(procedure_id: &str) -> DomainError {
     }
 }
 
+fn procedure_evidence_changed(procedure_id: &str) -> DomainError {
+    DomainError::PolicyDeniedWithDetails {
+        message: "procedure evidence changed or lost admission while promotion was being verified"
+            .to_owned(),
+        repair: Some(format!(
+            "reload ee procedure show {procedure_id} --include-verification --json and retry against current evidence"
+        )),
+        details_json: json!({
+            "reasonCode": "procedure_evidence_changed",
+            "procedureId": procedure_id,
+            "conflict": true,
+        })
+        .to_string(),
+    }
+}
+
 fn open_procedure_store(workspace: &Path) -> Result<Option<ProcedureStore>, DomainError> {
     open_procedure_store_with_workspace_mode(workspace, false)
 }
@@ -4281,9 +4419,12 @@ mod tests {
 
     fn assert_procedure_state_conflict(error: &DomainError) -> TestResult {
         let DomainError::PolicyDeniedWithDetails { details_json, .. } = error else {
-            return Err(format!("expected a procedure state conflict, got {error:?}"));
+            return Err(format!(
+                "expected a procedure state conflict, got {error:?}"
+            ));
         };
-        let details: Value = serde_json::from_str(details_json).map_err(|error| error.to_string())?;
+        let details: Value =
+            serde_json::from_str(details_json).map_err(|error| error.to_string())?;
         assert_eq!(details["reasonCode"], "procedure_state_changed");
         assert_eq!(details["conflict"], true);
         Ok(())
@@ -4396,8 +4537,8 @@ mod tests {
     }
 
     #[test]
-    fn procedure_reads_and_promotion_preview_refuse_migration_without_changing_store()
-    -> TestResult {
+    fn procedure_reads_and_promotion_preview_refuse_migration_without_changing_store() -> TestResult
+    {
         let workspace = std::env::temp_dir()
             .join(format!("ee-procedure-read-schema-{}", uuid::Uuid::now_v7()))
             .join("operator's workspace");
@@ -4460,10 +4601,16 @@ mod tests {
         ] {
             match result {
                 Err(DomainError::MigrationRequired { repair, .. }) => {
-                    assert_eq!(repair.as_deref(), Some(expected_repair.as_str()), "{surface}");
+                    assert_eq!(
+                        repair.as_deref(),
+                        Some(expected_repair.as_str()),
+                        "{surface}"
+                    );
                 }
                 other => {
-                    return Err(format!("{surface}: expected migration refusal, got {other:?}"));
+                    return Err(format!(
+                        "{surface}: expected migration refusal, got {other:?}"
+                    ));
                 }
             }
         }
@@ -4490,7 +4637,10 @@ mod tests {
                     message.contains("migration is required"),
                     "{source_kind}: {message}"
                 );
-                assert!(message.contains(&expected_repair), "{source_kind}: {message}");
+                assert!(
+                    message.contains(&expected_repair),
+                    "{source_kind}: {message}"
+                );
             }
         }
         assert_eq!(
@@ -4515,8 +4665,8 @@ mod tests {
     }
 
     #[test]
-    fn procedure_read_store_preserves_migration_drift_and_names_the_addressed_store()
-    -> TestResult {
+    fn procedure_read_store_preserves_migration_drift_and_names_the_addressed_store() -> TestResult
+    {
         let workspace = procedure_store_workspace()?;
         let database_path = workspace.join(".ee/ee.db");
         let (connection, _) = procedure_store_connection(&workspace)?;
@@ -4559,7 +4709,10 @@ mod tests {
         let store = open_procedure_store(&workspace)
             .map_err(|error| error.message())?
             .ok_or("expected an initialized procedure store")?;
-        assert_eq!(store.connection.mode(), crate::db::DatabaseOpenMode::ReadOnly);
+        assert_eq!(
+            store.connection.mode(),
+            crate::db::DatabaseOpenMode::ReadOnly
+        );
         let error = store
             .connection
             .execute_raw("CREATE TABLE forbidden_procedure_read_write (value TEXT)")
@@ -4719,7 +4872,9 @@ mod tests {
                 ..Default::default()
             };
             let Err(error) = propose_procedure(&options) else {
-                return Err(format!("proposal should fail when {table} rejects its write"));
+                return Err(format!(
+                    "proposal should fail when {table} rejects its write"
+                ));
             };
             assert!(error.message().contains("lifecycle write failure"));
             let (connection, _) = procedure_store_connection(&workspace)?;
@@ -4820,10 +4975,9 @@ mod tests {
                 .iter()
                 .find(|audit| audit.action == action)
                 .ok_or_else(|| format!("missing {action} audit after retry"))?;
-            let details: Value = serde_json::from_str(
-                audit.details.as_deref().ok_or("missing audit details")?,
-            )
-            .map_err(|error| error.to_string())?;
+            let details: Value =
+                serde_json::from_str(audit.details.as_deref().ok_or("missing audit details")?)
+                    .map_err(|error| error.to_string())?;
             assert_eq!(details["fromMaturity"], before.procedure.maturity);
             assert!(after.events.iter().any(|event| {
                 details["eventId"] == event.id
@@ -4853,11 +5007,12 @@ mod tests {
                     actor: Some("independent-writer".to_owned()),
                 })?;
                 retired_snapshot = Some(
-                    procedure_lifecycle_snapshot(workspace, procedure_id)
-                        .map_err(|message| DomainError::Storage {
+                    procedure_lifecycle_snapshot(workspace, procedure_id).map_err(|message| {
+                        DomainError::Storage {
                             message,
                             repair: None,
-                        })?,
+                        }
+                    })?,
                 );
                 Ok(report)
             },
@@ -4874,7 +5029,12 @@ mod tests {
             after.procedure.retire_reason.as_deref(),
             Some("concurrent retirement must remain terminal")
         );
-        assert!(after.events.iter().all(|event| event.event_type != "promoted"));
+        assert!(
+            after
+                .events
+                .iter()
+                .all(|event| event.event_type != "promoted")
+        );
         assert!(
             after
                 .audits
@@ -4923,23 +5083,29 @@ mod tests {
                 |workspace, procedure_id, evidence| {
                     let report = verify_procedure_for_promotion(workspace, procedure_id, evidence)?;
                     assert_eq!(report.overall_result, "passed");
-                    let (connection, _) = procedure_store_connection(workspace)
-                        .map_err(|message| DomainError::Storage {
-                            message,
-                            repair: None,
+                    let (connection, _) =
+                        procedure_store_connection(workspace).map_err(|message| {
+                            DomainError::Storage {
+                                message,
+                                repair: None,
+                            }
                         })?;
                     assert_eq!(
                         connection
-                            .execute(update, &[sqlmodel_core::Value::Text(procedure_id.to_owned())])
+                            .execute(
+                                update,
+                                &[sqlmodel_core::Value::Text(procedure_id.to_owned())]
+                            )
                             .map_err(storage_error("failed to apply concurrent fixture update"))?,
                         1
                     );
                     changed_snapshot = Some(
-                        procedure_lifecycle_snapshot(workspace, procedure_id)
-                            .map_err(|message| DomainError::Storage {
+                        procedure_lifecycle_snapshot(workspace, procedure_id).map_err(
+                            |message| DomainError::Storage {
                                 message,
                                 repair: None,
-                            })?,
+                            },
+                        )?,
                     );
                     Ok(report)
                 },
@@ -6113,14 +6279,219 @@ mod tests {
     }
 
     #[test]
-    fn promotion_uses_live_claims_and_explicit_recorder_runs_without_counting_lineage()
-    -> TestResult {
+    fn promotion_rechecks_live_source_authority_before_writing_lifecycle_state() -> TestResult {
+        for (is_claim, update, still_admitted) in [
+            (
+                true,
+                "UPDATE evidence_spans SET search_eligibility = 'quarantined', pack_eligibility = 'quarantined' WHERE id = ?1",
+                false,
+            ),
+            (
+                true,
+                "UPDATE evidence_spans SET start_line = start_line + 1, end_line = end_line + 1 WHERE id = ?1",
+                true,
+            ),
+            (
+                true,
+                "UPDATE sessions SET workspace_id = ?2 WHERE id = (SELECT session_id FROM evidence_spans WHERE id = ?1)",
+                false,
+            ),
+            (
+                true,
+                "UPDATE sessions SET model = 'replacement-model' WHERE id = (SELECT session_id FROM evidence_spans WHERE id = ?1)",
+                true,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET status = 'abandoned' WHERE run_id = ?1",
+                false,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET chain_complete = 0 WHERE run_id = ?1",
+                false,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET event_count = 0 WHERE run_id = ?1",
+                false,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET workspace_id = ?2 WHERE run_id = ?1",
+                false,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET source_id = 'fixture://replacement' WHERE run_id = ?1",
+                true,
+            ),
+            (
+                false,
+                "UPDATE recorder_runs SET workspace_id = NULL WHERE run_id = ?1",
+                true,
+            ),
+        ] {
+            let workspace = procedure_store_workspace()?;
+            let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+            let foreign =
+                crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(911)).to_string();
+            connection
+                .insert_workspace(
+                    &foreign,
+                    &CreateWorkspaceInput {
+                        path: workspace.join("foreign").display().to_string(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let source = if is_claim {
+                insert_promotion_claim(&connection, &workspace_id, 912)?
+            } else {
+                let run = "run_promotion_source_race";
+                insert_promotion_run(&connection, run, Some(&workspace_id), "completed", 2, true)?;
+                run.to_owned()
+            };
+            let options =
+                propose_from_promotion_evidence(&workspace, vec![source.clone()], Vec::new())?;
+            drop(connection);
+            let before = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+            let result = promote_persisted_procedure_with_verifier(
+                &options,
+                &options.procedure_id,
+                ProcedureMaturity::Validated,
+                |workspace, procedure_id, evidence| {
+                    let report = verify_procedure_for_promotion(workspace, procedure_id, evidence)?;
+                    assert_eq!(report.overall_result, "passed");
+                    assert_eq!(report.pass_count, 1);
+                    // A separate writer changes only the supporting source.
+                    // The procedure, its timestamps, and its evidence URI stay
+                    // identical, so a procedure-row-only fence cannot detect it.
+                    let (writer, _) = procedure_store_connection(workspace).map_err(|message| {
+                        DomainError::Storage {
+                            message,
+                            repair: None,
+                        }
+                    })?;
+                    let mut parameters = vec![sqlmodel_core::Value::Text(source.clone())];
+                    if update.contains("?2") {
+                        parameters.push(sqlmodel_core::Value::Text(foreign.clone()));
+                    }
+                    assert_eq!(
+                        writer
+                            .execute(update, &parameters)
+                            .map_err(storage_error("failed to change verification source"))?,
+                        1
+                    );
+                    drop(writer);
+                    let fresh = verify_procedure_for_promotion(workspace, procedure_id, evidence)?;
+                    assert_eq!(
+                        fresh.overall_result,
+                        if still_admitted { "passed" } else { "failed" },
+                        "{update}"
+                    );
+                    Ok(report)
+                },
+            );
+            let error = result.expect_err("stale source verification cannot authorize promotion");
+            let DomainError::PolicyDeniedWithDetails { details_json, .. } = error else {
+                return Err(format!(
+                    "expected an evidence conflict for {update}, got {error:?}"
+                ));
+            };
+            let details: Value =
+                serde_json::from_str(&details_json).map_err(|error| error.to_string())?;
+            assert_eq!(details["reasonCode"], "procedure_evidence_changed");
+            assert_eq!(details["conflict"], true);
+            assert_eq!(
+                procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
+                before,
+                "{update}"
+            );
+            if still_admitted {
+                // A new verification of the changed source may authorize a
+                // fresh promotion, including a run that is now unscoped.
+                let promoted = promote_procedure(&options).map_err(|error| error.message())?;
+                assert_eq!(promoted.status, "promoted");
+                assert_eq!(promoted.verification.pass_count, 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promotion_requires_every_source_and_reported_step_to_pass() -> TestResult {
+        for incomplete in [
+            json!({"status": "skipped"}),
+            json!({"status": "passed", "step_results": [{"result": "failed"}]}),
+            json!({"status": "passed", "step_results": [{"result": "skipped"}]}),
+        ] {
+            let workspace = procedure_store_workspace()?;
+            let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+            let source = insert_promotion_claim(&connection, &workspace_id, 913)?;
+            let fixture = workspace.join("incomplete-source.json");
+            fs::write(&fixture, incomplete.to_string()).map_err(|error| error.to_string())?;
+            let mut options = propose_from_promotion_evidence(
+                &workspace,
+                vec![source, "incomplete-source.json".to_owned()],
+                Vec::new(),
+            )?;
+            options.to_maturity = Some("mature".to_owned());
+            let before = procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?;
+            let preview = promote_procedure(&ProcedurePromoteOptions {
+                dry_run: true,
+                ..options.clone()
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(preview.status, "blocked", "{incomplete}");
+            assert!(
+                preview
+                    .planned_effects
+                    .iter()
+                    .all(|effect| !effect.would_write)
+            );
+            let error = promote_procedure(&options)
+                .expect_err("one passing claim cannot conceal incomplete verification");
+            assert_eq!(error.code(), "policy_denied");
+            assert_eq!(
+                procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
+                before
+            );
+
+            fs::write(
+                &fixture,
+                json!({"status": "passed", "step_results": [{"result": "passed"}]}).to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            let preview = promote_procedure(&ProcedurePromoteOptions {
+                dry_run: true,
+                ..options.clone()
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(preview.status, "dry_run");
+            let promoted = promote_procedure(&options).map_err(|error| error.message())?;
+            assert_eq!(promoted.to_status, "mature");
+            assert_eq!(promoted.verification.pass_count, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promotion_uses_live_claims_and_explicit_recorder_runs_without_counting_lineage() -> TestResult
+    {
         let workspace = procedure_store_workspace()?;
         let (connection, workspace_id) = procedure_store_connection(&workspace)?;
         let evidence_id = insert_promotion_claim(&connection, &workspace_id, 701)?;
         let run_id = "run_promotion_owned";
         let global_run = "run_promotion_global";
-        insert_promotion_run(&connection, run_id, Some(&workspace_id), "completed", 2, true)?;
+        insert_promotion_run(
+            &connection,
+            run_id,
+            Some(&workspace_id),
+            "completed",
+            2,
+            true,
+        )?;
         insert_promotion_run(&connection, global_run, None, "imported", 1, true)?;
         assert!(
             connection
@@ -6177,7 +6548,10 @@ mod tests {
             assert!(after.procedure.last_validated_at.is_some());
             assert_eq!(after.events.len(), before.events.len() + 1);
             assert_eq!(after.audits.len(), before.audits.len() + 1);
-            assert_eq!(after.procedure.evidence_uris, before.procedure.evidence_uris);
+            assert_eq!(
+                after.procedure.evidence_uris,
+                before.procedure.evidence_uris
+            );
         }
         let lineage_only = propose_from_promotion_evidence(
             &workspace,
@@ -6238,7 +6612,11 @@ mod tests {
                 .all(|effect| !effect.would_write)
         );
         let error = promote_procedure(&options).expect_err("one row cannot supply two sources");
-        assert!(error.message().contains("requires at least 2 evidence URI(s); found 1"));
+        assert!(
+            error
+                .message()
+                .contains("requires at least 2 evidence URI(s); found 1")
+        );
         assert_eq!(
             procedure_lifecycle_snapshot(&workspace, &options.procedure_id)?,
             before
@@ -6310,9 +6688,27 @@ mod tests {
         }
         for (source, owner, status, count, complete) in [
             ("run_foreign_proof", foreign.as_str(), "completed", 1, true),
-            ("run_broken_chain", workspace_id.as_str(), "completed", 1, false),
-            ("run_empty_proof", workspace_id.as_str(), "completed", 0, true),
-            ("run_abandoned_proof", workspace_id.as_str(), "abandoned", 1, true),
+            (
+                "run_broken_chain",
+                workspace_id.as_str(),
+                "completed",
+                1,
+                false,
+            ),
+            (
+                "run_empty_proof",
+                workspace_id.as_str(),
+                "completed",
+                0,
+                true,
+            ),
+            (
+                "run_abandoned_proof",
+                workspace_id.as_str(),
+                "abandoned",
+                1,
+                true,
+            ),
         ] {
             insert_promotion_run(&connection, source, Some(owner), status, count, complete)?;
             rejected.push((source.to_owned(), "recorder_run"));
@@ -6379,8 +6775,10 @@ mod tests {
                     "step_id":"run_fixture", "sequence":1, "result":"passed",
                     "expected":"verification command succeeds", "actual":"exit_code=0"
                 }]
-            }).to_string(),
-        ).map_err(|error| error.to_string())?;
+            })
+            .to_string(),
+        )
+        .map_err(|error| error.to_string())?;
         let options = propose_from_promotion_evidence(
             &workspace,
             vec![
@@ -6430,9 +6828,15 @@ mod tests {
             assert_eq!(report.overall_result, "failed");
             assert_eq!(report.fail_count, 1);
             assert_eq!(report.sources_checked[0].source_kind, source_kind);
-            assert!(report.sources_checked[0].message.as_deref().is_some_and(|message| {
-                message.contains("failed to load persisted") && !message.contains("not found")
-            }));
+            assert!(
+                report.sources_checked[0]
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| {
+                        message.contains("failed to load persisted")
+                            && !message.contains("not found")
+                    })
+            );
         }
         Ok(())
     }
