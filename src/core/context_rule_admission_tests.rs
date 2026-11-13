@@ -164,10 +164,13 @@ impl Fixture {
     ) -> Resolution {
         let mut degraded = Vec::new();
         let mut hits = Vec::new();
+        let evidence_batch =
+            preload_evidence_pack_hits(&self.db, &self.workspace, &search, &mut degraded);
         let (memories, metrics) = candidates_from_search_for_task_paths(
             &self.db,
             &self.workspace,
             &search,
+            &evidence_batch,
             filters,
             include_tombstoned,
             &mut degraded,
@@ -1886,10 +1889,13 @@ fn sourceless_admitted_rules_take_the_direct_rule_lane() {
     let search = report(&[&sourced.rule, &sourceless.rule]);
     let mut degraded = Vec::new();
     let mut direct_rules = Vec::new();
+    let evidence_batch =
+        preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
     let (candidates, _) = candidates_from_search_for_task_paths(
         &f.db,
         &f.workspace,
         &search,
+        &evidence_batch,
         &QueryFilters::default(),
         false,
         &mut degraded,
@@ -2485,10 +2491,13 @@ fn native_sourced_rules_reject_stale_revision_without_borrowing_parent_body() {
         Some(serde_json::json!({"entity_revision": format!("blake3:{}", "0".repeat(64))}));
     let mut hits = Vec::new();
     let mut degraded = Vec::new();
+    let evidence_batch =
+        preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
     let (memories, metrics) = candidates_from_search_for_task_paths(
         &f.db,
         &f.workspace,
         &search,
+        &evidence_batch,
         &QueryFilters::default(),
         false,
         &mut degraded,

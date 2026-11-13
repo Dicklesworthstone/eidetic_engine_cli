@@ -4455,6 +4455,210 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn pack_candidate_lanes_share_one_paged_evidence_hydration() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory.path();
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0xe800)).to_string();
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session_id,
+                &crate::db::CreateSessionInput {
+                    workspace_id: workspace_id.clone(),
+                    cass_session_id: "shared-evidence-hydration".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 257,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(b"shared-session").to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let session = connection
+            .get_session(&session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing shared-hydration session".to_owned())?;
+        let spans = (1..=257_u32)
+            .map(|line| {
+                let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                    0xe800 + u128::from(line),
+                ))
+                .to_string();
+                let excerpt = format!(
+                    "Release evidence number {line}: the replay verification completed for this source."
+                );
+                (
+                    id,
+                    crate::db::CreateEvidenceSpanInput {
+                        workspace_id: workspace_id.clone(),
+                        session_id: session_id.clone(),
+                        memory_id: None,
+                        producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("shared-span-{line}"),
+                        span_kind: "message".to_owned(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some("assistant".to_owned()),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
+                        excerpt,
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        connection
+            .insert_evidence_spans_in_session(&spans, &session)
+            .map_err(|error| error.to_string())?;
+        let request = ContextRequest::new(ContextRequestInput::for_query("release evidence"))
+            .map_err(|error| error.to_string())?;
+
+        for (count, present) in [
+            (0_usize, true),
+            (1, true),
+            (32, true),
+            (257, true),
+            (257, false),
+        ] {
+            let mut hits = spans[..count]
+                .iter()
+                .enumerate()
+                .map(|(index, (id, _))| {
+                    let mut hit =
+                        ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
+                    hit.doc_id = if present {
+                        id.clone()
+                    } else {
+                        crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                            0xf800 + index as u128,
+                        ))
+                        .to_string()
+                    };
+                    hit
+                })
+                .collect::<Vec<_>>();
+            if let Some(first) = hits.first().cloned() {
+                hits.push(first.clone());
+                // A blocked duplicate cannot consume the allowed hit's source
+                // row or make the direct lane bypass the mesh decision.
+                let mut blocked = first;
+                blocked.metadata = Some(serde_json::json!({
+                    "mesh": { "workspaceScopeDecision": "quarantine" }
+                }));
+                hits.insert(0, blocked);
+            }
+            let search = ppr_search_report(hits);
+            let baseline = super::collect_direct_evidence_pack_candidates(
+                &connection,
+                workspace,
+                &search,
+                &request,
+                &Default::default(),
+                Some(0.0),
+                &mut Vec::new(),
+            )
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|candidate| candidate.item)
+            .collect::<Vec<_>>();
+
+            connection
+                .begin_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+                let mut degraded = Vec::new();
+                let batch = super::preload_evidence_pack_hits(
+                    &connection,
+                    workspace,
+                    &search,
+                    &mut degraded,
+                );
+                assert_eq!(
+                    batch.rows.as_ref().map(BTreeMap::len),
+                    Some(if present { count } else { 0 })
+                );
+                let (memories, _) = super::candidates_from_search_for_task_paths(
+                    &connection,
+                    workspace,
+                    &search,
+                    &batch,
+                    &Default::default(),
+                    false,
+                    &mut degraded,
+                    None,
+                    &[],
+                    None,
+                    &mut Vec::new(),
+                );
+                assert!(memories.is_empty());
+                super::collect_direct_evidence_pack_candidates_with_probe(
+                    &connection,
+                    workspace,
+                    &search,
+                    batch,
+                    &request,
+                    &Default::default(),
+                    None,
+                    Some(0.0),
+                    &mut degraded,
+                    None,
+                )
+            });
+            connection
+                .rollback_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let items = result
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|candidate| candidate.item)
+                .collect::<Vec<_>>();
+            assert_eq!(items.len(), if present { count } else { 0 });
+            assert_eq!(
+                items, baseline,
+                "shared hydration must preserve every packed field"
+            );
+            let body_reads = queries
+                .iter()
+                .filter(|sql| sql.contains("FROM evidence_spans e WHERE e.id IN ("))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_reads.len(),
+                count.div_ceil(128),
+                "both lanes must share one bind-safe hydration, including all-missing batches: {body_reads:?}"
+            );
+            assert!(
+                !queries.iter().any(|sql| {
+                    sql.contains("FROM evidence_spans WHERE id =")
+                        || sql.contains("FROM sessions WHERE id =")
+                }),
+                "a successful source batch must not fall back to point reads: {queries:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn direct_evidence_batch_failure_reports_fallback_and_preserves_admission() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = directory.path();
@@ -4660,6 +4864,30 @@ pub fn unrelated_context() -> u64 {{
                 .iter()
                 .any(|entry| entry.message.contains("no live source row"))
         );
+        let (absent_candidates, absent_queries) = crate::db::capture_query_sql_for_test(|| {
+            super::collect_direct_evidence_pack_candidates_with_probe(
+                &connection,
+                workspace,
+                &search,
+                absent_batch,
+                &request,
+                &Default::default(),
+                None,
+                Some(0.0),
+                &mut Vec::new(),
+                None,
+            )
+        });
+        assert!(
+            absent_candidates.map_err(|error| error.to_string())?.is_empty(),
+            "native selection must preserve the same successful-batch absence"
+        );
+        assert!(
+            !absent_queries.iter().any(|sql| {
+                sql.contains("FROM evidence_spans") || sql.contains("FROM sessions")
+            }),
+            "native selection must not rehydrate absent rows from another source read"
+        );
 
         let mut detached_rows = rows.clone();
         detached_rows
@@ -4812,7 +5040,7 @@ pub fn unrelated_context() -> u64 {{
         assert!(
             resolution_degraded[0]
                 .message
-                .contains("individual source reads were used during candidate resolution")
+                .contains("individual source reads were used during candidate resolution and pack admission")
         );
         assert!(
             super::resolve_evidence_pack_hit(
@@ -4861,7 +5089,7 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(fallbacks[0].repair.as_deref(), Some("ee doctor --json"));
         assert_eq!(
             fallbacks[0].message,
-            "Imported-evidence batch hydration failed; individual source reads were used before pack admission."
+            "Imported-evidence batch hydration failed; individual source reads were used during candidate resolution and pack admission."
         );
         assert!(
             degraded

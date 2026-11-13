@@ -3587,11 +3587,21 @@ async fn run_context_pack_attempt(
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    // Memory-linked routing and native evidence selection share the exact
+    // same hydrated source rows. Retain this batch only inside the held read
+    // snapshot, then move its bodies into the direct-evidence lane below.
+    let evidence_batch = preload_evidence_pack_hits(
+        read_connection,
+        &options.workspace_path,
+        &search_report,
+        &mut degraded,
+    );
     let mut direct_rule_hits = Vec::new();
     let (mut candidates, mut candidate_metrics) = candidates_from_search_for_task_paths(
         read_connection,
         &options.workspace_path,
         &search_report,
+        &evidence_batch,
         &effective_filters,
         options.include_tombstoned,
         &mut degraded,
@@ -4040,6 +4050,7 @@ async fn run_context_pack_attempt(
         read_connection,
         &options.workspace_path,
         &search_report,
+        evidence_batch,
         &request,
         &effective_filters,
         query_exclusions.as_ref(),
@@ -11001,10 +11012,13 @@ fn candidates_from_search_with_metrics(
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
+    let evidence_batch =
+        preload_evidence_pack_hits(connection, workspace_path, search_report, degraded);
     candidates_from_search_for_task_paths(
         connection,
         workspace_path,
         search_report,
+        &evidence_batch,
         filters,
         include_tombstoned,
         degraded,
@@ -11026,6 +11040,7 @@ fn candidates_from_search_for_task_paths(
     connection: &DbConnection,
     workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
+    evidence_batch: &EvidencePackHitBatch,
     filters: &crate::models::QueryFilters,
     include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -11059,8 +11074,6 @@ fn candidates_from_search_for_task_paths(
         Option<(MemoryId, Option<String>)>,
         Option<MeshDisplayProvenance>,
     )> = Vec::new();
-    let evidence_batch =
-        preload_evidence_pack_hits(connection, workspace_path, search_report, degraded);
     let rule_projections = crate::core::search::load_pack_rule_projections(
         connection,
         workspace_path,
@@ -11081,7 +11094,7 @@ fn candidates_from_search_for_task_paths(
         // Deferring it is successful resolution, not a failed memory lookup;
         // the native admission boundary below owns its selection and denial.
         let evidence_resolution =
-            resolve_evidence_pack_hit(connection, &evidence_batch, hit, degraded);
+            resolve_evidence_pack_hit(connection, evidence_batch, hit, degraded);
         if matches!(
             evidence_resolution.as_ref(),
             Some(EvidencePackHitResolution::Direct)
@@ -16577,10 +16590,13 @@ fn collect_direct_evidence_pack_candidates(
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
     let exclusions = QueryExclusions::from_query(&request.query);
+    let evidence_batch =
+        preload_evidence_pack_hits(connection, workspace_path, search_report, degraded);
     collect_direct_evidence_pack_candidates_with_probe(
         connection,
         workspace_path,
         search_report,
+        evidence_batch,
         request,
         filters,
         exclusions.as_ref(),
@@ -16594,6 +16610,7 @@ fn collect_direct_evidence_pack_candidates_with_probe(
     connection: &DbConnection,
     workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
+    evidence_batch: EvidencePackHitBatch,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
     exclusions: Option<&QueryExclusions>,
@@ -16611,43 +16628,22 @@ fn collect_direct_evidence_pack_candidates_with_probe(
         return Ok(Vec::new());
     }
 
-    let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
+    let EvidencePackHitBatch {
+        workspace_ids,
+        mut rows,
+    } = evidence_batch;
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
     let mut rejected_live_admission = 0_usize;
     let mut filtered_count = 0_usize;
 
-    // Hydrate every evidence hit with one batched read instead of two point
-    // queries per hit (bd-reality-core-convergence-1azkt.64). Report a failed
-    // batch before falling back to each hit's point reads (bd-p42mq).
-    let hit_ids = search_report
-        .results
-        .iter()
-        .filter_map(|hit| EvidenceId::from_str(&hit.doc_id).ok())
-        .map(|id| id.to_string())
-        .collect::<BTreeSet<_>>();
-    let hit_id_refs = hit_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut hydrated = match connection.get_evidence_spans_with_sessions(&hit_id_refs) {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|row| (row.span.id.clone(), row))
-            .collect::<BTreeMap<_, _>>(),
-        Err(_) => {
-            // Degradation prose participates in pack identity. Keep this
-            // stable and do not expose database paths or SQL error details.
-            push_degradation(
-                degraded,
-                "context_evidence_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                "Imported-evidence batch hydration failed; individual source reads were used before pack admission.",
-                Some("ee doctor --json".to_owned()),
-            );
-            BTreeMap::new()
-        }
-    };
-
     for hit in &search_report.results {
-        if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {
+        if !hit.doc_id.starts_with("ev_")
+            || matches!(
+                mesh_query_visibility(hit.metadata.as_ref()),
+                MeshQueryVisibility::Blocked
+            )
+        {
             continue;
         }
         let Ok(evidence_id) = EvidenceId::from_str(&hit.doc_id) else {
@@ -16655,8 +16651,20 @@ fn collect_direct_evidence_pack_candidates_with_probe(
             continue;
         };
         let canonical_id = evidence_id.to_string();
-        let row = match hydrated.remove(&canonical_id) {
-            Some(row) => row,
+        if !seen.insert(canonical_id.clone()) {
+            continue;
+        }
+        // Consume the batch already used for routing. A successful lookup
+        // that omitted an ID proves absence in this source view; re-reading
+        // it would add N+1 queries and detach the two admission decisions.
+        let row = match rows.as_mut() {
+            Some(rows) => {
+                let Some(row) = rows.remove(&canonical_id) else {
+                    rejected_live_admission = rejected_live_admission.saturating_add(1);
+                    continue;
+                };
+                row
+            }
             None => {
                 let Ok(Some(span)) = connection.get_evidence_span(&canonical_id) else {
                     rejected_live_admission = rejected_live_admission.saturating_add(1);
@@ -17597,7 +17605,7 @@ fn preload_evidence_pack_hits(
                 degraded,
                 "context_evidence_hit_unhydrated",
                 ContextResponseSeverity::Low,
-                "Imported-evidence batch hydration failed; individual source reads were used during candidate resolution.",
+                "Imported-evidence batch hydration failed; individual source reads were used during candidate resolution and pack admission.",
                 Some("ee doctor --json".to_owned()),
             );
             None

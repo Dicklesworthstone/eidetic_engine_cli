@@ -572,11 +572,18 @@ impl WhyNotSelectionProbe {
                 }
                 let mut target_search = search.clone();
                 target_search.results = vec![admission_probe_hit(id)];
+                let evidence_batch = preload_evidence_pack_hits(
+                    connection,
+                    &options.workspace_path,
+                    &target_search,
+                    &mut local_degraded,
+                );
                 let mut rules = Vec::new();
                 let _ = candidates_from_search_for_task_paths(
                     connection,
                     &options.workspace_path,
                     &target_search,
+                    &evidence_batch,
                     filters,
                     options.include_tombstoned,
                     &mut local_degraded,
