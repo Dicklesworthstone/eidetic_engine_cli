@@ -4655,6 +4655,124 @@ pub fn unrelated_context() -> u64 {{
                 "a successful source batch must not fall back to point reads: {queries:?}"
             );
         }
+        let linked_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0xe900));
+        let linked_memory_key = linked_memory_id.to_string();
+        let linked_content = "Release evidence has one shared live source memory.";
+        connection
+            .insert_memory(
+                &linked_memory_key,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: linked_content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.8,
+                    importance: 0.8,
+                    provenance_uri: Some("manual://shared-evidence-hydration".to_owned()),
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "UPDATE evidence_spans SET memory_id = ?1 WHERE session_id = ?2",
+                &[
+                    sqlmodel_core::Value::Text(linked_memory_key.clone()),
+                    sqlmodel_core::Value::Text(session_id.clone()),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        for count in [0_usize, 1, 32, 257] {
+            for use_preloaded in [false, true] {
+                let mut hits = spans[..count]
+                    .iter()
+                    .map(|(id, _)| {
+                        let mut hit = ppr_hit(linked_memory_id, 0.8, None);
+                        hit.doc_id = id.clone();
+                        hit
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(first) = hits.first().cloned() {
+                    hits.push(first);
+                    hits.push(ppr_hit(linked_memory_id, 0.8, None));
+                }
+                let search = ppr_search_report(hits);
+                connection
+                    .begin_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                let preloaded = connection
+                    .get_memories_batch(&[linked_memory_key.as_str()])
+                    .map_err(|error| error.to_string())?;
+                let ((candidates, metrics), queries) =
+                    crate::db::capture_query_sql_for_test(|| {
+                        let mut degraded = Vec::new();
+                        let batch = super::preload_evidence_pack_hits(
+                            &connection,
+                            workspace,
+                            &search,
+                            &mut degraded,
+                        );
+                        super::candidates_from_search_for_task_paths(
+                            &connection,
+                            workspace,
+                            &search,
+                            &batch,
+                            &Default::default(),
+                            false,
+                            &mut degraded,
+                            use_preloaded.then_some(&preloaded),
+                            &[],
+                            None,
+                            &mut Vec::new(),
+                        )
+                    });
+                connection
+                    .rollback_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(candidates.len(), if count == 0 { 0 } else { count + 2 });
+                assert!(candidates.iter().all(|candidate| {
+                    candidate.memory_id == linked_memory_id
+                        && candidate.content == linked_content
+                }));
+                assert_eq!(metrics.unique_memory_ids, usize::from(count > 0));
+                let expected_memory_reads = usize::from(count > 0 && !use_preloaded);
+                assert_eq!(metrics.memory_batch_reads, expected_memory_reads);
+                let memory_reads = queries
+                    .iter()
+                    .filter(|sql| sql.contains("FROM memories WHERE id IN ("))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    memory_reads.len(),
+                    expected_memory_reads,
+                    "all evidence links, duplicates and the ordinary hit must share one memory batch: {queries:?}"
+                );
+                assert!(
+                    memory_reads.iter().all(|sql| sql.contains("id IN (?1)")),
+                    "shared links must be deduplicated before memory hydration: {memory_reads:?}"
+                );
+                assert_eq!(
+                    queries
+                        .iter()
+                        .filter(|sql| sql.contains("FROM evidence_spans e WHERE e.id IN ("))
+                        .count(),
+                    count.div_ceil(128)
+                );
+                assert!(
+                    !queries.iter().any(|sql| {
+                        sql.contains("FROM memories WHERE id =")
+                            || sql.contains("FROM evidence_spans WHERE id =")
+                            || sql.contains("FROM sessions WHERE id =")
+                    }),
+                    "linked source admission must not perform per-hit body reads: {queries:?}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -4936,40 +5054,109 @@ pub fn unrelated_context() -> u64 {{
         );
 
         let linked_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0xe730));
+        let linked_memory_key = linked_memory_id.to_string();
         let mut linked_rows = rows.clone();
         linked_rows
             .get_mut(&evidence_ids[0])
             .ok_or_else(|| "fixture evidence row disappeared".to_owned())?
             .span
-            .memory_id = Some(linked_memory_id.to_string());
+            .memory_id = Some(linked_memory_key.clone());
         let linked_batch = super::EvidencePackHitBatch {
             workspace_ids: batch.workspace_ids.clone(),
             rows: Some(linked_rows),
         };
+        let linked_search = ppr_search_report(vec![search.results[0].clone()]);
+        let resolve_linked = |source: &DbConnection,
+                              source_batch: &super::EvidencePackHitBatch,
+                              preloaded: Option<&BTreeMap<String, StoredMemory>>,
+                              filters: &crate::models::QueryFilters,
+                              include_tombstoned: bool| {
+            let mut degraded = Vec::new();
+            let (candidates, metrics) = super::candidates_from_search_for_task_paths(
+                source,
+                workspace,
+                &linked_search,
+                source_batch,
+                filters,
+                include_tombstoned,
+                &mut degraded,
+                preloaded,
+                &[],
+                None,
+                &mut Vec::new(),
+            );
+            (candidates, metrics, degraded)
+        };
+
         resolution_degraded.clear();
-        assert!(
+        assert!(matches!(
             super::resolve_evidence_pack_hit(
-                &connection,
+                &no_source_tables,
                 &linked_batch,
                 &search.results[0],
                 &mut resolution_degraded,
-            )
-            .is_none(),
-            "batched evidence must still revalidate its linked memory"
-        );
+            ),
+            Some(super::EvidencePackHitResolution::Linked {
+                memory_id,
+                evidence_id,
+                workspace_id: linked_workspace,
+            }) if memory_id == linked_memory_id
+                && evidence_id == evidence_ids[0]
+                && linked_workspace == workspace_id
+        ));
         assert!(
-            resolution_degraded
+            resolution_degraded.is_empty(),
+            "source routing must defer the memory join without performing a point read"
+        );
+        let ((missing, _, missing_degraded), missing_queries) =
+            crate::db::capture_query_sql_for_test(|| {
+                resolve_linked(&connection, &linked_batch, None, &Default::default(), false)
+            });
+        assert!(missing.is_empty());
+        assert!(
+            missing_degraded
                 .iter()
                 .any(|entry| entry.message.contains("memory that is no longer present"))
         );
+        assert!(
+            !missing_queries
+                .iter()
+                .any(|sql| sql.contains("FROM memories WHERE id =")),
+            "a missing batched linked memory must not trigger a point read: {missing_queries:?}"
+        );
+        let (unavailable, _, unavailable_degraded) = resolve_linked(
+            &no_source_tables,
+            &linked_batch,
+            None,
+            &Default::default(),
+            false,
+        );
+        assert!(unavailable.is_empty());
+        assert!(unavailable_degraded.iter().any(|entry| {
+            entry.code == "context_candidate_memory_batch_unavailable"
+        }));
+        assert!(unavailable_degraded.iter().any(|entry| {
+            entry.message.contains("linked memory could not be revalidated")
+        }));
+        assert!(
+            !unavailable_degraded.iter().any(|entry| {
+                entry.message.contains("memory that is no longer present")
+            }),
+            "a failed memory read must not claim successful source absence"
+        );
+
+        let linked_content = format!(
+            "{}terminal_exclusion",
+            "Release evidence has a live source memory. ".repeat(64)
+        );
         connection
             .insert_memory(
-                &linked_memory_id.to_string(),
+                &linked_memory_key,
                 &CreateMemoryInput {
                     workspace_id: workspace_id.clone(),
                     level: "semantic".to_owned(),
                     kind: "fact".to_owned(),
-                    content: "Release evidence has a live source memory.".to_owned(),
+                    content: linked_content.clone(),
                     workflow_id: None,
                     confidence: 0.8,
                     utility: 0.8,
@@ -4983,18 +5170,151 @@ pub fn unrelated_context() -> u64 {{
                 },
             )
             .map_err(|error| error.to_string())?;
-        resolution_degraded.clear();
-        assert!(matches!(
-            super::resolve_evidence_pack_hit(
-                &connection,
-                &linked_batch,
-                &search.results[0],
-                &mut resolution_degraded,
-            ),
-            Some(super::EvidencePackHitResolution::Linked { memory_id, evidence_id })
-                if memory_id == linked_memory_id && evidence_id == evidence_ids[0]
-        ));
-        assert!(resolution_degraded.is_empty(), "{resolution_degraded:?}");
+        let (mut linked_candidates, metrics, linked_degraded) =
+            resolve_linked(&connection, &linked_batch, None, &Default::default(), false);
+        assert_eq!(linked_candidates.len(), 1, "{linked_degraded:?}");
+        assert_eq!(linked_candidates[0].memory_id, linked_memory_id);
+        assert_eq!(linked_candidates[0].content, linked_content);
+        assert_eq!(metrics.memory_batch_reads, 1);
+        let exclusions =
+            crate::search::query::QueryExclusions::from_query("release -terminal_exclusion");
+        let omissions = super::filter_candidates_by_query_exclusions(
+            exclusions.as_ref(),
+            &mut linked_candidates,
+            &mut Vec::new(),
+        );
+        assert!(
+            linked_candidates.is_empty(),
+            "linked routing must retain full source content for terminal query exclusions"
+        );
+        assert_eq!(omissions.len(), 1);
+        assert_eq!(omissions[0].memory_id, linked_memory_id);
+
+        let live_memories = connection
+            .get_memories_batch(&[linked_memory_key.as_str()])
+            .map_err(|error| error.to_string())?;
+        for scenario in ["workspace", "identity", "tombstone", "expired"] {
+            let mut preloaded = live_memories.clone();
+            let memory = preloaded
+                .get_mut(&linked_memory_key)
+                .ok_or_else(|| "missing linked source fixture".to_owned())?;
+            let mut filters = crate::models::QueryFilters::default();
+            match scenario {
+                "workspace" => {
+                    memory.workspace_id =
+                        WorkspaceId::from_uuid(uuid::Uuid::from_u128(0xe731)).to_string();
+                }
+                "identity" => {
+                    memory.id = MemoryId::from_uuid(uuid::Uuid::from_u128(0xe732)).to_string();
+                }
+                "tombstone" => {
+                    memory.tombstoned_at = Some("2026-05-01T00:00:00Z".to_owned());
+                }
+                "expired" => {
+                    memory.valid_to = Some("2026-04-30T23:59:59Z".to_owned());
+                    filters.temporal = QueryTemporalFilters {
+                        validity: Some(QueryTemporalValidity {
+                            posture: QueryTemporalValidityPosture::Strict,
+                            reference_time: Some(query_time("2026-05-01T00:00:00Z")),
+                        }),
+                        ..Default::default()
+                    };
+                }
+                _ => unreachable!(),
+            }
+            let ((rejected, rejected_metrics, rejected_degraded), rejected_queries) =
+                crate::db::capture_query_sql_for_test(|| {
+                    resolve_linked(
+                        &connection,
+                        &linked_batch,
+                        Some(&preloaded),
+                        &filters,
+                        false,
+                    )
+                });
+            assert!(
+                rejected.is_empty(),
+                "{scenario} source must not become a linked MemoryId candidate"
+            );
+            assert_eq!(rejected_metrics.memory_batch_reads, 0);
+            assert!(
+                !rejected_queries.iter().any(|sql| {
+                    sql.contains("FROM memories WHERE id =")
+                        || sql.contains("FROM memories WHERE id IN (")
+                }),
+                "a preloaded linked source must not be replaced by another memory body read"
+            );
+            if matches!(scenario, "workspace" | "identity") {
+                assert!(rejected_degraded.iter().any(|entry| {
+                    entry.message.contains("live pack admission proof is incomplete")
+                }));
+            }
+            if scenario == "expired" {
+                assert_eq!(rejected_metrics.temporal_filtered_candidates, 1);
+            }
+            if scenario == "tombstone" {
+                let (included, _, _) = resolve_linked(
+                    &connection,
+                    &linked_batch,
+                    Some(&preloaded),
+                    &filters,
+                    true,
+                );
+                assert_eq!(included.len(), 1, "explicit tombstone inclusion is preserved");
+
+                // Original CASS evidence has independent source admission even
+                // when its derived parent is not selected as a memory.
+                let native = super::collect_direct_evidence_pack_candidates_with_probe(
+                    &connection,
+                    workspace,
+                    &linked_search,
+                    super::EvidencePackHitBatch {
+                        workspace_ids: linked_batch.workspace_ids.clone(),
+                        rows: linked_batch.rows.clone(),
+                    },
+                    &request,
+                    &Default::default(),
+                    None,
+                    Some(0.0),
+                    &mut Vec::new(),
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                assert_eq!(native.len(), 1);
+                assert_eq!(native[0].item.evidence_id, evidence_ids[0]);
+            }
+        }
+
+        let lowercase_link = linked_memory_key.to_ascii_lowercase();
+        assert_ne!(lowercase_link, linked_memory_key);
+        assert_eq!(
+            MemoryId::from_str(&lowercase_link).map_err(|error| error.to_string())?,
+            linked_memory_id,
+            "the negative control must exercise a parseable noncanonical ID"
+        );
+        let mut alias_rows = linked_batch
+            .rows
+            .clone()
+            .ok_or_else(|| "missing linked evidence fixture".to_owned())?;
+        alias_rows
+            .get_mut(&evidence_ids[0])
+            .ok_or_else(|| "fixture evidence row disappeared".to_owned())?
+            .span
+            .memory_id = Some(lowercase_link);
+        let (aliased, _, aliased_degraded) = resolve_linked(
+            &connection,
+            &super::EvidencePackHitBatch {
+                workspace_ids: linked_batch.workspace_ids.clone(),
+                rows: Some(alias_rows),
+            },
+            Some(&live_memories),
+            &Default::default(),
+            false,
+        );
+        assert!(aliased.is_empty());
+        assert!(aliased_degraded.iter().any(|entry| {
+            entry.message.contains("malformed memory identifier")
+        }));
 
         // Break only the bulk path's optional cached-verdict read. The real
         // span and session reads remain usable, with admission re-derived

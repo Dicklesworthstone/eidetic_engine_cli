@@ -11069,6 +11069,7 @@ fn candidates_from_search_for_task_paths(
     // A second row lookup could detach the selected body from its checked
     // revision, tags and scope while its parent passes source admission.
     let mut rules_map: BTreeMap<String, RuleIndexProjection> = BTreeMap::new();
+    let mut evidence_workspaces = BTreeMap::new();
     let mut hit_resolutions: Vec<(
         &crate::core::search::SearchHit,
         Option<(MemoryId, Option<String>)>,
@@ -11132,7 +11133,11 @@ fn candidates_from_search_for_task_paths(
                         Some(EvidencePackHitResolution::Linked {
                             memory_id,
                             evidence_id,
-                        }) => Some((memory_id, Some(evidence_id))),
+                            workspace_id,
+                        }) => {
+                            evidence_workspaces.insert(evidence_id.clone(), workspace_id);
+                            Some((memory_id, Some(evidence_id)))
+                        }
                         Some(EvidencePackHitResolution::Direct) | None => None,
                     })
             }
@@ -11204,6 +11209,20 @@ fn candidates_from_search_for_task_paths(
                 let memory_key = memory_id.to_string();
                 let promoted_rule = artifact_id.as_deref().and_then(|id| rules_map.get(id));
                 let filtering_start = Instant::now();
+                if let Some(evidence_id) = artifact_id.as_deref()
+                    && let Some(workspace_id) = evidence_workspaces.get(evidence_id)
+                    && !linked_evidence_memory_admitted(
+                        &memories,
+                        &memory_key,
+                        workspace_id,
+                        evidence_id,
+                        degraded,
+                    )
+                {
+                    metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                    metrics.subspans.filtering += filtering_start.elapsed();
+                    continue;
+                }
                 if let Some(mesh_provenance) = mesh_provenance.as_ref()
                     && let Some(memory) = memories.get(&memory_key)
                     && memory.trust_class == TrustClass::HumanExplicit.as_str()
@@ -14801,6 +14820,7 @@ fn context_memory_seal_admission(
 enum CandidateMemoryBatch<'a> {
     Owned(BTreeMap<String, StoredMemory>),
     Borrowed(&'a BTreeMap<String, StoredMemory>),
+    Unavailable,
 }
 
 impl CandidateMemoryBatch<'_> {
@@ -14808,6 +14828,7 @@ impl CandidateMemoryBatch<'_> {
         match self {
             Self::Owned(memories) => memories.get(memory_id),
             Self::Borrowed(memories) => memories.get(memory_id),
+            Self::Unavailable => None,
         }
     }
 
@@ -14815,6 +14836,7 @@ impl CandidateMemoryBatch<'_> {
         match self {
             Self::Owned(memories) => memories,
             Self::Borrowed(memories) => memories.clone(),
+            Self::Unavailable => BTreeMap::new(),
         }
     }
 }
@@ -14849,8 +14871,8 @@ fn load_candidate_batch_maps_with_preloaded<'a>(
     let memories = if let Some(preloaded) = preloaded_memories.filter(|_| preloaded_covers_all) {
         CandidateMemoryBatch::Borrowed(preloaded)
     } else {
-        CandidateMemoryBatch::Owned(match connection.get_memories_batch(memory_ids) {
-            Ok(memories) => memories,
+        match connection.get_memories_batch(memory_ids) {
+            Ok(memories) => CandidateMemoryBatch::Owned(memories),
             Err(error) => {
                 push_degradation(
                     degraded,
@@ -14859,9 +14881,9 @@ fn load_candidate_batch_maps_with_preloaded<'a>(
                     format!("Context candidate memories could not be batch-loaded: {error}"),
                     Some("ee status --json".to_string()),
                 );
-                BTreeMap::new()
+                CandidateMemoryBatch::Unavailable
             }
-        })
+        }
     };
 
     let tags_map = match connection.get_memory_tags_batch(memory_ids) {
@@ -17621,17 +17643,17 @@ enum EvidencePackHitResolution {
     Linked {
         memory_id: MemoryId,
         evidence_id: String,
+        workspace_id: String,
     },
     Direct,
 }
 
-/// Resolve imported evidence to its linked memory or defer it to native
-/// evidence admission without reporting a failed memory conversion.
+/// Resolve a live-admitted span's linked identity or defer it to native evidence.
 ///
-/// Search-hit metadata is a derived, staleable asset and therefore never
-/// authorizes pack hydration. Use the live batched span and session, then
-/// revalidate any linked memory before returning its id. Only a failed bulk
-/// read falls back to point reads; a successful batch's missing rows stay absent.
+/// Search-hit metadata never authorizes hydration. Span/session admission uses
+/// the shared source batch; linked memory ownership is checked against the
+/// candidate memory batch before constructing any MemoryId candidate. Only a
+/// failed source batch falls back to point reads; successful absence stays absent.
 fn resolve_evidence_pack_hit(
     connection: &DbConnection,
     evidence_batch: &EvidencePackHitBatch,
@@ -17747,11 +17769,11 @@ fn resolve_evidence_pack_hit(
             return None;
         }
     };
-    let search_admitted = hydrated.map_or_else(
-        || span.is_search_admitted_for_session(&span.workspace_id, &session),
-        |row| row.is_search_admitted(&span.workspace_id),
+    let pack_admitted = hydrated.map_or_else(
+        || span.is_direct_pack_admitted_for_session(&span.workspace_id, &session),
+        |row| row.is_direct_pack_admitted(&span.workspace_id),
     );
-    if !search_admitted {
+    if !pack_admitted {
         push_degradation(
             degraded,
             "context_evidence_hit_unhydrated",
@@ -17771,8 +17793,8 @@ fn resolve_evidence_pack_hit(
         return Some(EvidencePackHitResolution::Direct);
     };
     let memory_id = match MemoryId::from_str(linked_memory_id) {
-        Ok(memory_id) => memory_id,
-        Err(_) => {
+        Ok(memory_id) if memory_id.to_string() == linked_memory_id => memory_id,
+        Ok(_) | Err(_) => {
             push_degradation(
                 degraded,
                 "context_evidence_hit_unhydrated",
@@ -17783,53 +17805,52 @@ fn resolve_evidence_pack_hit(
             return None;
         }
     };
-    let memory = match connection.get_memory(linked_memory_id) {
-        Ok(Some(memory)) => memory,
-        Ok(None) => {
-            push_degradation(
-                degraded,
-                "context_evidence_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Evidence {} links to a memory that is no longer present.",
-                    evidence_id
-                ),
-                None,
-            );
-            return None;
-        }
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_evidence_hit_unhydrated",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Evidence {} linked memory could not be revalidated: {error}",
-                    evidence_id
-                ),
-                Some("ee doctor --json".to_owned()),
-            );
-            return None;
-        }
-    };
-    if span.is_pack_admitted(&span.workspace_id, &session, &memory) {
-        return Some(EvidencePackHitResolution::Linked {
-            memory_id,
-            evidence_id,
-        });
-    }
+    Some(EvidencePackHitResolution::Linked {
+        memory_id,
+        evidence_id,
+        workspace_id: span.workspace_id.clone(),
+    })
+}
 
+/// Span admission and the memory join share the caller's held source snapshot.
+/// Every linked hit consumes the same deduplicated memory batch as ordinary
+/// hits and rule parents; no point read may resurrect an absent batch member.
+fn linked_evidence_memory_admitted(
+    memories: &CandidateMemoryBatch<'_>,
+    memory_id: &str,
+    workspace_id: &str,
+    evidence_id: &str,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> bool {
+    let (message, repair_hint) = match memories.get(memory_id) {
+        Some(memory) if memory.id == memory_id && memory.workspace_id == workspace_id => {
+            return true;
+        }
+        Some(_) => (
+            format!(
+                "Evidence {evidence_id} was excluded because its live pack admission proof is incomplete."
+            ),
+            Some("ee index rebuild --json".to_owned()),
+        ),
+        None if matches!(memories, CandidateMemoryBatch::Unavailable) => (
+            format!(
+                "Evidence {evidence_id} linked memory could not be revalidated because candidate memory batch hydration failed."
+            ),
+            Some("ee doctor --json".to_owned()),
+        ),
+        None => (
+            format!("Evidence {evidence_id} links to a memory that is no longer present."),
+            None,
+        ),
+    };
     push_degradation(
         degraded,
         "context_evidence_hit_unhydrated",
         ContextResponseSeverity::Low,
-        format!(
-            "Evidence {} was excluded because its live pack admission proof is incomplete.",
-            evidence_id
-        ),
-        Some("ee index rebuild --json".to_owned()),
+        message,
+        repair_hint,
     );
-    None
+    false
 }
 
 pub(crate) fn is_registry_artifact_id(value: &str) -> bool {
