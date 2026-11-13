@@ -4,7 +4,7 @@
 //! Missing precision anchors use the same pure extractor as a writable rebuild,
 //! but remain request-local. The owner releases only a snapshot it began.
 
-use super::{DbConnection, IndexRebuildError};
+use super::{DbConnection, DbError, IndexRebuildError};
 use crate::db::DatabaseOpenMode;
 #[cfg(test)]
 use crate::models::{MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors};
@@ -687,18 +687,18 @@ pub(super) fn capture<T>(
     Ok(result)
 }
 
-struct ReadSnapshot<'a> {
+pub(super) struct ReadSnapshot<'a> {
     db: &'a DbConnection,
     active: bool,
 }
 
 impl<'a> ReadSnapshot<'a> {
-    fn begin(db: &'a DbConnection) -> Result<Self, IndexRebuildError> {
+    pub(super) fn begin(db: &'a DbConnection) -> Result<Self, DbError> {
         db.begin_read_snapshot()?;
         Ok(Self { db, active: true })
     }
 
-    fn finish(mut self) -> Result<(), IndexRebuildError> {
+    pub(super) fn finish(mut self) -> Result<(), DbError> {
         self.db.commit_read_snapshot()?;
         self.active = false;
         Ok(())

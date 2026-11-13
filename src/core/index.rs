@@ -153,11 +153,15 @@ static INDEX_CORPUS_REVISION: OnceLock<CorpusRevision> = OnceLock::new();
 #[cfg(test)]
 type BeforeIndexPublishHook = Box<dyn FnOnce(&asupersync::Cx)>;
 #[cfg(test)]
+type BeforeIndexStatusGenerationHook = Box<dyn FnOnce() -> Result<(), DbError>>;
+#[cfg(test)]
 std::thread_local! {
     static BEFORE_INDEX_PUBLISH_HOOK: RefCell<Option<BeforeIndexPublishHook>> =
         const { RefCell::new(None) };
     static INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+    static BEFORE_INDEX_STATUS_GENERATION_HOOK: RefCell<Option<BeforeIndexStatusGenerationHook>> =
+        const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -11421,20 +11425,32 @@ fn get_index_status_with_connection_mode(
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
 
+    // Passive readiness must work while another process owns the writer gate.
+    // Counts, admission, source generation and model selection also have to
+    // describe one database snapshot; otherwise a write between the corpus
+    // scan and generation read can make old counts look current.
+    let caller_holds_snapshot = caller_holds_snapshot && connection.is_some();
+    let owned_connection = if connection.is_none() && database_path.exists() {
+        Some(DbConnection::open_file_read_only(&database_path)?)
+    } else {
+        None
+    };
+    let connection = connection.or(owned_connection.as_ref());
+    let snapshot = if caller_holds_snapshot {
+        None
+    } else {
+        connection
+            .map(source_snapshot::ReadSnapshot::begin)
+            .transpose()?
+    };
+
     // Check index directory
     let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
 
     let mut selected_embedders = None;
-    let (db_document_counts, evidence_admission, db_generation, embedding) = if database_path
-        .exists()
+    let (db_document_counts, evidence_admission, db_generation, embedding) = if let Some(db) =
+        connection
     {
-        let owned_connection;
-        let db = if let Some(connection) = connection {
-            connection
-        } else {
-            owned_connection = DbConnection::open_file(&database_path)?;
-            &owned_connection
-        };
         if let Some(workspace_id) = workspace_id_for_index_status(db, &options.workspace_path)? {
             // Freshness is a watermark question. Never scan a large stale
             // corpus merely to report counts before retrieval can decide to
@@ -11459,7 +11475,7 @@ fn get_index_status_with_connection_mode(
             };
             let (counts, admission, generation) = match fast {
                 Some(stats) => stats,
-                None => get_db_stats(db, &workspace_id, caller_holds_snapshot)?,
+                None => get_db_stats(db, &workspace_id, true)?,
             };
             let embedding = if require_vector_identity {
                 let descriptors = match fast_embedder {
@@ -11566,6 +11582,9 @@ fn get_index_status_with_connection_mode(
         repair_hint,
         elapsed_ms,
     };
+    if let Some(snapshot) = snapshot {
+        snapshot.finish()?;
+    }
     log_db_generation_observed(&report);
     Ok(report)
 }
@@ -11950,6 +11969,10 @@ fn get_db_stats(
     } else {
         current_index_corpus_counts(db, workspace_id)?
     };
+    #[cfg(test)]
+    BEFORE_INDEX_STATUS_GENERATION_HOOK.with(|slot| {
+        slot.borrow_mut().take().map_or(Ok(()), |hook| hook())
+    })?;
     let generation = db
         .get_workspace_generation(workspace_id)?
         .or(Some(u64::from(counts.total())));
@@ -25797,6 +25820,189 @@ mod tests {
             "workspace A should not expose workspace B as selected registry model",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn index_status_keeps_counts_and_generation_in_one_read_snapshot() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let _selection = install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: fixture.options.index_dir.clone(),
+        };
+        let generation_before = fixture
+            .db
+            .get_workspace_generation(&fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        let writer = DbConnection::open_file(&options.resolve_database_path())
+            .map_err(|error| error.to_string())?;
+        let workspace_id = fixture.workspace_id.clone();
+        BEFORE_INDEX_STATUS_GENERATION_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                writer.insert_memory(
+                    "mem_00000000000000000000000002",
+                    &crate::db::CreateMemoryInput {
+                        workspace_id,
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: "A later write must not relabel the earlier corpus count.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )?;
+                writer.close()
+            }));
+        });
+
+        let first = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(first.db_memory_count, 1);
+        assert_eq!(
+            first.db_generation, generation_before,
+            "the report must not combine pre-write counts with the newer generation"
+        );
+        let generation_after = fixture
+            .db
+            .get_workspace_generation(&fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            generation_after > generation_before,
+            "the concurrent write must commit"
+        );
+        let next = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(next.db_memory_count, 2);
+        assert_eq!(next.db_generation, generation_after);
+        Ok(())
+    }
+
+    #[test]
+    fn index_status_releases_owned_snapshots_and_preserves_borrowed_snapshots() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let _selection = install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: fixture.options.index_dir.clone(),
+        };
+        let reader = DbConnection::open_file_read_only(&options.resolve_database_path())
+            .map_err(|error| error.to_string())?;
+        let report = get_index_status_with_connection(&options, Some(&reader))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(report.db_memory_count, 1);
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let borrowed = get_index_status_in_current_snapshot(&options, &reader)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(borrowed.db_generation, report.db_generation);
+        assert_eq!(borrowed.db_memory_count, 1);
+        assert!(
+            reader.begin_read_snapshot().is_err(),
+            "the caller still owns its snapshot"
+        );
+        reader
+            .commit_read_snapshot()
+            .map_err(|error| error.to_string())?;
+
+        let invalid_index = fixture.options.workspace_path.join("not-an-index-directory");
+        std::fs::write(&invalid_index, b"not a directory")
+            .map_err(|error| error.to_string())?;
+        let invalid_options = IndexStatusOptions {
+            index_dir: Some(invalid_index),
+            ..options
+        };
+        assert!(get_index_status_with_connection(&invalid_options, Some(&reader)).is_err());
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        reader
+            .commit_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        reader.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_status_reads_a_held_writer_store_without_mutation_or_waiting() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        use rustix::fs::{FlockOperation, flock};
+
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let _selection = install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: fixture.options.index_dir.clone(),
+        };
+        let database = options.resolve_database_path();
+        fixture.db.close().map_err(|error| error.to_string())?;
+        let lock_path = options.workspace_path.join(".ee/ee.write.lock");
+        let lock_before = std::fs::read(&lock_path).map_err(|error| error.to_string())?;
+        let database_before = std::fs::read(&database).map_err(|error| error.to_string())?;
+        for path in [&database, &lock_path] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
+                .map_err(|error| error.to_string())?;
+        }
+        let holder = std::fs::File::open(&lock_path).map_err(|error| error.to_string())?;
+        flock(&holder, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+
+        let started = Instant::now();
+        let status = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            status.db_memory_count, 1,
+            "the actual corpus must remain inspectable"
+        );
+        assert_eq!(status.health, IndexHealth::Missing);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "status waited for the writer"
+        );
+        assert_eq!(
+            std::fs::read(&lock_path).map_err(|error| error.to_string())?,
+            lock_before
+        );
+        assert_eq!(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            database_before
+        );
+        for path in [&database, &lock_path] {
+            assert_eq!(
+                std::fs::metadata(path)
+                    .map_err(|error| error.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o400
+            );
+        }
+        drop(holder);
+        Ok(())
+    }
+
+    #[test]
+    fn index_status_does_not_create_an_absent_store() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = IndexStatusOptions {
+            workspace_path: root.path().to_path_buf(),
+            database_path: None,
+            index_dir: None,
+        };
+        let status = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(status.health, IndexHealth::Missing);
+        assert_eq!(status.db_memory_count, 0);
+        assert_eq!(status.db_generation, None);
+        assert!(!root.path().join(".ee").exists());
+        Ok(())
     }
 
     #[test]
