@@ -152,6 +152,16 @@ impl Fixture {
     }
 
     fn resolve_report(&self, search: SearchReport, filters: &QueryFilters) -> Resolution {
+        self.resolve_with_admission(search, filters, false, None)
+    }
+
+    fn resolve_with_admission(
+        &self,
+        search: SearchReport,
+        filters: &QueryFilters,
+        include_tombstoned: bool,
+        preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
+    ) -> Resolution {
         let mut degraded = Vec::new();
         let mut hits = Vec::new();
         let (memories, metrics) = candidates_from_search_for_task_paths(
@@ -159,9 +169,9 @@ impl Fixture {
             &self.workspace,
             &search,
             filters,
-            false,
+            include_tombstoned,
             &mut degraded,
-            None,
+            preloaded_memories,
             &[],
             filters
                 .temporal
@@ -1486,6 +1496,314 @@ fn source_lifecycle_and_seal_requirements_still_guard_rule_hydration() {
     );
     assert_eq!(sources(&resolved.candidates), BTreeSet::from([live.rule]));
     assert_eq!(resolved.metrics.temporal_filtered_candidates, 2);
+}
+
+#[test]
+fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
+    let f = Fixture::new();
+    let first = f.add(1, |_| {}, |_| {});
+    let last = f.add(90, |_| {}, |_| {});
+    let retired = f.add(10, |_| {}, |_| {});
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET tombstoned_at = '{NEW}' WHERE id = '{}'",
+        retired.memory
+    ))
+    .unwrap();
+    let sealed = f.add(
+        20,
+        |memory| memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+        |_| {},
+    );
+    f.db.insert_memory_seal(
+        &sealed.memory,
+        &crate::models::memory_seal_commitment(b"required private source"),
+        OLD,
+    )
+    .unwrap();
+    let literal_placeholder = f.add(
+        30,
+        |memory| memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+        |_| {},
+    );
+    let live = f.add(
+        100,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![first.memory.clone(), last.memory.clone()],
+    );
+    let sourceless = f.add(101, |_| {}, |rule| rule.source_memory_ids.clear());
+    let mut expected = BTreeSet::from([live.rule.clone(), sourceless.rule.clone()]);
+    let mut rules = vec![live, sourceless];
+    let mut retired_rules = BTreeSet::new();
+    for source in [&retired, &sealed, &literal_placeholder] {
+        for (source_ids, expected_first) in [
+            (
+                vec![first.memory.clone(), source.memory.clone()],
+                &first.memory,
+            ),
+            (
+                vec![source.memory.clone(), last.memory.clone()],
+                &source.memory,
+            ),
+        ] {
+            let rule = f.add(
+                102 + rules.len() as u128,
+                |_| {},
+                |rule| rule.source_memory_ids = source_ids,
+            );
+            assert_eq!(f.projection(&rule).source_memory_ids()[0], *expected_first);
+            if source.rule == literal_placeholder.rule {
+                expected.insert(rule.rule.clone());
+            }
+            if source.rule == retired.rule {
+                retired_rules.insert(rule.rule.clone());
+            }
+            rules.push(rule);
+        }
+    }
+    let ids = rules
+        .iter()
+        .map(|rule| rule.rule.as_str())
+        .chain(std::iter::once(first.memory.as_str()))
+        .collect::<Vec<_>>();
+    let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+        f.resolve(&ids, &QueryFilters::default())
+    });
+    assert_eq!(sources(&resolved.candidates), expected);
+    assert_eq!(resolved.memories.len(), 1);
+    assert_eq!(resolved.memories[0].memory_id.to_string(), first.memory);
+    assert_eq!(resolved.metrics.unique_memory_ids, 5);
+    assert_eq!(resolved.metrics.memory_batch_reads, 1);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memories WHERE id IN ("))
+            .count(),
+        1,
+        "all required parents share one candidate-memory batch"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memory_seals WHERE"))
+            .count(),
+        2,
+        "each shared placeholder source needs one sidecar lookup"
+    );
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_candidate_sealed")
+    );
+
+    let including_retired = f.resolve_with_admission(
+        report(&ids),
+        &QueryFilters::default(),
+        true,
+        None,
+    );
+    expected.extend(retired_rules);
+    assert_eq!(sources(&including_retired.candidates), expected);
+    assert_eq!(including_retired.memories.len(), 1);
+}
+
+#[test]
+fn native_rule_sources_preserve_strict_relaxed_and_ignored_validity_for_every_parent() {
+    let f = Fixture::new();
+    let first = f.add(1, |_| {}, |_| {});
+    let last = f.add(90, |_| {}, |_| {});
+    let expired = f.add(
+        10,
+        |memory| memory.valid_to = Some(OLD.to_owned()),
+        |_| {},
+    );
+    let future = f.add(
+        20,
+        |memory| memory.valid_from = Some(NEW.to_owned()),
+        |_| {},
+    );
+    let malformed = f.add(30, |_| {}, |_| {});
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET valid_to = 'invalid-validity' WHERE id = '{}'",
+        malformed.memory
+    ))
+    .unwrap();
+    let live = f.add(
+        100,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![first.memory.clone(), last.memory.clone()],
+    );
+    let sourceless = f.add(101, |_| {}, |rule| rule.source_memory_ids.clear());
+    let strict_expected = BTreeSet::from([live.rule.clone(), sourceless.rule.clone()]);
+    let mut rules = vec![live, sourceless];
+    for source in [&expired, &future, &malformed] {
+        for (source_ids, expected_first) in [
+            (
+                vec![first.memory.clone(), source.memory.clone()],
+                &first.memory,
+            ),
+            (
+                vec![source.memory.clone(), last.memory.clone()],
+                &source.memory,
+            ),
+        ] {
+            let rule = f.add(
+                102 + rules.len() as u128,
+                |_| {},
+                |rule| rule.source_memory_ids = source_ids,
+            );
+            assert_eq!(f.projection(&rule).source_memory_ids()[0], *expected_first);
+            rules.push(rule);
+        }
+    }
+    rules.push(f.add(
+        200,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![expired.memory.clone(), future.memory.clone()],
+    ));
+    let ids = rules
+        .iter()
+        .map(|rule| rule.rule.as_str())
+        .collect::<Vec<_>>();
+    let all_rules = rules
+        .iter()
+        .map(|rule| rule.rule.clone())
+        .collect::<BTreeSet<_>>();
+    for posture in [
+        QueryTemporalValidityPosture::Strict,
+        QueryTemporalValidityPosture::Relaxed,
+        QueryTemporalValidityPosture::Ignore,
+    ] {
+        let resolved = f.resolve(
+            &ids,
+            &QueryFilters {
+                temporal: QueryTemporalFilters {
+                    validity: Some(QueryTemporalValidity {
+                        posture,
+                        reference_time: Some(timestamp(BOUND)),
+                    }),
+                    ..QueryTemporalFilters::default()
+                },
+                ..QueryFilters::default()
+            },
+        );
+        let strict = posture == QueryTemporalValidityPosture::Strict;
+        assert_eq!(
+            sources(&resolved.candidates),
+            if strict {
+                strict_expected.clone()
+            } else {
+                all_rules.clone()
+            }
+        );
+        assert_eq!(
+            resolved.metrics.temporal_filtered_candidates,
+            if strict { 7 } else { 0 }
+        );
+        assert_eq!(
+            resolved.metrics.temporal_relaxed_candidates,
+            if posture == QueryTemporalValidityPosture::Relaxed {
+                7
+            } else {
+                0
+            },
+            "relaxed validity counts rules, including a rule with two invalid parents"
+        );
+    }
+    assert_eq!(
+        sources(&f.resolve(&ids, &QueryFilters::default()).candidates),
+        all_rules
+    );
+}
+
+#[test]
+fn native_rule_later_sources_cannot_hide_behind_partial_preloads_or_unreadable_seals() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let sealed = f.add(
+        2,
+        |memory| memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+        |_| {},
+    );
+    f.db.insert_memory_seal(
+        &sealed.memory,
+        &crate::models::memory_seal_commitment(b"later private source"),
+        OLD,
+    )
+    .unwrap();
+    let derived = f.add(
+        3,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![live.memory.clone(), sealed.memory.clone()],
+    );
+    let preloaded = f.db.get_memories_batch(&[&live.memory]).unwrap();
+    let resolved = f.resolve_with_admission(
+        report(&[&derived.rule, &live.rule, &live.memory]),
+        &QueryFilters::default(),
+        false,
+        Some(&preloaded),
+    );
+    assert_eq!(
+        sources(&resolved.candidates),
+        BTreeSet::from([live.rule.clone()])
+    );
+    assert_eq!(resolved.metrics.unique_memory_ids, 2);
+    assert_eq!(resolved.metrics.memory_batch_reads, 1);
+    assert_eq!(resolved.memories.len(), 1);
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_candidate_sealed")
+    );
+
+    f.db.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_rule_source_seals")
+        .unwrap();
+    let unresolved = f.resolve(
+        &[&derived.rule, &live.rule, &live.memory],
+        &QueryFilters::default(),
+    );
+    assert_eq!(
+        sources(&unresolved.candidates),
+        BTreeSet::from([live.rule.clone()])
+    );
+    assert_eq!(unresolved.memories.len(), 1);
+    assert_eq!(unresolved.memories[0].memory_id.to_string(), live.memory);
+    assert!(
+        unresolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_candidate_memory_batch_unavailable")
+    );
+}
+
+#[test]
+fn native_rule_malformed_lineage_never_becomes_a_sourceless_or_partly_admitted_rule() {
+    let f = Fixture::new();
+    let pair = f.add(1, |_| {}, |_| {});
+    let live = f.projection(&pair);
+    let hit = report(&[&pair.rule]).results.remove(0);
+    // Inject a corrupt projection at the admission boundary: real-store
+    // lineage guards need not be bypassed to exercise malformed identifiers.
+    for source_ids in [
+        vec![pair.memory.clone(), "not-a-memory-id".to_owned()],
+        vec!["not-a-memory-id".to_owned()],
+    ] {
+        let projection = RuleIndexProjection::new(
+            live.rule().clone(),
+            &f.workspace,
+            live.tags().to_vec(),
+            source_ids,
+        );
+        let projections = BTreeMap::from([(pair.rule.clone(), projection)]);
+        let mut degraded = Vec::new();
+        assert!(rule_linked_memory_id(&projections, &[], &hit, &mut degraded).is_none());
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "context_rule_hit_unhydrated")
+        );
+    }
 }
 
 #[test]
