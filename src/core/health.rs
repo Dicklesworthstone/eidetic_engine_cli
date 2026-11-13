@@ -27,8 +27,8 @@ use super::build_info;
 use super::curate::stable_workspace_id;
 use super::learn::{LearnGapsOptions, show_gaps};
 use super::memory_debt::{
-    MemoryDebtDoctorOptions, MemoryDebtReport, MemoryDebtSnapshotOptions, MemoryDebtSnapshotReport,
-    run_memory_debt_doctor, run_memory_debt_snapshot,
+    MemoryDebtDoctorOptions, MemoryDebtReport, memory_debt_snapshot_input,
+    run_memory_debt_doctor_from_connection,
 };
 use super::status::{
     default_workspace_path, probe_runtime_capability, probe_search_capability,
@@ -39,6 +39,8 @@ pub const HEALTH_SCORECARD_SCHEMA_V1: &str = "ee.health_scorecard.v1";
 
 const HEALTH_SCORECARD_TREND_LIMIT: u32 = 12;
 const HEALTH_SCORECARD_LEARN_GAP_LIMIT: u32 = 50;
+const HEALTH_SCORECARD_SNAPSHOT_ACTION: &str = "health.scorecard_snapshot";
+const HEALTH_SCORECARD_SNAPSHOT_TARGET: &str = "health_scorecard";
 const SCORE_EPSILON: f64 = 0.000_001;
 
 /// Overall health verdict.
@@ -405,30 +407,6 @@ impl HealthScorecardReport {
             ));
         }
 
-        let snapshot_summary = if options.record_snapshot {
-            match run_memory_debt_snapshot(&MemoryDebtSnapshotOptions {
-                workspace_path,
-                database_path: Some(&database_path),
-                now_rfc3339: options.now_rfc3339,
-                dry_run: false,
-                limit: Some(50),
-            }) {
-                Ok(report) => HealthScorecardSnapshotSummary::from_snapshot_report(&report),
-                Err(error) => {
-                    degraded.push(HealthScorecardDegradation {
-                        code: "health_scorecard_snapshot_failed".to_owned(),
-                        severity: "warning".to_owned(),
-                        message: format!("Could not record memory-debt trend snapshot: {error}"),
-                        repair: "ee steward run --job memory_debt_snapshot --workspace . --json"
-                            .to_owned(),
-                    });
-                    HealthScorecardSnapshotSummary::not_recorded(true, 0)
-                }
-            }
-        } else {
-            HealthScorecardSnapshotSummary::not_recorded(false, 0)
-        };
-
         let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
             DomainError::Storage {
                 message: format!(
@@ -444,6 +422,16 @@ impl HealthScorecardReport {
             &[workspace_path],
         )
         .unwrap_or(workspace_id);
+        let source_generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(health_scorecard_snapshot_error)?
+            .unwrap_or(0);
+        let source_audit_count = if options.record_snapshot {
+            health_scorecard_audit_count(&connection, &workspace_id)
+                .map_err(health_scorecard_snapshot_error)?
+        } else {
+            0
+        };
 
         let memories = connection
             .list_memories(&workspace_id, None, false)
@@ -451,7 +439,7 @@ impl HealthScorecardReport {
                 message: format!("Failed to list memories for health scorecard: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             })?;
-        let history = connection
+        let debt_history = connection
             .list_debt_snapshots(&workspace_id, options.history_limit.max(1))
             .map_err(|error| DomainError::Storage {
                 message: format!(
@@ -461,17 +449,33 @@ impl HealthScorecardReport {
                     "ee steward run --job memory_debt_snapshot --workspace . --json".to_owned(),
                 ),
             })?;
-        let deterministic_now = health_scorecard_now(options.now_rfc3339, &memories, &history);
+        let history = read_health_scorecard_snapshots(
+            &connection,
+            &workspace_id,
+            options.history_limit.max(1),
+        )?;
+        let snapshot_now = options
+            .record_snapshot
+            .then(|| chrono::Utc::now().to_rfc3339());
+        let deterministic_now = health_scorecard_now(
+            options.now_rfc3339.or(snapshot_now.as_deref()),
+            &memories,
+            &debt_history,
+            &history,
+        );
 
-        let debt_report = match run_memory_debt_doctor(&MemoryDebtDoctorOptions {
-            workspace_path,
-            database_path: Some(&database_path),
-            class_filter: None,
-            limit: 50,
-            trend: true,
-            now_rfc3339: Some(deterministic_now.as_str()),
-            audit_scan_limit: None,
-        }) {
+        let debt_report = match run_memory_debt_doctor_from_connection(
+            &connection,
+            &MemoryDebtDoctorOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                class_filter: None,
+                limit: 50,
+                trend: true,
+                now_rfc3339: Some(deterministic_now.as_str()),
+                audit_scan_limit: None,
+            },
+        ) {
             Ok(report) => Some(report),
             Err(error) => {
                 degraded.push(HealthScorecardDegradation {
@@ -503,10 +507,9 @@ impl HealthScorecardReport {
 
         let structural =
             StructuralHealthReport::gather_from_connection(&connection, workspace_path);
-        let mut snapshot_summary = snapshot_summary;
-        snapshot_summary.history_count = history.len();
-
-        Ok(Self::from_parts(
+        let snapshot_summary =
+            HealthScorecardSnapshotSummary::not_recorded(options.record_snapshot, history.len());
+        let mut report = Self::from_parts(
             workspace_path,
             &database_path,
             workspace_id,
@@ -517,7 +520,46 @@ impl HealthScorecardReport {
             history,
             snapshot_summary,
             degraded,
-        ))
+        );
+        drop(connection);
+
+        // A requested observation becomes the next call's baseline. Inserting
+        // it before calculating the trend would compare the score to itself.
+        if options.record_snapshot {
+            let recorded = debt_report
+                .as_ref()
+                .ok_or_else(|| {
+                    health_scorecard_snapshot_error("memory-debt measurement was unavailable")
+                })
+                .and_then(|debt| {
+                    record_health_scorecard_snapshot(
+                        &report,
+                        debt,
+                        source_generation,
+                        source_audit_count,
+                    )
+                });
+            match recorded {
+                Ok(snapshot) => {
+                    report.snapshot = HealthScorecardSnapshotSummary::recorded(
+                        &snapshot,
+                        report.trend.snapshot_count.saturating_add(1),
+                    );
+                }
+                Err(error) => {
+                    report.degraded.push(HealthScorecardDegradation {
+                        code: "health_scorecard_snapshot_failed".to_owned(),
+                        severity: "warning".to_owned(),
+                        message: format!(
+                            "Could not record health scorecard trend snapshot: {error}"
+                        ),
+                        repair: "ee health scorecard --record-snapshot --workspace . --json"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(report)
     }
 
     fn from_parts(
@@ -528,7 +570,7 @@ impl HealthScorecardReport {
         debt_report: Option<&MemoryDebtReport>,
         learn_gaps: Option<&super::learn::LearnGapsReport>,
         structural: StructuralHealthReport,
-        history: Vec<StoredDebtSnapshot>,
+        history: Vec<HealthScorecardSnapshot>,
         snapshot_summary: HealthScorecardSnapshotSummary,
         mut degraded: Vec<HealthScorecardDegradation>,
     ) -> Self {
@@ -592,24 +634,167 @@ impl HealthScorecardSnapshotSummary {
             report_hash: None,
             inserted: None,
             history_count,
-            next_command: "ee steward run --job memory_debt_snapshot --workspace . --json"
+            next_command: "ee health scorecard --record-snapshot --workspace . --json"
                 .to_owned(),
         }
     }
 
-    fn from_snapshot_report(report: &MemoryDebtSnapshotReport) -> Self {
+    fn recorded(snapshot: &HealthScorecardSnapshot, history_count: usize) -> Self {
         Self {
             requested: true,
-            recorded_this_run: report.inserted,
-            status: report.status.clone(),
-            snapshot_day: Some(report.snapshot_day.clone()),
-            report_hash: Some(report.report_hash.clone()),
-            inserted: Some(report.inserted),
-            history_count: 0,
+            recorded_this_run: true,
+            status: "inserted".to_owned(),
+            snapshot_day: Some(snapshot.captured_at.chars().take(10).collect()),
+            report_hash: Some(snapshot.report_hash.clone()),
+            inserted: Some(true),
+            history_count,
             next_command: "ee health scorecard --workspace . --json".to_owned(),
         }
     }
 }
+
+#[derive(Clone, Debug)]
+struct HealthScorecardSnapshot {
+    score: u32,
+    captured_at: String,
+    report_hash: String,
+}
+
+fn health_scorecard_snapshot_error(error: impl std::fmt::Display) -> DomainError {
+    DomainError::Storage {
+        message: format!("Health scorecard snapshot storage failed: {error}"),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    }
+}
+
+fn read_health_scorecard_snapshots(
+    connection: &DbConnection,
+    workspace_id: &str,
+    limit: u32,
+) -> Result<Vec<HealthScorecardSnapshot>, DomainError> {
+    let entries = connection
+        .list_audit_by_workspace_target(
+            workspace_id,
+            HEALTH_SCORECARD_SNAPSHOT_TARGET,
+            workspace_id,
+            None,
+            limit,
+        )
+        .map_err(health_scorecard_snapshot_error)?;
+    let mut snapshots = Vec::new();
+    for entry in entries {
+        if entry.action != HEALTH_SCORECARD_SNAPSHOT_ACTION {
+            continue;
+        }
+        let details = entry.details.as_deref().ok_or_else(|| {
+            health_scorecard_snapshot_error("recorded scorecard has no measurement")
+        })?;
+        let value: JsonValue =
+            serde_json::from_str(details).map_err(health_scorecard_snapshot_error)?;
+        if value.get("scorecardSchema").and_then(JsonValue::as_str)
+            != Some(HEALTH_SCORECARD_SCHEMA_V1)
+        {
+            continue;
+        }
+        let score = value
+            .get("score")
+            .and_then(JsonValue::as_u64)
+            .and_then(|score| u32::try_from(score).ok())
+            .filter(|score| *score <= 100)
+            .ok_or_else(|| health_scorecard_snapshot_error("invalid recorded score"))?;
+        let captured_at = value
+            .get("capturedAt")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| health_scorecard_snapshot_error("missing measurement timestamp"))?;
+        chrono::DateTime::parse_from_rfc3339(captured_at)
+            .map_err(health_scorecard_snapshot_error)?;
+        snapshots.push(HealthScorecardSnapshot {
+            score,
+            captured_at: captured_at.to_owned(),
+            report_hash: format!("blake3:{}", blake3::hash(details.as_bytes()).to_hex()),
+        });
+    }
+    Ok(snapshots)
+}
+
+fn record_health_scorecard_snapshot(
+    report: &HealthScorecardReport,
+    debt_report: &MemoryDebtReport,
+    source_generation: u64,
+    source_audit_count: u64,
+) -> Result<HealthScorecardSnapshot, DomainError> {
+    let details = serde_json::json!({
+        "scorecardSchema": HEALTH_SCORECARD_SCHEMA_V1,
+        "capturedAt": debt_report.generated_at,
+        "score": report.score,
+        "subScores": report.sub_scores,
+        "evidence": report.evidence,
+    })
+    .to_string();
+    let snapshot = HealthScorecardSnapshot {
+        score: report.score,
+        captured_at: debt_report.generated_at.clone(),
+        report_hash: format!("blake3:{}", blake3::hash(details.as_bytes()).to_hex()),
+    };
+    let debt_input = memory_debt_snapshot_input(debt_report, source_generation);
+    let connection = DbConnection::open_file(&report.database_path)
+        .map_err(health_scorecard_snapshot_error)?;
+    let recorded = connection
+        .with_transaction(|| {
+            if connection
+                .get_workspace_generation(&report.workspace_id)?
+                .unwrap_or(0)
+                != source_generation
+                || health_scorecard_audit_count(&connection, &report.workspace_id)?
+                    != source_audit_count
+            {
+                return Ok(false);
+            }
+            // The daily debt row remains immutable/idempotent. Actual
+            // scorecard observations need their own append-only history:
+            // query demand and other score inputs can change within one
+            // source generation and on the same day.
+            connection.insert_debt_snapshot(&debt_input)?;
+            connection.insert_audit(
+                &crate::db::generate_audit_id(),
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(report.workspace_id.clone()),
+                    actor: Some("ee health scorecard".to_owned()),
+                    action: HEALTH_SCORECARD_SNAPSHOT_ACTION.to_owned(),
+                    target_type: Some(HEALTH_SCORECARD_SNAPSHOT_TARGET.to_owned()),
+                    target_id: Some(report.workspace_id.clone()),
+                    details: Some(details),
+                },
+            )?;
+            Ok(true)
+        })
+        .map_err(health_scorecard_snapshot_error)?;
+    if !recorded {
+        return Err(health_scorecard_snapshot_error(
+            "workspace changed while calculating the scorecard; retry the snapshot",
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn health_scorecard_audit_count(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> crate::db::Result<u64> {
+    let rows = connection.query(
+        "SELECT COUNT(*) FROM audit_log WHERE workspace_id = ?1",
+        &[sqlmodel_core::Value::Text(workspace_id.to_owned())],
+    )?;
+    rows.first()
+        .and_then(|row| row.get(0))
+        .and_then(sqlmodel_core::Value::as_i64)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or_else(|| crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "health scorecard audit count was missing or invalid".to_owned(),
+        })
+}
+
 
 fn health_scorecard_evidence(
     memories: &[StoredMemory],
@@ -675,7 +860,8 @@ fn health_scorecard_evidence(
 fn health_scorecard_now(
     override_now: Option<&str>,
     memories: &[StoredMemory],
-    history: &[StoredDebtSnapshot],
+    debt_history: &[StoredDebtSnapshot],
+    history: &[HealthScorecardSnapshot],
 ) -> String {
     if let Some(now) = override_now {
         return now.to_owned();
@@ -683,7 +869,8 @@ fn health_scorecard_now(
     memories
         .iter()
         .map(|memory| memory.updated_at.as_str())
-        .chain(history.iter().map(|snapshot| snapshot.created_at.as_str()))
+        .chain(debt_history.iter().map(|snapshot| snapshot.created_at.as_str()))
+        .chain(history.iter().map(|snapshot| snapshot.captured_at.as_str()))
         .max()
         .unwrap_or("1970-01-01T00:00:00Z")
         .to_owned()
@@ -933,9 +1120,10 @@ const fn health_scorecard_status(score: u32) -> &'static str {
 
 fn health_scorecard_trend(
     current_score: u32,
-    history: &[StoredDebtSnapshot],
+    history: &[HealthScorecardSnapshot],
 ) -> HealthScorecardTrend {
-    let previous = history.iter().find_map(health_score_from_debt_snapshot);
+    let latest = history.first();
+    let previous = latest.map(|snapshot| snapshot.score);
     let delta = previous.map(|score| current_score as i32 - score as i32);
     let direction = match delta {
         None => "no_baseline",
@@ -943,49 +1131,21 @@ fn health_scorecard_trend(
         Some(value) if value < -1 => "declining",
         Some(_) => "flat",
     };
-    let latest = history.first();
     HealthScorecardTrend {
         direction: direction.to_owned(),
         delta: delta.unwrap_or(0),
         current_score,
         previous_score: previous,
         snapshot_count: history.len(),
-        source: if history.is_empty() {
-            "none".to_owned()
+        source: if latest.is_some() {
+            "health_scorecard_snapshots".to_owned()
         } else {
-            "debt_snapshots".to_owned()
+            "none".to_owned()
         },
-        latest_snapshot_day: latest.map(|snapshot| snapshot.snapshot_day.clone()),
+        latest_snapshot_day: latest
+            .map(|snapshot| snapshot.captured_at.chars().take(10).collect()),
         latest_snapshot_hash: latest.map(|snapshot| snapshot.report_hash.clone()),
     }
-}
-
-fn health_score_from_debt_snapshot(snapshot: &StoredDebtSnapshot) -> Option<u32> {
-    if let Ok(value) = serde_json::from_str::<JsonValue>(&snapshot.report_json) {
-        if value.get("schema").and_then(JsonValue::as_str) == Some(HEALTH_SCORECARD_SCHEMA_V1) {
-            return value
-                .get("score")
-                .and_then(JsonValue::as_u64)
-                .map(|score| score.min(100) as u32);
-        }
-        let memory_count = value
-            .get("summary")
-            .and_then(|summary| summary.get("memoryCount"))
-            .and_then(JsonValue::as_u64)
-            .unwrap_or(snapshot.item_count)
-            .max(1) as f64;
-        let item_count = snapshot.item_count as f64;
-        let debt_ratio = item_count / (memory_count + item_count);
-        let average_debt = if item_count <= SCORE_EPSILON {
-            0.0
-        } else {
-            f64::from(snapshot.total_score) / item_count
-        };
-        return Some(bounded_score(
-            100.0 - debt_ratio * 45.0 - average_debt * 25.0,
-        ));
-    }
-    None
 }
 
 fn top_scorecard_actions(
@@ -1053,8 +1213,8 @@ fn action_for_sub_score(
         ),
         _ if trend.direction == "no_baseline" => (
             "Record a trend baseline",
-            "No steward trend snapshot exists, so the scorecard cannot show movement yet.",
-            "ee steward run --job memory_debt_snapshot --workspace . --json",
+            "No measured scorecard baseline exists, so the scorecard cannot show movement yet.",
+            "ee health scorecard --record-snapshot --workspace . --json",
         ),
         _ => (
             "Review memory hygiene queue",
@@ -1828,37 +1988,366 @@ mod tests {
     }
 
     #[test]
-    fn health_scorecard_trend_declines_from_prior_debt_snapshot() -> TestResult {
-        let snapshot = StoredDebtSnapshot {
-            workspace_id: "wsp_scorecard_trend".to_owned(),
-            snapshot_day: "2026-06-17".to_owned(),
-            generation: 7,
-            report_hash: "blake3:prior".to_owned(),
-            report_json: serde_json::json!({
-                "schema": "ee.curate.doctor.v1",
-                "summary": {
-                    "memoryCount": 10,
-                    "itemCount": 1,
-                    "totalScore": 0.2
-                }
+    fn health_scorecard_trend_compares_actual_scores() -> TestResult {
+        let history = vec![HealthScorecardSnapshot {
+            score: 86,
+            captured_at: "2026-11-12T12:00:00Z".to_owned(),
+            report_hash: "blake3:measured".to_owned(),
+        }];
+        let declining = health_scorecard_trend(79, &history);
+        ensure(declining.direction.as_str(), "declining", "measured decline")?;
+        ensure(declining.previous_score, Some(86), "actual baseline")?;
+        ensure(declining.delta, -7, "actual score difference")?;
+        ensure(
+            declining.latest_snapshot_hash.as_deref(),
+            Some("blake3:measured"),
+            "baseline provenance",
+        )?;
+        ensure(
+            health_scorecard_trend(90, &history).direction.as_str(),
+            "improving",
+            "measured improvement",
+        )?;
+        ensure(
+            health_scorecard_trend(86, &history).direction.as_str(),
+            "flat",
+            "unchanged measurement",
+        )?;
+        let missing = health_scorecard_trend(86, &[]);
+        ensure(missing.direction.as_str(), "no_baseline", "missing measurement")?;
+        ensure(missing.previous_score, None, "no invented prior score")
+    }
+
+    #[test]
+    fn health_scorecard_snapshots_track_demand_and_preserve_legacy_debt() -> TestResult {
+        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temporary.path();
+        let database_path = workspace.join(".ee/ee.db");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(workspace);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("scorecard history".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for index in 0..3 {
+            insert_test_memory(&connection, &workspace_id, &format!("mem_{index:026}"))?;
+        }
+        let generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+        let legacy_json = serde_json::json!({
+            "schema": "ee.curate.doctor.v1",
+            "summary": {"memoryCount": 3, "itemCount": 3, "totalScore": 1.0},
+        })
+        .to_string();
+        connection
+            .insert_debt_snapshot(&crate::db::CreateDebtSnapshotInput {
+                workspace_id: workspace_id.clone(),
+                snapshot_day: "2026-11-12".to_owned(),
+                generation,
+                report_hash: format!("blake3:{}", blake3::hash(legacy_json.as_bytes()).to_hex()),
+                report_json: legacy_json,
+                item_count: 3,
+                total_score: 1.0,
+                created_at: "2026-11-12T00:00:00Z".to_owned(),
             })
-            .to_string(),
-            item_count: 1,
-            total_score: 0.2,
-            created_at: "2026-06-17T00:00:00Z".to_owned(),
+            .map_err(|error| error.to_string())?;
+        let legacy = connection
+            .list_debt_snapshots(&workspace_id, 1)
+            .map_err(|error| error.to_string())?
+            .remove(0);
+        drop(connection);
+
+        let options = HealthScorecardOptions {
+            workspace_path: workspace,
+            database_path: Some(&database_path),
+            record_snapshot: true,
+            history_limit: 12,
+            now_rfc3339: Some("2026-11-12T12:00:00Z"),
         };
+        let first = HealthScorecardReport::gather(&options).map_err(|error| error.to_string())?;
+        ensure(
+            first.trend.direction.as_str(),
+            "no_baseline",
+            "legacy debt is not a measured scorecard baseline",
+        )?;
+        ensure(first.trend.previous_score, None, "legacy debt has no prior score")?;
+        ensure(first.snapshot.recorded_this_run, true, "first measured baseline recorded")?;
 
-        let trend = health_scorecard_trend(70, &[snapshot]);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_debt_snapshots(&workspace_id, 12)
+                .map_err(|error| error.to_string())?,
+            vec![legacy.clone()],
+            "existing daily debt snapshot remains byte-for-byte unchanged",
+        )?;
+        for _ in 0..6 {
+            let query_hash = format!(
+                "blake3:{}",
+                blake3::hash(b"missing release evidence").to_hex()
+            );
+            connection
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(workspace_id.clone()),
+                        actor: None,
+                        action: crate::db::audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+                        target_type: Some("query_hash".to_owned()),
+                        target_id: Some(query_hash.clone()),
+                        details: Some(
+                            serde_json::json!({
+                                "schema": "ee.search.query_miss.v1",
+                                "queryHash": query_hash,
+                                "reason": "no_relevant_results",
+                                "queryTextStored": false,
+                                "queryVectorStored": false,
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        ensure(
+            connection
+                .get_workspace_generation(&workspace_id)
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0),
+            generation,
+            "query demand changes without a source generation bump",
+        )?;
+        drop(connection);
 
-        ensure(trend.direction.as_str(), "declining", "declining trend")?;
-        ensure(trend.current_score, 70, "current score")?;
-        if trend.previous_score.unwrap_or(0) <= trend.current_score {
+        let second = HealthScorecardReport::gather(&options).map_err(|error| error.to_string())?;
+        if second.score >= first.score {
             return Err(format!(
-                "expected previous score above current score, got {:?} and {}",
-                trend.previous_score, trend.current_score
+                "unmet query demand did not lower {} below {}",
+                second.score, first.score
             ));
         }
-        Ok(())
+        ensure(second.trend.previous_score, Some(first.score), "prior actual composite")?;
+        ensure(second.trend.direction.as_str(), "declining", "real decline is visible")?;
+        ensure(second.trend.snapshot_count, 1, "new observation is not its own baseline")?;
+        ensure(second.snapshot.recorded_this_run, true, "second observation recorded")?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let observations = read_health_scorecard_snapshots(&connection, &workspace_id, 12)
+            .map_err(|error| error.to_string())?;
+        ensure(observations.len(), 2, "multiple observations survive within one day")?;
+        ensure(observations[0].score, second.score, "latest composite is stored")?;
+        ensure(observations[1].score, first.score, "prior composite is preserved")?;
+        let debt_rows = connection
+            .list_debt_snapshots(&workspace_id, 12)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            debt_rows.iter().any(|row| row == &legacy),
+            true,
+            "legacy debt remains immutable after subsequent observations",
+        )?;
+
+        let audit_count_before_read = health_scorecard_audit_count(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let read_options = HealthScorecardOptions {
+            record_snapshot: false,
+            ..options
+        };
+        let read = HealthScorecardReport::gather(&read_options)
+            .map_err(|error| error.to_string())?;
+        ensure(read.score, second.score, "same state has the same score")?;
+        ensure(read.trend.previous_score, Some(second.score), "latest measured baseline")?;
+        ensure(read.trend.direction.as_str(), "flat", "same state is flat")?;
+        ensure(read.snapshot.recorded_this_run, false, "plain health stays read-only")?;
+        ensure(
+            read_health_scorecard_snapshots(&connection, &workspace_id, 12)
+                .map_err(|error| error.to_string())?
+                .len(),
+            2,
+            "read-only call appended no scorecard observation",
+        )?;
+        ensure(
+            connection
+                .list_debt_snapshots(&workspace_id, 12)
+                .map_err(|error| error.to_string())?,
+            debt_rows.clone(),
+            "read-only call changed no debt history",
+        )?;
+        ensure(
+            health_scorecard_audit_count(&connection, &workspace_id)
+                .map_err(|error| error.to_string())?,
+            audit_count_before_read,
+            "read-only call changed no audit history",
+        )?;
+
+        let debt_report = run_memory_debt_doctor_from_connection(
+            &connection,
+            &MemoryDebtDoctorOptions {
+                now_rfc3339: options.now_rfc3339,
+                ..MemoryDebtDoctorOptions::new(workspace)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let current_generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+        let audit_count = health_scorecard_audit_count(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_audit(
+                &crate::db::generate_audit_id(),
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace_id.clone()),
+                    actor: None,
+                    action: crate::db::audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+                    target_type: Some("query_hash".to_owned()),
+                    target_id: Some("blake3:concurrent-demand".to_owned()),
+                    details: Some(
+                        serde_json::json!({
+                            "queryHash": "blake3:concurrent-demand",
+                            "reason": "no_relevant_results",
+                            "queryTextStored": false,
+                        })
+                        .to_string(),
+                    ),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_workspace_generation(&workspace_id)
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0),
+            current_generation,
+            "concurrent demand did not change source generation",
+        )?;
+        ensure(
+            record_health_scorecard_snapshot(
+                &read,
+                &debt_report,
+                current_generation,
+                audit_count,
+            )
+            .is_err(),
+            true,
+            "changed demand history refuses stale measurement",
+        )?;
+        let updated_audit_count = health_scorecard_audit_count(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        insert_test_memory(&connection, &workspace_id, "mem_00000000000000000000000003")?;
+        let updated_generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+        if updated_generation <= current_generation {
+            return Err("new memory did not advance source generation".to_owned());
+        }
+        ensure(
+            record_health_scorecard_snapshot(
+                &read,
+                &debt_report,
+                current_generation,
+                updated_audit_count,
+            )
+            .is_err(),
+            true,
+            "changed source generation refuses stale measurement",
+        )?;
+        ensure(
+            read_health_scorecard_snapshots(&connection, &workspace_id, 12)
+                .map_err(|error| error.to_string())?
+                .len(),
+            2,
+            "refused measurement appended no observation",
+        )?;
+        ensure(
+            connection
+                .list_debt_snapshots(&workspace_id, 12)
+                .map_err(|error| error.to_string())?,
+            debt_rows,
+            "refused measurements changed no debt history",
+        )
+    }
+
+    #[test]
+    fn health_scorecard_history_is_workspace_scoped_and_rejects_invalid_scores() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let first = "wsp_scorecard_first";
+        let second = "wsp_scorecard_second";
+        for (workspace_id, score) in [(first, 86), (second, 1)] {
+            connection
+                .insert_workspace(
+                    workspace_id,
+                    &CreateWorkspaceInput {
+                        path: format!("/tmp/{workspace_id}"),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: None,
+                        action: HEALTH_SCORECARD_SNAPSHOT_ACTION.to_owned(),
+                        target_type: Some(HEALTH_SCORECARD_SNAPSHOT_TARGET.to_owned()),
+                        target_id: Some(workspace_id.to_owned()),
+                        details: Some(
+                            serde_json::json!({
+                                "scorecardSchema": HEALTH_SCORECARD_SCHEMA_V1,
+                                "capturedAt": "2026-11-12T12:00:00Z",
+                                "score": score,
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let history = read_health_scorecard_snapshots(&connection, first, 1)
+            .map_err(|error| error.to_string())?;
+        ensure(history.len(), 1, "workspace-local limit")?;
+        ensure(history[0].score, 86, "other workspace cannot replace baseline")?;
+
+        connection
+            .insert_audit(
+                &crate::db::generate_audit_id(),
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(first.to_owned()),
+                    actor: None,
+                    action: HEALTH_SCORECARD_SNAPSHOT_ACTION.to_owned(),
+                    target_type: Some(HEALTH_SCORECARD_SNAPSHOT_TARGET.to_owned()),
+                    target_id: Some(first.to_owned()),
+                    details: Some(
+                        serde_json::json!({
+                            "scorecardSchema": HEALTH_SCORECARD_SCHEMA_V1,
+                            "capturedAt": "2026-11-12T12:00:00Z",
+                            "score": 101,
+                        })
+                        .to_string(),
+                    ),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            read_health_scorecard_snapshots(&connection, first, 12).is_err(),
+            true,
+            "invalid stored score must not become a healthy baseline",
+        )
     }
 
     #[test]
@@ -1893,7 +2382,7 @@ mod tests {
             current_score: 60,
             previous_score: Some(60),
             snapshot_count: 1,
-            source: "debt_snapshots".to_owned(),
+            source: "health_scorecard_snapshots".to_owned(),
             latest_snapshot_day: Some("2026-06-17".to_owned()),
             latest_snapshot_hash: Some("blake3:prior".to_owned()),
         };
@@ -2104,3 +2593,4 @@ mod tests {
         .to_string()
     }
 }
+

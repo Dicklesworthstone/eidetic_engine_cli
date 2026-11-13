@@ -483,6 +483,28 @@ pub fn run_memory_debt_doctor(
     )
 }
 
+/// Build a debt measurement using an already-open connection. Read-only
+/// callers retain control of database admission and never run migrations.
+pub(crate) fn run_memory_debt_doctor_from_connection(
+    connection: &DbConnection,
+    options: &MemoryDebtDoctorOptions<'_>,
+) -> Result<MemoryDebtReport, DomainError> {
+    let mut prepared = prepare_memory_debt(options.workspace_path, options.database_path)?;
+    let class_filter = parse_class_filter(options.class_filter)?;
+    let limit = options.limit.min(MAX_LIMIT);
+    let now = parse_now(options.now_rfc3339)?;
+    bind_prepared_memory_debt(connection, &mut prepared);
+    build_memory_debt_report(
+        connection,
+        &prepared,
+        class_filter,
+        limit,
+        options.trend,
+        now,
+        options.audit_scan_limit.unwrap_or(DEFAULT_AUDIT_SCAN_LIMIT),
+    )
+}
+
 /// Run the steward snapshot job.
 pub fn run_memory_debt_snapshot(
     options: &MemoryDebtSnapshotOptions<'_>,
@@ -507,24 +529,12 @@ pub fn run_memory_debt_snapshot(
             repair: Some("ee doctor --json".to_owned()),
         })?
         .unwrap_or(0);
-    let snapshot_day = report.generated_at.chars().take(10).collect::<String>();
-    let report_json = report.data_json();
-    let report_text = report_json.to_string();
-    let report_hash = format!("blake3:{}", blake3::hash(report_text.as_bytes()).to_hex());
+    let input = memory_debt_snapshot_input(&report, generation);
     let inserted = if options.dry_run {
         false
     } else {
         connection
-            .insert_debt_snapshot(&CreateDebtSnapshotInput {
-                workspace_id: prepared.workspace_id.clone(),
-                snapshot_day: snapshot_day.clone(),
-                generation,
-                report_hash: report_hash.clone(),
-                report_json: report_text,
-                item_count: report.summary.item_count as u64,
-                total_score: report.summary.total_score,
-                created_at: report.generated_at.clone(),
-            })
+            .insert_debt_snapshot(&input)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to insert memory debt snapshot: {error}"),
                 repair: Some("ee steward run --job memory_debt_snapshot --workspace .".to_owned()),
@@ -541,13 +551,34 @@ pub fn run_memory_debt_snapshot(
         },
         dry_run: options.dry_run,
         inserted,
-        workspace_id: prepared.workspace_id,
-        snapshot_day,
+        workspace_id: input.workspace_id,
+        snapshot_day: input.snapshot_day,
         generation,
-        report_hash,
+        report_hash: input.report_hash,
         item_count: report.summary.item_count,
         total_score: report.summary.total_score,
     })
+}
+
+/// Prepare the same immutable debt row for steward and scorecard snapshots.
+/// History is excluded so a snapshot never recursively captures prior rows.
+pub(crate) fn memory_debt_snapshot_input(
+    report: &MemoryDebtReport,
+    generation: u64,
+) -> CreateDebtSnapshotInput {
+    let mut report_json = report.data_json();
+    report_json["trend"] = JsonValue::Null;
+    let report_text = report_json.to_string();
+    CreateDebtSnapshotInput {
+        workspace_id: report.workspace_id.clone(),
+        snapshot_day: report.generated_at.chars().take(10).collect(),
+        generation,
+        report_hash: format!("blake3:{}", blake3::hash(report_text.as_bytes()).to_hex()),
+        report_json: report_text,
+        item_count: report.summary.item_count as u64,
+        total_score: report.summary.total_score,
+        created_at: report.generated_at.clone(),
+    }
 }
 
 fn build_memory_debt_report(
@@ -1693,3 +1724,4 @@ mod tests {
         assert_eq!(forward, reversed, "insertion order changed the report");
     }
 }
+

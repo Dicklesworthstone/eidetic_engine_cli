@@ -2,7 +2,7 @@
 # bd-2vq2z.14 - Health scorecard e2e (real binary, no mocks).
 #
 # Proves `ee health scorecard --json` returns the stable scorecard schema,
-# reads existing memory-debt snapshots for trend, and declines after introducing
+# reads measured scorecard snapshots for trend, and declines after introducing
 # duplicate, low-provenance memory debt. The script intentionally does not
 # build; central RCH verify provides the binary.
 set -uo pipefail
@@ -90,8 +90,10 @@ assert_jq "$baseline_scorecard" '.schema == "ee.response.v2" and .success == tru
     "baseline scorecard returns success envelope"
 assert_jq "$baseline_scorecard" '.data.schema == "ee.health_scorecard.v1"' \
     "baseline scorecard emits health scorecard schema"
-assert_jq "$baseline_scorecard" '.data.snapshot.requested == true and (.data.snapshot.status | type == "string")' \
-    "baseline scorecard records or recognizes a trend snapshot"
+assert_jq "$baseline_scorecard" '.data.snapshot.requested == true and .data.snapshot.recordedThisRun == true and .data.snapshot.status == "inserted"' \
+    "baseline scorecard records an actual composite observation"
+assert_jq "$baseline_scorecard" '.data.trend.direction == "no_baseline" and .data.trend.previousScore == null' \
+    "first recorded observation is not its own baseline"
 assert_jq "$baseline_scorecard" '(.data.subScores | length) >= 5 and (.data.topActions | type == "array")' \
     "baseline scorecard includes subscores and top actions"
 baseline_score="$(json_scalar "$baseline_scorecard" '.data.score')"
@@ -117,8 +119,10 @@ assert_jq "$declined_scorecard" '.schema == "ee.response.v2" and .success == tru
     "declined scorecard returns success envelope"
 assert_jq "$declined_scorecard" '.data.schema == "ee.health_scorecard.v1"' \
     "declined scorecard emits stable data schema"
-assert_jq "$declined_scorecard" '.data.trend.source == "debt_snapshots" and .data.trend.snapshotCount >= 1' \
-    "declined scorecard reads the baseline debt snapshot"
+assert_jq "$declined_scorecard" '.data.trend.source == "health_scorecard_snapshots" and .data.trend.snapshotCount >= 1' \
+    "declined scorecard reads the measured composite baseline"
+assert_eq "$(json_scalar "$declined_scorecard" '.data.trend.previousScore')" "$baseline_score" \
+    "trend compares against the actual prior composite score"
 assert_jq "$declined_scorecard" '.data.trend.direction == "declining" and .data.trend.delta < 0' \
     "declined scorecard reports a negative trend"
 declined_score="$(json_scalar "$declined_scorecard" '.data.score')"

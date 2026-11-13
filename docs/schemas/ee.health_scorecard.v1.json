@@ -132,7 +132,7 @@
         "currentScore": 72,
         "previousScore": 81,
         "snapshotCount": 3,
-        "source": "debt_snapshots",
+        "source": "health_scorecard_snapshots",
         "latestSnapshotDay": "2026-06-18",
         "latestSnapshotHash": "blake3:abc"
       },
@@ -155,7 +155,7 @@
         "reportHash": null,
         "inserted": null,
         "historyCount": 3,
-        "nextCommand": "ee steward run --job memory_debt_snapshot --workspace . --json"
+        "nextCommand": "ee health scorecard --record-snapshot --workspace . --json"
       },
       "evidence": {
         "memoryCount": 12,
