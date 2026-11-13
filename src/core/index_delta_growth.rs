@@ -165,12 +165,21 @@ fn plan_with_digest(
         let reusable = if let Some(expected) = live.get(&document.id) {
             let actual = digest(document);
             checkpoint()?;
-            if *expected == actual {
-                continue;
-            }
             let expected_input = inputs.get(&document.id).ok_or_else(invalid_identity_map)?;
             let actual_input = embedding_input_digest(document);
             checkpoint()?;
+            if *expected == actual {
+                // The ordinary pass may have hit its budget before this row.
+                // Bulk fallback must preserve the same input commitments as
+                // streaming and ordinary source admission.
+                if *expected_input != actual_input {
+                    return Err(incremental_fallback(
+                        IncrementalFallbackReason::CorpusRevisionMismatch,
+                        "unchanged source document has an inconsistent live embedding-input digest",
+                    ));
+                }
+                continue;
+            }
             let reuse = *expected_input == actual_input;
             let bytes = document_payload_bytes(document);
             checkpoint()?;

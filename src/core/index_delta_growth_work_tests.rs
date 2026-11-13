@@ -151,6 +151,99 @@ fn pure_growth_cannot_skip_complete_input_maps_or_late_duplicate_identity_checks
 }
 
 #[test]
+fn bulk_growth_fallback_cannot_replace_conflicting_unchanged_input_commitments() {
+    let original = documents(32);
+    let live = digests(&original);
+    let input = inputs(&original);
+    let mut damaged = input.clone();
+    damaged.insert(original[31].id.clone(), input[&original[0].id].clone());
+    let mut current = documents(128);
+    current.rotate_left(original.len());
+
+    // New IDs exhaust the ordinary inference allowance before ANY retained
+    // row is visited, so its consistency check cannot protect the fallback.
+    let mut hashed = 0;
+    let ordinary = super::super::planning::diff_with_digest(
+        &live,
+        &damaged,
+        &current,
+        IDENTITY.to_owned(),
+        |document| {
+            hashed += 1;
+            document_digest(document)
+        },
+    )
+    .expect_err("new inputs exceed the ordinary allowance");
+    assert_eq!(
+        ordinary.reason,
+        IncrementalFallbackReason::DeltaOverThreshold
+    );
+    assert_eq!(hashed, 0);
+
+    for rotation in [0, 1, 32, 96, 127] {
+        let mut ordered = current.clone();
+        ordered.rotate_left(rotation);
+        let error = super::super::diff(&live, &damaged, &ordered, IDENTITY.to_owned())
+            .expect_err("neither planner may replace conflicting retained commitments");
+        assert_eq!(
+            error.reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        assert!(
+            error
+                .detail
+                .contains("inconsistent live embedding-input digest")
+        );
+    }
+
+    // A matching input commitment admits precisely the same bulk source.
+    let admitted = super::super::diff(&live, &input, &current, IDENTITY.to_owned())
+        .expect("valid input commitments keep bulk append available");
+    assert_eq!(admitted.upserts.len(), 96);
+    assert!(admitted.removals.is_empty());
+    assert_eq!(
+        admitted.vector_upserts(IDENTITY).expect("new inputs").len(),
+        96
+    );
+    let mut reconstructed = live.clone();
+    reconstructed.extend(digests(&admitted.upserts));
+    assert_eq!(reconstructed, digests(&current));
+}
+
+#[test]
+fn bulk_growth_commitment_checks_preserve_reembedding_and_metadata_reuse() {
+    let original = documents(32);
+    let live = digests(&original);
+    let input = inputs(&original);
+    let mut current = documents(128);
+    current[30].title = Some("refreshed session title".to_owned());
+    current[31].content.push_str(" repaired");
+    current.rotate_left(original.len());
+
+    let delta = super::super::diff(&live, &input, &current, IDENTITY.to_owned())
+        .expect("changed source bodies are reembedded, not rejected");
+    assert_eq!(delta.upserts.len(), 98);
+    assert!(delta.removals.is_empty());
+    let expected_vectors = current
+        .iter()
+        .filter(|document| !live.contains_key(&document.id) || document.id == original[31].id)
+        .map(|document| document.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let vectors = delta.vector_upserts(IDENTITY).expect("same producer");
+    assert_eq!(vectors.len(), 97);
+    assert_eq!(
+        vectors
+            .iter()
+            .map(|document| document.id.as_str())
+            .collect::<BTreeSet<_>>(),
+        expected_vectors
+    );
+    let mut reconstructed = live.clone();
+    reconstructed.extend(digests(&delta.upserts));
+    assert_eq!(reconstructed, digests(&current));
+}
+
+#[test]
 fn actual_growth_dispatch_observes_cancellation_after_its_first_retained_hash() -> Result<(), String>
 {
     crate::core::run_cli_with_cx(std::time::Duration::from_secs(10), |cx| async move {
