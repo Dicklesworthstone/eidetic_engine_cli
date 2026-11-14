@@ -4924,6 +4924,36 @@ mod tests {
     }
 
     #[test]
+    fn new_connector_identity_survives_discovery_and_storage_projection() -> TestResult {
+        for agent in ["opencode", "pi_agent", "aider", "future-harness_42"] {
+            for discovery in [
+                json!({"sessions": [{
+                    "path": "/tmp/session.jsonl",
+                    "agent": agent,
+                    "content_hash": "connector-session-hash",
+                    "message_count": 1
+                }]}),
+                json!({"hits": [{
+                    "source_path": "/tmp/session.jsonl",
+                    "agent": agent,
+                    "content_hash": "connector-session-hash"
+                }]}),
+            ] {
+                let sessions = parse_sessions_json(discovery.to_string().as_bytes())
+                    .map_err(|error| error.to_string())?;
+                ensure_equal(&sessions.len(), &1, "one discovered session")?;
+                let input = session_input("wsp_01234567890123456789012345", &sessions[0]);
+                ensure_equal(
+                    &input.agent_name.as_deref(),
+                    &Some(agent),
+                    "stored agent identity",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn missing_cass_session_metadata_is_observable() -> TestResult {
         let input = br#"{
           "sessions": [

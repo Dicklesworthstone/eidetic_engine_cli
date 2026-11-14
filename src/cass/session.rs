@@ -62,7 +62,7 @@ fn normalized_cass_token(input: &str) -> String {
 }
 
 /// Agent type from CASS session metadata.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum CassAgent {
     /// Claude Code sessions.
     ClaudeCode,
@@ -74,14 +74,16 @@ pub enum CassAgent {
     Gemini,
     /// ChatGPT sessions.
     ChatGpt,
-    /// Unknown or unrecognized agent.
+    /// A CASS connector slug not covered by the built-in aliases.
+    Other(String),
+    /// Missing or invalid agent identity.
     #[default]
     Unknown,
 }
 
 impl CassAgent {
-    /// Parse an agent string from CASS output, mapping unknown values to
-    /// [`Self::Unknown`].
+    /// Preserve connector identities, including agents added by newer CASS
+    /// versions, while retaining the established aliases for known agents.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match normalized_cass_token(s).as_str() {
@@ -90,19 +92,34 @@ impl CassAgent {
             "cursor" => Self::Cursor,
             "gemini" => Self::Gemini,
             "chatgpt" | "chat-gpt" | "chat_gpt" => Self::ChatGpt,
-            _ => Self::Unknown,
+            "unknown" => Self::Unknown,
+            _ => {
+                let slug = s.trim();
+                if !slug.is_empty()
+                    && slug.len() <= 64
+                    && slug.as_bytes()[0].is_ascii_alphanumeric()
+                    && slug
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                {
+                    Self::Other(slug.to_owned())
+                } else {
+                    Self::Unknown
+                }
+            }
         }
     }
 
     /// Stable string representation for storage and JSON output.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::ClaudeCode => "claude_code",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Gemini => "gemini",
             Self::ChatGpt => "chatgpt",
+            Self::Other(slug) => slug,
             Self::Unknown => "unknown",
         }
     }
@@ -1018,10 +1035,47 @@ mod tests {
             "PascalCase ChatGpt",
         )?;
         ensure_equal(
-            &CassAgent::parse_lossy("unknown-agent"),
+            &CassAgent::parse_lossy("unknown"),
             &CassAgent::Unknown,
             "unknown",
         )
+    }
+
+    #[test]
+    fn cass_agent_preserves_new_connector_slugs() {
+        for slug in ["opencode", "pi_agent", "aider", "new-harness_42"] {
+            let agent = CassAgent::parse_lossy(slug);
+            assert_eq!(agent, CassAgent::Other(slug.to_owned()));
+            assert_eq!(agent.as_str(), slug);
+            assert_eq!(agent.to_string(), slug);
+            assert_eq!(CassAgent::parse_lossy(&format!("  {slug}  ")), agent);
+
+            let hit: CassSearchHit = serde_json::from_value(serde_json::json!({
+                "source_path": "/workspace/session.jsonl",
+                "agent": slug,
+                "source_id": "local",
+                "origin_kind": "local"
+            }))
+            .expect("a new connector uses the existing robot hit contract");
+            assert_eq!(hit.agent, agent);
+        }
+    }
+
+    #[test]
+    fn cass_agent_refuses_invalid_or_unbounded_slugs() {
+        for slug in [
+            "",
+            "  ",
+            "-agent",
+            "agent/name",
+            "agent\nname",
+            "api_key=private-value",
+            "hérness",
+        ] {
+            assert_eq!(CassAgent::parse_lossy(slug), CassAgent::Unknown);
+        }
+        assert_eq!(CassAgent::parse_lossy(&"a".repeat(65)), CassAgent::Unknown);
+        assert_eq!(CassAgent::parse_lossy(&"a".repeat(64)).as_str(), "a".repeat(64));
     }
 
     #[test]
