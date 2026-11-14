@@ -19438,7 +19438,7 @@ where
             ),
         };
     }
-    let plan = if verb == ResolveVerb::Merge {
+    let plan = if matches!(verb, ResolveVerb::Merge | ResolveVerb::ScopeSplit) {
         match crate::core::curate::preview_conflict_resolution(
             workspace,
             Some(&database_path),

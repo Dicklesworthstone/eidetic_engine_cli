@@ -1015,6 +1015,33 @@ fn every_precommit_interruption_rolls_back_the_entire_conflict_supersession() {
 }
 
 #[test]
+fn scope_split_rechecks_existing_tags_before_any_resolution_mutation() {
+    let fixture = Fixture::new();
+    let memory_a = fixture.seed_conflict_memory("fact", "semantic");
+    let memory_b = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&memory_a, &memory_b, MemoryLinkRelation::Contradicts);
+    let plan = fixture.resolution_plan(&memory_a, &memory_b, ResolveVerb::ScopeSplit);
+
+    // The preview had distinct scopes. Existing tags can change before a
+    // direct apply, so the writer must evaluate the resulting scopes again.
+    fixture
+        .db
+        .add_memory_tags(&memory_a, &["scope-b".to_owned()])
+        .unwrap();
+    fixture
+        .db
+        .add_memory_tags(&memory_b, &["scope-a".to_owned()])
+        .unwrap();
+    let before = fixture.state();
+    let result = record_resolution(&fixture.conflict_options(&plan), &plan);
+    assert!(matches!(result, Err(DomainError::Usage { .. })));
+    assert_eq!(fixture.state(), before);
+    let surface = assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default());
+    assert_eq!(surface.pairs.len(), 1);
+    assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
+}
+
+#[test]
 fn conflict_candidate_completion_and_resolution_roll_back_together() {
     for verb in [
         ResolveVerb::Supersede,
