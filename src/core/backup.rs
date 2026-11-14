@@ -8753,6 +8753,46 @@ fn redact_recovery_identity(key: &str, redaction: RedactionLevel) -> String {
     evidence_export::redact_identity(key, redaction)
 }
 
+/// Tags are shared identities, so replacing every private tag with one prose
+/// placeholder loses distinctions. Assign snapshot-local ordinals instead of
+/// content hashes, which would expose fingerprints of low-entropy private tags.
+/// Reserve unchanged labels first, and sort the original set so the mapping is
+/// deterministic and an unchanged recovered inventory is a redaction fixed point.
+fn recovery_rule_tag_identities(
+    tags_by_rule: &BTreeMap<String, Vec<String>>,
+    redaction: RedactionLevel,
+) -> BTreeMap<String, String> {
+    let original_tags = tags_by_rule
+        .values()
+        .flat_map(|tags| tags.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut identities = BTreeMap::new();
+    let mut reserved = BTreeSet::new();
+    for &tag in &original_tags {
+        if redact_content(tag, redaction) == tag {
+            identities.insert(tag.to_owned(), tag.to_owned());
+            reserved.insert(tag.to_owned());
+        }
+    }
+    let mut ordinal = 0_usize;
+    for tag in original_tags {
+        if identities.contains_key(tag) {
+            continue;
+        }
+        let label = loop {
+            ordinal += 1;
+            // Fixed-width decimal ordering also preserves the mapping on
+            // repeated full redaction. The label remains below 64 tag bytes.
+            let candidate = format!("redacted-tag-{ordinal:020}");
+            if reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        identities.insert(tag.to_owned(), label);
+    }
+    identities
+}
+
 fn collect_learning_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -8788,14 +8828,18 @@ fn collect_learning_history_payloads(
             });
         }
     }
-    let mut tags = Vec::new();
-    for (rule_id, values) in connection
+    let tags_by_rule = connection
         .list_rule_tags_for_workspace(workspace_id)
-        .map_err(work_history_error)?
-    {
+        .map_err(work_history_error)?;
+    let tag_identities = recovery_rule_tag_identities(&tags_by_rule, redaction);
+    let mut tags = Vec::new();
+    for (rule_id, values) in tags_by_rule {
         let mut seen = BTreeSet::new();
         for tag in values {
-            let tag = redact_content(&tag, redaction);
+            let tag = tag_identities
+                .get(&tag)
+                .ok_or_else(|| work_history_error("rule tag has no recovery identity"))?
+                .clone();
             if !seen.insert(tag.clone()) {
                 return Err(work_history_error("redaction merges distinct rule tags"));
             }
@@ -8805,6 +8849,7 @@ fn collect_learning_history_payloads(
             });
         }
     }
+    tags.sort_by(|left, right| (&left.rule_id, &left.tag).cmp(&(&right.rule_id, &right.tag)));
     let mut feedback = connection
         .list_feedback_events(workspace_id)
         .map_err(work_history_error)?;
@@ -27548,6 +27593,210 @@ mod tests {
             b"profile key obstruction".to_vec(),
             "key obstruction untouched",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn rule_tag_redaction_preserves_shared_identities_without_content_fingerprints() {
+        let private_a = "api_key=rule-tag-secret-canary-a";
+        let private_b = "api_key=rule-tag-secret-canary-b";
+        let reserved = "redacted-tag-00000000000000000001";
+        let tags_by_rule = BTreeMap::from([
+            (
+                "rule-a".to_owned(),
+                vec![private_b.to_owned(), "release".to_owned(), reserved.to_owned()],
+            ),
+            (
+                "rule-b".to_owned(),
+                vec![private_a.to_owned(), "release".to_owned()],
+            ),
+            ("rule-empty".to_owned(), Vec::new()),
+        ]);
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Full,
+            RedactionLevel::Paranoid,
+        ] {
+            assert!(recovery_rule_tag_identities(&BTreeMap::new(), redaction).is_empty());
+            let identities = recovery_rule_tag_identities(&tags_by_rule, redaction);
+            assert_eq!(identities.len(), 4);
+            assert_eq!(identities.values().collect::<BTreeSet<_>>().len(), 4);
+            assert_eq!(
+                identities,
+                recovery_rule_tag_identities(&tags_by_rule, redaction)
+            );
+            if redaction == RedactionLevel::None {
+                assert!(
+                    identities
+                        .iter()
+                        .all(|(original, recovered)| original == recovered)
+                );
+            } else {
+                for private in [private_a, private_b] {
+                    let label = &identities[private];
+                    assert!(crate::models::Tag::parse(label).is_ok());
+                    assert!(!label.contains("rule-tag-secret-canary"));
+                    let fingerprint = blake3::hash(private.as_bytes()).to_hex().to_string();
+                    assert!(!label.contains(&fingerprint));
+                }
+                if matches!(redaction, RedactionLevel::Full | RedactionLevel::Paranoid) {
+                    assert!(identities.values().all(|label| {
+                        label.starts_with("redacted-tag-")
+                            && crate::models::Tag::parse(label).is_ok()
+                    }));
+                } else {
+                    assert_eq!(identities["release"], "release");
+                    assert_eq!(identities[reserved], reserved);
+                    assert_eq!(identities[private_a], "redacted-tag-00000000000000000002");
+                    assert_eq!(identities[private_b], "redacted-tag-00000000000000000003");
+                }
+            }
+            let projected = tags_by_rule
+                .iter()
+                .map(|(rule, tags)| {
+                    (
+                        rule.clone(),
+                        tags.iter().map(|tag| identities[tag].clone()).collect(),
+                    )
+                })
+                .collect::<BTreeMap<_, Vec<_>>>();
+            let repeated = recovery_rule_tag_identities(&projected, redaction);
+            assert!(
+                repeated
+                    .iter()
+                    .all(|(original, recovered)| original == recovered)
+            );
+            assert_eq!(projected["rule-a"].len(), 3);
+            assert_eq!(projected["rule-b"].len(), 2);
+            assert_eq!(projected["rule-a"][1], projected["rule-b"][1]);
+            let single = BTreeMap::from([("rule-one".to_owned(), vec![private_a.to_owned()])]);
+            assert_eq!(recovery_rule_tag_identities(&single, redaction).len(), 1);
+        }
+    }
+
+    #[test]
+    fn backup_restores_distinct_and_shared_rule_tags_under_strong_redaction() -> TestResult {
+        let private_a = "api_key=rule-tag-secret-canary-a";
+        let private_b = "api_key=rule-tag-secret-canary-b";
+        let reserved = "redacted-tag-00000000000000000001";
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+            RedactionLevel::Paranoid,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let rules = [recovery_rule(&workspace_id, 0), recovery_rule(&workspace_id, 1)];
+            source
+                .with_transaction(|| {
+                    for rule in &rules {
+                        source.insert_procedural_rule_for_recovery(rule)?;
+                        source.restore_rule_tag(&rule.id, "release")?;
+                    }
+                    source.restore_rule_tag(&rules[0].id, private_a)?;
+                    source.restore_rule_tag(&rules[0].id, reserved)?;
+                    source.restore_rule_tag(&rules[1].id, private_b)?;
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            let original = source
+                .list_rule_tags_for_workspace(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let identities = recovery_rule_tag_identities(&original, redaction);
+            let expected = original
+                .iter()
+                .map(|(rule, tags)| {
+                    let mut projected = tags
+                        .iter()
+                        .map(|tag| identities[tag].clone())
+                        .collect::<Vec<_>>();
+                    projected.sort();
+                    (rule.clone(), projected)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let mut archived = BTreeMap::<String, Vec<String>>::new();
+            for asset in backup
+                .derived
+                .iter()
+                .filter(|asset| asset.kind == "learning_history")
+            {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let text = String::from_utf8_lossy(&bytes);
+                ensure_equal(
+                    text.contains("rule-tag-secret-canary"),
+                    redaction == RedactionLevel::None,
+                    "private tags obey the requested export policy",
+                )?;
+                for private in [private_a, private_b] {
+                    let fingerprint = blake3::hash(private.as_bytes()).to_hex().to_string();
+                    ensure(
+                        !text.contains(&fingerprint),
+                        "private tag identities do not expose a content fingerprint",
+                    )?;
+                }
+                let chunk: BackupLearningHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                for tag in chunk.tags {
+                    archived.entry(tag.rule_id).or_default().push(tag.tag);
+                }
+            }
+            ensure_equal(
+                &archived,
+                &expected,
+                "archive preserves every distinct tag relationship",
+            )?;
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace,
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: tempdir.path().join("restored-rule-tags"),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(restored.restored_rule_count, 2, "both rules restored")?;
+            ensure_equal(
+                restored.restored_rule_tag_count,
+                5,
+                "all five tag relationships restored",
+            )?;
+            let target = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let actual = target
+                .list_rule_tags_for_workspace(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                &actual,
+                &expected,
+                "restored tags retain cardinality and shared identity",
+            )?;
+            target.close().map_err(|e| e.to_string())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_rule_tags_for_workspace(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original,
+                "redaction does not mutate the source rule tags",
+            )?;
+        }
         Ok(())
     }
 
