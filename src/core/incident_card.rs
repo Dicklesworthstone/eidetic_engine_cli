@@ -933,7 +933,10 @@ mod tests {
             None
         );
         let mixed = format!("{long}\n{short}");
-        assert_eq!(fix_facet(&[mixed], &anchors, budget), Some(short.to_owned()));
+        assert_eq!(
+            fix_facet(&[mixed], &anchors, budget),
+            Some(short.to_owned())
+        );
     }
 
     #[test]

@@ -235,7 +235,9 @@ fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
                 ended_at: Some(TIME.to_owned()),
                 duration_ms: Some(75),
                 agent: Some("RecoveryAgent".to_owned()),
-                episode_hash: owner.is_none().then(|| hash_bytes(b"source global episode")),
+                episode_hash: owner
+                    .is_none()
+                    .then(|| hash_bytes(b"source global episode")),
             },
             TIME,
         )?;

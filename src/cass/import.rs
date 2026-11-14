@@ -3720,7 +3720,11 @@ mod tests {
                 .db
                 .list_evidence_spans_for_session(&fixture.session_id)
                 .unwrap();
-            let session = fixture.db.get_session(&fixture.session_id).unwrap().unwrap();
+            let session = fixture
+                .db
+                .get_session(&fixture.session_id)
+                .unwrap()
+                .unwrap();
             let arcs = crate::core::cass_error_recall::session_failure_arcs(
                 &fixture.workspace,
                 &session,
@@ -3745,7 +3749,10 @@ mod tests {
                 "blake3:{}",
                 blake3::hash(old.input.excerpt.as_bytes()).to_hex()
             );
-            fixture.db.insert_evidence_span(&old.id, &old.input).unwrap();
+            fixture
+                .db
+                .insert_evidence_span(&old.id, &old.input)
+                .unwrap();
             let original = fixture.db.get_evidence_span(&old.id).unwrap().unwrap();
             crate::core::error_diagnosis::record_error_repair_links(
                 &fixture.db,
@@ -3805,12 +3812,21 @@ mod tests {
             assert!(current.reader_body().contains(REPAIR));
             assert_eq!(fixture.publication_id(), publication);
             assert_ne!(fixture.marker_id(), previous_marker);
-            assert!(fixture.db.get_audit(&fixture.marker_id()).unwrap().is_some());
+            assert!(
+                fixture
+                    .db
+                    .get_audit(&fixture.marker_id())
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(
                 fixture.db.get_audit(&previous_marker).unwrap(),
                 Some(previous_audit)
             );
-            assert_eq!(fixture.db.get_evidence_span(&old.id).unwrap(), Some(original));
+            assert_eq!(
+                fixture.db.get_evidence_span(&old.id).unwrap(),
+                Some(original)
+            );
             for source in &source_rows {
                 assert_eq!(
                     fixture.db.get_evidence_span(&source.id).unwrap().as_ref(),
@@ -4484,8 +4500,7 @@ mod tests {
                 "cass index --full",
             ),
             (
-                json!({"error": {"repair": "ee doctor --json", "hint": command_hint}})
-                    .to_string(),
+                json!({"error": {"repair": "ee doctor --json", "hint": command_hint}}).to_string(),
                 "ee doctor --json",
             ),
             (

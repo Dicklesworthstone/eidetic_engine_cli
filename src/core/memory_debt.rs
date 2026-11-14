@@ -1724,4 +1724,3 @@ mod tests {
         assert_eq!(forward, reversed, "insertion order changed the report");
     }
 }
-

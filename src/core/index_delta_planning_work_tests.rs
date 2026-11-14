@@ -209,7 +209,9 @@ fn ordinary_fallback_rejects_inconsistent_unchanged_input_commitments() {
     let valid_inputs = inputs(&original);
     let mut current = original.clone();
     current[0].title = Some("metadata-only update before the corrupt row".to_owned());
-    current[1].content.push_str(" changed input before the corrupt row");
+    current[1]
+        .content
+        .push_str(" changed input before the corrupt row");
     let unchanged = &original[15];
 
     for missing in [false, true] {
@@ -219,10 +221,7 @@ fn ordinary_fallback_rejects_inconsistent_unchanged_input_commitments() {
         } else {
             let mut conflicting = unchanged.clone();
             conflicting.content.push_str(" a different indexed input");
-            input.insert(
-                unchanged.id.clone(),
-                embedding_input_digest(&conflicting),
-            );
+            input.insert(unchanged.id.clone(), embedding_input_digest(&conflicting));
         }
         let before = input.clone();
         // Exercise the dispatcher as well: a proof refusal must not fall

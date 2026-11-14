@@ -1810,11 +1810,10 @@ fn serve_search_payload_json(
     let advisory_workspace_key =
         crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     let options = serve_search_options(request, workspace_path)?;
-    let report = run_search(&options)
-        .map_err(|error| DomainError::SearchIndex {
-            message: error.to_string(),
-            repair: error.repair_hint().map(str::to_owned),
-        })?;
+    let report = run_search(&options).map_err(|error| DomainError::SearchIndex {
+        message: error.to_string(),
+        repair: error.repair_hint().map(str::to_owned),
+    })?;
     let (data, advisory_delivery) =
         advisory_state.render_for_delivery(&report, &advisory_workspace_key)?;
     let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
@@ -4416,7 +4415,12 @@ mod tests {
         ensure(
             context.cli_argv,
             argv(&[
-                "ee", "pack", "--json", "--read-only", "--", "prepare release",
+                "ee",
+                "pack",
+                "--json",
+                "--read-only",
+                "--",
+                "prepare release",
             ]),
             "context argv",
         )?;
@@ -4840,7 +4844,11 @@ mod tests {
         let options = serve_search_options(&request, PathBuf::from("/workspace"))
             .map_err(|error| error.to_string())?;
         ensure(options.limit, 3, "HTTP search limit")?;
-        ensure(options.speed, crate::search::SpeedMode::Instant, "HTTP speed")?;
+        ensure(
+            options.speed,
+            crate::search::SpeedMode::Instant,
+            "HTTP speed",
+        )?;
         ensure(
             options.source_mode,
             SearchSourceMode::LexicalOnly,
@@ -4902,7 +4910,10 @@ mod tests {
         assert!(options.baseline_write.is_none());
         let plan = serve_dispatch_plan(&request).map_err(|error| error.to_string())?;
         assert!(plan.cli_argv.contains(&"--task-path=src/a,b.rs".to_owned()));
-        assert!(plan.cli_argv.contains(&"--task-path=tests/café notes.rs".to_owned()));
+        assert!(
+            plan.cli_argv
+                .contains(&"--task-path=tests/café notes.rs".to_owned())
+        );
         assert!(!plan.cli_argv.contains(&"--strict-scope".to_owned()));
         for target in [
             "/v1/search?q=--memory-scope%3Dswarm&memoryScope=verified",
@@ -4923,7 +4934,9 @@ mod tests {
                     assert_eq!(args.memory_scope, Some(MemoryScope::Verified));
                 }
                 other => {
-                    return Err(format!("retrieval plan selected another command: {other:?}"));
+                    return Err(format!(
+                        "retrieval plan selected another command: {other:?}"
+                    ));
                 }
             }
         }
@@ -5081,7 +5094,11 @@ mod tests {
             dry_run: false,
         })
         .map_err(|error| error.to_string())?;
-        ensure(rebuilt.status, IndexRebuildStatus::Success, "HTTP fixture index")?;
+        ensure(
+            rebuilt.status,
+            IndexRebuildStatus::Success,
+            "HTTP fixture index",
+        )?;
         let before = fs::read(&database).map_err(|error| error.to_string())?;
         let _current_dir = enter_current_dir(&root)?;
         let token = "01234567890123456789012345678901";
@@ -5138,7 +5155,10 @@ mod tests {
         let context = "/v1/context?task=quasar+release&speed=instant&sourceMode=lexical_only&memoryScope=verified&relevanceFloor=0&maxTokens=4000";
         for (targets, expected) in [
             ("&taskPath=src%2Fa%2Cb.rs", vec![rule_ids[0].clone()]),
-            ("&taskPath=tests%2Fcaf%C3%A9+notes.rs", vec![rule_ids[1].clone()]),
+            (
+                "&taskPath=tests%2Fcaf%C3%A9+notes.rs",
+                vec![rule_ids[1].clone()],
+            ),
             ("&taskPath=src-other%2Flib.rs", Vec::new()),
             ("", Vec::new()),
         ] {

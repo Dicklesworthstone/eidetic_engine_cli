@@ -132,16 +132,18 @@ fn persist_snapshot(
     initial: bool,
 ) -> Result<bool, DbError> {
     if initial {
-        Ok(match persist_session_import_if_absent(db, workspace, session, spans)? {
-            SessionImportPersistResult::Imported { session_id, .. } => {
-                assert_eq!(session_id, id);
-                true
-            }
-            SessionImportPersistResult::Skipped { session_id } => {
-                assert_eq!(session_id, id);
-                false
-            }
-        })
+        Ok(
+            match persist_session_import_if_absent(db, workspace, session, spans)? {
+                SessionImportPersistResult::Imported { session_id, .. } => {
+                    assert_eq!(session_id, id);
+                    true
+                }
+                SessionImportPersistResult::Skipped { session_id } => {
+                    assert_eq!(session_id, id);
+                    false
+                }
+            },
+        )
     } else {
         refresh_session(db, workspace, id, session, spans).map(|report| report.changed)
     }
@@ -200,7 +202,10 @@ fn initial_and_growing_redaction_audits_batch_chain_reads_and_keep_exact_payload
                 persist_snapshot(&db, &workspace, &id, &session, &spans, initial)
             });
             assert_eq!(result.unwrap(), initial || count > 0);
-            let mut ordered = spans.iter().filter(|span| span.redacted).collect::<Vec<_>>();
+            let mut ordered = spans
+                .iter()
+                .filter(|span| span.redacted)
+                .collect::<Vec<_>>();
             if !initial {
                 // Refresh preserves raw-reference ordering, including its
                 // lexical ordering of line numbers. Initial import preserves
@@ -241,7 +246,10 @@ fn initial_and_growing_redaction_audits_batch_chain_reads_and_keep_exact_payload
             );
             let rows = db.list_evidence_spans_for_session(&id).unwrap();
             assert_eq!(rows.len(), count as usize);
-            assert!(rows.iter().all(|row| !row.excerpt.contains(&"Q".repeat(36))));
+            assert!(
+                rows.iter()
+                    .all(|row| !row.excerpt.contains(&"Q".repeat(36)))
+            );
             let before_counts = batch_table_counts(&db);
             let before_session = db.get_session(&id).unwrap();
             let before_audits = db.list_audit_entries(None, None).unwrap();
@@ -323,7 +331,9 @@ fn late_redaction_audit_failure_or_collision_rolls_back_the_entire_import() {
                 db.execute_raw("DROP TRIGGER reject_late_redaction_audit")
                     .unwrap();
                 assert!(persist_snapshot(&db, &workspace, &id, &session, &spans, initial).unwrap());
-                assert!(!persist_snapshot(&db, &workspace, &id, &session, &spans, initial).unwrap());
+                assert!(
+                    !persist_snapshot(&db, &workspace, &id, &session, &spans, initial).unwrap()
+                );
                 assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 257);
             }
         }
@@ -381,20 +391,21 @@ fn historical_screening_reconciliation_batches_audits_without_rewriting_evidence
         sql_text(&expected[200].0),
     ))
     .unwrap();
-    let (failure, queries) = capture_query_sql_for_test(|| {
-        refresh_session(&db, &workspace, &id, &session, &spans)
-    });
+    let (failure, queries) =
+        capture_query_sql_for_test(|| refresh_session(&db, &workspace, &id, &session, &spans));
     assert!(failure.is_err());
     assert_eq!(audit_tip_reads(&queries), 2);
     assert_eq!(batch_table_counts(&db), before_counts);
     assert_eq!(db.get_session(&id).unwrap(), before_session);
-    assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), before_rows);
+    assert_eq!(
+        db.list_evidence_spans_for_session(&id).unwrap(),
+        before_rows
+    );
     assert_eq!(db.list_audit_entries(None, None).unwrap(), before_audits);
     db.execute_raw("DROP TRIGGER reject_late_reconciliation")
         .unwrap();
-    let (result, queries) = capture_query_sql_for_test(|| {
-        refresh_session(&db, &workspace, &id, &session, &spans)
-    });
+    let (result, queries) =
+        capture_query_sql_for_test(|| refresh_session(&db, &workspace, &id, &session, &spans));
     let report = result.unwrap();
     assert!(report.changed);
     assert!(report.added_lines.is_empty());
@@ -406,7 +417,10 @@ fn historical_screening_reconciliation_batches_audits_without_rewriting_evidence
         .unwrap();
     assert_eq!(refreshed.len(), 1);
     assert_eq!(refreshed[0].prev_row_hash, last_hash);
-    assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), before_rows);
+    assert_eq!(
+        db.list_evidence_spans_for_session(&id).unwrap(),
+        before_rows
+    );
     let after_counts = batch_table_counts(&db);
     assert_eq!(after_counts[0], before_counts[0]);
     assert_eq!(after_counts[1], before_counts[1]);
@@ -414,9 +428,8 @@ fn historical_screening_reconciliation_batches_audits_without_rewriting_evidence
     assert_eq!(after_counts[3], before_counts[3] + i64::from(TOTAL) + 1);
     assert_eq!(&after_counts[4..], &before_counts[4..]);
     let after_audits = db.list_audit_entries(None, None).unwrap();
-    let (retry, queries) = capture_query_sql_for_test(|| {
-        refresh_session(&db, &workspace, &id, &session, &spans)
-    });
+    let (retry, queries) =
+        capture_query_sql_for_test(|| refresh_session(&db, &workspace, &id, &session, &spans));
     assert!(!retry.unwrap().changed);
     assert_eq!(audit_tip_reads(&queries), 0);
     assert_eq!(batch_table_counts(&db), after_counts);

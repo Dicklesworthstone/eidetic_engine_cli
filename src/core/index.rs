@@ -7525,8 +7525,8 @@ fn verify_published_tier_counts_with_native_check(
 ) -> Result<(), IndexRebuildError> {
     let invalid = IndexRebuildError::Index;
     let expected = usize::try_from(documents_total).unwrap_or(usize::MAX);
-    let fast = open_fast_vector_index_read_only(index_dir)
-        .map_err(|fallback| invalid(fallback.detail))?;
+    let fast =
+        open_fast_vector_index_read_only(index_dir).map_err(|fallback| invalid(fallback.detail))?;
     if fast.record_count() != expected {
         return Err(invalid(format!(
             "fast-tier persisted document count mismatch: expected {expected}, found {}",
@@ -11999,9 +11999,8 @@ fn get_db_stats(
         current_index_corpus_counts(db, workspace_id)?
     };
     #[cfg(test)]
-    BEFORE_INDEX_STATUS_GENERATION_HOOK.with(|slot| {
-        slot.borrow_mut().take().map_or(Ok(()), |hook| hook())
-    })?;
+    BEFORE_INDEX_STATUS_GENERATION_HOOK
+        .with(|slot| slot.borrow_mut().take().map_or(Ok(()), |hook| hook()))?;
     let generation = db
         .get_workspace_generation(workspace_id)?
         .or(Some(u64::from(counts.total())));
@@ -25875,7 +25874,8 @@ mod tests {
                         workspace_id,
                         level: "semantic".to_owned(),
                         kind: "fact".to_owned(),
-                        content: "A later write must not relabel the earlier corpus count.".to_owned(),
+                        content: "A later write must not relabel the earlier corpus count."
+                            .to_owned(),
                         workflow_id: None,
                         confidence: 0.9,
                         utility: 0.8,
@@ -25941,9 +25941,11 @@ mod tests {
             .commit_read_snapshot()
             .map_err(|error| error.to_string())?;
 
-        let invalid_index = fixture.options.workspace_path.join("not-an-index-directory");
-        std::fs::write(&invalid_index, b"not a directory")
-            .map_err(|error| error.to_string())?;
+        let invalid_index = fixture
+            .options
+            .workspace_path
+            .join("not-an-index-directory");
+        std::fs::write(&invalid_index, b"not a directory").map_err(|error| error.to_string())?;
         let invalid_options = IndexStatusOptions {
             index_dir: Some(invalid_index),
             ..options

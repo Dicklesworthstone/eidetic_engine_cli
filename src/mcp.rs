@@ -2231,15 +2231,18 @@ fn append_retrieval_tool_constraints(
         push_arg(args, format!("--speed={}", speed.as_str()));
     }
     if let Some(source) = find_argument(arguments, &["sourceMode", "source_mode"]) {
-        let source = serde_json::from_value::<crate::core::search::SearchSourceMode>(source.clone())
-            .map_err(|_| {
-                "Argument 'sourceMode' must be lexical_only, semantic_only, or hybrid".to_owned()
-            })?;
+        let source =
+            serde_json::from_value::<crate::core::search::SearchSourceMode>(source.clone())
+                .map_err(|_| {
+                    "Argument 'sourceMode' must be lexical_only, semantic_only, or hybrid"
+                        .to_owned()
+                })?;
         push_arg(args, format!("--source-mode={}", source.as_str()));
     }
     if let Some(scope) = optional_string(arguments, &["memoryScope", "memory_scope"])? {
-        let scope = crate::models::MemoryScope::parse(scope)
-            .ok_or_else(|| "Argument 'memoryScope' must name a supported memory scope".to_owned())?;
+        let scope = crate::models::MemoryScope::parse(scope).ok_or_else(|| {
+            "Argument 'memoryScope' must name a supported memory scope".to_owned()
+        })?;
         push_arg(args, format!("--memory-scope={}", scope.as_str()));
     }
     if let Some(as_of) = optional_string(arguments, &["asOf", "as_of"])? {
@@ -2301,10 +2304,9 @@ fn build_search_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result
         push_arg(args, format!("--kind={kind}"));
     }
     for field in optional_string_list(arguments, &["fieldFilters", "field_filters"])? {
-        crate::core::search::TypedMemoryFieldFilter::parse(&field)
-            .map_err(|_| {
-                "Argument 'fieldFilters' contains an invalid typed field predicate".to_owned()
-            })?;
+        crate::core::search::TypedMemoryFieldFilter::parse(&field).map_err(|_| {
+            "Argument 'fieldFilters' contains an invalid typed field predicate".to_owned()
+        })?;
         push_arg(args, format!("--field={field}"));
     }
     if let Some(dedupe) = optional_string(arguments, &["dedupe"])? {
@@ -2349,7 +2351,10 @@ fn build_context_tool_args_with_explanation(
     if optional_bool(arguments, &["readOnly", "read_only"])? {
         push_arg(args, "--read-only");
     }
-    if optional_bool(arguments, &["requireFreshSentinels", "require_fresh_sentinels"])? {
+    if optional_bool(
+        arguments,
+        &["requireFreshSentinels", "require_fresh_sentinels"],
+    )? {
         push_arg(args, "--require-fresh-sentinels");
     }
     if optional_bool(arguments, &["explain"])? || force_explanation {
@@ -5874,7 +5879,8 @@ mod tests {
                     arguments["maxTokens"] = json!(1200);
                 }
                 let args = build_cli_args_for_tool(registry_tool(name)?, &arguments)?;
-                let cli = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+                let cli =
+                    crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
                 assert_eq!(cli.workspace, Some(PathBuf::from("workspace with spaces")));
                 match cli.command {
                     Some(crate::cli::Command::Search(args)) => {
@@ -5891,11 +5897,17 @@ mod tests {
                         assert_eq!(args.limit, 7);
                         assert!(args.full && args.include_tombstoned);
                         assert_eq!(args.kind.as_deref(), Some("failure"));
-                        assert_eq!(args.field_filters, ["root_cause~cache mismatch", "code=E0425"]);
+                        assert_eq!(
+                            args.field_filters,
+                            ["root_cause~cache mismatch", "code=E0425"]
+                        );
                         assert_eq!(args.dedupe.as_str(), "mi");
                     }
                     Some(crate::cli::Command::Pack(args)) => {
-                        assert!(args.command.is_none(), "query must never become a subcommand");
+                        assert!(
+                            args.command.is_none(),
+                            "query must never become a subcommand"
+                        );
                         assert_eq!(args.query.as_deref(), Some(query));
                         assert_eq!(args.database, Some(PathBuf::from("--foreign-store")));
                         assert_eq!(args.index_dir, Some(PathBuf::from("--foreign-index")));
@@ -5935,7 +5947,10 @@ mod tests {
                 "strictSourceMode",
                 "asOf",
             ] {
-                assert!(schema["properties"][property].is_object(), "{name}: {property}");
+                assert!(
+                    schema["properties"][property].is_object(),
+                    "{name}: {property}"
+                );
             }
             let mut canonical = json!({"query":"Q", "memoryScope":"verified",
                 "strictScope":true, "sourceMode":"lexical_only", "strictSourceMode":true,
@@ -6010,10 +6025,8 @@ mod tests {
                         arguments[key] = value.clone();
                     }
                 }
-                let response = handle_tools_call(
-                    json!(1),
-                    Some(&json!({"name":name, "arguments":arguments})),
-                );
+                let response =
+                    handle_tools_call(json!(1), Some(&json!({"name":name, "arguments":arguments})));
                 assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
                 assert!(response.get("result").is_none());
                 assert!(!response.to_string().contains("private-canary"));
@@ -6035,8 +6048,8 @@ mod tests {
 
     #[test]
     #[cfg(feature = "lexical-bm25")]
-    fn persistent_mcp_retrieval_enforces_scope_validity_and_native_rule_paths()
-    -> Result<(), String> {
+    fn persistent_mcp_retrieval_enforces_scope_validity_and_native_rule_paths() -> Result<(), String>
+    {
         use crate::db::{
             CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
         };
@@ -6163,7 +6176,10 @@ mod tests {
             dry_run: false,
         })
         .map_err(|error| error.to_string())?;
-        assert_eq!(rebuilt.status, crate::core::index::IndexRebuildStatus::Success);
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
         let base = json!({
             "query":"Quasar deployment release",
             "workspace":workspace.to_string_lossy(),
@@ -6179,7 +6195,10 @@ mod tests {
         search["limit"] = json!(30);
         let verified = call(&mut process, "ee_search", search.clone())?;
         assert_eq!(verified["data"]["request"]["memoryScope"], "verified");
-        assert_eq!(verified["data"]["metrics"]["sourceModeApplied"], "lexical_only");
+        assert_eq!(
+            verified["data"]["metrics"]["sourceModeApplied"],
+            "lexical_only"
+        );
         assert_eq!(
             ids(&verified, "/data/results", "memoryId")?,
             BTreeSet::from([memory_ids[0].clone()])

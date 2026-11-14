@@ -951,7 +951,10 @@ fn repair_chains_keep_every_source_or_only_the_successful_proof_on_overflow() {
                     <= crate::core::incident_card::INCIDENT_CARD_TOKEN_BUDGET
             );
         } else {
-            assert!(recall.helpful_repairs.is_empty(), "never teach a capped suffix");
+            assert!(
+                recall.helpful_repairs.is_empty(),
+                "never teach a capped suffix"
+            );
             assert_eq!(report.incident_cards_recorded, 0);
             assert!(
                 connection
@@ -962,15 +965,17 @@ fn repair_chains_keep_every_source_or_only_the_successful_proof_on_overflow() {
         }
         for source in &sources {
             assert_eq!(
-                connection.get_evidence_span(&source.id).expect("source").as_ref(),
+                connection
+                    .get_evidence_span(&source.id)
+                    .expect("source")
+                    .as_ref(),
                 Some(source)
             );
         }
         let before = connection
             .list_error_repair_links(WS, "rustc:E0277")
             .expect("links");
-        let repeated =
-            record_session_error_recall(&connection, WS, &session_id).expect("repeat");
+        let repeated = record_session_error_recall(&connection, WS, &session_id).expect("repeat");
         assert_eq!(repeated.incident_cards_recorded, 0);
         let after = connection
             .list_error_repair_links(WS, "rustc:E0277")

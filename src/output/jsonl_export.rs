@@ -2243,13 +2243,22 @@ mod tests {
                     let line = written.strip_suffix('\n').expect("one complete record");
                     let emitted: ExportMemoryRecord =
                         serde_json::from_str(line).expect("exported memory parses");
-                    let expected_hash =
-                        format!("blake3:{}", blake3::hash(emitted.content.as_bytes()).to_hex());
-                    assert_eq!(emitted.content_hash.as_deref(), Some(expected_hash.as_str()));
+                    let expected_hash = format!(
+                        "blake3:{}",
+                        blake3::hash(emitted.content.as_bytes()).to_hex()
+                    );
+                    assert_eq!(
+                        emitted.content_hash.as_deref(),
+                        Some(expected_hash.as_str())
+                    );
                     assert_eq!(count, 1);
                     let mut replay = RecordsRootBuilder::new();
                     replay.push(&emitted.memory_id, &canonical_record_hash(line.as_bytes()));
-                    assert_eq!(root, replay.finalize(), "root must authenticate emitted bytes");
+                    assert_eq!(
+                        root,
+                        replay.finalize(),
+                        "root must authenticate emitted bytes"
+                    );
 
                     if scope == ExportScope::MetadataOnly {
                         assert!(emitted.content.is_empty());
@@ -2305,8 +2314,14 @@ mod tests {
             let redacted = redact_memory_record(memory, level);
             let expected_hash = format!("blake3:{}", blake3::hash(expected.as_bytes()).to_hex());
             assert_eq!(redacted.content, expected);
-            assert_eq!(redacted.content_hash.as_deref(), Some(expected_hash.as_str()));
-            assert_ne!(redacted.content_hash.as_deref(), Some(withheld_hash.as_str()));
+            assert_eq!(
+                redacted.content_hash.as_deref(),
+                Some(expected_hash.as_str())
+            );
+            assert_ne!(
+                redacted.content_hash.as_deref(),
+                Some(withheld_hash.as_str())
+            );
         }
     }
 
@@ -2325,8 +2340,14 @@ mod tests {
         let mut second = first.clone();
         second.details = Some(serde_json::json!({ "value": secret_assignment("654321") }));
 
-        assert_eq!(redact_audit_record(first.clone(), RedactionLevel::None), first);
-        assert_eq!(redact_audit_record(second.clone(), RedactionLevel::None), second);
+        assert_eq!(
+            redact_audit_record(first.clone(), RedactionLevel::None),
+            first
+        );
+        assert_eq!(
+            redact_audit_record(second.clone(), RedactionLevel::None),
+            second
+        );
         for level in [
             RedactionLevel::Minimal,
             RedactionLevel::Standard,
@@ -2342,7 +2363,10 @@ mod tests {
             assert_eq!(redacted.target_type, first.target_type);
             assert_eq!(
                 redacted.target_id,
-                first.target_id.as_ref().map(|id| redact_identifier(id, level))
+                first
+                    .target_id
+                    .as_ref()
+                    .map(|id| redact_identifier(id, level))
             );
             let mut absent = first.clone();
             absent.details = None;

@@ -146,7 +146,10 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
     let long_body = "memory body fixture ".repeat(20);
     let body_hash = format!("blake3:{}", blake3::hash(long_body.as_bytes()).to_hex());
     let truncated_body: String = long_body.chars().take(200).collect();
-    let truncated_hash = format!("blake3:{}", blake3::hash(truncated_body.as_bytes()).to_hex());
+    let truncated_hash = format!(
+        "blake3:{}",
+        blake3::hash(truncated_body.as_bytes()).to_hex()
+    );
     let placeholder_hash = format!(
         "blake3:{}",
         blake3::hash(REDACTED_PLACEHOLDER.as_bytes()).to_hex()

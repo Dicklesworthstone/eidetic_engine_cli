@@ -264,7 +264,10 @@ fn complete_commands_survive_card_storage_recall_and_current_source_proof() -> T
             .db
             .get_evidence_span(&incident_card_id(WS, &fixture.failure))?
             .ok_or("card")?;
-        assert!(card.reader_body().contains(&format!("Fix: {repair}\nVerified:")));
+        assert!(
+            card.reader_body()
+                .contains(&format!("Fix: {repair}\nVerified:"))
+        );
         assert!(
             crate::pack::estimate_tokens_default(&card.excerpt)
                 <= crate::core::incident_card::INCIDENT_CARD_TOKEN_BUDGET
@@ -277,7 +280,10 @@ fn complete_commands_survive_card_storage_recall_and_current_source_proof() -> T
         let exposed = recalled_repair_evidence(&fixture.db, WS, &recall)?;
         assert!(exposed.iter().any(|item| {
             item.evidence_id == card.id
-                && item.text.as_deref().is_some_and(|text| text.contains(repair))
+                && item
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.contains(repair))
         }));
         assert_eq!(
             fixture.db.get_evidence_span(&source.id)?.as_ref(),
@@ -312,28 +318,35 @@ fn overbudget_repairs_remain_recallable_without_publishing_command_fragments() -
         let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
         assert_eq!(report.resolved_failures, 1);
         assert_eq!(report.repair_links_recorded, 2);
-        assert_eq!(report.incident_cards_recorded, if alternative { 1 } else { 0 });
+        assert_eq!(
+            report.incident_cards_recorded,
+            if alternative { 1 } else { 0 }
+        );
         let card = fixture
             .db
             .get_evidence_span(&incident_card_id(WS, &fixture.failure))?;
         if alternative {
             let card = card.ok_or("complete alternative should fit")?;
-            assert!(card.reader_body().contains(&format!("Fix: {short}\nVerified:")));
+            assert!(
+                card.reader_body()
+                    .contains(&format!("Fix: {short}\nVerified:"))
+            );
             assert!(!card.reader_body().contains("complete_chunk"));
             let mut checks = CardChecks::default();
             checks.observe(&card)?;
             assert!(checks.withheld(&fixture.db, WS)?.is_empty());
         } else {
-            assert!(card.is_none(), "an incomplete repair is not a compact incident");
+            assert!(
+                card.is_none(),
+                "an incomplete repair is not a compact incident"
+            );
         }
         let diagnostic = from_rustc(Some("E0277"), "trait bound");
         let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
         assert!(recall.helpful_repairs.contains(&source.id));
         let exposed = recalled_repair_evidence(&fixture.db, WS, &recall)?;
         assert!(exposed.iter().any(|item| {
-            item.evidence_id == source.id
-                && item.role == "repair"
-                && item.text.is_some()
+            item.evidence_id == source.id && item.role == "repair" && item.text.is_some()
         }));
         assert_eq!(source.reader_body().as_ref(), repair.as_str());
         assert_eq!(

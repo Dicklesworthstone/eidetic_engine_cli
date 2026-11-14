@@ -634,8 +634,7 @@ impl HealthScorecardSnapshotSummary {
             report_hash: None,
             inserted: None,
             history_count,
-            next_command: "ee health scorecard --record-snapshot --workspace . --json"
-                .to_owned(),
+            next_command: "ee health scorecard --record-snapshot --workspace . --json".to_owned(),
         }
     }
 
@@ -737,8 +736,8 @@ fn record_health_scorecard_snapshot(
         report_hash: format!("blake3:{}", blake3::hash(details.as_bytes()).to_hex()),
     };
     let debt_input = memory_debt_snapshot_input(debt_report, source_generation);
-    let connection = DbConnection::open_file(&report.database_path)
-        .map_err(health_scorecard_snapshot_error)?;
+    let connection =
+        DbConnection::open_file(&report.database_path).map_err(health_scorecard_snapshot_error)?;
     let recorded = connection
         .with_transaction(|| {
             if connection
@@ -794,7 +793,6 @@ fn health_scorecard_audit_count(
             message: "health scorecard audit count was missing or invalid".to_owned(),
         })
 }
-
 
 fn health_scorecard_evidence(
     memories: &[StoredMemory],
@@ -869,7 +867,11 @@ fn health_scorecard_now(
     memories
         .iter()
         .map(|memory| memory.updated_at.as_str())
-        .chain(debt_history.iter().map(|snapshot| snapshot.created_at.as_str()))
+        .chain(
+            debt_history
+                .iter()
+                .map(|snapshot| snapshot.created_at.as_str()),
+        )
         .chain(history.iter().map(|snapshot| snapshot.captured_at.as_str()))
         .max()
         .unwrap_or("1970-01-01T00:00:00Z")
@@ -1142,8 +1144,7 @@ fn health_scorecard_trend(
         } else {
             "none".to_owned()
         },
-        latest_snapshot_day: latest
-            .map(|snapshot| snapshot.captured_at.chars().take(10).collect()),
+        latest_snapshot_day: latest.map(|snapshot| snapshot.captured_at.chars().take(10).collect()),
         latest_snapshot_hash: latest.map(|snapshot| snapshot.report_hash.clone()),
     }
 }
@@ -1995,7 +1996,11 @@ mod tests {
             report_hash: "blake3:measured".to_owned(),
         }];
         let declining = health_scorecard_trend(79, &history);
-        ensure(declining.direction.as_str(), "declining", "measured decline")?;
+        ensure(
+            declining.direction.as_str(),
+            "declining",
+            "measured decline",
+        )?;
         ensure(declining.previous_score, Some(86), "actual baseline")?;
         ensure(declining.delta, -7, "actual score difference")?;
         ensure(
@@ -2014,7 +2019,11 @@ mod tests {
             "unchanged measurement",
         )?;
         let missing = health_scorecard_trend(86, &[]);
-        ensure(missing.direction.as_str(), "no_baseline", "missing measurement")?;
+        ensure(
+            missing.direction.as_str(),
+            "no_baseline",
+            "missing measurement",
+        )?;
         ensure(missing.previous_score, None, "no invented prior score")
     }
 
@@ -2080,8 +2089,16 @@ mod tests {
             "no_baseline",
             "legacy debt is not a measured scorecard baseline",
         )?;
-        ensure(first.trend.previous_score, None, "legacy debt has no prior score")?;
-        ensure(first.snapshot.recorded_this_run, true, "first measured baseline recorded")?;
+        ensure(
+            first.trend.previous_score,
+            None,
+            "legacy debt has no prior score",
+        )?;
+        ensure(
+            first.snapshot.recorded_this_run,
+            true,
+            "first measured baseline recorded",
+        )?;
 
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -2137,18 +2154,46 @@ mod tests {
                 second.score, first.score
             ));
         }
-        ensure(second.trend.previous_score, Some(first.score), "prior actual composite")?;
-        ensure(second.trend.direction.as_str(), "declining", "real decline is visible")?;
-        ensure(second.trend.snapshot_count, 1, "new observation is not its own baseline")?;
-        ensure(second.snapshot.recorded_this_run, true, "second observation recorded")?;
+        ensure(
+            second.trend.previous_score,
+            Some(first.score),
+            "prior actual composite",
+        )?;
+        ensure(
+            second.trend.direction.as_str(),
+            "declining",
+            "real decline is visible",
+        )?;
+        ensure(
+            second.trend.snapshot_count,
+            1,
+            "new observation is not its own baseline",
+        )?;
+        ensure(
+            second.snapshot.recorded_this_run,
+            true,
+            "second observation recorded",
+        )?;
 
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         let observations = read_health_scorecard_snapshots(&connection, &workspace_id, 12)
             .map_err(|error| error.to_string())?;
-        ensure(observations.len(), 2, "multiple observations survive within one day")?;
-        ensure(observations[0].score, second.score, "latest composite is stored")?;
-        ensure(observations[1].score, first.score, "prior composite is preserved")?;
+        ensure(
+            observations.len(),
+            2,
+            "multiple observations survive within one day",
+        )?;
+        ensure(
+            observations[0].score,
+            second.score,
+            "latest composite is stored",
+        )?;
+        ensure(
+            observations[1].score,
+            first.score,
+            "prior composite is preserved",
+        )?;
         let debt_rows = connection
             .list_debt_snapshots(&workspace_id, 12)
             .map_err(|error| error.to_string())?;
@@ -2164,12 +2209,20 @@ mod tests {
             record_snapshot: false,
             ..options
         };
-        let read = HealthScorecardReport::gather(&read_options)
-            .map_err(|error| error.to_string())?;
+        let read =
+            HealthScorecardReport::gather(&read_options).map_err(|error| error.to_string())?;
         ensure(read.score, second.score, "same state has the same score")?;
-        ensure(read.trend.previous_score, Some(second.score), "latest measured baseline")?;
+        ensure(
+            read.trend.previous_score,
+            Some(second.score),
+            "latest measured baseline",
+        )?;
         ensure(read.trend.direction.as_str(), "flat", "same state is flat")?;
-        ensure(read.snapshot.recorded_this_run, false, "plain health stays read-only")?;
+        ensure(
+            read.snapshot.recorded_this_run,
+            false,
+            "plain health stays read-only",
+        )?;
         ensure(
             read_health_scorecard_snapshots(&connection, &workspace_id, 12)
                 .map_err(|error| error.to_string())?
@@ -2234,13 +2287,8 @@ mod tests {
             "concurrent demand did not change source generation",
         )?;
         ensure(
-            record_health_scorecard_snapshot(
-                &read,
-                &debt_report,
-                current_generation,
-                audit_count,
-            )
-            .is_err(),
+            record_health_scorecard_snapshot(&read, &debt_report, current_generation, audit_count)
+                .is_err(),
             true,
             "changed demand history refuses stale measurement",
         )?;
@@ -2321,7 +2369,11 @@ mod tests {
         let history = read_health_scorecard_snapshots(&connection, first, 1)
             .map_err(|error| error.to_string())?;
         ensure(history.len(), 1, "workspace-local limit")?;
-        ensure(history[0].score, 86, "other workspace cannot replace baseline")?;
+        ensure(
+            history[0].score,
+            86,
+            "other workspace cannot replace baseline",
+        )?;
 
         connection
             .insert_audit(
@@ -2593,4 +2645,3 @@ mod tests {
         .to_string()
     }
 }
-

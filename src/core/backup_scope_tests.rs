@@ -364,9 +364,7 @@ fn every_required_table_has_executable_source_ownership() {
                 .is_none_or(|owner| owner == workspace)
         }));
     }
-    let unknown = db
-        .list_task_episodes_for_recovery("' OR 1=1 --")
-        .unwrap();
+    let unknown = db.list_task_episodes_for_recovery("' OR 1=1 --").unwrap();
     assert_eq!(unknown.len(), 1);
     assert!(unknown[0].workspace_id.is_none());
     assert!(count_rows(&db, "curation_ttl_policies", &fixture.ids[0]).unwrap() > 0);

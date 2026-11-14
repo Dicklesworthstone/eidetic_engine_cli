@@ -20,8 +20,8 @@ use crate::config::{
 };
 use crate::db::{
     CreateWorkspaceInput, DatabaseConfig, DbConnection, EvidenceAdmissionCounts,
-    EvidenceQuarantineReasonReport, FeedbackSourceHarmfulCount,
-    GraphSnapshotStatus, GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
+    EvidenceQuarantineReasonReport, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
+    GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state,
@@ -6657,7 +6657,10 @@ mod tests {
         assert_eq!(empty["status"], "complete");
         assert_eq!(empty["counts"]["quarantined"], 0);
         assert_eq!(empty["quarantine"]["inspected"], 0);
-        assert_eq!(empty["quarantine"]["quarantineReasons"], serde_json::json!({}));
+        assert_eq!(
+            empty["quarantine"]["quarantineReasons"],
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -7715,7 +7718,11 @@ mod tests {
                     "pinned status snapshot must not start a nested evidence transaction".to_owned()
                 })?;
 
-            ensure(&status.health, &IndexHealth::Missing, "missing fixture index")?;
+            ensure(
+                &status.health,
+                &IndexHealth::Missing,
+                "missing fixture index",
+            )?;
             ensure(status.db_memory_count, 0_u32, "empty fixture memory count")?;
             let index_status = Ok(status);
             let admission = super::gather_evidence_admission_status(

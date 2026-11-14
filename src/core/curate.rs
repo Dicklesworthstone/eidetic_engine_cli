@@ -4142,7 +4142,10 @@ fn capture_suggestion_dedupe_status(
         return CaptureSuggestionDedupeStatus {
             status: "suppressed_existing_memory".to_owned(),
             method: "memory_exact_content".to_owned(),
-            reason: format!("Memory {} already contains this complete lesson.", memory.id),
+            reason: format!(
+                "Memory {} already contains this complete lesson.",
+                memory.id
+            ),
             matched_candidate_id: None,
             matched_memory_id: Some(memory.id.clone()),
             similarity: Some(1.0),
@@ -21614,8 +21617,8 @@ mod tests {
                 "message": {"role": "assistant", "content": current},
             })
             .to_string();
-            let connection =
-                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            let connection = DbConnection::open_file(&fixture.database_path)
+                .map_err(|error| error.to_string())?;
             connection
                 .insert_session(
                     &session_id,
@@ -21672,9 +21675,14 @@ mod tests {
                 "the old suppression must actually confuse this pair: {previous} / {current}"
             );
 
-            let connection =
-                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
-            insert_review_memory(&connection, &fixture.workspace_id, &memory_id, &prior_content)?;
+            let connection = DbConnection::open_file(&fixture.database_path)
+                .map_err(|error| error.to_string())?;
+            insert_review_memory(
+                &connection,
+                &fixture.workspace_id,
+                &memory_id,
+                &prior_content,
+            )?;
             connection.close().map_err(|error| error.to_string())?;
             let related_memory = capture_suggestions(&options).map_err(|error| error.message())?;
             assert_eq!(related_memory.candidate_count, 1, "{current}");
@@ -21696,8 +21704,8 @@ mod tests {
                 Some(memory_id.as_str())
             );
 
-            let connection =
-                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            let connection = DbConnection::open_file(&fixture.database_path)
+                .map_err(|error| error.to_string())?;
             insert_capture_dedup_candidate(
                 &connection,
                 &fixture.workspace_id,
@@ -21706,7 +21714,8 @@ mod tests {
                 &prior_content,
             )?;
             connection.close().map_err(|error| error.to_string())?;
-            let related_candidate = capture_suggestions(&options).map_err(|error| error.message())?;
+            let related_candidate =
+                capture_suggestions(&options).map_err(|error| error.message())?;
             assert_eq!(related_candidate.candidate_count, 1, "{current}");
             assert!(related_candidate.suppressed.is_empty());
             assert_eq!(
@@ -21720,7 +21729,10 @@ mod tests {
                     .as_deref(),
                 Some(previous_candidate_id.as_str())
             );
-            assert_eq!(related_candidate.candidates[0].evidence, suggestion.evidence);
+            assert_eq!(
+                related_candidate.candidates[0].evidence,
+                suggestion.evidence
+            );
             assert_eq!(
                 related_candidate.candidates[0].proposed_fields.content,
                 suggestion.proposed_fields.content
@@ -21738,10 +21750,13 @@ mod tests {
             .map_err(|error| error.message())?;
             assert_eq!(persisted.candidate_count, 1, "{current}");
             assert!(persisted.candidates[0].persisted);
-            assert_eq!(persisted.candidates[0].candidate_id, suggestion.candidate_id);
+            assert_eq!(
+                persisted.candidates[0].candidate_id,
+                suggestion.candidate_id
+            );
             assert_eq!(persisted.candidates[0].source_ids, vec![source_id.clone()]);
-            let connection =
-                DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+            let connection = DbConnection::open_file(&fixture.database_path)
+                .map_err(|error| error.to_string())?;
             let stored = connection
                 .get_curation_candidate(&fixture.workspace_id, &suggestion.candidate_id)
                 .map_err(|error| error.to_string())?
@@ -21834,7 +21849,10 @@ mod tests {
             .iter()
             .find(|entry| entry.candidate_id == suggestion.candidate_id)
             .ok_or_else(|| "identical rejected guidance must stay suppressed".to_owned())?;
-        assert_eq!(suppressed.dedupe_status.method, "curation_queue_exact_content");
+        assert_eq!(
+            suppressed.dedupe_status.method,
+            "curation_queue_exact_content"
+        );
         assert_eq!(
             suppressed.dedupe_status.matched_candidate_id.as_deref(),
             Some(exact_id.as_str())
@@ -21912,7 +21930,9 @@ mod tests {
         assert_eq!(bootstrap.source_ids, vec![bootstrap_evidence_id.clone()]);
         assert!(bootstrap.persisted);
         assert!(
-            bootstrap.proposed_content.contains(LESSON.trim_end_matches('.')),
+            bootstrap
+                .proposed_content
+                .contains(LESSON.trim_end_matches('.')),
             "persisted proposals must retain the complete command and quoted whitespace"
         );
         assert!(
@@ -32242,11 +32262,7 @@ mod tests {
                 "message": {"role": "assistant", "content": body},
             })
             .to_string();
-            let mut span = synthetic_span(
-                "span_lesson000000000000000000000",
-                None,
-                &envelope,
-            );
+            let mut span = synthetic_span("span_lesson000000000000000000000", None, &envelope);
             span.role = Some("assistant".to_owned());
             span
         };
@@ -32260,8 +32276,7 @@ mod tests {
         ] {
             let span = make_span(example);
             assert!(
-                build_bootstrap_session_candidates(workspace_id, &session, &[span], 0.0)
-                    .is_empty(),
+                build_bootstrap_session_candidates(workspace_id, &session, &[span], 0.0).is_empty(),
                 "a real transcript projection must not manufacture a lesson: {example:?}"
             );
         }
@@ -32287,8 +32302,16 @@ mod tests {
         let candidate = &candidates[0];
         assert!(candidate.proposed_content.contains(first));
         assert!(candidate.proposed_content.contains(second));
-        assert!(!candidate.proposed_content.contains("skip the release tests"));
-        assert!(!candidate.proposed_content.contains("Never run verification"));
+        assert!(
+            !candidate
+                .proposed_content
+                .contains("skip the release tests")
+        );
+        assert!(
+            !candidate
+                .proposed_content
+                .contains("Never run verification")
+        );
         assert_eq!(candidate.source_ids, vec![span.id.clone()]);
         assert_eq!(
             candidate.content_hash,
@@ -32312,12 +32335,8 @@ mod tests {
         })
         .to_string();
         let span = synthetic_span("span_case_sensitive_commands", None, &envelope);
-        let candidates = build_bootstrap_session_candidates(
-            &session.workspace_id,
-            &session,
-            &[span],
-            0.0,
-        );
+        let candidates =
+            build_bootstrap_session_candidates(&session.workspace_id, &session, &[span], 0.0);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].proposed_content.matches(upper).count(), 1);
         assert_eq!(candidates[0].proposed_content.matches(lower).count(), 1);

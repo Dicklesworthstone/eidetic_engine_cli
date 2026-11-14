@@ -53,9 +53,10 @@ impl SyntaxSource {
                 self.line = Some(number);
             }
         } else if let Some((number, _)) = line.split_once(" |")
-            && number.parse::<u32>().ok().is_some_and(|number| {
-                number > 0 && self.line == Some(number)
-            })
+            && number
+                .parse::<u32>()
+                .ok()
+                .is_some_and(|number| number > 0 && self.line == Some(number))
         {
             self.rendered = true;
         }

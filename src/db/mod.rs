@@ -15305,7 +15305,9 @@ impl EvidenceQuarantineReasonReport {
                 "message" | "tool_call" | "tool_result" | "file" | "summary" | "metadata"
             )
             && classes.as_ref().is_ok_and(|classes| {
-                classes.iter().all(|class| valid_evidence_security_token(class))
+                classes
+                    .iter()
+                    .all(|class| valid_evidence_security_token(class))
                     && span.security_metadata_matches(producer, classes)
             });
         if !verified {
@@ -18702,8 +18704,7 @@ impl DbConnection {
                 });
             }
             let bytes = u64::try_from(span.excerpt.len()).unwrap_or(u64::MAX);
-            if bytes > EVIDENCE_QUARANTINE_STATUS_MAX_BYTES.saturating_sub(report.inspected_bytes)
-            {
+            if bytes > EVIDENCE_QUARANTINE_STATUS_MAX_BYTES.saturating_sub(report.inspected_bytes) {
                 break;
             }
             report.record(&span);
@@ -57135,8 +57136,10 @@ UPDATE memories
         let audits = connection.count_table_rows("audit_log")?;
 
         connection.begin_read_snapshot()?;
-        let report = connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
-        let repeated = connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+        let report =
+            connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+        let repeated =
+            connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
         connection.commit_read_snapshot()?;
         assert_eq!(
             report, repeated,

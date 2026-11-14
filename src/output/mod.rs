@@ -5731,7 +5731,10 @@ fn render_search_status_json(
     evidence_admission: &crate::core::status::EvidenceAdmissionStatusReport,
 ) {
     parent.field_object("search", |search| {
-        search.field_raw("evidenceAdmission", &evidence_admission.data_json().to_string());
+        search.field_raw(
+            "evidenceAdmission",
+            &evidence_admission.data_json().to_string(),
+        );
         search.field_object("lexicalRamTier", |tier| {
             tier.field_str("schema", lexical_ram_tier.schema);
             tier.field_str("collectionStatus", lexical_ram_tier.collection_status);

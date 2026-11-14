@@ -27604,7 +27604,11 @@ mod tests {
         let tags_by_rule = BTreeMap::from([
             (
                 "rule-a".to_owned(),
-                vec![private_b.to_owned(), "release".to_owned(), reserved.to_owned()],
+                vec![
+                    private_b.to_owned(),
+                    "release".to_owned(),
+                    reserved.to_owned(),
+                ],
             ),
             (
                 "rule-b".to_owned(),
@@ -27691,7 +27695,10 @@ mod tests {
             let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
             let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
-            let rules = [recovery_rule(&workspace_id, 0), recovery_rule(&workspace_id, 1)];
+            let rules = [
+                recovery_rule(&workspace_id, 0),
+                recovery_rule(&workspace_id, 1),
+            ];
             source
                 .with_transaction(|| {
                     for rule in &rules {

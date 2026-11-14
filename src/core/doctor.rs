@@ -3125,7 +3125,9 @@ fn database_write_lock_held(workspace_path: &Path) -> std::io::Result<bool> {
 /// Reuse index readiness logic without its standalone write-capable open.
 /// Both embedding and search diagnostics must remain available behind a held
 /// writer, and inspecting a healthy store must not advance its writer epoch.
-fn doctor_index_status(options: &IndexStatusOptions) -> Result<IndexStatusReport, IndexStatusError> {
+fn doctor_index_status(
+    options: &IndexStatusOptions,
+) -> Result<IndexStatusReport, IndexStatusError> {
     let connection = DbConnection::open_file_read_only(options.resolve_database_path())?;
     get_index_status_with_connection(options, Some(&connection))
 }
@@ -6297,7 +6299,9 @@ mod tests {
         let _ = check_search_index(Some(workspace));
         let elapsed = started.elapsed();
         if elapsed >= std::time::Duration::from_secs(10) {
-            return Err(format!("doctor database checks waited behind the writer for {elapsed:?}"));
+            return Err(format!(
+                "doctor database checks waited behind the writer for {elapsed:?}"
+            ));
         }
         ensure(
             locked.error_code,
@@ -6306,7 +6310,9 @@ mod tests {
         )?;
         ensure(locked.severity, CheckSeverity::Error, "writes are blocked")?;
         ensure(
-            locked.repair.is_some_and(|repair| repair.contains("leave the database")),
+            locked
+                .repair
+                .is_some_and(|repair| repair.contains("leave the database")),
             true,
             "lock repair preserves the live store",
         )?;
@@ -6376,7 +6382,11 @@ mod tests {
             false,
             "absent writer lock is not contention",
         )?;
-        ensure(workspace.join(".ee/ee.db").exists(), false, "no database created")?;
+        ensure(
+            workspace.join(".ee/ee.db").exists(),
+            false,
+            "no database created",
+        )?;
         ensure(
             workspace.join(".ee/ee.write.lock").exists(),
             false,
@@ -6391,8 +6401,7 @@ mod tests {
         let workspace = root.path();
         std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
         let target = workspace.join("outside-lock");
-        std::fs::write(&target, b"keep this lock unchanged")
-            .map_err(|error| error.to_string())?;
+        std::fs::write(&target, b"keep this lock unchanged").map_err(|error| error.to_string())?;
         std::os::unix::fs::symlink(&target, workspace.join(".ee/ee.write.lock"))
             .map_err(|error| error.to_string())?;
         let check = check_database_write_lock(workspace)

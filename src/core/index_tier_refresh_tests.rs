@@ -577,8 +577,7 @@ fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult 
                         .map_err(|error| error.detail)?
                         .ok_or("fixture quality tier is missing")?
                 } else {
-                    index::open_fast_vector_index_read_only(&live)
-                        .map_err(|error| error.detail)?
+                    index::open_fast_vector_index_read_only(&live).map_err(|error| error.detail)?
                 };
                 let revision = if variant == "quality-producer" {
                     "f".repeat(64)
@@ -637,20 +636,16 @@ fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult 
                 }
             }
             let before = generation_files(&live)?;
-            let staged = index::stage_delta_generation(
-                &lock,
-                &live,
-                &stack,
-                &current,
-                2,
-                counts(&current)?,
-            )
-            .await;
+            let staged =
+                index::stage_delta_generation(&lock, &live, &stack, &current, 2, counts(&current)?)
+                    .await;
             match (corrupted, staged) {
                 (true, Err(index::DeltaStageError::Refused(_))) => {}
                 (false, Ok((stage, _))) => drop(stage),
                 (true, Ok(_)) => {
-                    return Err(format!("{variant}: invalid native membership entered staging"));
+                    return Err(format!(
+                        "{variant}: invalid native membership entered staging"
+                    ));
                 }
                 (_, Err(index::DeltaStageError::Cancelled(error))) => {
                     return Err(format!("{variant}: unexpected cancellation: {error}"));
@@ -706,7 +701,11 @@ fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult 
             } else {
                 usize::from(variant == "upsert")
             };
-            assert_eq!(fast.inputs.load(Ordering::SeqCst), expected_inputs, "{variant}");
+            assert_eq!(
+                fast.inputs.load(Ordering::SeqCst),
+                expected_inputs,
+                "{variant}"
+            );
             assert_eq!(
                 quality.inputs.load(Ordering::SeqCst),
                 expected_inputs,
@@ -715,8 +714,8 @@ fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult 
             let mut expected_ids: Vec<_> =
                 current.iter().map(|document| document.id.clone()).collect();
             expected_ids.sort();
-            let published_fast = index::open_fast_vector_index_read_only(&live)
-                .map_err(|error| error.detail)?;
+            let published_fast =
+                index::open_fast_vector_index_read_only(&live).map_err(|error| error.detail)?;
             let published_quality = index::open_quality_vector_index_read_only(&live)
                 .map_err(|error| error.detail)?
                 .ok_or("published quality tier is missing")?;
@@ -730,12 +729,17 @@ fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult 
             }
             assert_eq!(
                 published_fast.embedder_revision(),
-                fast.identity().map_err(|error| error.to_string())?.fingerprint(),
+                fast.identity()
+                    .map_err(|error| error.to_string())?
+                    .fingerprint(),
                 "{variant}",
             );
             assert_eq!(
                 published_quality.embedder_revision(),
-                quality.identity().map_err(|error| error.to_string())?.fingerprint(),
+                quality
+                    .identity()
+                    .map_err(|error| error.to_string())?
+                    .fingerprint(),
                 "{variant}",
             );
             assert_eq!(

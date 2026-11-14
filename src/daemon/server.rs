@@ -5826,10 +5826,11 @@ impl DaemonContextParams {
             &["readOnly", "read_only"],
             &["timeoutMs", "timeout_ms", "deadlineMs", "deadline_ms"],
         ];
-        if let Some(field) = object
-            .keys()
-            .find(|field| !FIELD_GROUPS.iter().any(|keys| keys.contains(&field.as_str())))
-        {
+        if let Some(field) = object.keys().find(|field| {
+            !FIELD_GROUPS
+                .iter()
+                .any(|keys| keys.contains(&field.as_str()))
+        }) {
             return Err(format!("unknown ee.daemon.context field `{field}`"));
         }
         for keys in FIELD_GROUPS {
@@ -5854,16 +5855,15 @@ impl DaemonContextParams {
             .map(|value| parse_daemon_source_mode(&value))
             .transpose()?
             .unwrap_or_default();
-        let memory_scope =
-            context_optional_string_any(object, &["memoryScope", "memory_scope"])?
-                .map(|value| {
-                    MemoryScope::parse(&value).ok_or_else(|| {
-                        "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
-                            .to_owned()
-                    })
+        let memory_scope = context_optional_string_any(object, &["memoryScope", "memory_scope"])?
+            .map(|value| {
+                MemoryScope::parse(&value).ok_or_else(|| {
+                    "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
+                        .to_owned()
                 })
-                .transpose()?
-                .unwrap_or_default();
+            })
+            .transpose()?
+            .unwrap_or_default();
         let as_of = context_optional_string_any(object, &["asOf", "as_of"])?
             .map(|value| {
                 chrono::DateTime::parse_from_rfc3339(&value)
@@ -6079,9 +6079,8 @@ fn context_string_list_any(
     let Some(key) = keys.iter().find(|key| object.contains_key(**key)) else {
         return Ok(Vec::new());
     };
-    let invalid = || {
-        format!("field `{key}` must be a nonblank string or an array of nonblank strings")
-    };
+    let invalid =
+        || format!("field `{key}` must be a nonblank string or an array of nonblank strings");
     match &object[*key] {
         serde_json::Value::String(value) if !value.trim().is_empty() => Ok(vec![value.clone()]),
         serde_json::Value::Array(values) => values
@@ -11367,7 +11366,10 @@ mod tests {
     #[test]
     fn daemon_context_forwards_scope_temporal_and_task_controls_with_aliases() {
         let workspace = private_tempdir();
-        let workspace_path = workspace.path().canonicalize().expect("canonical workspace");
+        let workspace_path = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
         let workspace_id = workspace_path.to_string_lossy().into_owned();
         let value = serde_json::json!({
             "workspacePath": workspace_path,
@@ -11393,7 +11395,9 @@ mod tests {
             "readOnly": true,
         });
         let params = DaemonContextParams::from_value(&value).expect("typed context controls");
-        let options = params.context_options(&workspace_id).expect("authorized controls");
+        let options = params
+            .context_options(&workspace_id)
+            .expect("authorized controls");
         assert_eq!(options.bead_id.as_deref(), Some("bd-release"));
         assert_eq!(options.task_paths, ["src/release.rs", "src/signing.rs"]);
         assert_eq!(options.memory_scope, MemoryScope::Verified);
@@ -11465,7 +11469,10 @@ mod tests {
     #[test]
     fn daemon_context_rejects_ambiguous_or_invalid_constraints_before_admission() {
         let workspace = private_tempdir();
-        let workspace_path = workspace.path().canonicalize().expect("canonical workspace");
+        let workspace_path = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
         let policy = DaemonDispatchPolicy::for_workspace(workspace_path.display().to_string());
         let shutdown = AtomicBool::new(false);
         let mut invalid_controls = vec![
@@ -11567,8 +11574,8 @@ mod tests {
         let fixture = DaemonRememberReportFixture::new();
         fs::create_dir_all(fixture.workspace_path.join("src/signing"))
             .expect("native rule directory");
-        let connection = crate::db::DbConnection::open_file(&fixture.database_path)
-            .expect("fixture connection");
+        let connection =
+            crate::db::DbConnection::open_file(&fixture.database_path).expect("fixture connection");
         for (id, content, trust, valid_from, valid_to) in [
             (
                 VERIFIED,
@@ -11672,7 +11679,12 @@ mod tests {
         let policy = DaemonDispatchPolicy::for_workspace(workspace_id.clone());
         let shutdown = AtomicBool::new(false);
         for (scope, include_temporal, task_paths, expected) in [
-            (MemoryScope::Workspace, false, Vec::new(), vec![VERIFIED, ASSERTED]),
+            (
+                MemoryScope::Workspace,
+                false,
+                Vec::new(),
+                vec![VERIFIED, ASSERTED],
+            ),
             (MemoryScope::Verified, false, Vec::new(), vec![VERIFIED]),
             (
                 MemoryScope::Verified,
@@ -11704,10 +11716,20 @@ mod tests {
                 .items
                 .iter()
                 .map(|item| item.memory_id.to_string())
-                .chain(direct.data.pack.rule_items.iter().map(|item| item.rule_id.clone()))
+                .chain(
+                    direct
+                        .data
+                        .pack
+                        .rule_items
+                        .iter()
+                        .map(|item| item.rule_id.clone()),
+                )
                 .collect();
             let expected: BTreeSet<_> = expected.into_iter().map(str::to_owned).collect();
-            assert_eq!(direct_ids, expected, "fixture must exercise each admission control");
+            assert_eq!(
+                direct_ids, expected,
+                "fixture must exercise each admission control"
+            );
 
             let mut params = base.clone();
             params["memoryScope"] = serde_json::json!(scope.as_str());
@@ -11754,7 +11776,12 @@ mod tests {
         );
         strict_request.workspace_id = Some(workspace_id);
         let withheld = dispatch_with_echo_policy_and_workspace_inner(
-            &strict_request, false, &policy, &shutdown, false, None,
+            &strict_request,
+            false,
+            &policy,
+            &shutdown,
+            false,
+            None,
         );
         assert!(withheld.error.is_none(), "{withheld:?}");
         assert!(

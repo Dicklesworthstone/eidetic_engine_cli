@@ -355,12 +355,13 @@ fn native_rule_pack_hydration_batches_bodies_and_relations_without_changing_item
             .iter()
             .map(|pair| pair.rule.as_str())
             .collect::<Vec<_>>();
-        let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
-            f.resolve(&ids, &QueryFilters::default())
-        });
+        let (resolved, queries) =
+            crate::db::capture_query_sql_for_test(|| f.resolve(&ids, &QueryFilters::default()));
         assert_eq!(
             sources(&resolved.candidates),
-            ids.iter().map(|id| (*id).to_owned()).collect::<BTreeSet<_>>()
+            ids.iter()
+                .map(|id| (*id).to_owned())
+                .collect::<BTreeSet<_>>()
         );
         assert_eq!(resolved.hits.len(), count);
         assert!(resolved.memories.is_empty());
@@ -544,7 +545,10 @@ fn native_rule_pack_batch_failures_preserve_valid_neighbors_and_memory_hits() {
     let unresolved = f.resolve(&[&admitted.rule, &admitted.memory], &filters);
     assert!(unresolved.candidates.is_empty());
     assert_eq!(unresolved.memories.len(), 1);
-    assert_eq!(unresolved.memories[0].memory_id.to_string(), admitted.memory);
+    assert_eq!(
+        unresolved.memories[0].memory_id.to_string(),
+        admitted.memory
+    );
     assert!(
         unresolved
             .degraded
@@ -1568,9 +1572,8 @@ fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
         .map(|rule| rule.rule.as_str())
         .chain(std::iter::once(first.memory.as_str()))
         .collect::<Vec<_>>();
-    let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
-        f.resolve(&ids, &QueryFilters::default())
-    });
+    let (resolved, queries) =
+        crate::db::capture_query_sql_for_test(|| f.resolve(&ids, &QueryFilters::default()));
     assert_eq!(sources(&resolved.candidates), expected);
     assert_eq!(resolved.memories.len(), 1);
     assert_eq!(resolved.memories[0].memory_id.to_string(), first.memory);
@@ -1599,12 +1602,8 @@ fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
             .any(|entry| entry.code == "context_candidate_sealed")
     );
 
-    let including_retired = f.resolve_with_admission(
-        report(&ids),
-        &QueryFilters::default(),
-        true,
-        None,
-    );
+    let including_retired =
+        f.resolve_with_admission(report(&ids), &QueryFilters::default(), true, None);
     expected.extend(retired_rules);
     assert_eq!(sources(&including_retired.candidates), expected);
     assert_eq!(including_retired.memories.len(), 1);
@@ -1615,11 +1614,7 @@ fn native_rule_sources_preserve_strict_relaxed_and_ignored_validity_for_every_pa
     let f = Fixture::new();
     let first = f.add(1, |_| {}, |_| {});
     let last = f.add(90, |_| {}, |_| {});
-    let expired = f.add(
-        10,
-        |memory| memory.valid_to = Some(OLD.to_owned()),
-        |_| {},
-    );
+    let expired = f.add(10, |memory| memory.valid_to = Some(OLD.to_owned()), |_| {});
     let future = f.add(
         20,
         |memory| memory.valid_from = Some(NEW.to_owned()),
@@ -1889,8 +1884,7 @@ fn sourceless_admitted_rules_take_the_direct_rule_lane() {
     let search = report(&[&sourced.rule, &sourceless.rule]);
     let mut degraded = Vec::new();
     let mut direct_rules = Vec::new();
-    let evidence_batch =
-        preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
+    let evidence_batch = preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
     let (candidates, _) = candidates_from_search_for_task_paths(
         &f.db,
         &f.workspace,
@@ -2491,8 +2485,7 @@ fn native_sourced_rules_reject_stale_revision_without_borrowing_parent_body() {
         Some(serde_json::json!({"entity_revision": format!("blake3:{}", "0".repeat(64))}));
     let mut hits = Vec::new();
     let mut degraded = Vec::new();
-    let evidence_batch =
-        preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
+    let evidence_batch = preload_evidence_pack_hits(&f.db, &f.workspace, &search, &mut degraded);
     let (memories, metrics) = candidates_from_search_for_task_paths(
         &f.db,
         &f.workspace,

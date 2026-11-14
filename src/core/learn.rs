@@ -6663,7 +6663,9 @@ mod tests {
             prompt_injection_guard: true,
         };
         let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
-        let before = db.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = db
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         assert!(
             matches!(
                 crate::core::outcome::record_outcome(&generic_options),
@@ -6672,7 +6674,8 @@ mod tests {
             "typed evidence cannot make the public candidate path accept an external experiment"
         );
         assert_eq!(
-            db.logical_table_digests().map_err(|error| error.to_string())?,
+            db.logical_table_digests()
+                .map_err(|error| error.to_string())?,
             before
         );
         db.insert_feedback_event_audited(

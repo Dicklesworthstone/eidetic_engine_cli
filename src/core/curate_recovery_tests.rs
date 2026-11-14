@@ -429,7 +429,8 @@ fn a_contributing_explanation_before_the_failed_attempt_notice_is_not_rehabilita
 fn complete_multi_turn_repairs_survive_public_review_and_validation() -> TestResult {
     let workspace = Workspace::new()?;
     let first = "I fixed E0277 by importing Serialize in src/widget.rs. This applies only to validated records.";
-    let second = "I fixed E0277 by adding Serialize support for the nested Widget state in src/widget.rs.";
+    let second =
+        "I fixed E0277 by adding Serialize support for the nested Widget state in src/widget.rs.";
     let episode = workspace.episode(
         86_001,
         "Work item multi-turn.",
