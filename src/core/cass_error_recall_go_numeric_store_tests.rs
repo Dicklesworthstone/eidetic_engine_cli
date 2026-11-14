@@ -2,7 +2,9 @@
 //! Times, OutputType decorations and fractional durations are original bytes.
 
 use super::*;
-use crate::core::cass_error_recall::{ToolOutput, record_session_error_recall};
+use crate::core::cass_error_recall::{
+    ToolOutput, record_session_error_recall, structured_error_diagnostics,
+};
 use crate::core::error_diagnosis::error_recall_report;
 use crate::core::incident_card::{incident_card_id, proof::CardChecks};
 use crate::db::{
@@ -256,5 +258,189 @@ fn actual_go_capture_cannot_be_certified_by_changed_invocation_or_bad_tail() -> 
                 .is_none()
         );
     }
+    Ok(())
+}
+
+// These are the original native bytes inside the captured test2json Output
+// events, before JSON serialization. Terminal parsing must preserve their
+// diagnostic identity and reach the same durable readers as the JSON stream.
+fn native_output(capture: &str) -> TestResult<String> {
+    let records = capture
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(records
+        .iter()
+        .filter_map(|record| record.get("Output").and_then(Value::as_str))
+        .collect())
+}
+
+const NATIVE_COMMAND: &str = "go test -v -count=1 ./...";
+
+#[test]
+fn native_go_capture_records_readable_repair_proof_and_preserves_originals() -> TestResult {
+    let episode = Episode::new()?;
+    let failed_output = format!("{}FAIL\n", native_output(FAILED)?);
+    let passed_output = native_output(PASSED)?;
+    let diagnostic = structured_error_diagnostics(&failed_output)
+        .into_iter()
+        .next()
+        .ok_or("native Go diagnostic")?;
+    assert_eq!(
+        structured_error_diagnostics(&failed_output),
+        structured_error_diagnostics(FAILED)
+    );
+    episode.call(1, "failure", NATIVE_COMMAND)?;
+    let failed = episode.result(2, "failure", &failed_output, true)?;
+    let repair = episode.append(
+        3,
+        "message",
+        "assistant",
+        json!({"type":"text","text":REPAIR}),
+    )?;
+    episode.call(4, "retry", NATIVE_COMMAND)?;
+    let proof = episode.result(5, "retry", &passed_output, false)?;
+    let original = episode
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
+    let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+    let recall = error_recall_report(&episode.db, WS, &diagnostic)?;
+    assert!(recall.helpful_repairs.contains(&repair));
+    assert_eq!(recall.proof_links, vec![proof]);
+    let card = episode
+        .db
+        .get_search_admitted_evidence_span(&incident_card_id(WS, &failed), WS)?
+        .ok_or("admitted native Go incident card")?;
+    assert!(card.excerpt.contains("go test failure:"));
+    episode.db.begin_read_snapshot()?;
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    assert!(checks.withheld(&episode.db, WS)?.is_empty());
+    episode.db.rollback_read_snapshot()?;
+    let links = episode.db.count_table_rows("error_repair_links")?;
+    assert_eq!(
+        record_session_error_recall(&episode.db, WS, &episode.session)?.incident_cards_recorded,
+        0
+    );
+    assert_eq!(episode.db.count_table_rows("error_repair_links")?, links);
+    for span in original {
+        let after = episode
+            .db
+            .get_evidence_span(&span.id)?
+            .ok_or("retained source")?;
+        assert_eq!(after.excerpt, span.excerpt);
+        assert_eq!(after.metadata_json, span.metadata_json);
+        assert_eq!(after.content_hash, span.content_hash);
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            span.canonical_provenance_uri()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_go_retry_requires_the_failed_subject_controls_package_and_invocation() -> TestResult {
+    let failed_output = native_output(FAILED)?;
+    let passed_output = native_output(PASSED)?;
+    let narrowed = passed_output
+        .lines()
+        .filter(|line| !line.contains("TestControl"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (command, retry) in [
+        (
+            "go test -v -count=1 -run TestCache ./...",
+            passed_output.clone(),
+        ),
+        (NATIVE_COMMAND, narrowed),
+        (
+            NATIVE_COMMAND,
+            passed_output.replace("--- PASS: TestCache", "--- SKIP: TestCache"),
+        ),
+        (
+            NATIVE_COMMAND,
+            passed_output.replace("TestCache", "TestRenamed"),
+        ),
+        (
+            NATIVE_COMMAND,
+            passed_output.replace("example.org/cache", "example.org/other"),
+        ),
+        (NATIVE_COMMAND, passed_output.replace("0.012s", "(cached)")),
+        (
+            NATIVE_COMMAND,
+            "PASS\nok  \texample.org/cache\t0.012s [no tests to run]\n".to_owned(),
+        ),
+        (
+            NATIVE_COMMAND,
+            "?   \texample.org/cache\t[no test files]\n".to_owned(),
+        ),
+        (
+            NATIVE_COMMAND,
+            "ok  \texample.org/cache\t0.012s\n".to_owned(),
+        ),
+        (NATIVE_COMMAND, format!("{passed_output}unexpected tail\n")),
+        (NATIVE_COMMAND, failed_output.clone()),
+    ] {
+        let episode = Episode::new()?;
+        episode.call(1, "failure", NATIVE_COMMAND)?;
+        let failure = episode.result(2, "failure", &failed_output, true)?;
+        episode.append(
+            3,
+            "message",
+            "assistant",
+            json!({"type":"text","text":REPAIR}),
+        )?;
+        episode.call(4, "retry", command)?;
+        episode.result(5, "retry", &retry, false)?;
+        let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+        assert_eq!(report.resolved_failures, 0, "{command}: {retry}");
+        assert_eq!(report.incident_cards_recorded, 0, "{command}: {retry}");
+        let diagnostic = structured_error_diagnostics(&failed_output).remove(0);
+        assert!(
+            error_recall_report(&episode.db, WS, &diagnostic)?
+                .helpful_repairs
+                .is_empty()
+        );
+        assert!(
+            episode
+                .db
+                .get_evidence_span(&incident_card_id(WS, &failure))?
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn quiet_native_failure_is_remembered_but_never_supplies_a_missing_inventory() -> TestResult {
+    let episode = Episode::new()?;
+    let failed_output = "--- FAIL: TestCache (0.01s)\n    cache_test.go:4: cache must flush before reading\nFAIL\nFAIL\texample.org/cache\t0.010s\nFAIL\n";
+    let diagnostic = structured_error_diagnostics(failed_output).remove(0);
+    episode.call(1, "failure", "go test -count=1 ./...")?;
+    episode.result(2, "failure", failed_output, true)?;
+    episode.append(
+        3,
+        "message",
+        "assistant",
+        json!({"type":"text","text":REPAIR}),
+    )?;
+    // Even an unexpectedly verbose later report cannot reconstruct controls
+    // absent from the original failure's nonverbose inventory.
+    episode.call(4, "retry", "go test -count=1 ./...")?;
+    episode.result(5, "retry", &native_output(PASSED)?, false)?;
+    let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.fingerprints_recorded, 1);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+    assert!(
+        error_recall_report(&episode.db, WS, &diagnostic)?
+            .helpful_repairs
+            .is_empty()
+    );
     Ok(())
 }

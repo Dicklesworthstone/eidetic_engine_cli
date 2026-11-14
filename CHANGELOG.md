@@ -78,6 +78,15 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+### Added
+
+- Native Go terminal failures now feed imported-session error recall, interactive
+  `diagnose-error`, and `pack --error-log` with the same fingerprints as Go JSON.
+  Quiet failures remain recallable; repair attribution requires a complete
+  verbose retry with the same invocation, execution context, failed tests, and
+  passing controls. Cached, empty, narrowed, skipped, and incomplete retries do
+  not certify a repair. Existing imports are reconsidered under derivation v27.
+
 ### Fixed
 
 - Passive index readiness on Unix now holds a shared generation lease across

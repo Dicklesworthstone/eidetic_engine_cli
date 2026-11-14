@@ -129,7 +129,7 @@ fn finish_benchmarks(
     }
 }
 
-fn commitment(package: &str, test: Option<&str>) -> [u8; 32] {
+pub(super) fn commitment(package: &str, test: Option<&str>) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(b"ee.cass.go_test.subject.v1\0");
     for field in [package, test.unwrap_or("")] {
@@ -139,7 +139,7 @@ fn commitment(package: &str, test: Option<&str>) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
-fn diagnostic(package: &str, test: Option<&str>, build: bool) -> CanonicalDiagnostic {
+pub(super) fn diagnostic(package: &str, test: Option<&str>, build: bool) -> CanonicalDiagnostic {
     let message = match test {
         Some(test) => format!("go test failure: {package} test {test}"),
         None if build => format!("go build failure: {package}"),
@@ -411,7 +411,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     Ok(Some(output))
 }
 
-fn retain_diagnostic(
+pub(super) fn retain_diagnostic(
     output: &mut CompilerOutput,
     keys: &mut BTreeSet<String>,
     diagnostic: CanonicalDiagnostic,
