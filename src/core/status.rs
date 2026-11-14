@@ -19,7 +19,8 @@ use crate::config::{
     read_env_var_or_default, read_env_var_os, workspace_config,
 };
 use crate::db::{
-    CreateWorkspaceInput, DatabaseConfig, DbConnection, FeedbackSourceHarmfulCount,
+    CreateWorkspaceInput, DatabaseConfig, DbConnection, EvidenceAdmissionCounts,
+    EvidenceQuarantineReasonReport, FeedbackSourceHarmfulCount,
     GraphSnapshotStatus, GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
@@ -2008,10 +2009,45 @@ pub struct StatusReport {
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
     pub lexical_ram_tier: LexicalRamTierResult,
+    pub evidence_admission: EvidenceAdmissionStatusReport,
     pub mesh_storage: Option<MeshStorageStatusReport>,
     pub tailscale_local: Option<TailscaleLocalReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
+}
+
+/// Exact admission totals and bounded current-policy quarantine explanations.
+/// Missing measurements stay `None`; they must never look like an empty store.
+#[derive(Clone, Debug, Default)]
+pub struct EvidenceAdmissionStatusReport {
+    pub counts: Option<EvidenceAdmissionCounts>,
+    pub quarantine: Option<EvidenceQuarantineReasonReport>,
+}
+
+impl EvidenceAdmissionStatusReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let status = match (&self.counts, &self.quarantine) {
+            (Some(counts), Some(quarantine))
+                if quarantine.inspected == counts.quarantined && quarantine.unverified == 0 =>
+            {
+                "complete"
+            }
+            (Some(_), _) => "partial",
+            (None, _) => "unavailable",
+        };
+        serde_json::json!({
+            "status": status,
+            "counts": self.counts,
+            "quarantine": self.quarantine,
+            "inspectionLimits": {
+                "maxRows": crate::db::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS,
+                "maxBytes": crate::db::EVIDENCE_QUARANTINE_STATUS_MAX_BYTES,
+            },
+            "policyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+            "verdictRevision": crate::db::EVIDENCE_ADMISSION_VERDICT_REVISION,
+        })
+    }
 }
 
 /// Redaction posture required by `ee.scale_envelope.v1`.
@@ -2490,6 +2526,13 @@ impl StatusReport {
         let index_status = timed_gather("index_status", || {
             gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref)
         });
+        let evidence_admission = timed_gather("evidence_admission", || {
+            gather_evidence_admission_status(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+                index_status.as_ref(),
+            )
+        });
         let mut capabilities = timed_gather("capabilities", || {
             CapabilityReport::gather_with_workspace_connection_and_index(
                 options.workspace_path.as_deref(),
@@ -2751,6 +2794,7 @@ impl StatusReport {
             graph_snapshot_artifact,
             derived_assets,
             lexical_ram_tier,
+            evidence_admission,
             mesh_storage,
             tailscale_local,
             agent_inventory,
@@ -5109,6 +5153,55 @@ fn gather_status_index_status(
     )
 }
 
+fn gather_evidence_admission_status(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+    index_status: Option<&Result<IndexStatusReport, ()>>,
+) -> EvidenceAdmissionStatusReport {
+    // Totals already belong to status's pinned source snapshot. Reuse them;
+    // another full admission scan would undo the evidence read-path hotfix.
+    let (Some(workspace_path), Some(connection), Some(Ok(index))) =
+        (workspace_path, connection, index_status)
+    else {
+        return EvidenceAdmissionStatusReport::default();
+    };
+    let fallback_database_path = workspace_database_path(workspace_path);
+    let database_path = match connection.location() {
+        crate::db::DatabaseLocation::File(path) => path.as_path(),
+        _ => fallback_database_path.as_path(),
+    };
+    let Ok(Some(workspace)) =
+        super::workspace::addressed_workspace_row(connection, workspace_path, database_path)
+    else {
+        return EvidenceAdmissionStatusReport::default();
+    };
+    let counts = EvidenceAdmissionCounts {
+        admitted: index.db_evidence_admitted_count,
+        quarantined: index.db_evidence_quarantined_count,
+        denied: index.db_evidence_denied_count,
+    };
+    let quarantine = if counts.quarantined == 0 {
+        Some(EvidenceQuarantineReasonReport::default())
+    } else {
+        match connection.inspect_evidence_quarantine_reasons_in_current_snapshot(&workspace.id) {
+            Ok(report) if report.inspected <= counts.quarantined => Some(report),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ee::status::gather",
+                    error = %error,
+                    "status quarantine reason inspection was unavailable"
+                );
+                None
+            }
+        }
+    };
+    EvidenceAdmissionStatusReport {
+        counts: Some(counts),
+        quarantine,
+    }
+}
+
 #[cfg(test)]
 fn gather_derived_assets(
     workspace_path: Option<&Path>,
@@ -6549,6 +6642,66 @@ mod tests {
     // so a workspace whose WAL had outgrown its own database was reported as
     // needing nothing. Every connection open replayed that WAL.
 
+    #[test]
+    fn evidence_admission_status_distinguishes_unavailable_from_measured_empty() {
+        let unavailable = super::EvidenceAdmissionStatusReport::default().data_json();
+        assert_eq!(unavailable["status"], "unavailable");
+        assert!(unavailable["counts"].is_null());
+        assert!(unavailable["quarantine"].is_null());
+
+        let empty = super::EvidenceAdmissionStatusReport {
+            counts: Some(crate::db::EvidenceAdmissionCounts::default()),
+            quarantine: Some(crate::db::EvidenceQuarantineReasonReport::default()),
+        }
+        .data_json();
+        assert_eq!(empty["status"], "complete");
+        assert_eq!(empty["counts"]["quarantined"], 0);
+        assert_eq!(empty["quarantine"]["inspected"], 0);
+        assert_eq!(empty["quarantine"]["quarantineReasons"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn evidence_admission_status_marks_bounded_or_unverified_reasons_partial() {
+        let mut report = super::EvidenceAdmissionStatusReport {
+            counts: Some(crate::db::EvidenceAdmissionCounts {
+                admitted: 3,
+                quarantined: 65,
+                denied: 2,
+            }),
+            quarantine: Some(crate::db::EvidenceQuarantineReasonReport {
+                inspected: 64,
+                requires_rescreen: 64,
+                ..crate::db::EvidenceQuarantineReasonReport::default()
+            }),
+        };
+        let bounded = report.data_json();
+        assert_eq!(bounded["status"], "partial");
+        assert_eq!(bounded["counts"]["quarantined"], 65);
+        assert_eq!(bounded["counts"]["admitted"], 3);
+        assert_eq!(bounded["quarantine"]["requiresRescreen"], 64);
+        assert_eq!(bounded["inspectionLimits"]["maxRows"], 64);
+        assert_eq!(bounded["inspectionLimits"]["maxBytes"], 262_144);
+
+        report.counts = Some(crate::db::EvidenceAdmissionCounts {
+            admitted: 3,
+            quarantined: 64,
+            denied: 2,
+        });
+        report.quarantine = Some(crate::db::EvidenceQuarantineReasonReport {
+            inspected: 64,
+            unverified: 1,
+            requires_rescreen: 63,
+            ..crate::db::EvidenceQuarantineReasonReport::default()
+        });
+        assert_eq!(report.data_json()["status"], "partial");
+
+        report.quarantine = None;
+        let unavailable_reasons = report.data_json();
+        assert_eq!(unavailable_reasons["status"], "partial");
+        assert_eq!(unavailable_reasons["counts"]["quarantined"], 64);
+        assert!(unavailable_reasons["quarantine"].is_null());
+    }
+
     fn wal_report(bytes: u64, database_bytes: u64, threshold: u64) -> WalStatusReport {
         WalStatusReport {
             bytes,
@@ -7521,48 +7674,73 @@ mod tests {
 
     #[test]
     fn status_index_probe_reuses_pinned_snapshot_without_nested_transaction() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let ee_dir = temp.path().join(".ee");
-        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
-        let database_path = ee_dir.join("ee.db");
-        let writer = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        writer.migrate().map_err(|error| error.to_string())?;
-        let canonical_workspace = temp
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|_| temp.path().to_path_buf());
-        let workspace_id = stable_workspace_id(&canonical_workspace);
-        writer
-            .insert_workspace(
-                &workspace_id,
-                &CreateWorkspaceInput {
-                    path: canonical_workspace.display().to_string(),
-                    name: Some("status-index-snapshot".to_owned()),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        let _embedder_guard =
-            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        for filename in ["ee.db", "shared-status.db"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let ee_dir = temp.path().join(".ee");
+            std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+            let database_path = ee_dir.join(filename);
+            let writer =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            writer.migrate().map_err(|error| error.to_string())?;
+            let canonical_workspace = temp
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| temp.path().to_path_buf());
+            let workspace_id = stable_workspace_id(&canonical_workspace);
+            writer
+                .insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: canonical_workspace.display().to_string(),
+                        name: Some("status-index-snapshot".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let _embedder_guard =
+                crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
 
-        let read_pool = registered_process_read_pool(
-            DatabaseConfig::file(database_path),
-            PoolConfig::default_single(),
-        );
-        let snapshot = read_pool
-            .pin_snapshot()
-            .map_err(|error| error.to_string())?;
-        let connection = snapshot
-            .checked_connection()
-            .map_err(|error| error.to_string())?;
-        let status = gather_status_index_status(Some(temp.path()), Some(connection))
-            .ok_or_else(|| "explicit workspace must produce an index status probe".to_owned())?
-            .map_err(|()| {
-                "pinned status snapshot must not start a nested evidence transaction".to_owned()
-            })?;
+            let read_pool = registered_process_read_pool(
+                DatabaseConfig::file(database_path),
+                PoolConfig::default_single(),
+            );
+            let snapshot = read_pool
+                .pin_snapshot()
+                .map_err(|error| error.to_string())?;
+            let connection = snapshot
+                .checked_connection()
+                .map_err(|error| error.to_string())?;
+            let status = gather_status_index_status(Some(temp.path()), Some(connection))
+                .ok_or_else(|| "explicit workspace must produce an index status probe".to_owned())?
+                .map_err(|()| {
+                    "pinned status snapshot must not start a nested evidence transaction".to_owned()
+                })?;
 
-        ensure(status.health, IndexHealth::Missing, "missing fixture index")?;
-        ensure(status.db_memory_count, 0_u32, "empty fixture memory count")?;
-        snapshot.commit().map_err(|error| error.to_string())
+            ensure(&status.health, &IndexHealth::Missing, "missing fixture index")?;
+            ensure(status.db_memory_count, 0_u32, "empty fixture memory count")?;
+            let index_status = Ok(status);
+            let admission = super::gather_evidence_admission_status(
+                Some(temp.path()),
+                Some(connection),
+                Some(&index_status),
+            );
+            ensure(
+                admission.data_json()["status"].as_str(),
+                Some("complete"),
+                "evidence inspection uses the pinned connection's actual database path",
+            )?;
+            ensure(
+                admission.counts,
+                Some(crate::db::EvidenceAdmissionCounts::default()),
+                "empty evidence totals belong to the same snapshot",
+            )?;
+            ensure(
+                admission.quarantine,
+                Some(crate::db::EvidenceQuarantineReasonReport::default()),
+                "empty quarantine needs no body scan or nested transaction",
+            )?;
+            snapshot.commit().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     #[test]

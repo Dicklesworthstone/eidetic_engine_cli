@@ -89,7 +89,13 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/jsonValue" }
         },
-        "search": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+        "search": {
+          "type": "object",
+          "properties": {
+            "evidenceAdmission": { "$ref": "#/$defs/evidenceAdmission" }
+          },
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        },
         "derivedAssets": {
           "type": "array",
           "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
@@ -155,6 +161,63 @@
     "full": ["*"]
   },
   "$defs": {
+    "evidenceAdmission": {
+      "description": "Exact current-snapshot admission totals with bounded current-policy explanations for retained quarantines. Partial inspection is not a population estimate. requiresRescreen rows remain quarantined; this diagnostic never authorizes retrieval or changes their eligibility.",
+      "type": "object",
+      "required": ["status", "counts", "quarantine", "inspectionLimits", "policyEpoch", "verdictRevision"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["complete", "partial", "unavailable"] },
+        "counts": {
+          "description": "Null means admission totals could not be measured, not that the workspace has no evidence.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["admitted", "quarantined", "denied"],
+              "additionalProperties": false,
+              "properties": {
+                "admitted": { "type": "integer", "minimum": 0 },
+                "quarantined": { "type": "integer", "minimum": 0 },
+                "denied": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "quarantine": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["inspected", "inspectedBytes", "quarantineReasons", "requiresRescreen", "unverified"],
+              "additionalProperties": false,
+              "properties": {
+                "inspected": { "type": "integer", "minimum": 0, "maximum": 64 },
+                "inspectedBytes": { "type": "integer", "minimum": 0, "maximum": 262144 },
+                "quarantineReasons": {
+                  "description": "First current-policy rejection per verified retained excerpt, in deterministic reason-code order; excludes unread and unverified rows.",
+                  "type": "object",
+                  "additionalProperties": { "type": "integer", "minimum": 1 }
+                },
+                "requiresRescreen": { "type": "integer", "minimum": 0 },
+                "unverified": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "inspectionLimits": {
+          "type": "object",
+          "required": ["maxRows", "maxBytes"],
+          "additionalProperties": false,
+          "properties": {
+            "maxRows": { "const": 64 },
+            "maxBytes": { "const": 262144 }
+          }
+        },
+        "policyEpoch": { "type": "integer", "minimum": 1 },
+        "verdictRevision": { "type": "integer", "minimum": 1 }
+      }
+    },
     "readPoolStatus": {
       "type": "object",
       "required": [

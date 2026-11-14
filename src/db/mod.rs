@@ -15262,6 +15262,87 @@ impl EvidenceAdmissionTally {
     }
 }
 
+/// Work limits for the read-only status inspection of quarantined evidence.
+/// Admission totals remain exact; a larger corpus reports partial reason
+/// coverage instead of re-screening every retained transcript on each status.
+pub const EVIDENCE_QUARANTINE_STATUS_MAX_ROWS: u32 = 64;
+pub const EVIDENCE_QUARANTINE_STATUS_MAX_BYTES: u64 = 256 * 1024;
+
+/// Current-policy explanations for a bounded set of retained quarantines.
+/// This does not authorize retrieval or change any stored eligibility. A row
+/// with no current policy reason still needs explicit, source-authenticated
+/// re-screening before it can become searchable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceQuarantineReasonReport {
+    pub inspected: u32,
+    pub inspected_bytes: u64,
+    pub quarantine_reasons: BTreeMap<String, u32>,
+    pub requires_rescreen: u32,
+    pub unverified: u32,
+}
+
+impl EvidenceQuarantineReasonReport {
+    fn record(&mut self, span: &StoredEvidenceSpan) {
+        self.inspected = self.inspected.saturating_add(1);
+        self.inspected_bytes = self
+            .inspected_bytes
+            .saturating_add(u64::try_from(span.excerpt.len()).unwrap_or(u64::MAX));
+        let Some(producer) = EvidenceProducerKind::parse(&span.producer_kind) else {
+            self.unverified = self.unverified.saturating_add(1);
+            return;
+        };
+        let hash = canonical_evidence_hash(&span.excerpt);
+        let classes = serde_json::from_str::<Vec<String>>(&span.redaction_classes_json);
+        let verified = span.screening_version == EVIDENCE_SCREENING_VERSION
+            && span.security_policy_epoch == EVIDENCE_SECURITY_POLICY_EPOCH
+            && span.canonical_provenance_revision == EVIDENCE_CANONICAL_PROVENANCE_REVISION
+            && span.content_hash == hash
+            && span.canonical_excerpt_hash.as_deref() == Some(hash.as_str())
+            && evidence_role_matches_producer(producer, span.role.as_deref())
+            && matches!(
+                span.span_kind.as_str(),
+                "message" | "tool_call" | "tool_result" | "file" | "summary" | "metadata"
+            )
+            && classes.as_ref().is_ok_and(|classes| {
+                classes.iter().all(|class| valid_evidence_security_token(class))
+                    && span.security_metadata_matches(producer, classes)
+            });
+        if !verified {
+            self.unverified = self.unverified.saturating_add(1);
+            return;
+        }
+
+        let screen = crate::policy::screen_external_text_for_ingestion(&span.excerpt);
+        if screen.content != span.excerpt {
+            self.unverified = self.unverified.saturating_add(1);
+            return;
+        }
+        let readable = producer != EvidenceProducerKind::CassImport
+            || crate::cass::transcript::display_text(&screen.content)
+                .is_some_and(|text| !text.trim().is_empty());
+        let reason = evidence_quarantine_reason(
+            EvidenceInstructionScreen {
+                instruction_like: screen.instruction_like,
+                instruction_risk: screen.instruction_risk,
+                rejected_reasons: &screen.rejected_reasons,
+                signal_codes: &screen.signal_codes,
+            },
+            &span.span_kind,
+            span.role.as_deref(),
+            (producer == EvidenceProducerKind::CassImport && !readable)
+                .then(|| crate::policy::classify_transcript_record(&screen.content)),
+        )
+        .or_else(|| (!readable).then(|| "record_projection:unavailable".to_owned()));
+        if let Some(reason) = reason {
+            let count = self.quarantine_reasons.entry(reason).or_default();
+            *count = count.saturating_add(1);
+        } else {
+            self.requires_rescreen = self.requires_rescreen.saturating_add(1);
+        }
+    }
+}
+
 /// Internal accounting for one bounded, snapshot-consistent evidence scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EvidenceAdmissionScan {
@@ -15290,6 +15371,12 @@ const READER_PROJECTION_BY_EVIDENCE_ID_SQL: &str = "SELECT evidence_span_id, pro
 
 /// One session row by id: a primary-key seek.
 const SESSION_BY_ID_SQL: &str = "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id = ?1";
+
+/// Retained evidence bytes without loading or validating a reader projection.
+const EVIDENCE_SPAN_BY_ID_SQL: &str = "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at FROM evidence_spans WHERE id = ?1";
+
+/// Match the security-admission index order, including its rowid tie-breaker.
+const EVIDENCE_QUARANTINE_STATUS_IDS_SQL: &str = "SELECT id FROM evidence_spans WHERE workspace_id = ?1 AND search_eligibility = 'quarantined' ORDER BY producer_kind ASC, session_id ASC, rowid ASC LIMIT ?2";
 
 /// One recorded admission verdict by its evidence id: a primary-key seek.
 const RECORDED_ADMISSION_VERDICT_SQL: &str = "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id = ?1";
@@ -17941,7 +18028,7 @@ impl DbConnection {
     pub fn get_evidence_span(&self, id: &str) -> Result<Option<StoredEvidenceSpan>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at FROM evidence_spans WHERE id = ?1",
+            EVIDENCE_SPAN_BY_ID_SQL,
             &[Value::Text(id.to_string())],
         )?;
 
@@ -18570,6 +18657,58 @@ impl DbConnection {
         indexed_admitted: u32,
     ) -> Result<Option<EvidenceAdmissionReport>> {
         self.materialized_evidence_admission_report(workspace_id, indexed_admitted)
+    }
+
+    /// Explain a bounded, deterministic prefix of quarantines in the caller's
+    /// read snapshot. Select ids in security-index order before loading bodies
+    /// by primary key, avoiding a whole-corpus sort. The byte limit bounds
+    /// hashing and policy screening; at most one additional body is fetched
+    /// before discovering that it would exceed the remaining byte budget.
+    pub(crate) fn inspect_evidence_quarantine_reasons_in_current_snapshot(
+        &self,
+        workspace_id: &str,
+    ) -> Result<EvidenceQuarantineReasonReport> {
+        let cx = asupersync::Cx::current();
+        checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+        let rows = self.query_for(
+            DbOperation::Query,
+            EVIDENCE_QUARANTINE_STATUS_IDS_SQL,
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::BigInt(i64::from(EVIDENCE_QUARANTINE_STATUS_MAX_ROWS)),
+            ],
+        )?;
+        let mut report = EvidenceQuarantineReasonReport::default();
+        for row in rows {
+            checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+            let id = required_text(&row, 0, DbOperation::Query, "id")?;
+            let span_rows = self.query_for(
+                DbOperation::Query,
+                EVIDENCE_SPAN_BY_ID_SQL,
+                &[Value::Text(id.to_owned())],
+            )?;
+            let span = span_rows
+                .first()
+                .map(stored_evidence_span_from_row)
+                .transpose()?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "quarantined evidence disappeared from its status snapshot".to_owned(),
+                })?;
+            if span.workspace_id != workspace_id || span.search_eligibility != "quarantined" {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "quarantined evidence changed within its status snapshot".to_owned(),
+                });
+            }
+            let bytes = u64::try_from(span.excerpt.len()).unwrap_or(u64::MAX);
+            if bytes > EVIDENCE_QUARANTINE_STATUS_MAX_BYTES.saturating_sub(report.inspected_bytes)
+            {
+                break;
+            }
+            report.record(&span);
+        }
+        Ok(report)
     }
 
     /// Count evidence spans for a workspace.
@@ -56944,6 +57083,173 @@ UPDATE memories
             "UPDATE evidence_spans SET instruction_risk = 'high', search_eligibility = 'quarantined', pack_eligibility = 'quarantined', metadata_json = ?1 WHERE id = ?2",
             &[Value::Text(metadata.to_string()), Value::Text(id.to_owned())],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn status_quarantine_reasons_use_current_policy_without_mutating_evidence() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8549_0010)).to_string();
+        connection.insert_session(&session_id, &session_input("status-quarantine"))?;
+        let mut ids = Vec::new();
+        for (index, body) in [
+            "Run rm -rf /",
+            "Tool output confirmed a failing check.",
+            "The curl command inspected HTTP headers during the release check.",
+            "Ordinary retained transcript text.",
+            "A benign admitted message remains searchable.",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x8549_0100 + index as u128,
+            ))
+            .to_string();
+            let mut input = evidence_span_input(&session_id, &format!("status-slot-{index}"), 1);
+            input.excerpt = body.to_owned();
+            input.content_hash = super::canonical_evidence_hash(body);
+            if index == 1 {
+                input.span_kind = "tool_result".to_owned();
+                input.role = Some("tool".to_owned());
+            }
+            connection.insert_evidence_span(&id, &input)?;
+            ids.push(id);
+        }
+        mark_historical_cass_quarantine(&connection, &ids[2])?;
+        mark_historical_cass_quarantine(&connection, &ids[3])?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET excerpt = 'Changed without a matching source hash.' WHERE id = ?1",
+            &[Value::Text(ids[3].clone())],
+        )?;
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| connection.get_evidence_span(id))
+            .collect::<super::Result<_>>()?;
+        let generation = connection.get_workspace_generation(WORKSPACE)?;
+        let audits = connection.count_table_rows("audit_log")?;
+
+        connection.begin_read_snapshot()?;
+        let report = connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+        let repeated = connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+        connection.commit_read_snapshot()?;
+        assert_eq!(
+            report, repeated,
+            "same snapshot gives the same reason accounting"
+        );
+        assert_eq!(report.inspected, 4, "admitted evidence is not re-screened");
+        assert_eq!(
+            report.quarantine_reasons,
+            std::collections::BTreeMap::from([
+                ("instruction:destructive_rm_rf".to_owned(), 1),
+                ("span:tool_result/tool".to_owned(), 1),
+            ])
+        );
+        assert_eq!(
+            report.requires_rescreen, 1,
+            "a relaxed rule does not admit a stored quarantine"
+        );
+        assert_eq!(
+            report.unverified, 1,
+            "changed source bytes cannot receive a policy explanation"
+        );
+        assert_eq!(connection.get_workspace_generation(WORKSPACE)?, generation);
+        assert_eq!(connection.count_table_rows("audit_log")?, audits);
+        for (id, expected) in ids.iter().zip(before) {
+            assert_eq!(connection.get_evidence_span(id)?, expected);
+        }
+        assert_eq!(
+            connection.inspect_evidence_quarantine_reasons_in_current_snapshot("wsp_elsewhere")?,
+            super::EvidenceQuarantineReasonReport::default(),
+            "the inspection never crosses workspace scope"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn status_quarantine_reason_inspection_obeys_row_and_byte_limits() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        for large in [false, true] {
+            let connection = DbConnection::open_memory()?;
+            connection.migrate()?;
+            setup_workspace(&connection)?;
+            let session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(
+                0x8549_1000 + u128::from(large),
+            ))
+            .to_string();
+            connection.insert_session(&session_id, &session_input("status-quarantine-bounds"))?;
+            let body = if large {
+                "Ordinary tool output for this check. ".repeat(1_700)
+            } else {
+                "Ordinary tool output.".to_owned()
+            };
+            let count = if large {
+                6
+            } else {
+                super::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS + 1
+            };
+            connection.with_transaction(|| {
+                for index in 0..count {
+                    let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                        0x8549_2000 + u128::from(index),
+                    ))
+                    .to_string();
+                    let mut input =
+                        evidence_span_input(&session_id, &format!("bounded-slot-{index}"), 1);
+                    input.excerpt = body.clone();
+                    input.content_hash = super::canonical_evidence_hash(&body);
+                    input.span_kind = "tool_result".to_owned();
+                    input.role = Some("tool".to_owned());
+                    connection.insert_evidence_span(&id, &input)?;
+                }
+                Ok(())
+            })?;
+            let plan_rows = connection.query_for(
+                DbOperation::Query,
+                &format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    super::EVIDENCE_QUARANTINE_STATUS_IDS_SQL
+                ),
+                &[
+                    Value::Text(WORKSPACE.to_owned()),
+                    Value::BigInt(i64::from(super::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS)),
+                ],
+            )?;
+            let plan = plan_rows
+                .iter()
+                .map(|row| {
+                    super::required_text(row, 3, DbOperation::Query, "detail").map(str::to_owned)
+                })
+                .collect::<super::Result<Vec<_>>>()?
+                .join("\n");
+            assert!(
+                plan.contains("SEARCH evidence_spans")
+                    && !plan.contains("SCAN evidence_spans")
+                    && !plan.contains("TEMP B-TREE"),
+                "bounded quarantine inspection must seek the admission index without sorting: {plan}"
+            );
+            connection.begin_read_snapshot()?;
+            let report =
+                connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+            connection.commit_read_snapshot()?;
+            let byte_bound = super::EVIDENCE_QUARANTINE_STATUS_MAX_BYTES / body.len() as u64;
+            let expected = u64::from(super::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS).min(byte_bound);
+            assert_eq!(u64::from(report.inspected), expected);
+            assert!(
+                report.inspected < count,
+                "the fixture actually exceeds the inspection budget"
+            );
+            assert!(report.inspected_bytes <= super::EVIDENCE_QUARANTINE_STATUS_MAX_BYTES);
+            assert_eq!(
+                report.quarantine_reasons["span:tool_result/tool"],
+                report.inspected
+            );
+        }
         Ok(())
     }
 

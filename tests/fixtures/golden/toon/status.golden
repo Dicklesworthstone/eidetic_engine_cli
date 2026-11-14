@@ -301,6 +301,15 @@ data:
       availability: live_compute_available
     nextRefreshVia: ee graph centrality-refresh --workspace .
   search:
+    evidenceAdmission:
+      status: unavailable
+      counts: null
+      quarantine: null
+      inspectionLimits:
+        maxRows: 64
+        maxBytes: 262144
+      policyEpoch: 1
+      verdictRevision: 5
     lexicalRamTier:
       schema: ee.status.search.lexical_ram_tier.v1
       collectionStatus: observed

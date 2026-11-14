@@ -192,6 +192,27 @@ expression: canonical_json_text(value)
       "workers": []
     },
     "search": {
+      "evidenceAdmission": {
+        "counts": {
+          "admitted": 0,
+          "denied": 0,
+          "quarantined": 0
+        },
+        "inspectionLimits": {
+          "maxBytes": 262144,
+          "maxRows": 64
+        },
+        "policyEpoch": 1,
+        "quarantine": {
+          "inspected": 0,
+          "inspectedBytes": 0,
+          "quarantineReasons": {},
+          "requiresRescreen": 0,
+          "unverified": 0
+        },
+        "status": "complete",
+        "verdictRevision": 5
+      },
       "lexicalRamTier": {
         "attempted": false,
         "bytesMmapped": 0,

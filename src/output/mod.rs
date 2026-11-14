@@ -4878,7 +4878,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_flight_recorder_status_json(d, &report.flight_recorder);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
-        render_search_status_json(d, &report.lexical_ram_tier);
+        render_search_status_json(d, &report.lexical_ram_tier, &report.evidence_admission);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_mesh_status_json(
             d,
@@ -5728,8 +5728,10 @@ fn render_derived_assets_json(
 fn render_search_status_json(
     parent: &mut JsonBuilder,
     lexical_ram_tier: &crate::search::lexical_ram_tier::LexicalRamTierResult,
+    evidence_admission: &crate::core::status::EvidenceAdmissionStatusReport,
 ) {
     parent.field_object("search", |search| {
+        search.field_raw("evidenceAdmission", &evidence_admission.data_json().to_string());
         search.field_object("lexicalRamTier", |tier| {
             tier.field_str("schema", lexical_ram_tier.schema);
             tier.field_str("collectionStatus", lexical_ram_tier.collection_status);
@@ -6001,12 +6003,45 @@ pub fn render_status_human(report: &StatusReport) -> String {
                 if diagnostics == 1 { "" } else { "s" }
             )
         });
+    let evidence_line = match &report.evidence_admission.counts {
+        None => "evidence: unavailable\n".to_owned(),
+        Some(counts) => {
+            let mut line = format!(
+                "evidence: {} admitted, {} quarantined, {} denied\n",
+                counts.admitted, counts.quarantined, counts.denied
+            );
+            if counts.quarantined > 0 {
+                if let Some(inspection) = &report.evidence_admission.quarantine {
+                    let reasons = inspection
+                        .quarantine_reasons
+                        .iter()
+                        .map(|(reason, count)| format!("{reason}={count}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = writeln!(
+                        line,
+                        "  quarantine reasons: {}/{} inspected; {} require re-screening; {} unverified{}{}",
+                        inspection.inspected,
+                        counts.quarantined,
+                        inspection.requires_rescreen,
+                        inspection.unverified,
+                        if reasons.is_empty() { "" } else { "; " },
+                        reasons
+                    );
+                } else {
+                    line.push_str("  quarantine reasons: unavailable\n");
+                }
+            }
+            line
+        }
+    };
     format!(
-        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nverification posture: {} (recent reusable: {}, stale: {}, in flight: {})\nverification ledger: {} (active blockers: {}, local fallback refused: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\n{}mesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nverification posture: {} (recent reusable: {}, stale: {}, in flight: {})\nverification ledger: {} (active blockers: {}, local fallback refused: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
         report.shard_fanout.posture.as_str(),
         report.capabilities.search.as_str(),
+        evidence_line,
         report.capabilities.mesh.as_str(),
         report.capabilities.agent_detection.as_str(),
         report.rch_worker_pressure.status,
@@ -21117,6 +21152,70 @@ mod tests {
             let value = parse_rendered_json(&rendered, context)?;
             ensure_top_level_degraded_mirrors_data_degraded(&value, context)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn status_evidence_admission_keeps_counts_reasons_and_bounds_on_all_surfaces() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.evidence_admission = crate::core::status::EvidenceAdmissionStatusReport {
+            counts: Some(crate::db::EvidenceAdmissionCounts {
+                admitted: 10,
+                quarantined: 5,
+                denied: 2,
+            }),
+            quarantine: Some(crate::db::EvidenceQuarantineReasonReport {
+                inspected: 3,
+                inspected_bytes: 120,
+                quarantine_reasons: std::collections::BTreeMap::from([
+                    ("instruction:destructive_rm_rf".to_owned(), 1),
+                    ("span:tool_result/tool".to_owned(), 1),
+                ]),
+                requires_rescreen: 1,
+                unverified: 0,
+            }),
+        };
+        let expected = report.evidence_admission.data_json();
+        for rendered in [
+            render_status_json(&report),
+            render_status_json_filtered(&report, FieldProfile::Summary),
+            render_status_json_filtered(&report, FieldProfile::Standard),
+        ] {
+            let value: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["data"]["search"]["evidenceAdmission"],
+                &expected,
+                "every status JSON profile preserves bounded evidence admission facts",
+            )?;
+        }
+        let human = super::render_status_human(&report);
+        ensure_contains(
+            &human,
+            "evidence: 10 admitted, 5 quarantined, 2 denied",
+            "human status distinguishes admission from index coverage",
+        )?;
+        ensure_contains(
+            &human,
+            "quarantine reasons: 3/5 inspected; 1 require re-screening; 0 unverified",
+            "human status does not present sampled reasons as the entire quarantine",
+        )?;
+        ensure_contains(
+            &human,
+            "instruction:destructive_rm_rf=1, span:tool_result/tool=1",
+            "human reason histogram has deterministic order",
+        )?;
+        let toon = render_status_toon(&report);
+        ensure_contains(&toon, "evidenceAdmission:", "TOON evidence admission")?;
+        ensure_contains(&toon, "requiresRescreen: 1", "TOON historical quarantine")?;
+        ensure_contains(&toon, "maxRows: 64", "TOON inspection bounds")?;
+
+        report.evidence_admission = Default::default();
+        ensure_contains(
+            &super::render_status_human(&report),
+            "evidence: unavailable",
+            "unavailable evidence counts never render as a measured zero",
+        )?;
         Ok(())
     }
 
