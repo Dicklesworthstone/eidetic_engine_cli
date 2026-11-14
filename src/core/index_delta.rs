@@ -407,6 +407,44 @@ impl DocDigests {
     }
 }
 
+/// Counts alone cannot bind reused native rows to the source snapshot. Check
+/// the finalized tier against the exact digest identities before publication.
+/// The borrowed membership set retains no document bodies or vector values.
+pub(super) fn verify_native_membership(
+    cx: &asupersync::Cx,
+    reader: &frankensearch::VectorIndex,
+    digests: &DocDigests,
+) -> Result<(), IndexRebuildError> {
+    super::index_checkpoint(cx)?;
+    let invalid = |detail: &str| {
+        IndexRebuildError::Index(format!(
+            "native index membership verification failed: {detail}"
+        ))
+    };
+    let documents = &digests.documents;
+    if reader.record_count() != documents.len()
+        || reader.wal_record_count() != 0
+        || reader.tombstone_count() != 0
+    {
+        return Err(invalid(
+            "native tier does not contain exactly the proved source set",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for row in 0..reader.record_count() {
+        super::index_checkpoint(cx)?;
+        let id = reader
+            .doc_id_at(row)
+            .map_err(|_| invalid("native document identity is malformed"))?;
+        if !documents.contains_key(id) || !seen.insert(id) {
+            return Err(invalid(
+                "native document identities differ from the source proof",
+            ));
+        }
+    }
+    super::index_checkpoint(cx)
+}
+
 fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback> {
     let request = asupersync::Cx::current();
     let checkpoint = || {

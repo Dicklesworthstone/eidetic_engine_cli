@@ -22,7 +22,7 @@ use super::super::{
 use super::{
     AdmittedVectors, DOC_DIGESTS_SCHEMA_V3, DocDigests, admit_published_vector, batch,
     copy_generation_files, document_digest, embedder_identity, embedding_input_digest,
-    read_digests, verified_embedder_identity,
+    read_digests, verified_embedder_identity, verify_native_membership,
 };
 
 struct TierRefreshPlan {
@@ -192,7 +192,7 @@ impl TierRefreshPlan {
             if reader.embedder_revision() != producer {
                 return Err(refused("native producer differs from the source proof"));
             }
-            verify_native_membership(cx, &reader, &self.digests.documents)?;
+            verify_native_membership(cx, &reader, &self.digests)?;
             if nonce.is_some_and(|nonce| nonce != reader.publication_nonce()) {
                 return Err(refused(
                     "native fast and quality publication identities differ",
@@ -237,34 +237,6 @@ impl TierRefreshPlan {
             nonce.ok_or_else(|| refused("no native tier was admitted"))?,
         ))
     }
-}
-
-fn verify_native_membership(
-    cx: &asupersync::Cx,
-    reader: &VectorIndex,
-    documents: &BTreeMap<String, String>,
-) -> Result<(), IndexRebuildError> {
-    if reader.record_count() != documents.len()
-        || reader.wal_record_count() != 0
-        || reader.tombstone_count() != 0
-    {
-        return Err(refused(
-            "native tier does not contain exactly the proved source set",
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for row in 0..reader.record_count() {
-        index_checkpoint(cx)?;
-        let id = reader
-            .doc_id_at(row)
-            .map_err(|_| refused("native document identity is malformed"))?;
-        if !documents.contains_key(id) || !seen.insert(id) {
-            return Err(refused(
-                "native document identities differ from the source proof",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn verify_native_pair(directory: &Path, expect_quality: bool) -> Result<(), IndexRebuildError> {

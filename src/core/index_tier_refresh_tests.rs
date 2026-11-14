@@ -524,6 +524,232 @@ fn metadata_beyond_delta_budget_rebuilds_lexical_without_any_vector_inference() 
 }
 
 #[test]
+fn ordinary_delta_verifies_native_membership_before_publication() -> TestResult {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let parent = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    crate::core::run_cli_with_cx(Duration::from_secs(240), |cx| async move {
+        let _root = root;
+        let db = database(&parent)?;
+        let lock = index::IndexPublishLockOwner::acquire(&cx, &db, WORKSPACE)
+            .map_err(|error| error.to_string())?;
+        for variant in [
+            "unchanged",
+            "metadata",
+            "upsert",
+            "removal",
+            "fast-id",
+            "fast-duplicate",
+            "quality-id",
+            "quality-duplicate",
+            "quality-producer",
+            "missing-quality",
+        ] {
+            let live = parent.join(variant);
+            let original = documents(12);
+            let fast = Arc::new(CountingHash::new(64, 17));
+            let quality = Arc::new(CountingHash::new(96, 29));
+            let stack = selected(&fast, Some(&quality));
+            index::publish_full_index_generation_with_stack(
+                &lock,
+                &live,
+                stack.clone(),
+                original.clone(),
+                1,
+                counts(&original)?,
+                || Ok(()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let corrupted = !matches!(variant, "unchanged" | "metadata" | "upsert" | "removal");
+            if variant == "missing-quality" {
+                std::fs::rename(
+                    live.join(index::VECTOR_INDEX_QUALITY_FILE),
+                    parent.join("detached-quality.idx"),
+                )
+                .map_err(|error| error.to_string())?;
+            } else if corrupted {
+                let is_quality = variant.starts_with("quality-");
+                let reader = if is_quality {
+                    index::open_quality_vector_index_read_only(&live)
+                        .map_err(|error| error.detail)?
+                        .ok_or("fixture quality tier is missing")?
+                } else {
+                    index::open_fast_vector_index_read_only(&live)
+                        .map_err(|error| error.detail)?
+                };
+                let revision = if variant == "quality-producer" {
+                    "f".repeat(64)
+                } else {
+                    reader.embedder_revision().to_owned()
+                };
+                let nonce = reader.publication_nonce();
+                let dimension = reader.dimension();
+                let mut values = rows(&reader)?;
+                drop(reader);
+                if variant.ends_with("-id") {
+                    let vector = values.remove("doc-00000").ok_or("fixture source row")?;
+                    values.insert("foreign-document".to_owned(), vector);
+                }
+                let path = live.join(if is_quality {
+                    index::VECTOR_INDEX_QUALITY_FILE
+                } else {
+                    index::VECTOR_INDEX_FAST_FILE
+                });
+                let mut writer = frankensearch::VectorIndex::create_with_revision(
+                    &path,
+                    if is_quality { quality.id() } else { fast.id() },
+                    &revision,
+                    dimension,
+                    frankensearch::index::Quantization::F16,
+                )
+                .map_err(|error| error.to_string())?
+                .with_publication_nonce(nonce);
+                for (id, vector) in values {
+                    let id = if variant.ends_with("-duplicate") && id == "doc-00011" {
+                        "doc-00000".to_owned()
+                    } else {
+                        id
+                    };
+                    writer
+                        .write_record(&id, &vector)
+                        .map_err(|error| error.to_string())?;
+                }
+                writer.finish().map_err(|error| error.to_string())?;
+                if variant.ends_with("-id") {
+                    index::verify_published_tier_counts(&live, 12, true)
+                        .map_err(|error| format!("same-count fixture is invalid: {error}"))?;
+                }
+            }
+            let mut current = original;
+            match variant {
+                "unchanged" => {}
+                "upsert" => current[1].content.push_str(" revised source input"),
+                "removal" => {
+                    let _ = current.pop();
+                }
+                _ => {
+                    current[1]
+                        .metadata
+                        .insert("review".to_owned(), "confirmed".to_owned());
+                }
+            }
+            let before = generation_files(&live)?;
+            let staged = index::stage_delta_generation(
+                &lock,
+                &live,
+                &stack,
+                &current,
+                2,
+                counts(&current)?,
+            )
+            .await;
+            match (corrupted, staged) {
+                (true, Err(index::DeltaStageError::Refused(_))) => {}
+                (false, Ok((stage, _))) => drop(stage),
+                (true, Ok(_)) => {
+                    return Err(format!("{variant}: invalid native membership entered staging"));
+                }
+                (_, Err(index::DeltaStageError::Cancelled(error))) => {
+                    return Err(format!("{variant}: unexpected cancellation: {error}"));
+                }
+                (false, Err(index::DeltaStageError::Refused(reason))) => {
+                    return Err(format!("{variant}: valid delta refused: {reason}"));
+                }
+            }
+            assert_eq!(generation_files(&live)?, before, "{variant}");
+            if variant == "unchanged" {
+                let cancelled = asupersync::Cx::for_testing();
+                cancelled.set_cancel_reason(asupersync::CancelReason::user(
+                    "cancel native membership verification",
+                ));
+                let digests = DocDigests::new(&stack, &current);
+                let result = index::verify_published_tier_counts_with_native_check(
+                    &live,
+                    12,
+                    true,
+                    |reader| super::super::verify_native_membership(&cancelled, reader, &digests),
+                );
+                assert!(
+                    matches!(result, Err(index::IndexRebuildError::Cancelled(_))),
+                    "native membership cancellation must retain its typed reason",
+                );
+            }
+            fast.inputs.store(0, Ordering::SeqCst);
+            quality.inputs.store(0, Ordering::SeqCst);
+            let (_, kind) = index::publish_index_generation_preferring_delta(
+                &lock,
+                &live,
+                stack,
+                current.clone(),
+                2,
+                counts(&current)?,
+                |_| Ok(()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if corrupted {
+                assert!(
+                    matches!(kind, index::PublishedGenerationKind::Full { .. }),
+                    "{variant}",
+                );
+            } else {
+                assert!(
+                    matches!(kind, index::PublishedGenerationKind::Delta),
+                    "{variant}",
+                );
+            }
+            let expected_inputs = if corrupted {
+                current.len()
+            } else {
+                usize::from(variant == "upsert")
+            };
+            assert_eq!(fast.inputs.load(Ordering::SeqCst), expected_inputs, "{variant}");
+            assert_eq!(
+                quality.inputs.load(Ordering::SeqCst),
+                expected_inputs,
+                "{variant}",
+            );
+            let mut expected_ids: Vec<_> =
+                current.iter().map(|document| document.id.clone()).collect();
+            expected_ids.sort();
+            let published_fast = index::open_fast_vector_index_read_only(&live)
+                .map_err(|error| error.detail)?;
+            let published_quality = index::open_quality_vector_index_read_only(&live)
+                .map_err(|error| error.detail)?
+                .ok_or("published quality tier is missing")?;
+            for reader in [&published_fast, &published_quality] {
+                assert_eq!(reader.record_count(), current.len(), "{variant}");
+                assert_eq!(
+                    rows(reader)?.into_keys().collect::<Vec<_>>(),
+                    expected_ids,
+                    "{variant}",
+                );
+            }
+            assert_eq!(
+                published_fast.embedder_revision(),
+                fast.identity().map_err(|error| error.to_string())?.fingerprint(),
+                "{variant}",
+            );
+            assert_eq!(
+                published_quality.embedder_revision(),
+                quality.identity().map_err(|error| error.to_string())?.fingerprint(),
+                "{variant}",
+            );
+            assert_eq!(
+                index::read_index_metadata(&live).generation,
+                Some(2),
+                "{variant}",
+            );
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+#[test]
 fn incomplete_proof_changed_inputs_and_changed_membership_take_full_rebuild() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
     let parent = root

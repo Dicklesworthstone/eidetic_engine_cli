@@ -3970,12 +3970,14 @@ async fn stage_planned_index_delta_with_capacity(
                 ))
             })?;
         publish_lock.checkpoint()?;
-        verify_published_tier_counts(
+        let verified = verify_published_tier_counts_with_native_check(
             staging.path(),
             document_counts.total(),
             stack.quality().is_some(),
-        )
-        .map_err(IndexRebuildError::Index)?;
+            |reader| delta::verify_native_membership(cx, reader, &digests),
+        );
+        publish_lock.checkpoint()?;
+        verified?;
         if delta::embedder_identity(stack) != producer {
             return Err(IndexRebuildError::Index(
                 "embedding producer changed while staging an index delta".to_owned(),
@@ -7500,33 +7502,59 @@ fn verify_published_tier_counts(
     documents_total: u32,
     expect_quality_tier: bool,
 ) -> Result<(), String> {
+    verify_published_tier_counts_with_native_check(
+        index_dir,
+        documents_total,
+        expect_quality_tier,
+        |_| Ok(()),
+    )
+    .map_err(|error| match error {
+        IndexRebuildError::Index(detail) => detail,
+        error => error.to_string(),
+    })
+}
+
+/// Reuse the same native readers for count and source-identity verification.
+/// A cancellation from the source check retains its typed reason so the
+/// publisher never treats interruption as permission to start a full rebuild.
+fn verify_published_tier_counts_with_native_check(
+    index_dir: &Path,
+    documents_total: u32,
+    expect_quality_tier: bool,
+    mut verify_native: impl FnMut(&VectorIndex) -> Result<(), IndexRebuildError>,
+) -> Result<(), IndexRebuildError> {
+    let invalid = IndexRebuildError::Index;
     let expected = usize::try_from(documents_total).unwrap_or(usize::MAX);
-    let fast = open_fast_vector_index_read_only(index_dir).map_err(|fallback| fallback.detail)?;
+    let fast = open_fast_vector_index_read_only(index_dir)
+        .map_err(|fallback| invalid(fallback.detail))?;
     if fast.record_count() != expected {
-        return Err(format!(
+        return Err(invalid(format!(
             "fast-tier persisted document count mismatch: expected {expected}, found {}",
             fast.record_count()
-        ));
+        )));
     }
+    verify_native(&fast)?;
 
-    let quality =
-        open_quality_vector_index_read_only(index_dir).map_err(|fallback| fallback.detail)?;
+    let quality = open_quality_vector_index_read_only(index_dir)
+        .map_err(|fallback| invalid(fallback.detail))?;
     match (expect_quality_tier, quality) {
-        (true, Some(index)) if index.record_count() == expected => {}
+        (true, Some(index)) if index.record_count() == expected => verify_native(&index)?,
         (true, Some(index)) => {
-            return Err(format!(
+            return Err(invalid(format!(
                 "quality-tier persisted document count mismatch: expected {expected}, found {}",
                 index.record_count()
-            ));
+            )));
         }
         (true, None) => {
-            return Err("quality-tier index is missing from a two-tier generation".to_owned());
+            return Err(invalid(
+                "quality-tier index is missing from a two-tier generation".to_owned(),
+            ));
         }
         (false, Some(_)) => {
-            return Err(
+            return Err(invalid(
                 "quality-tier index is present for a generation built without a quality embedder"
                     .to_owned(),
-            );
+            ));
         }
         (false, None) => {}
     }
@@ -7536,33 +7564,34 @@ fn verify_published_tier_counts(
         let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
         let lexical =
             frankensearch::lexical_tantivy::Index::open_in_dir(&lexical_path).map_err(|error| {
-                format!(
+                invalid(format!(
                     "failed to open lexical tier {} for count verification: {error}",
                     lexical_path.display()
-                )
+                ))
             })?;
         let reader: frankensearch::lexical_tantivy::IndexReader = lexical
             .reader_builder()
             .reload_policy(frankensearch::lexical_tantivy::ReloadPolicy::Manual)
             .try_into()
             .map_err(|error| {
-                format!(
+                invalid(format!(
                     "failed to open lexical-tier reader {} for count verification: {error}",
                     lexical_path.display()
-                )
+                ))
             })?;
         reader.reload().map_err(|error| {
-            format!(
+            invalid(format!(
                 "failed to reload lexical-tier reader {} for count verification: {error}",
                 lexical_path.display()
-            )
+            ))
         })?;
-        let actual = usize::try_from(reader.searcher().num_docs())
-            .map_err(|_| "lexical-tier persisted document count does not fit usize".to_owned())?;
+        let actual = usize::try_from(reader.searcher().num_docs()).map_err(|_| {
+            invalid("lexical-tier persisted document count does not fit usize".to_owned())
+        })?;
         if actual != expected {
-            return Err(format!(
+            return Err(invalid(format!(
                 "lexical-tier persisted document count mismatch: expected {expected}, found {actual}"
-            ));
+            )));
         }
     }
 
