@@ -86,7 +86,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// withholds cards whose repair cannot fit without truncation or misattribution.
 /// V25 retains complete bounded repair-source sets rather than teaching only
 /// the latest turns; over-budget episodes retain their successful proof alone.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v25";
+/// V26 mines native code-less rustc parser failures only with their own valid
+/// location and rendered source, preserving the exact retry proof requirement.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v26";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

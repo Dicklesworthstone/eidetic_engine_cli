@@ -128,10 +128,14 @@ impl Fixture {
     }
 
     fn repair(&mut self) -> Fallible<String> {
+        self.repair_text(FIX)
+    }
+
+    fn repair_text(&mut self, text: &str) -> Fallible<String> {
         self.add(
             "message",
             "assistant",
-            json!({"type":"assistant","message":{"role":"assistant","content":FIX}}),
+            json!({"type":"assistant","message":{"role":"assistant","content":text}}),
         )
     }
 
@@ -139,6 +143,120 @@ impl Fixture {
         self.call("verify", COMMAND, CWD)?;
         self.result("verify", "", Some(0))
     }
+}
+
+const SYNTAX: &str = "error: expected expression, found `;`\n --> src/widget.rs:2:17\n  |\n2 |     let value = ;\n  |                 ^ expected expression\nerror: could not compile `widget` (lib) due to 1 previous error\n";
+const SYNTAX_FIX: &str = "I fixed the parser failure by adding the missing initializer expression before the semicolon in src/widget.rs.";
+
+#[test]
+fn native_syntax_failures_produce_cited_idempotent_repairs_and_incident_cards() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    let failed_id = fixture.result("fail", SYNTAX, Some(101))?;
+    let repair_id = fixture.repair_text(SYNTAX_FIX)?;
+    let proof_id = fixture.verify()?;
+    let before = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.fingerprints_recorded, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.repair_links_recorded, 2);
+    assert_eq!(report.incident_cards_recorded, 1);
+    let diagnostic = structured_error_diagnostics(SYNTAX)
+        .into_iter()
+        .next()
+        .ok_or("syntax diagnostic")?;
+    let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+    assert!(recall.exact);
+    assert!(recall.helpful_repairs.contains(&repair_id));
+    assert_eq!(recall.proof_links, vec![proof_id]);
+    let card_id = incident_card_id(WS, &failed_id);
+    assert!(recall.helpful_repairs.contains(&card_id));
+    let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    let seed = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
+    assert!(seed.contains("prior fix:"));
+    assert!(seed.contains("missing initializer"));
+    assert!(!seed.contains("let value = ;"));
+    let links = fixture
+        .db
+        .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+    assert_eq!(links.len(), 3);
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(failed_id.as_str()))
+    );
+    for source in before {
+        let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+        assert_eq!(source.excerpt, after.excerpt);
+        assert_eq!(source.content_hash, after.content_hash);
+        assert_eq!(source.metadata_json, after.metadata_json);
+        assert_eq!(
+            source.canonical_provenance_uri(),
+            after.canonical_provenance_uri()
+        );
+    }
+    let repeated = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(repeated.incident_cards_recorded, 0);
+    assert_eq!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        links.len()
+    );
+    Ok(())
+}
+
+#[test]
+fn syntax_mentions_and_missing_source_context_do_not_create_repair_history() -> TestResult {
+    for text in [
+        format!("Compiler documentation example:\n{SYNTAX}"),
+        "error: expected expression, found `;`".to_owned(),
+        SYNTAX.replace(" --> src/widget.rs:2:17\n", ""),
+        SYNTAX.replace("2 |", "3 |"),
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", &text, Some(101))?;
+        fixture.repair_text(SYNTAX_FIX)?;
+        fixture.verify()?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 0, "{text}");
+        assert_eq!(report.fingerprints_recorded, 0);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn syntax_repairs_still_require_the_same_completed_nonfailing_retry() -> TestResult {
+    for (command, cwd, body, exit) in [
+        ("cargo check --locked --lib", CWD, "", Some(0)),
+        (COMMAND, "/tmp/other-cargo", "", Some(0)),
+        (COMMAND, CWD, "", None),
+        (COMMAND, CWD, SYNTAX, Some(0)),
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", SYNTAX, Some(101))?;
+        fixture.repair_text(SYNTAX_FIX)?;
+        fixture.call("verify", command, cwd)?;
+        fixture.result("verify", body, exit)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert!(report.failures_seen >= 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    Ok(())
 }
 
 #[test]

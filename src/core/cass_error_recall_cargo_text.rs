@@ -24,6 +24,69 @@ struct Diagnostic<'a> {
     code: Option<&'a str>,
     message: &'a str,
     causes: Vec<&'a str>,
+    syntax_source: Option<SyntaxSource>,
+}
+
+/// Code-less parser wording is less distinctive than an E#### header. Require
+/// its own valid primary location and matching rendered source row before it
+/// can become a fingerprint; another diagnostic's source cannot complete it.
+#[derive(Default)]
+struct SyntaxSource {
+    line: Option<u32>,
+    rendered: bool,
+}
+
+impl SyntaxSource {
+    fn observe(&mut self, line: &str) -> Result<(), ()> {
+        let line = line.trim_start();
+        if let Some(location) = line.strip_prefix("--> ") {
+            let (path_line, column) = location.rsplit_once(':').ok_or(())?;
+            let (path, number) = path_line.rsplit_once(':').ok_or(())?;
+            let number = number.parse::<u32>().map_err(|_| ())?;
+            if path.trim().is_empty()
+                || number == 0
+                || !column.parse::<u32>().is_ok_and(|column| column > 0)
+            {
+                return Err(());
+            }
+            if self.line.is_none() {
+                self.line = Some(number);
+            }
+        } else if let Some((number, _)) = line.split_once(" |")
+            && number.parse::<u32>().ok().is_some_and(|number| {
+                number > 0 && self.line == Some(number)
+            })
+        {
+            self.rendered = true;
+        }
+        Ok(())
+    }
+}
+
+fn syntax_message(message: &str) -> bool {
+    if message == "this file contains an unclosed delimiter" {
+        return true;
+    }
+    for prefix in [
+        "mismatched closing delimiter: ",
+        "unexpected closing delimiter: ",
+    ] {
+        if let Some(delimiter) = message.strip_prefix(prefix) {
+            return matches!(delimiter, "`)`" | "`]`" | "`}`");
+        }
+    }
+    message
+        .strip_prefix("expected ")
+        .and_then(|rest| rest.split_once(", found "))
+        .is_some_and(|(expected, found)| {
+            !expected.trim().is_empty()
+                && !found.trim().is_empty()
+                && message
+                    .bytes()
+                    .filter(|byte| *byte == b'`')
+                    .count()
+                    .is_multiple_of(2)
+        })
 }
 
 fn quoted(text: &str) -> Result<(&str, &str), ()> {
@@ -39,7 +102,10 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
     let Some(message) = line.strip_prefix("error: ") else {
         return Ok(None);
     };
-    let origin = if let Some(rest) = message.strip_prefix("failed to get ") {
+    let syntax = syntax_message(message);
+    let origin = if syntax {
+        Origin::Rustc
+    } else if let Some(rest) = message.strip_prefix("failed to get ") {
         let (_, rest) = quoted(rest)?;
         let rest = rest
             .strip_prefix(" as a dependency of package ")
@@ -101,6 +167,7 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
         code: None,
         message,
         causes: Vec::new(),
+        syntax_source: syntax.then(SyntaxSource::default),
     }))
 }
 
@@ -123,6 +190,7 @@ fn coded_diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
         code: Some(code),
         message,
         causes: Vec::new(),
+        syntax_source: None,
     }))
 }
 
@@ -250,7 +318,14 @@ fn append(
     current: Diagnostic<'_>,
     keys: &mut BTreeSet<String>,
     output: &mut Vec<CanonicalDiagnostic>,
-) {
+) -> Result<(), ()> {
+    if current
+        .syntax_source
+        .as_ref()
+        .is_some_and(|source| !source.rendered)
+    {
+        return Err(());
+    }
     let mut description = current.message.to_owned();
     for cause in current.causes {
         description.push_str("; caused by: ");
@@ -264,6 +339,7 @@ fn append(
     if keys.insert(canonical.layered_key().key) && output.len() < MAX_DIAGNOSTICS_PER_FAILURE {
         output.push(canonical);
     }
+    Ok(())
 }
 
 /// Interpret coded and code-less diagnostics through the same complete native
@@ -340,7 +416,7 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
                 return Err(());
             }
             if let Some(previous) = current.replace(next) {
-                append(previous, &mut keys, &mut output);
+                append(previous, &mut keys, &mut output)?;
             }
             continue;
         }
@@ -362,6 +438,12 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
         }
         if current.is_none() {
             return Ok(None);
+        }
+        if let Some(source) = current
+            .as_mut()
+            .and_then(|current| current.syntax_source.as_mut())
+        {
+            source.observe(line)?;
         }
         if line == "Caused by:" {
             cause_pending = true;
@@ -385,7 +467,7 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
         return Err(());
     }
     if let Some(current) = current {
-        append(current, &mut keys, &mut output);
+        append(current, &mut keys, &mut output)?;
         Ok(Some(output))
     } else {
         Ok(None)
@@ -444,6 +526,137 @@ mod tests {
     const CODED: &str = "error[E0308]: mismatched types\n --> src/widget.rs:2:1\n  |\n2 | fn widget() -> bool { 7 }\n  |                      ^ expected bool\n";
     const LINKER: &str =
         "error: linking with `cc` failed: exit status: 1\n  = note: undefined symbol\n";
+
+    fn syntax_report(message: &str) -> String {
+        format!(
+            "error: {message}\n --> src/widget.rs:2:17\n  |\n2 |     let value = ;\n  |                 ^ expected expression\nerror: could not compile `widget` (lib) due to 1 previous error\n"
+        )
+    }
+
+    #[test]
+    fn code_less_rustc_parser_reports_share_native_json_fingerprints() {
+        for message in [
+            "expected expression, found `;`",
+            "expected identifier, found keyword `fn`",
+            "expected `;`, found `}`",
+            "expected one of `.`, `;`, `?`, `else`, or an operator, found `}`",
+            "this file contains an unclosed delimiter",
+            "mismatched closing delimiter: `]`",
+            "unexpected closing delimiter: `}`",
+        ] {
+            let text = syntax_report(message);
+            let expected = vec![from_rustc(None, message)];
+            let json = serde_json::json!({
+                "$message_type": "diagnostic", "level": "error",
+                "message": message, "code": null
+            })
+            .to_string();
+            assert_eq!(decode(&text).unwrap(), Some(expected.clone()));
+            assert_eq!(failure_diagnostics(&optimistic(&text)), expected);
+            assert_eq!(structured_error_diagnostics(&text), expected);
+            assert_eq!(structured_error_diagnostics(&json), expected);
+            assert_eq!(expected[0].canonical_code, None);
+            assert_eq!(expected[0].tool.as_str(), "rustc");
+            assert!(optimistic(&text).failed());
+            assert!(!optimistic(&text).succeeded());
+        }
+    }
+
+    #[test]
+    fn syntax_context_is_required_for_each_diagnostic_without_borrowing_a_neighbors() {
+        let header = "error: expected expression, found `;`\n";
+        let report = syntax_report("expected expression, found `;`");
+        for text in [
+            header.to_owned(),
+            report.replace(" --> src/widget.rs:2:17\n", ""),
+            report.replace("2 |     let value = ;\n", ""),
+            report.replace("2 |", "3 |"),
+            report.replace(":2:17", ":0:17"),
+            report.replace(":2:17", ":2:0"),
+            report.replace(":2:17", ":x:17"),
+            report.replace("src/widget.rs", ""),
+            format!("{CODED}{header}"),
+            format!("{header}{CODED}"),
+            format!("{report}{header}"),
+        ] {
+            assert!(decode(&text).is_err(), "{text}");
+            assert!(failure_diagnostics(&optimistic(&text)).is_empty());
+            assert!(structured_error_diagnostics(&text).is_empty());
+        }
+        let windows = report.replace("src/widget.rs", "C:\\work\\widget.rs");
+        assert_eq!(decode(&windows).unwrap(), decode(&report).unwrap());
+    }
+
+    #[test]
+    fn syntax_examples_and_unknown_headers_do_not_invent_failure_classes() {
+        let report = syntax_report("expected expression, found `;`");
+        for text in [
+            format!("An example:\n{report}"),
+            format!("```text\n{report}\n```"),
+            serde_json::json!({"example": report}).to_string(),
+            "expected expression, found `;`".to_owned(),
+            "error: an unrelated shell failure".to_owned(),
+        ] {
+            assert!(decode(&text).unwrap().is_none(), "{text}");
+            assert!(structured_error_diagnostics(&text).is_empty());
+            assert!(failure_diagnostics(&optimistic(&text)).is_empty());
+        }
+        for message in [
+            "expected expression, found `;",
+            "expected , found `;`",
+            "expected expression, found ",
+            "mismatched closing delimiter: `x`",
+            "unexpected closing delimiter: `}` trailing text",
+        ] {
+            assert!(
+                structured_error_diagnostics(&syntax_report(message)).is_empty(),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn styled_syntax_and_mixed_reports_keep_complete_validation_and_masked_templates() {
+        let report = syntax_report("expected expression, found `;`");
+        let expected = structured_error_diagnostics(&report);
+        assert_eq!(expected.len(), 1);
+        for text in [
+            format!("\u{1b}[31m{report}\u{1b}[0m"),
+            report.replace("expected", "ex\u{1b}[1mpected\u{1b}[0m"),
+            report.replace('\n', "\r\n"),
+            report.replace("src/widget.rs:2:17", "src/界.rs:2:39"),
+        ] {
+            assert_eq!(structured_error_diagnostics(&text), expected);
+            assert_eq!(failure_diagnostics(&optimistic(&text)), expected);
+            assert_eq!(
+                symptom_line(&optimistic(&text)),
+                symptom_line(&optimistic(&report))
+            );
+        }
+        for mixed in [format!("{CODED}{report}"), format!("{report}{CODED}")] {
+            let diagnostics = structured_error_diagnostics(&mixed);
+            assert_eq!(diagnostics.len(), 2);
+            assert!(diagnostics.contains(&expected[0]));
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.layered_key().key == "rustc:E0308")
+            );
+        }
+        let secret = format!("ghp_{}", "Q".repeat(36));
+        let secret_report = syntax_report(&format!("expected identifier, found `{secret}`"));
+        let masked = structured_error_diagnostics(&secret_report);
+        assert_eq!(masked.len(), 1);
+        assert!(!format!("{masked:?}").contains(&secret));
+        for suffix in ["\u{1b}[31", "unrelated output", "error[E0308]: "] {
+            let text = format!("{report}{suffix}");
+            assert!(decode(&text).is_err());
+            assert!(structured_error_diagnostics(&text).is_empty());
+        }
+        let oversized = format!("{report}  {}", "x".repeat(MAX_SCANNED_OUTPUT_BYTES));
+        assert!(decode(&oversized).is_err());
+        assert!(failure_diagnostics(&optimistic(&oversized)).is_empty());
+    }
 
     #[test]
     fn standalone_rustc_reports_share_native_keys_and_original_symptoms() {

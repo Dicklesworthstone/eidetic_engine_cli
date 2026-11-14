@@ -85,7 +85,7 @@ are checked even when Vitest merges several named failures into one error block.
 
 Only the first diagnostic line enters existing redaction and canonicalization;
 test identities, diffs and stack frames do not become fingerprint text.
-`cass_error_recall.v25` reconsiders existing imports on their next import.
+`cass_error_recall.v26` reconsiders existing imports on their next import.
 Verified repairs reach incident cards and review candidates; durable memories
 still require explicit validation and apply.
 
@@ -108,6 +108,23 @@ whole repair. Existing source admission and command-context checks still apply;
 durable lessons also retain their refutation checks. Re-import and live readers
 revalidate historical cards and repair links without rewriting source evidence
 or deleting the recorded history.
+
+### Native code-less Rust parser diagnostics
+
+Native rustc parser reports for unexpected tokens and mismatched, unexpected,
+or unclosed delimiters enter the same template fingerprint path as equivalent
+structured rustc JSON. Each code-less parser diagnostic must carry a valid
+primary source location and its matching numbered source row. A bare error
+phrase, quoted example, unrelated JSON payload, or another diagnostic's source
+context cannot establish that failure. Complete bounded reports, including
+mixed coded and code-less errors, retain the existing terminal decoding and
+suffix validation.
+
+Only the redacted and normalized header enters the fingerprint and symptom;
+source code and location coordinates are not retained as diagnostic text.
+Repair credit still requires a later completed retry of the same invocation
+and execution context. An optimistic zero exit over another error, an unfinished
+retry, or a changed command cannot create a helpful repair or incident card.
 
 ## Consequences
 
