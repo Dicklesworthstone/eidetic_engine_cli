@@ -545,8 +545,9 @@ pub fn store_unreadable<'a>(checks: impl IntoIterator<Item = (&'a str, Option<&'
 /// guidance for the database, and the repairs that read it (index rebuild,
 /// migration) are skipped: running them crashes or builds over lost data
 /// (bd-xa6ud; bd-rnqxs for the missing store).
-/// Otherwise the finding is keyed on the error code, and any other failing
-/// `search_index` check is repaired as stale.
+/// Otherwise the finding is keyed on the error code, and any other coded
+/// `search_index` failure is repaired as stale. An unmeasured check without a
+/// code has no repair to dispatch.
 #[must_use]
 pub fn fix_finding_for_check(
     error_code: Option<&str>,
@@ -645,7 +646,7 @@ pub fn fix_finding_for_check(
         // directory. `--fix` is opt-in, and a detector whose repair never runs
         // is the gap this bead exists to close.
         Some("EE-E101") if check_name == "workspace" => Some("workspace_config_malformed_toml"),
-        _ if check_name == "search_index" => Some("search_index_stale"),
+        Some(_) if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
     }
 }
@@ -906,6 +907,12 @@ mod tests {
             "with no dispatch, --fix must report the shard problem as Manual"
         );
         assert_eq!(fix_finding_for_check(None, "database", false), None);
+        assert_eq!(fix_finding_for_check(None, "search_index", false), None);
+        assert_eq!(
+            fix_mode_for_check(None, "search_index", false),
+            (FixMode::Manual, None),
+            "an unmeasured index must not trigger a rebuild"
+        );
         assert_eq!(
             fix_finding_for_check(Some("EE-E304"), "database", false),
             None

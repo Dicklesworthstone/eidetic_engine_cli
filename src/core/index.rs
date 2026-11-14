@@ -11342,6 +11342,7 @@ impl IndexStatusDegradation {
 pub enum IndexStatusError {
     Database(DbError),
     Io(std::io::Error),
+    GenerationInspectionUnavailable(String),
     SourceInspectionDeferred {
         db_generation: u64,
         index_generation: Option<u64>,
@@ -11354,6 +11355,9 @@ impl IndexStatusError {
         match self {
             Self::Database(_) => Some("ee doctor --json"),
             Self::Io(_) => Some("Check workspace path permissions"),
+            Self::GenerationInspectionUnavailable(_) => {
+                Some("ee index status --workspace . --json")
+            }
             Self::SourceInspectionDeferred { .. } => Some("ee index rebuild --workspace ."),
         }
     }
@@ -11364,6 +11368,9 @@ impl std::fmt::Display for IndexStatusError {
         match self {
             Self::Database(e) => write!(f, "Database error: {e}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::GenerationInspectionUnavailable(reason) => {
+                write!(f, "Search index readiness was not measured: {reason}")
+            }
             Self::SourceInspectionDeferred {
                 db_generation,
                 index_generation,
@@ -11454,6 +11461,19 @@ fn get_index_status_with_connection_mode(
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
 
+    // A DB snapshot alone cannot pin files exchanged by an index publisher.
+    // Hold the same shared parent-directory lease used by search until the
+    // metadata, counts and native producer checks have all finished. A nested
+    // shared lease is safe when the search caller already owns one. Passive
+    // status never waits for the publisher or creates a lock sidecar.
+    #[cfg(unix)]
+    let generation_lease = IndexGenerationLease::try_read_for_inspection(&index_dir)
+        .map_err(|error| IndexStatusError::GenerationInspectionUnavailable(error.to_string()))?;
+    #[cfg(unix)]
+    let inspect_generation = generation_lease.is_some();
+    #[cfg(not(unix))]
+    let inspect_generation = true;
+
     // Passive readiness must work while another process owns the writer gate.
     // Counts, admission, source generation and model selection also have to
     // describe one database snapshot; otherwise a write between the corpus
@@ -11474,7 +11494,11 @@ fn get_index_status_with_connection_mode(
     };
 
     // Check index directory
-    let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
+    let (index_exists, index_file_count, index_size_bytes) = if inspect_generation {
+        inspect_index_dir(&index_dir)?
+    } else {
+        (false, 0, 0)
+    };
 
     let mut selected_embedders = None;
     let (db_document_counts, evidence_admission, db_generation, embedding) = if let Some(db) =
@@ -11485,7 +11509,11 @@ fn get_index_status_with_connection_mode(
             // corpus merely to report counts before retrieval can decide to
             // degrade. Explicit rebuild (including dry-run) owns that work.
             if let Some(generation) = db.get_workspace_generation(&workspace_id)? {
-                let metadata = read_index_metadata_with_identity(&index_dir, Ok(None));
+                let metadata = if inspect_generation {
+                    read_index_metadata_with_identity(&index_dir, Ok(None))
+                } else {
+                    IndexMetadataStatus::default()
+                };
                 if metadata.generation != Some(generation)
                     && !workspace_index_source_rows_fit(db, &workspace_id, 2048).map_err(
                         |error| IndexStatusError::Io(std::io::Error::other(error.to_string())),
@@ -11497,7 +11525,7 @@ fn get_index_status_with_connection_mode(
                     });
                 }
             }
-            let fast = if caller_holds_snapshot {
+            let fast = if caller_holds_snapshot && inspect_generation {
                 published_corpus_counts_at_current_generation(db, &workspace_id, &index_dir)?
             } else {
                 None
@@ -11511,11 +11539,12 @@ fn get_index_status_with_connection_mode(
                     Some(embedder) => (EmbedderDescriptor::from_embedder(embedder), None),
                     None => workspace_embedder_descriptors(db, &workspace_id)?,
                 };
-                let vector_coverage = embedding_vector_coverage(
-                    &index_dir,
-                    counts.total(),
-                    read_fast_vector_record_count,
-                );
+                let vector_coverage =
+                    embedding_vector_coverage(&index_dir, counts.total(), |path| {
+                        inspect_generation
+                            .then(|| read_fast_vector_record_count(path))
+                            .flatten()
+                    });
                 let records = db.list_embedding_metadata_records(&workspace_id)?;
                 let embedding = embedding_posture_from_records(
                     &descriptors.0,
@@ -11548,7 +11577,9 @@ fn get_index_status_with_connection_mode(
     let evidence_totals = EvidenceAdmissionTotals::from_report(&evidence_admission);
 
     // Read index metadata if available.
-    let metadata_status = if require_vector_identity {
+    let metadata_status = if !inspect_generation {
+        IndexMetadataStatus::default()
+    } else if require_vector_identity {
         read_index_metadata_for_selection(&index_dir, fast_embedder, selected_embedders.as_ref())
     } else {
         read_index_metadata_with_identity(&index_dir, Ok(None))
@@ -25865,9 +25896,23 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let writer = DbConnection::open_file(&options.resolve_database_path())
             .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        let publisher = std::fs::File::open(index_parent(&options.resolve_index_dir()))
+            .map_err(|error| error.to_string())?;
         let workspace_id = fixture.workspace_id.clone();
         BEFORE_INDEX_STATUS_GENERATION_HOOK.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
+                #[cfg(unix)]
+                assert!(
+                    matches!(
+                        rustix::fs::flock(
+                            &publisher,
+                            rustix::fs::FlockOperation::NonBlockingLockExclusive
+                        ),
+                        Err(rustix::io::Errno::WOULDBLOCK)
+                    ),
+                    "index publication must remain excluded throughout source inspection"
+                );
                 writer.insert_memory(
                     "mem_00000000000000000000000002",
                     &crate::db::CreateMemoryInput {
@@ -25909,6 +25954,102 @@ mod tests {
         let next = get_index_status(&options).map_err(|error| error.to_string())?;
         assert_eq!(next.db_memory_count, 2);
         assert_eq!(next.db_generation, generation_after);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_status_reports_publisher_contention_without_claiming_corruption() -> TestResult {
+        use rustix::fs::{FlockOperation, flock};
+
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let stack = hash_fallback_embedder_stack();
+        let _selection = install_test_workspace_embedder(&fixture.workspace_id, stack.clone());
+        let snapshot = collect_workspace_index_source_snapshot(&fixture.db, &fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        let index_dir = fixture.options.resolve_index_dir();
+        let stats = build_index_generation_sync(&index_dir, stack, snapshot.documents)?;
+        validate_built_generation(&index_dir, stats, snapshot.document_counts)?;
+        write_index_metadata(
+            &index_dir,
+            snapshot.generation,
+            snapshot.document_counts,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+        };
+        let ready = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(ready.health, IndexHealth::Ready);
+        assert_eq!(ready.index_document_count, Some(1));
+        let before = index_regular_file_snapshot(&index_dir)?;
+        let publisher =
+            std::fs::File::open(index_parent(&index_dir)).map_err(|error| error.to_string())?;
+        flock(&publisher, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        let failed = get_index_status(&options).expect_err("held publisher must refuse inspection");
+        assert!(matches!(
+            failed,
+            IndexStatusError::GenerationInspectionUnavailable(_)
+        ));
+        assert!(failed.to_string().contains("not measured"));
+        assert!(failed.to_string().contains("busy"));
+        assert!(
+            failed
+                .repair_hint()
+                .is_some_and(|repair| !repair.contains("rebuild"))
+        );
+        assert_eq!(index_regular_file_snapshot(&index_dir)?, before);
+        drop(publisher);
+        let recovered = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(recovered.health, IndexHealth::Ready);
+        assert_eq!(recovered.index_generation, ready.index_generation);
+        assert_eq!(index_regular_file_snapshot(&index_dir)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_status_keeps_an_absent_parent_observation_when_creation_races() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let _selection = install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let index_dir = fixture
+            .options
+            .workspace_path
+            .join("new-index-parent/index");
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+        };
+        assert!(!index_parent(&index_dir).exists());
+        BEFORE_INDEX_STATUS_GENERATION_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::fs::create_dir_all(&index_dir).expect("concurrent index parent creation");
+                std::fs::write(index_dir.join(INDEX_METADATA_FILE), b"{}")
+                    .expect("concurrent incomplete metadata creation");
+                Ok(())
+            }));
+        });
+        let first = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert_eq!(first.db_memory_count, 1);
+        assert_eq!(first.health, IndexHealth::Missing);
+        assert!(!first.index_exists);
+        assert_eq!(first.index_generation, None);
+        assert_eq!(first.index_file_count, 0);
+        assert!(first.last_check_error.is_none());
+        let next = get_index_status(&options).map_err(|error| error.to_string())?;
+        assert!(
+            next.index_exists,
+            "the next leased inspection must see the creation"
+        );
+        assert!(
+            next.last_check_error.is_some(),
+            "the new incomplete generation must be refused"
+        );
         Ok(())
     }
 

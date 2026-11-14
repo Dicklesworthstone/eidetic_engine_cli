@@ -3875,6 +3875,14 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
                 error_codes::INDEX_CORRUPTED,
             ),
         },
+        Err(error @ IndexStatusError::GenerationInspectionUnavailable(_)) => CheckResult {
+            name: "search_index",
+            severity: CheckSeverity::Warning,
+            message: error.to_string(),
+            error_code: None,
+            repair: Some("ee index status --workspace . --json"),
+            tier: CheckTier::Core,
+        },
         Err(error) => CheckResult::warning(
             "search_index",
             format!("Search index readiness check failed: {error}"),
@@ -6586,6 +6594,73 @@ mod tests {
             Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
         );
         assert!(check.message.contains("freshness is unverified"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_search_index_keeps_publication_contention_unmeasured() -> TestResult {
+        use crate::core::doctor_fixers::{FixMode, fix_finding_for_check, fix_mode_for_check};
+        use crate::core::index::install_test_workspace_embedder;
+        use crate::search::{EmbedderStack, HashEmbedder};
+        use rustix::fs::{FlockOperation, flock};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let connection =
+            DbConnection::open_file(ee_dir.join("ee.db")).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            insert_canary_memory(&connection, &workspace_id).status,
+            IntegrityCanaryStatus::Created,
+            "the source store must be readable",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let _selection = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(Arc::new(HashEmbedder::jl_384(11)), None),
+        );
+
+        let publisher = std::fs::File::open(&ee_dir).map_err(|error| error.to_string())?;
+        flock(&publisher, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        let check = check_search_index(Some(&workspace));
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert!(check.message.contains("not measured"));
+        assert!(check.message.contains("busy"));
+        assert_eq!(check.error_code, None);
+        assert_eq!(check.repair, Some("ee index status --workspace . --json"));
+        assert_eq!(fix_finding_for_check(None, check.name, false), None);
+        assert_eq!(
+            fix_mode_for_check(None, check.name, false),
+            (FixMode::Manual, None)
+        );
+        assert!(!ee_dir.join("index").exists());
+
+        drop(publisher);
+        let after = check_search_index(Some(&workspace));
+        assert_eq!(after.error_code, Some(error_codes::INDEX_NOT_FOUND));
+        assert_eq!(
+            fix_finding_for_check(after.error_code.map(|code| code.id), after.name, false),
+            Some("search_index_missing"),
+            "a completed inspection must retain the actual missing-index repair"
+        );
+        Ok(())
     }
 
     #[test]
