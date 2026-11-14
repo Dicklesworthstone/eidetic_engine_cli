@@ -189,22 +189,22 @@ check_closure_lint_drift() {
     fi
 
     if [ ! -f "$CLOSURE_REPORT" ]; then
-        return 0
+        guard_input_error "closure-lint: report $CLOSURE_REPORT is missing after audit; cannot establish tracked violations"
     fi
 
     # This is the instance verify.sh:958 leans on for its closure-lint
     # excuse, so a swallowed error here does not merely skip a check -- it
     # forgives a red linter. Fail closed (bd-ry56h).
     local violation_count
-    read_json_metric "$CLOSURE_REPORT" '.count // 0' "closure-lint"
+    read_json_metric "$CLOSURE_REPORT" 'if (.count | type) == "number" and (.count | floor) == .count and .count >= 0 then .count else error("count must be a nonnegative integer") end' "closure-lint"
     violation_count="$JSON_METRIC"
 
     if [ "$violation_count" -gt 0 ]; then
         local array_len
-        read_json_metric "$CLOSURE_REPORT" '(.violations // []) | length' "closure-lint.violations"
+        read_json_metric "$CLOSURE_REPORT" 'if (.violations | type) == "array" then (.violations | length) else error("violations must be an array") end' "closure-lint.violations"
         array_len="$JSON_METRIC"
-        if [ "$array_len" -lt "$violation_count" ]; then
-            add_drift "closure-lint" "Gate reports count=$violation_count but .violations array holds only $array_len entry/entries"
+        if [ "$array_len" -ne "$violation_count" ]; then
+            add_drift "closure-lint" "Gate reports count=$violation_count but .violations array holds $array_len entry/entries"
             return 0
         fi
 
@@ -393,6 +393,41 @@ EOF
         arm "TWIN: unknown --gate=closure_lint exits 2 and writes no verdict report" "true"
     else
         arm "TWIN: unknown --gate=closure_lint exits 2 and writes no verdict report (got rc=$rc)" "false"
+    fi
+
+    # Arm 6: a missing closure report, even after an audit attempt, is never clean.
+    mkdir -p "$scratch/a6/.beads"
+    cp "$scratch/a1/.beads/issues.jsonl" "$scratch/a6/.beads/issues.jsonl"
+    rc=0
+    (cd "$scratch/a6" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    if [ "$rc" -eq 2 ] && [ ! -f "$scratch/a6/.verification-drift-report.json" ]; then
+        arm "TWIN: missing closure report cannot authorize a pass (rc=2)" "true"
+    else
+        arm "TWIN: missing closure report incorrectly handled (got rc=$rc)" "false"
+    fi
+
+    # Arm 7: malformed count is an instrument failure, not zero violations.
+    mkdir -p "$scratch/a7/.beads"
+    cp "$scratch/a1/.beads/issues.jsonl" "$scratch/a7/.beads/issues.jsonl"
+    printf '%s\n' '{"count":null,"violations":[]}' > "$scratch/a7/.closure-lint-report.json"
+    rc=0
+    (cd "$scratch/a7" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        arm "TWIN: null count cannot silently become zero (rc=2)" "true"
+    else
+        arm "TWIN: null count incorrectly handled (got rc=$rc)" "false"
+    fi
+
+    # Arm 8: a report with uncounted violations cannot be treated as complete.
+    mkdir -p "$scratch/a8/.beads"
+    cp "$scratch/a1/.beads/issues.jsonl" "$scratch/a8/.beads/issues.jsonl"
+    printf '%s\n' '{"count":1,"violations":[{"bead":"closed-demo","surface":"demo"},{"bead":"closed-extra","surface":"extra"}]}' > "$scratch/a8/.closure-lint-report.json"
+    rc=0
+    (cd "$scratch/a8" && "$script_path" --gate=closure-lint --json >/dev/null 2>&1) || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        arm "TWIN: count smaller than violations array cannot pass (rc=1)" "true"
+    else
+        arm "TWIN: count smaller than violations array incorrectly handled (got rc=$rc)" "false"
     fi
 
     echo "[verification-drift-guard] self-test: $((total - failed))/$total arms passed"
