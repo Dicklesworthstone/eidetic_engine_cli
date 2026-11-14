@@ -2901,9 +2901,67 @@ impl SearchCandidateFilter<'_> {
             Self::Workspace {
                 connection,
                 filters,
-            } => typed_memory_hit_matches(connection, hit, filters.kind, filters.fields),
+            } => {
+                if filters.is_empty() {
+                    Ok(true)
+                } else {
+                    typed_memory_hit_matches(connection, hit, filters.kind, filters.fields)
+                }
+            }
             Self::Global(ids) => Ok(ids.contains(&hit.doc_id)),
         }
+    }
+
+    /// Count candidates that can survive the final live admission gates.
+    /// Keep the original hits untouched: the final gates own diagnostics,
+    /// canonical metadata, and strict scope's all-results-withheld decision.
+    fn live_admitted_ids(
+        &self,
+        options: &SearchOptions,
+        hits: &[SearchHit],
+    ) -> Option<BTreeSet<String>> {
+        let Self::Workspace { connection, .. } = self else {
+            return None;
+        };
+        let connection = *connection;
+        // Strict scope is applied after the relevance floor. This probe only
+        // counts eligible candidates; retaining rejected hits below ensures
+        // the final gate still sees every relevant scope violation.
+        let admission_options = SearchOptions {
+            strict_scope: false,
+            ..options.clone()
+        };
+        let mut probe_degraded = Vec::new();
+        let hits = apply_live_evidence_visibility(
+            &admission_options,
+            hits.to_vec(),
+            &mut probe_degraded,
+            Some(connection),
+        );
+        let hits = rule_admission::admit_hits(
+            &admission_options,
+            hits,
+            &mut probe_degraded,
+            Some(connection),
+        );
+        let hits = apply_tombstone_visibility_collecting(
+            &admission_options,
+            hits,
+            &mut probe_degraded,
+            Some(connection),
+            None,
+        );
+        let (hits, _) = apply_memory_scope_visibility_with_metadata_mode_collecting(
+            &admission_options,
+            hits,
+            &mut probe_degraded,
+            Some(connection),
+            false,
+            None,
+            None,
+        );
+        let hits = apply_mesh_query_visibility(hits, &mut probe_degraded);
+        Some(hits.into_iter().map(|hit| hit.doc_id).collect())
     }
 }
 
@@ -11136,17 +11194,17 @@ async fn run_search_inner_with_performance(
             applied: source_mode.applied,
         })
     } else {
-        let candidate_filter = if memory_filters.is_empty() {
-            SearchCandidateFilter::Unfiltered
-        } else {
-            SearchCandidateFilter::Workspace {
-                connection: read_connection.ok_or_else(|| {
-                    SearchError::Index(format!(
-                        "Database not found at {}; typed memory filters require an initialized workspace",
-                        options.resolve_database_path().display()
-                    ))
-                })?,
+        let candidate_filter = match read_connection {
+            Some(connection) => SearchCandidateFilter::Workspace {
+                connection,
                 filters: memory_filters,
+            },
+            None if memory_filters.is_empty() => SearchCandidateFilter::Unfiltered,
+            None => {
+                return Err(SearchError::Index(format!(
+                    "Database not found at {}; typed memory filters require an initialized workspace",
+                    options.resolve_database_path().display()
+                )));
             }
         };
         search_filtered_sync_with_performance(
@@ -15638,10 +15696,10 @@ fn search_sync(
     .map_err(|error| error.to_string())
 }
 
-/// Refill typed-filter searches from the same leased index generation. A
-/// fixed unfiltered top-K can contain no matching memories even when many
-/// exist deeper in the index. Widen only such requests, preserving the full
-/// quality-scoring pool and bounding the work independently of corpus size.
+/// Refill typed-filter and live-admission searches from the same leased index
+/// generation. A fixed unfiltered top-K can contain no eligible candidates even
+/// when they exist deeper in the index. Preserve the full quality-scoring pool
+/// and bound the work independently of corpus size.
 #[allow(clippy::too_many_arguments)]
 async fn search_filtered_sync_with_performance(
     cx: &asupersync::Cx,
@@ -15743,6 +15801,12 @@ async fn search_filtered_sync_with_performance(
         }
         retrieval.hits = filtered;
         trace.record_elapsed("search::memoryFilters", filter_start);
+        let admission_start = Instant::now();
+        let live_admitted_ids = candidate_filter.live_admitted_ids(options, &retrieval.hits);
+        let matching_count = live_admitted_ids
+            .as_ref()
+            .map_or(retrieval.hits.len(), BTreeSet::len);
+        trace.record_elapsed("search::candidateAdmission", admission_start);
         for entry in std::mem::take(&mut retrieval.degraded) {
             if let Some(previous) = degraded
                 .iter_mut()
@@ -15754,7 +15818,7 @@ async fn search_filtered_sync_with_performance(
             }
         }
 
-        let enough = retrieval.hits.len() >= matching_limit as usize;
+        let enough = matching_count >= matching_limit as usize;
         // The native semantic searcher may apply negative clauses after its
         // own bounded vector lookup. Its short output is then not a complete
         // corpus scan. Lexical search applies query negatives in the engine,
@@ -15767,11 +15831,24 @@ async fn search_filtered_sync_with_performance(
                 degraded.push(SearchDegradation::filter_candidate_budget_exhausted(
                     candidate_filter.lane(),
                     candidate_limit,
-                    retrieval.hits.len(),
+                    matching_count,
                     matching_limit,
                 ));
             }
-            retrieval.hits.truncate(matching_limit as usize);
+            if let Some(admitted) = live_admitted_ids {
+                let mut retained = 0usize;
+                retrieval.hits.retain(|hit| {
+                    if !admitted.contains(&hit.doc_id) {
+                        // Final admission must see rejected candidates for
+                        // lifecycle diagnostics and strict-scope enforcement.
+                        return true;
+                    }
+                    retained += 1;
+                    retained <= matching_limit as usize
+                });
+            } else {
+                retrieval.hits.truncate(matching_limit as usize);
+            }
             retrieval.degraded = degraded;
             return Ok(retrieval);
         }
