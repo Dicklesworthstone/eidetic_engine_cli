@@ -9196,6 +9196,7 @@ impl EeLazyModel2VecEmbedder {
         }
 
         let manifest = ModelManifest::potion_128m();
+        let mut download_guard = EmbeddingDownloadInFlightGuard::enter();
         emit_embedding_download_notice(manifest.total_size_bytes());
         let reporter = EeModelDownloadReporter::new(POTION_MODEL_NAME);
         let downloader = ModelDownloader::with_defaults();
@@ -9229,11 +9230,13 @@ impl EeLazyModel2VecEmbedder {
         reclaim_model_staging_dirs(&destination);
         let backup = match downloaded {
             Ok(backup) => {
+                download_guard.complete();
                 download_backoff::clear(staging_root, POTION_MODEL_NAME);
                 backup
             }
             Err(error) => {
                 if !matches!(error, SearchError::Cancelled { .. }) {
+                    download_guard.complete();
                     download_backoff::record_failure(
                         staging_root,
                         POTION_MODEL_NAME,
@@ -9570,6 +9573,46 @@ pub(crate) fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
         return model_root.to_path_buf();
     }
     model_root.join(POTION_MODEL_NAME)
+}
+
+static EMBEDDING_DOWNLOAD_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+struct EmbeddingDownloadInFlightGuard {
+    finished_without_cancellation: bool,
+}
+
+impl EmbeddingDownloadInFlightGuard {
+    fn enter() -> Self {
+        EMBEDDING_DOWNLOAD_INTERRUPTED.store(true, Ordering::Release);
+        Self {
+            finished_without_cancellation: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.finished_without_cancellation = true;
+        EMBEDDING_DOWNLOAD_INTERRUPTED.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for EmbeddingDownloadInFlightGuard {
+    fn drop(&mut self) {
+        if !self.finished_without_cancellation {
+            EMBEDDING_DOWNLOAD_INTERRUPTED.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// True when the most recent bundled embedding-model download was still in
+/// flight when its future was cancelled or dropped (bd-m7te9).
+#[must_use]
+pub(crate) fn embedding_model_download_interrupted() -> bool {
+    EMBEDDING_DOWNLOAD_INTERRUPTED.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn set_embedding_model_download_interrupted_for_test(interrupted: bool) {
+    EMBEDDING_DOWNLOAD_INTERRUPTED.store(interrupted, Ordering::Release);
 }
 
 fn emit_embedding_download_notice(bytes: u64) {

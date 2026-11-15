@@ -58512,6 +58512,7 @@ where
     let message = cancel_message(reason);
     let mode = mode.into();
     let budget = budget.filter(|_| reason.kind == asupersync::CancelKind::Deadline);
+    let download_interrupted = crate::core::index::embedding_model_download_interrupted();
     if mode != ErrorRenderMode::Human {
         let mut json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
@@ -58525,6 +58526,16 @@ where
                 }
             }
         });
+        if download_interrupted {
+            json["error"]["details"]["cancelCause"] =
+                serde_json::json!("embedding_model_download_in_progress");
+            json["error"]["details"]["model"] =
+                serde_json::json!(crate::core::index::POTION_MODEL_NAME);
+            let repair = "ee model fetch --json  # or set EE_EMBED_DOWNLOAD=off to use lexical/hash fallback without downloading";
+            json["error"]["repairKind"] =
+                serde_json::json!(output::repair_command_kind_name(repair));
+            json["error"]["repair"] = serde_json::json!(repair);
+        }
         if let Some(budget) = budget {
             let repair = budget.repair();
             json["error"]["repairKind"] =
@@ -58537,6 +58548,12 @@ where
         write_machine_error_payload(mode, &json, stdout);
     } else {
         let mut rendered = format!("error: cancelled ({kind}): {message}\n");
+        if download_interrupted {
+            rendered.push_str(&format!(
+                "\nInitial download of local embedding model {} was still in progress when the command was cancelled.\n\nNext:\n  ee model fetch --json\n",
+                crate::core::index::POTION_MODEL_NAME
+            ));
+        }
         if let Some(budget) = budget {
             rendered.push_str(&format!(
                 "\nThe {}s wall-clock budget ran out; {} raises it (at most {}s).\n\nNext:\n  {}\n",
@@ -74606,6 +74623,54 @@ mod tests {
             "human cancellation rendering",
         )?;
         ensure_equal(&(exit as u8), &130, "human cancellation numeric exit")
+    }
+
+    #[test]
+    fn cancelled_error_reports_interrupted_embedding_model_download_cause_and_repair() -> TestResult
+    {
+        struct ResetDownloadFlag;
+        impl Drop for ResetDownloadFlag {
+            fn drop(&mut self) {
+                crate::core::index::set_embedding_model_download_interrupted_for_test(false);
+            }
+        }
+        let _reset = ResetDownloadFlag;
+        crate::core::index::set_embedding_model_download_interrupted_for_test(true);
+
+        let reason = CancelReason::deadline().with_message("Deadline exceeded.");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = write_cancelled_error(&reason, true, &mut stdout, &mut stderr);
+        let payload: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("cancelled JSON parse failed: {error}"))?;
+
+        ensure_equal(&(exit as u8), &130, "cancelled exit code")?;
+        ensure_equal(
+            &payload["error"]["details"]["cancelCause"],
+            &serde_json::json!("embedding_model_download_in_progress"),
+            "machine error must name the in-flight model download cause",
+        )?;
+        ensure_equal(
+            &payload["error"]["details"]["model"],
+            &serde_json::json!(crate::core::index::POTION_MODEL_NAME),
+            "machine error must name the model being downloaded",
+        )?;
+        ensure(
+            payload["error"]["repair"].as_str().is_some_and(|repair| {
+                repair.contains("ee model fetch") && repair.contains("EE_EMBED_DOWNLOAD=off")
+            }),
+            format!("machine error must include actionable download repair: {payload}"),
+        )?;
+
+        let mut human_stdout = Vec::new();
+        let mut human_stderr = Vec::new();
+        let _ = write_cancelled_error(&reason, false, &mut human_stdout, &mut human_stderr);
+        let rendered = String::from_utf8(human_stderr).map_err(|error| error.to_string())?;
+        ensure(
+            rendered.contains(crate::core::index::POTION_MODEL_NAME)
+                && rendered.contains("ee model fetch"),
+            format!("human cancellation must explain the interrupted download: {rendered}"),
+        )
     }
 
     #[test]
