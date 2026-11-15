@@ -3025,7 +3025,15 @@ fn typed_memory_hit_matches(
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<bool, SearchError> {
     if !hit.doc_id.starts_with("mem_") {
-        return Ok(false);
+        // Native procedural rules have kind `rule`, but no memory sidecar.
+        // Classify only canonical native identities here; indexed metadata
+        // cannot turn evidence or another document into a rule. The batched
+        // live-rule admission gates still establish existence, ownership,
+        // revision and lifecycle before these candidates can rank or return.
+        return Ok(typed_field_filters.is_empty()
+            && kind_filter == Some(crate::models::MemoryKind::Rule.as_str())
+            && crate::models::RuleId::from_str(&hit.doc_id)
+                .is_ok_and(|id| id.to_string() == hit.doc_id));
     }
     let Some(memory) = connection.get_memory(&hit.doc_id).map_err(|error| {
         SearchError::Index(format!(

@@ -75,6 +75,10 @@ impl Fixture {
     }
 
     fn memory(&self, number: u128, body: &str) -> String {
+        self.memory_with_kind(number, body, "fact")
+    }
+
+    fn memory_with_kind(&self, number: u128, body: &str, kind: &str) -> String {
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         self.db
             .insert_memory(
@@ -83,7 +87,7 @@ impl Fixture {
                     workspace_id: self.workspace.clone(),
                     content: body.to_owned(),
                     level: "semantic".to_owned(),
-                    kind: "fact".to_owned(),
+                    kind: kind.to_owned(),
                     workflow_id: None,
                     confidence: 1.0,
                     utility: 0.5,
@@ -101,7 +105,11 @@ impl Fixture {
     }
 
     fn rule(&self) -> String {
-        let id = RuleId::from_uuid(uuid::Uuid::from_u128(201)).to_string();
+        self.rule_with_maturity(201, "candidate")
+    }
+
+    fn rule_with_maturity(&self, number: u128, maturity: &str) -> String {
+        let id = RuleId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         self.db
             .insert_procedural_rule(
                 &id,
@@ -114,7 +122,7 @@ impl Fixture {
                     trust_class: "human_explicit".to_owned(),
                     scope: "global".to_owned(),
                     scope_pattern: None,
-                    maturity: "candidate".to_owned(),
+                    maturity: maturity.to_owned(),
                     protected: false,
                     source_memory_ids: Vec::new(),
                     tags: Vec::new(),
@@ -343,6 +351,125 @@ fn complete_lexical(report: &SearchReport) {
         assert!(
             hit.fast_score.is_none() && hit.quality_score.is_none() && hit.rerank_score.is_none()
         );
+    }
+}
+
+#[test]
+fn unpublished_kind_filters_keep_native_rules_and_preserve_read_only_sources() {
+    for empty_directory in [false, true] {
+        let fixture = Fixture::new();
+        let memory_rule = fixture.memory_with_kind(200, BODY, "rule");
+        let anti_pattern = fixture.memory_with_kind(204, BODY, "anti-pattern");
+        let rule = fixture.rule();
+        let deprecated = fixture.rule_with_maturity(205, "deprecated");
+        let tombstoned = fixture.rule_with_maturity(206, "validated");
+        fixture.db.execute_raw(&format!(
+            "UPDATE procedural_rules SET tombstoned_at = '2026-01-01T00:00:00Z' WHERE id = '{tombstoned}'"
+        )).unwrap();
+        let evidence = fixture.evidence();
+        fixture
+            .db
+            .set_memory_typed_fields_json(&memory_rule, Some(r#"{"condition":"before release"}"#))
+            .unwrap();
+        if empty_directory {
+            std::fs::create_dir(fixture.root.join(".ee/index")).unwrap();
+        }
+        let before = fixture.state();
+        let options = fixture.options();
+        let reader = fixture.reader();
+        for (kind, field, expected) in [
+            (
+                None,
+                None,
+                vec![
+                    memory_rule.clone(),
+                    anti_pattern.clone(),
+                    rule.clone(),
+                    deprecated.clone(),
+                    evidence,
+                ],
+            ),
+            (
+                Some("rule"),
+                None,
+                vec![memory_rule.clone(), rule.clone(), deprecated.clone()],
+            ),
+            (Some("anti-pattern"), None, vec![anti_pattern]),
+            (
+                None,
+                Some("condition=before release"),
+                vec![memory_rule.clone()],
+            ),
+            (
+                Some("rule"),
+                Some("condition=before release"),
+                vec![memory_rule.clone()],
+            ),
+            (
+                Some("anti-pattern"),
+                Some("condition=before release"),
+                Vec::new(),
+            ),
+        ] {
+            let fields: Vec<_> = field
+                .map(|field| TypedMemoryFieldFilter::parse(field).unwrap())
+                .into_iter()
+                .collect();
+            let options = &options;
+            let reader = &reader;
+            let run = with_search_root(|cx| async move {
+                let mut audit_ids = SearchAuditIdSource::Ambient;
+                run_search_inner_with_performance(
+                    &cx,
+                    options,
+                    SearchMemoryFilters {
+                        kind,
+                        fields: &fields,
+                    },
+                    Some(reader),
+                    Deterministic::from_seed(0),
+                    &mut audit_ids,
+                    None,
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                    true,
+                )
+                .await
+            })
+            .unwrap();
+            complete_lexical(&run.report);
+            assert_eq!(
+                run.report
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected.iter().cloned().collect::<BTreeSet<_>>(),
+                "empty_index={empty_directory}, kind={kind:?}, field={field:?}",
+            );
+            assert_eq!(
+                run.report.status,
+                if expected.is_empty() {
+                    SearchStatus::NoResults
+                } else {
+                    SearchStatus::Success
+                }
+            );
+            assert_eq!(fixture.state(), before);
+        }
+        if empty_directory {
+            assert!(
+                std::fs::read_dir(options.resolve_index_dir())
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        } else {
+            assert!(!options.resolve_index_dir().exists());
+        }
     }
 }
 
