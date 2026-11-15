@@ -90,7 +90,10 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// location and rendered source, preserving the exact retry proof requirement.
 /// V27 also mines ordinary Go terminal failures with the JSON diagnostic key;
 /// repair proof requires a complete verbose package/test inventory and exit.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v27";
+/// V28 learns native unittest failures when a test body, tearDown or multiple
+/// cleanup callbacks fail the same subject, reconciling callback counts with
+/// unique executed tests before a complete passing retry can prove a repair.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v28";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

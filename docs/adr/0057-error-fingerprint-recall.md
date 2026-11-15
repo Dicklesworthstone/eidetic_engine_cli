@@ -85,7 +85,7 @@ are checked even when Vitest merges several named failures into one error block.
 
 Only the first diagnostic line enters existing redaction and canonicalization;
 test identities, diffs and stack frames do not become fingerprint text.
-`cass_error_recall.v27` reconsiders existing imports on their next import.
+`cass_error_recall.v28` reconsiders existing imports on their next import.
 Verified repairs reach incident cards and review candidates; durable memories
 still require explicit validation and apply.
 
@@ -148,6 +148,22 @@ retries cannot establish repair credit. Repeated execution preserves any earlier
 failure or skip. Test-printed exit text cannot replace successful tool completion
 metadata. Existing bounds, redaction, source admission, and incident-card proof
 checks apply; this derivation does not rewrite the imported source evidence.
+
+### Native Python unittest callback failures
+
+CPython's `TextTestRunner` counts executed tests separately from result
+callbacks. One named test can produce a body failure, a teardown error, and
+several cleanup errors while `Ran` still reports one test. The decoder retains
+each failure/error callback and reconciles the verbose progress, detailed
+failure blocks, and final summary against that unique test inventory.
+
+These reports use the same diagnostic identities and repair-proof path as
+ordinary unittest failures. A completed retry of the identical invocation must
+pass every required named test, including prior passing controls. Duplicate
+successes, mismatched callback counts, skipped required subjects, or an
+incomplete report cannot supply proof. Quiet reports still identify failures
+without claiming a complete inventory. Traceback bodies and cleanup exception
+messages do not become fingerprint text.
 
 ## Consequences
 
