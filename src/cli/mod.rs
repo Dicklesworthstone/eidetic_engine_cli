@@ -59473,7 +59473,9 @@ impl RememberMemoryReport {
             .field_raw("revision_group_id", &revision_group_id_json)
             .field_raw("audit_id", &audit_id_json)
             .field_raw("index_job_id", &index_job_id_json)
+            .field_raw("indexJobId", &index_job_id_json)
             .field_str("index_status", &self.index_status)
+            .field_str("indexStatus", &self.index_status)
             // Was a hardcoded `[]` in the literal. `effect_ids` is empty at
             // every construction site today, so this is byte-identical now,
             // but a hardcoded value cannot round-trip to its source field and
@@ -74946,7 +74948,9 @@ mod tests {
             ("revision_group_id", "sentinel-revision-group-id"),
             ("audit_id", "sentinel-audit-id"),
             ("index_job_id", "sentinel-index-job-id"),
+            ("indexJobId", "sentinel-index-job-id"),
             ("index_status", "sentinel-index-status"),
+            ("indexStatus", "sentinel-index-status"),
             ("suggested_link_status", "sentinel-suggested-link-status"),
             ("auto_link_status", "sentinel-auto-link-status"),
             (
@@ -75275,7 +75279,9 @@ mod tests {
             "revision_group_id",
             "audit_id",
             "index_job_id",
+            "indexJobId",
             "index_status",
+            "indexStatus",
             "effect_ids",
             "suggested_links",
             "suggested_link_status",
