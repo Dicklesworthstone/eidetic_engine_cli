@@ -1561,6 +1561,285 @@ fn why_schema_documents_hits_graph_block() -> TestResult {
     Ok(())
 }
 
+fn validate_object_against_schema_def(
+    instance: &Value,
+    def: &Value,
+    context: &str,
+) -> Result<(), String> {
+    let obj = instance
+        .as_object()
+        .ok_or_else(|| format!("{context} must be a JSON object, got {instance}"))?;
+    let required = collect_string_set(
+        def.get("required").unwrap_or(&Value::Null),
+        &format!("{context}.required"),
+    )?;
+    for field in &required {
+        if !obj.contains_key(field) {
+            return Err(format!("{context} missing required field `{field}`"));
+        }
+    }
+    if def.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+        let allowed = def
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{context} schema missing properties map"))?
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for key in obj.keys() {
+            if !allowed.contains(key) {
+                return Err(format!(
+                    "{context} emitted undeclared property `{key}` (allowed: {allowed:?})"
+                ));
+            }
+        }
+    }
+    if let Some(properties) = def.get("properties").and_then(Value::as_object) {
+        for (prop_name, prop_schema) in properties {
+            let Some(prop_val) = obj.get(prop_name) else {
+                continue;
+            };
+            if let Some(expected_const) = prop_schema.get("const")
+                && prop_val != expected_const
+            {
+                return Err(format!(
+                    "{context}.{prop_name} const mismatch: expected {expected_const}, got {prop_val}"
+                ));
+            }
+            if let Some(enum_vals) = prop_schema.get("enum").and_then(Value::as_array)
+                && !enum_vals.contains(prop_val)
+            {
+                return Err(format!(
+                    "{context}.{prop_name} enum mismatch: {prop_val} not in {enum_vals:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_why_output_against_ee_why_v1_schema(
+    data: &Value,
+    schema: &Value,
+) -> Result<(), String> {
+    let root_required = collect_string_set(
+        schema.get("required").unwrap_or(&Value::Null),
+        "ee.why.v1.required",
+    )?;
+    let data_obj = data
+        .as_object()
+        .ok_or_else(|| "why .data must be an object".to_owned())?;
+    for req in &root_required {
+        if !data_obj.contains_key(req) {
+            return Err(format!("why .data missing root required field `{req}`"));
+        }
+    }
+    let expected_schema_const = schema
+        .pointer("/properties/schema/const")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ee.why.v1 missing properties.schema.const".to_owned())?;
+    if data.get("schema").and_then(Value::as_str) != Some(expected_schema_const) {
+        return Err(format!(
+            "why .data.schema mismatch: expected {expected_schema_const:?}, got {:?}",
+            data.get("schema")
+        ));
+    }
+    if !data.get("memoryId").is_some_and(Value::is_string) {
+        return Err(format!(
+            "why .data.memoryId must be a string, got {:?}",
+            data.get("memoryId")
+        ));
+    }
+    let graph = data
+        .get("graph")
+        .ok_or_else(|| "why .data missing `graph` object".to_owned())?;
+    let graph_obj = graph
+        .as_object()
+        .ok_or_else(|| "why .data.graph must be an object".to_owned())?;
+    if schema
+        .pointer("/properties/graph/additionalProperties")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        let allowed_graph_keys = schema
+            .pointer("/properties/graph/properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "ee.why.v1 missing graph.properties".to_owned())?
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for key in graph_obj.keys() {
+            if !allowed_graph_keys.contains(key) {
+                return Err(format!(
+                    "why .data.graph emitted undeclared key `{key}` (allowed: {allowed_graph_keys:?})"
+                ));
+            }
+        }
+    }
+
+    let load_bearing = graph
+        .get("loadBearing")
+        .ok_or_else(|| "why .data.graph missing loadBearing".to_owned())?;
+    let load_bearing_def = schema
+        .pointer("/$defs/loadBearingWhy")
+        .ok_or_else(|| "ee.why.v1 missing $defs.loadBearingWhy".to_owned())?;
+    validate_object_against_schema_def(load_bearing, load_bearing_def, "graph.loadBearing")?;
+    let lb_evidence = load_bearing
+        .get("evidence")
+        .ok_or_else(|| "graph.loadBearing missing evidence".to_owned())?;
+    let lb_evidence_def = schema
+        .pointer("/$defs/loadBearingEvidence")
+        .ok_or_else(|| "ee.why.v1 missing $defs.loadBearingEvidence".to_owned())?;
+    validate_object_against_schema_def(lb_evidence, lb_evidence_def, "graph.loadBearing.evidence")?;
+    let rule_ref_def = schema
+        .pointer("/$defs/ruleReference")
+        .ok_or_else(|| "ee.why.v1 missing $defs.ruleReference".to_owned())?;
+    let citing_rules = load_bearing
+        .get("citingRules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "graph.loadBearing.citingRules must be an array".to_owned())?;
+    for (idx, rule) in citing_rules.iter().enumerate() {
+        validate_object_against_schema_def(
+            rule,
+            rule_ref_def,
+            &format!("graph.loadBearing.citingRules[{idx}]"),
+        )?;
+    }
+
+    let hits = graph
+        .get("hits")
+        .ok_or_else(|| "why .data.graph missing hits".to_owned())?;
+    let hits_def = schema
+        .pointer("/$defs/hitsWhy")
+        .ok_or_else(|| "ee.why.v1 missing $defs.hitsWhy".to_owned())?;
+    validate_object_against_schema_def(hits, hits_def, "graph.hits")?;
+    let profile_def = schema
+        .pointer("/$defs/hitsWhy/properties/profileInfluence")
+        .ok_or_else(|| "ee.why.v1 missing hitsWhy.properties.profileInfluence".to_owned())?;
+    let profile_val = hits
+        .get("profileInfluence")
+        .ok_or_else(|| "graph.hits missing profileInfluence".to_owned())?;
+    validate_object_against_schema_def(profile_val, profile_def, "graph.hits.profileInfluence")?;
+    let hits_evidence = hits
+        .get("evidence")
+        .ok_or_else(|| "graph.hits missing evidence".to_owned())?;
+    let hits_evidence_def = schema
+        .pointer("/$defs/hitsEvidence")
+        .ok_or_else(|| "ee.why.v1 missing $defs.hitsEvidence".to_owned())?;
+    validate_object_against_schema_def(hits_evidence, hits_evidence_def, "graph.hits.evidence")?;
+    Ok(())
+}
+
+#[test]
+fn why_cli_output_conforms_to_ee_why_v1_schema() -> TestResult {
+    let fixture = KnowledgeGapsFixture::new("why-cli-schema-conformance")?;
+    let connection = fixture.connection()?;
+    let authority_id = pad_id("mem_why_schema_auth", "mem_");
+    let hub_id = pad_id("mem_why_schema_hub", "mem_");
+    fixture.insert_memory(
+        &connection,
+        &authority_id,
+        "semantic",
+        "fact",
+        "Load-bearing authority memory for why schema conformance.",
+        0.92,
+    )?;
+    fixture.insert_memory(
+        &connection,
+        &hub_id,
+        "semantic",
+        "fact",
+        "Hub memory supporting the authority memory.",
+        0.88,
+    )?;
+    fixture.insert_link(
+        &connection,
+        "link_why_schema_1",
+        &hub_id,
+        &authority_id,
+        MemoryLinkRelation::Supports,
+        2,
+        0.9,
+    )?;
+    for rule_suffix in ["rule_why_schema_alpha", "rule_why_schema_beta"] {
+        let rule_id = pad_id_to(rule_suffix, "rule_", 31);
+        connection
+            .insert_procedural_rule(
+                &rule_id,
+                &ee::db::CreateProceduralRuleInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    content: format!("{rule_id} cites {authority_id}"),
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: vec![authority_id.clone()],
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    drop(connection);
+
+    let workspace = fixture.workspace.to_string_lossy().into_owned();
+    let refresh_output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "graph",
+        "centrality-refresh",
+    ])?;
+    let _refresh_json = stdout_json(&refresh_output, "ee graph centrality-refresh")?;
+
+    let why_output = run_ee(&["--workspace", &workspace, "--json", "why", &authority_id])?;
+    let why_json = stdout_json(&why_output, "ee why authority memory")?;
+    let data = why_json
+        .get("data")
+        .ok_or_else(|| "ee why response missing .data".to_owned())?;
+
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.why.v1.json");
+    let schema = read_json(&schema_path)?;
+
+    validate_why_output_against_ee_why_v1_schema(data, &schema)?;
+
+    // Negative control 1: removing a required field in `graph.hits` must fail.
+    let mut missing_required = data.clone();
+    missing_required
+        .pointer_mut("/graph/hits")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "graph.hits must be an object".to_owned())?
+        .remove("dominantRole");
+    if validate_why_output_against_ee_why_v1_schema(&missing_required, &schema).is_ok() {
+        return Err(
+            "schema validator must reject graph.hits missing required field `dominantRole`"
+                .to_owned(),
+        );
+    }
+
+    // Negative control 2: adding an undeclared property under `additionalProperties: false` must fail.
+    let mut extra_prop = data.clone();
+    extra_prop
+        .pointer_mut("/graph/loadBearing/evidence")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "graph.loadBearing.evidence must be an object".to_owned())?
+        .insert("undeclaredKey".to_owned(), Value::Bool(true));
+    if validate_why_output_against_ee_why_v1_schema(&extra_prop, &schema).is_ok() {
+        return Err(
+            "schema validator must reject undeclared property in graph.loadBearing.evidence"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
 #[test]
 fn insights_onboarding_documents_hits_workflow_for_agents() -> TestResult {
     let path = repo_root()
