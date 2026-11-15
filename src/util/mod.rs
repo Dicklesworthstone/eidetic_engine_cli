@@ -197,6 +197,17 @@ pub(crate) fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
     candidate.starts_with(r"\\")
 }
 
+/// End-boundary predicate for structured prose surfaces (JSON/Markdown/text
+/// snippets in handoff capsules and support bundles) where a path token ends at
+/// whitespace or surrounding punctuation/delimiters.
+pub(crate) fn structured_prose_path_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | ',' | '}' | ']' | ')' | '(' | '<' | '>' | ';'
+        )
+}
+
 /// Replace every redactable path in `value` with `[REDACTED_PATH]`.
 ///
 /// `boundary` decides where each redacted run ends and stays caller-supplied on
@@ -207,7 +218,16 @@ pub(crate) fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
 /// *start* predicate is shared.
 pub(crate) fn redact_path_like_segments(value: &str, boundary: fn(char) -> bool) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    redact_path_like_segments_with_placeholder(value, boundary, REDACTED_PATH)
+}
 
+/// Replace every redactable path in `value` with `placeholder`, advancing each
+/// matched segment until `boundary(ch)` holds.
+pub(crate) fn redact_path_like_segments_with_placeholder(
+    value: &str,
+    boundary: fn(char) -> bool,
+    placeholder: &str,
+) -> String {
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
     while cursor < value.len() {
@@ -221,7 +241,7 @@ pub(crate) fn redact_path_like_segments(value: &str, boundary: fn(char) -> bool)
         };
 
         output.push_str(&value[cursor..start]);
-        output.push_str(REDACTED_PATH);
+        output.push_str(placeholder);
         cursor = value[start..]
             .char_indices()
             .skip(1)

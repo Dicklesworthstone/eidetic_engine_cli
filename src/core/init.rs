@@ -18,7 +18,9 @@ use super::{
     },
     workspace::{ensure_bound_workspace, stable_workspace_id},
 };
-use crate::db::{DbConnection, WalCheckpointMode};
+use crate::db::{
+    CreateAuditInput, DbConnection, WalCheckpointMode, audit_actions, generate_audit_id,
+};
 use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 
 /// Status of the init operation.
@@ -1023,6 +1025,31 @@ fn initialize_database(
 
     super::model::ensure_bundled_embedding_model_registered(&connection, &workspace_id)
         .map_err(|error| format!("failed to register bundled embedding model: {error}"))?;
+
+    let existing_init_audit = connection
+        .list_audit_by_action(audit_actions::WORKSPACE_INITIALIZE, Some(1))
+        .map_err(|error| format!("failed to inspect workspace initialization audit: {error}"))?;
+    if existing_init_audit.is_empty() {
+        let audit_id = generate_audit_id();
+        let details = serde_json::json!({
+            "workspace_path": workspace_path.display().to_string(),
+            "database_path": database_path.display().to_string(),
+        })
+        .to_string();
+        connection
+            .insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.clone()),
+                    actor: Some("system:init".to_owned()),
+                    action: audit_actions::WORKSPACE_INITIALIZE.to_owned(),
+                    target_type: Some("workspace".to_owned()),
+                    target_id: Some(workspace_id.clone()),
+                    details: Some(details),
+                },
+            )
+            .map_err(|error| format!("failed to record workspace initialization audit: {error}"))?;
+    }
 
     // Approval-token issuance is a read-only preview operation and therefore
     // must never create authentication material as a side effect. Establish
@@ -2514,6 +2541,55 @@ mod tests {
             workspace.join("AGENTS.md").exists(),
             false,
             "failed init must not leave partial boilerplate files",
+        )
+    }
+
+    #[test]
+    fn init_records_idempotent_workspace_initialize_audit_row() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let options = InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let first = init_workspace(&options);
+        ensure(first.status, InitStatus::Created, "first init status")?;
+
+        let db_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        let rows = connection
+            .list_audit_by_action(audit_actions::WORKSPACE_INITIALIZE, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            rows.len(),
+            1,
+            "init must write one workspace.initialize audit row",
+        )?;
+        ensure(
+            rows[0].target_type.as_deref(),
+            Some("workspace"),
+            "workspace.initialize target_type",
+        )?;
+
+        let second = init_workspace(&options);
+        ensure(
+            second.status,
+            InitStatus::AlreadyExists,
+            "second init status",
+        )?;
+        let rows_after = connection
+            .list_audit_by_action(audit_actions::WORKSPACE_INITIALIZE, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            rows_after.len(),
+            1,
+            "idempotent re-init must not duplicate workspace.initialize audit row",
         )
     }
 }

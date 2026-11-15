@@ -1241,7 +1241,6 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "lab capture",
     "lab swarm replay",
     "learn close",
-    "learn experiment run",
     "learn observe",
     "maintenance graph-snapshot-prune",
     "maintenance graph-witnesses-prune",
@@ -1762,6 +1761,10 @@ impl EffectManifest {
             CommandEffect::read_only_db(
                 "learn cluster",
                 "Cluster learning evidence without durable mutation",
+            ),
+            CommandEffect::read_only_db(
+                "learn experiment run",
+                "Run a deterministic dry-run-only active learning experiment rehearsal without durable mutation",
             ),
             CommandEffect::read_only_db(
                 "learn gaps",
@@ -2858,24 +2861,12 @@ impl EffectManifest {
             ),
             // No learning_experiments or evaluation_reports table exists
             // (bd-hb5os). `learn close` lists the tables it was measured to
-            // write; `learn experiment run` was measured to write none.
+            // write; `learn experiment run` is a dry-run-only rehearsal
+            // declared in `read_only_commands` (bd-acxw6).
             CommandEffect::durable_write(
                 "learn close",
                 vec!["feedback_events", "learning_observations", "audit_log"],
                 "Close a learning experiment",
-            ),
-            // bd-acxw6: the bd-hb5os comment above already recorded that this
-            // command was measured to write no table, but the declaration was
-            // left naming `audit_log`. Execution is refused without
-            // `--dry-run` (src/core/learn.rs:3200, src/cli/mod.rs:26064) and a
-            // dry run persists nothing, so the measured write set is empty.
-            // The class stays `DurableMemoryWrite`: that is what the command
-            // becomes once experiment execution is backed by persisted
-            // ledgers, and the typed refusal is what stands in until then.
-            CommandEffect::durable_write(
-                "learn experiment run",
-                Vec::new(),
-                "Record a learning experiment run",
             ),
             CommandEffect::durable_write(
                 "learn observe",
@@ -3540,6 +3531,7 @@ impl EffectManifest {
             CommandEffect::config_write(
                 "init",
                 vec![
+                    "audit_log",
                     "curation_ttl_policies",
                     "ee_schema_migrations",
                     "memory_timestamp_spelling_repair_v124",
@@ -3622,26 +3614,20 @@ impl EffectManifest {
                 "workspace key path plus --show/--force mode",
                 "Generate or inspect a local certificate signing key",
             ),
-            // bd-acxw6: both were measured to change `.ee/config.toml` and
-            // nothing else — no table of the workspace store, no registry
-            // entry, no `.ee/audit.jsonl` record. That is by construction:
-            // src/mesh/emergency_disable.rs is "deliberately local-only" so
-            // containment still works when the store is unreachable. The
-            // declared tables are corrected here to the measured set; the fact
-            // that an incident-containment command with `--reason` and
-            // `--temporary-for` leaves no audit record anywhere is a product
-            // gap, filed separately, not a declaration to quietly soften.
+            // bd-acxw6 / bd-sf6p1: both stay local-only (no DB table dependency)
+            // so emergency containment works even when the store is unreachable,
+            // and both append an AuditEvent to `.ee/audit.jsonl` alongside `.ee/config.toml`.
             CommandEffect::config_write(
                 "mesh disable",
                 Vec::new(),
-                vec![".ee/config.toml"],
+                vec![".ee/config.toml", ".ee/audit.jsonl"],
                 "workspace id plus mesh disable reason",
                 "Disable mesh synchronization for a workspace",
             ),
             CommandEffect::config_write(
                 "mesh reenable",
                 Vec::new(),
-                vec![".ee/config.toml"],
+                vec![".ee/config.toml", ".ee/audit.jsonl"],
                 "workspace id plus mesh reenable reason",
                 "Re-enable mesh synchronization for a workspace",
             ),
@@ -5396,5 +5382,33 @@ mod tests {
             true,
             "a declared name outside the schema is red and named",
         )
+    }
+
+    #[test]
+    fn init_and_mesh_containment_declare_audit_surfaces_bd_sf6p1() -> TestResult {
+        let manifest = EffectManifest::build();
+        let init = manifest
+            .get("init")
+            .ok_or_else(|| "init not found".to_owned())?;
+        ensure(
+            init.write_surfaces.db_tables.contains(&"audit_log"),
+            true,
+            "init must declare audit_log in db_tables",
+        )?;
+
+        for command in ["mesh disable", "mesh reenable"] {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not found"))?;
+            ensure(
+                effect
+                    .write_surfaces
+                    .workspace_files
+                    .contains(&".ee/audit.jsonl"),
+                true,
+                &format!("{command} must declare .ee/audit.jsonl in workspace_files"),
+            )?;
+        }
+        Ok(())
     }
 }

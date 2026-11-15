@@ -789,7 +789,7 @@ impl DoctorMeshAutoEnrollmentReport {
                 } else {
                     "skipped"
                 },
-                ttl_seconds: crate::mesh::discovery_cache::DEFAULT_DISCOVERY_CACHE_TTL_SECONDS,
+                ttl_seconds: crate::mesh::discovery_cache::configured_discovery_cache_ttl_seconds(),
                 stale_beyond_workspace: probe.discovery_cache_stale_beyond_workspace,
                 hit: None,
                 refreshed_at: None,

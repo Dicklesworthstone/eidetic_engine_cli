@@ -15,6 +15,17 @@ pub const DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE: &str =
 pub const DISCOVERY_CACHE_TAILNET_CHANGED_CODE: &str =
     "discovery_cache_invalidated_tailnet_changed";
 
+/// Effective discovery-cache TTL in seconds, honoring
+/// `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS` when set to a positive integer and
+/// falling back to [`DEFAULT_DISCOVERY_CACHE_TTL_SECONDS`] (30s).
+#[must_use]
+pub fn configured_discovery_cache_ttl_seconds() -> u64 {
+    crate::config::EnvVar::MeshDiscoveryCacheTtlSeconds
+        .parse_into::<u64>()
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(DEFAULT_DISCOVERY_CACHE_TTL_SECONDS)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscoveryCacheRefreshReason {
     Missing,

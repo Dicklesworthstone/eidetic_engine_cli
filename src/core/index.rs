@@ -9297,6 +9297,11 @@ fn executed_model_resolution(
         EmbedModelResolution::ready(selected.source)
     } else if selected.source == EmbedModelSource::RegistryRejected {
         selected.clone()
+    } else if selected.source == EmbedModelSource::RemoteUnavailable {
+        // bd-p1b4e. Preserve RemoteUnavailable provenance alongside RegistryRejected
+        // instead of laundering it into DeterministicHash, while normalizing outcome
+        // to Fallback so the resolution is valid for HashFallback.
+        EmbedModelResolution::remote_unavailable()
     } else {
         EmbedModelResolution::deterministic_hash()
     }
@@ -13817,6 +13822,25 @@ mod tests {
                 executed.is_valid_for_backend(backend),
                 "executed resolution must be valid for the backend it reports",
             )?;
+            // bd-p1b4e twin sweep: explicit fallback/remote provenance variants must
+            // survive `executed_model_resolution` rather than being laundered into
+            // `DeterministicHash`.
+            if matches!(
+                source,
+                EmbedModelSource::Registered
+                    | EmbedModelSource::Configured
+                    | EmbedModelSource::Cache
+                    | EmbedModelSource::Downloaded
+                    | EmbedModelSource::Remote
+                    | EmbedModelSource::RemoteUnavailable
+                    | EmbedModelSource::DeterministicHash
+                    | EmbedModelSource::RegistryRejected
+            ) {
+                ensure(
+                    executed.source == source,
+                    "executed_model_resolution must preserve the exact EmbedModelSource across all twin arms",
+                )?;
+            }
         }
         Ok(())
     }

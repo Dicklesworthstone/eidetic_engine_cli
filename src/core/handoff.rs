@@ -1485,6 +1485,16 @@ fn generate_capsule_id() -> String {
     )
 }
 
+/// Compute the handoff capsule `content_hash` (bd-xmhzk).
+///
+/// Contract decision (`bd-xmhzk`): `ee.handoff.create.v1` and `HandoffCapsule`
+/// intentionally emit `content_hash` as a bare 16-character lowercase hex
+/// BLAKE3 prefix (`^[0-9a-f]{16}$`, without a `blake3:` tag) to preserve on-disk
+/// capsule verification (`compute_canonical_capsule_hash`) and the five pinned
+/// round-trip determinism contracts (`canonical_hash_is_stable_short_hex_prefix`).
+/// Sibling snapshot/diff/fragment digests (`memory_snapshot_tree_root`,
+/// `snapshot_memory_content_hash`, `render_resume_prompt_fragment`,
+/// `compute_workspace_state_hash`) use the tagged `blake3:<16-hex>` form.
 fn compute_content_hash(content: &str) -> String {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
@@ -2432,52 +2442,12 @@ fn redact_handoff_text(text: &str) -> String {
 }
 
 fn redact_handoff_path_segments(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
     let placeholder = redaction_placeholder("path");
-    let mut index = 0;
-    while index < input.len() {
-        if handoff_path_prefix_at(input, index) {
-            output.push_str(&placeholder);
-            index = handoff_path_segment_end(input, index);
-            continue;
-        }
-        let Some(ch) = input[index..].chars().next() else {
-            break;
-        };
-        output.push(ch);
-        index += ch.len_utf8();
-    }
-    output
-}
-
-/// bd-redactor-prefix-divergence-lsy52: the TWENTY-THIRD hand-copied prefix
-/// list, found by enumerating the population by DATA shape after the 22nd
-/// (`support_bundle.rs`) proved the helper-name grep undercounts.
-///
-/// Five prefixes against the shared cover's twenty-two, matched
-/// case-sensitively. It omitted `/root/`, `/etc/`, `/tmp/`, `/data/` and
-/// `/workspace/`, so a handoff carrying `/root/.ssh/id_rsa` emitted it verbatim.
-///
-/// Only the MATCH is shared. The walker and this surface's placeholder are
-/// untouched, so no rendered handoff changes shape — the divergence was in what
-/// got matched, not what got emitted. Every former prefix stays covered
-/// (`/var/folders/` by `/var/`), so this widens redaction and cannot narrow it.
-fn handoff_path_prefix_at(input: &str, index: usize) -> bool {
-    crate::util::sensitive_path_starts_at(input, index)
-}
-
-fn handoff_path_segment_end(input: &str, start: usize) -> usize {
-    input[start..]
-        .char_indices()
-        .find_map(|(offset, ch)| {
-            (ch.is_whitespace()
-                || matches!(
-                    ch,
-                    '"' | '\'' | ',' | '}' | ']' | ')' | '(' | '<' | '>' | ';'
-                ))
-            .then_some(start + offset)
-        })
-        .unwrap_or(input.len())
+    crate::util::redact_path_like_segments_with_placeholder(
+        input,
+        crate::util::structured_prose_path_boundary,
+        &placeholder,
+    )
 }
 
 fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), DomainError> {
@@ -8805,5 +8775,45 @@ memories_revised = 3
                 "expected DomainError::Storage from oversize key read; got {other:?}",
             )),
         }
+    }
+
+    /// Contract test for `bd-xmhzk`: capsule `content_hash` uses the bare 16-char
+    /// lowercase hex BLAKE3 prefix (`^[0-9a-f]{16}$`), whereas snapshot/fragment
+    /// helper digests use the `blake3:<16-hex>` tagged form.
+    #[test]
+    fn handoff_hash_contract_distinguishes_bare_capsule_hash_from_tagged_snapshot_digests()
+    -> TestResult {
+        let capsule_hash = compute_content_hash("handoff-capsule-payload");
+        ensure_equal(&capsule_hash.len(), &16, "bare capsule content_hash length")?;
+        ensure(
+            !capsule_hash.starts_with("blake3:"),
+            "capsule content_hash must remain bare 16-char hex without blake3: prefix",
+        )?;
+        ensure(
+            capsule_hash
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            format!("capsule content_hash must be lowercase hex, got {capsule_hash:?}"),
+        )?;
+
+        let canonical_hash = compute_canonical_capsule_hash(&serde_json::json!({
+            "objective": "verify bd-xmhzk hash contract",
+            "generated_at": "2026-11-15T00:00:00Z"
+        }));
+        ensure_equal(
+            &canonical_hash.len(),
+            &16,
+            "canonical capsule content_hash length",
+        )?;
+        ensure(
+            !canonical_hash.starts_with("blake3:"),
+            "canonical capsule content_hash must remain bare 16-char hex",
+        )?;
+
+        let tree_root = memory_snapshot_tree_root(&[]);
+        ensure(
+            tree_root.starts_with("blake3:") && tree_root.len() == 23,
+            format!("memory_snapshot_tree_root must be blake3:<16-hex>, got {tree_root:?}"),
+        )
     }
 }

@@ -1183,6 +1183,25 @@ impl EnvVar {
         }
     }
 
+    /// Whether production runtime code currently reads and honors this variable.
+    ///
+    /// Returns `false` only for compatibility no-ops (`EE_EXPERIMENTAL_TRIAD`)
+    /// and knobs whose target subsystem is not spawned in production yet
+    /// (`EE_AUDIT_LANE_*`, `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S`). Guarded by
+    /// `tests/env_registry_lint.rs` so wiring or retiring a variable forces
+    /// updating this classification in lockstep.
+    #[must_use]
+    pub const fn is_honored_in_production(self) -> bool {
+        !matches!(
+            self,
+            Self::AuditLaneBatchMax
+                | Self::AuditLaneCapacity
+                | Self::AuditLaneFlushMs
+                | Self::ExperimentalTriad
+                | Self::WorkspaceCloseDrainTimeoutSeconds
+        )
+    }
+
     /// Parse this variable through [`FromStr`].
     #[must_use]
     pub fn parse_into<T>(self) -> Option<T>

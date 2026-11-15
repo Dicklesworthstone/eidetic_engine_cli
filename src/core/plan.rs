@@ -1709,8 +1709,9 @@ pub(crate) fn save_recipe(options: &RecipeSaveOptions) -> Result<JsonValue, Doma
         .map_err(recipe_storage_error)?;
         Some(id)
     };
+    let persisted = audit_id.is_some();
     Ok(
-        json!({ "command":"plan recipe save", "dryRun":options.dry_run, "persisted":!options.dry_run,
+        json!({ "command":"plan recipe save", "dryRun":options.dry_run, "persisted":persisted,
         "recipe":recipe, "auditId":audit_id }),
     )
 }

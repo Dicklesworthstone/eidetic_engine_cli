@@ -9,13 +9,17 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use serde_json::Value;
 use toml_edit::{DocumentMut, value};
 
 use crate::config::MeshCommandMode;
+use crate::obs::log_envelope::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 
 pub const MESH_EMERGENCY_DISABLE_SCHEMA_V1: &str = "ee.mesh.emergency_disable.v1";
 pub const MESH_EMERGENCY_STATUS_SCHEMA_V1: &str = "ee.mesh.emergency_status.v1";
 pub const MESH_EMERGENCY_REENABLE_SCHEMA_V1: &str = "ee.mesh.emergency_reenable.v1";
+pub const MESH_EMERGENCY_DISABLE_AUDIT_ACTION: &str = "mesh.emergency_disable";
+pub const MESH_EMERGENCY_REENABLE_AUDIT_ACTION: &str = "mesh.emergency_reenable";
 
 /// Cap on the byte size of the workspace `.ee/config.toml` file that
 /// `write_mesh_config` reads before mutating for a mesh emergency
@@ -372,6 +376,7 @@ pub fn apply_emergency_disable(
             MeshCommandMode::Off,
             MESH_EMERGENCY_DISABLE_SCHEMA_V1,
         )?;
+        append_emergency_disable_audit_event(input, &report)?;
         report.config_actions = disable_config_actions(input, true);
         report.applied = true;
     }
@@ -435,10 +440,93 @@ pub fn apply_emergency_reenable(
             MeshCommandMode::Cache,
             MESH_EMERGENCY_REENABLE_SCHEMA_V1,
         )?;
+        append_emergency_reenable_audit_event(input, &report)?;
         report.config_actions = reenable_config_actions(input, true);
         report.applied = true;
     }
     Ok(report)
+}
+
+fn append_emergency_disable_audit_event(
+    input: &MeshEmergencyDisableInput,
+    report: &MeshEmergencyDisableReport,
+) -> Result<(), MeshEmergencyError> {
+    let audit_path = input.workspace_path.join(".ee").join("audit.jsonl");
+    let mut event = AuditEvent::new(
+        now_rfc3339_nanos(),
+        "operator:mesh_containment",
+        MESH_EMERGENCY_DISABLE_AUDIT_ACTION,
+        format!("workspace:{}", input.workspace_path.display()),
+        AuditOutcome::Success,
+    )
+    .with_field(
+        "command_schema",
+        Value::String(MESH_EMERGENCY_DISABLE_SCHEMA_V1.to_owned()),
+    )
+    .with_field("scope", Value::String(report.scope.clone()))
+    .with_field(
+        "mesh_enabled_before",
+        Value::Bool(input.mesh_enabled_before),
+    )
+    .with_field("mesh_enabled_after", Value::Bool(report.mesh_enabled_after))
+    .with_field(
+        "command_mode_before",
+        Value::String(report.command_mode_before.clone()),
+    )
+    .with_field(
+        "command_mode_after",
+        Value::String(report.command_mode_after.clone()),
+    );
+    if let Some(reason) = &input.reason {
+        event = event.with_field("reason", Value::String(reason.clone()));
+    }
+    if let Some(temporary_for) = &input.temporary_for {
+        event = event.with_field("temporary_for", Value::String(temporary_for.clone()));
+    }
+    event
+        .append_to_path(&audit_path)
+        .map_err(|source| MeshEmergencyError::WriteConfig {
+            path: audit_path,
+            source,
+        })
+}
+
+fn append_emergency_reenable_audit_event(
+    input: &MeshEmergencyReenableInput,
+    report: &MeshEmergencyReenableReport,
+) -> Result<(), MeshEmergencyError> {
+    let audit_path = input.workspace_path.join(".ee").join("audit.jsonl");
+    let event = AuditEvent::new(
+        now_rfc3339_nanos(),
+        "operator:mesh_containment",
+        MESH_EMERGENCY_REENABLE_AUDIT_ACTION,
+        format!("workspace:{}", input.workspace_path.display()),
+        AuditOutcome::Success,
+    )
+    .with_field(
+        "command_schema",
+        Value::String(MESH_EMERGENCY_REENABLE_SCHEMA_V1.to_owned()),
+    )
+    .with_field("explicit", Value::Bool(input.explicit))
+    .with_field(
+        "mesh_enabled_before",
+        Value::Bool(input.mesh_enabled_before),
+    )
+    .with_field("mesh_enabled_after", Value::Bool(report.mesh_enabled_after))
+    .with_field(
+        "command_mode_before",
+        Value::String(report.command_mode_before.clone()),
+    )
+    .with_field(
+        "command_mode_after",
+        Value::String(report.command_mode_after.clone()),
+    );
+    event
+        .append_to_path(&audit_path)
+        .map_err(|source| MeshEmergencyError::WriteConfig {
+            path: audit_path,
+            source,
+        })
 }
 
 fn disable_config_actions(
@@ -740,6 +828,17 @@ mod tests {
         let config = ConfigFile::parse(&config_text).map_err(|error| error.to_string())?;
         assert_eq!(config.mesh.enabled, Some(false));
         assert_eq!(config.mesh.command_mode, Some(MeshCommandMode::Off));
+
+        let audit_path = workspace.path().join(".ee").join("audit.jsonl");
+        let audit_text = fs::read_to_string(&audit_path)
+            .map_err(|error| format!("read {}: {error}", audit_path.display()))?;
+        let audit_json: serde_json::Value =
+            serde_json::from_str(audit_text.trim()).map_err(|error| error.to_string())?;
+        assert_eq!(audit_json["action"], "mesh.emergency_disable");
+        assert_eq!(audit_json["outcome"], "success");
+        assert_eq!(audit_json["fields"]["reason"], "unexpected peer");
+        assert_eq!(audit_json["fields"]["mesh_enabled_after"], false);
+        assert_eq!(audit_json["fields"]["command_mode_after"], "off");
         Ok(())
     }
 
@@ -1118,6 +1217,17 @@ mod tests {
         let config = ConfigFile::parse(&config_text).map_err(|error| error.to_string())?;
         assert_eq!(config.mesh.enabled, Some(true));
         assert_eq!(config.mesh.command_mode, Some(MeshCommandMode::Cache));
+
+        let audit_path = workspace.path().join(".ee").join("audit.jsonl");
+        let audit_text = fs::read_to_string(&audit_path)
+            .map_err(|error| format!("read {}: {error}", audit_path.display()))?;
+        let audit_json: serde_json::Value =
+            serde_json::from_str(audit_text.trim()).map_err(|error| error.to_string())?;
+        assert_eq!(audit_json["action"], "mesh.emergency_reenable");
+        assert_eq!(audit_json["outcome"], "success");
+        assert_eq!(audit_json["fields"]["explicit"], true);
+        assert_eq!(audit_json["fields"]["mesh_enabled_after"], true);
+        assert_eq!(audit_json["fields"]["command_mode_after"], "cache");
         Ok(())
     }
 }

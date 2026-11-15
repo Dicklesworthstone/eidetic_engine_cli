@@ -44,6 +44,13 @@ fn j6_fixture_codes(repo: &std::path::Path) -> Result<BTreeSet<String>, String> 
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))? {
         let entry = entry.map_err(|e| format!("read entry: {e}"))?;
         let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("._"))
+        {
+            continue;
+        }
         if path.extension().is_some_and(|x| x == "json") {
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -167,6 +174,13 @@ fn collect_fixture_golden_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> TestRes
         let path = entry.path();
         if path.is_dir() {
             collect_fixture_golden_paths(&path, paths)?;
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("._"))
+        {
             continue;
         }
         let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {

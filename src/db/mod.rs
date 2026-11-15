@@ -78,6 +78,9 @@ pub const MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1: &str = "ee.mesh.lane_grant_t
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
     pub const PLAN_RECIPE_SAVE: &str = "plan.recipe.save";
+    /// bd-sf6p1: workspace initialization audit record written once when the
+    /// durable database and workspace row are initialized.
+    pub const WORKSPACE_INITIALIZE: &str = "workspace.initialize";
     /// bd-4vwiz: explicit authenticated rebind of one workspace row's path
     /// after the store was relocated. Addressing-only; no memory row moves.
     pub const WORKSPACE_RELOCATE: &str = "workspace.relocate";

@@ -72,7 +72,13 @@ fn catalog_source_files() -> Result<Vec<PathBuf>, String> {
         .map_err(|error| format!("read mesh source dir {}: {error}", mesh_dir.display()))?;
     let mut mesh_files: Vec<PathBuf> = mesh_entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .filter(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("._"))
+        })
         .collect();
     mesh_files.sort();
     paths.extend(mesh_files);

@@ -3138,7 +3138,10 @@ fn auto_enrollment_status_for_snapshot(
         discovery_cache: MeshAutoDiscoveryCacheStatus {
             schema: "ee.mesh.discovery_cache.status.v1",
             status: "not_probed_in_this_mode".to_owned(),
-            ttl_seconds: 30,
+            ttl_seconds: u32::try_from(
+                crate::mesh::discovery_cache::configured_discovery_cache_ttl_seconds(),
+            )
+            .unwrap_or(u32::MAX),
             hit: None,
             refreshed_at: None,
         },

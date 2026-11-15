@@ -70,10 +70,24 @@ consumers):
   the existing `confidence` field continues to expose for backward
   compatibility within the same envelope version.
 - `credible_interval_90 = (Beta.ppf(0.05; alpha, beta), Beta.ppf(0.95;
-  alpha, beta))` — the 90 percent equal-tailed credible interval.
+  alpha, beta))` — the 90 percent equal-tailed credible interval of
+  the stored `Beta(alpha, beta)` pseudo-count distribution (used by
+  trust-class hysteresis gates).
 - `credible_interval_50 = (Beta.ppf(0.25; alpha, beta), Beta.ppf(0.75;
   alpha, beta))` — the 50 percent interval; rendered in compact
   formats that drop the 90 percent interval.
+- Because harmful outcome events accumulate with `harmful_weight = w`
+  (`2.5` by default), the stored posterior mean converges to the
+  weighted utility rate `mu_w = p / (p + w * (1 - p))` rather than the
+  raw Bernoulli helpful probability `p`, and `alpha + beta` grows faster
+  than raw event count `N` on harmful events. When callers evaluate
+  nominal frequentist coverage for `mu_w` under `w != 1.0`,
+  `BetaPosterior::weighted_credible_interval(level, harmful_weight)`
+  recovers the conjugate raw-Bernoulli posterior
+  `Beta(alpha, prior_beta + (beta - prior_beta) / w)` and pushes its
+  equal-tailed quantiles through the monotone bijection
+  `weighted_utility_rate(p, w) = p / (p + w * (1 - p))` while leaving
+  stored `Beta(alpha, beta)` quantiles (`credible_interval`) unchanged.
 
 ### Prior choice: Jeffreys (0.5, 0.5)
 

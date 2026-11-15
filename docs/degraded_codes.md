@@ -19210,5 +19210,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:21d1d9a2384bd064d307d190df519e4c7cbf51bbb9d9acf84e8429fe403b6cd3 -->
-<!-- degraded-codes-fingerprint body=sha256:e2486b8dc7b224be39c353ed174e3b4b2c4a9fbd31de18b1fdae619d7eb04251 -->
+<!-- degraded-codes-fingerprint inputs=sha256:ac7668c1cabbdc3c5cf66270157146247c827c483d3f18d72bf961899b4cf2be -->
+<!-- degraded-codes-fingerprint body=sha256:ce2fbaa1a25e0f26212018bfdd89d59b942beb13ee405fd6db92e9c288756642 -->

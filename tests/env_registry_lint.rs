@@ -64,7 +64,7 @@ const README_OBSOLETE_WORKSPACE_HYGIENE_ENV_VARS: [&str; 2] = [
 /// An entry is not permission to leave a variable unread. The test fails both
 /// ways: an unread variable missing from this list fails, and an entry that
 /// becomes read fails until it is removed. Wiring one up forces its deletion.
-const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 10] = [
+const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 5] = [
     (
         "EE_AUDIT_LANE_BATCH_MAX",
         "audit lane has no production caller: the only AuditLane::new sits in the \
@@ -81,32 +81,9 @@ const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 10] = [
         "same unspawned audit lane; no production flush loop exists to bound",
     ),
     (
-        "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
-        "docs/env_vars.md calls it a reserved contract; `ee curate auto-promote` exposes \
-         --min-confidence-episodic and --min-confidence-semantic, and one floor does not \
-         map onto both without deciding which it overrides",
-    ),
-    (
-        "EE_CURATION_DERIVED_PREVIEW_LIMIT",
-        "documented as reserved for derived-candidate preview and reject ergonomics",
-    ),
-    (
         "EE_EXPERIMENTAL_TRIAD",
         "documented compatibility no-op, retained so spike-era scripts keep running; this \
          one is deliberate and expected to stay listed",
-    ),
-    (
-        "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
-        "DEFAULT_DISCOVERY_CACHE_TTL_SECONDS in src/mesh/discovery_cache.rs is the only TTL \
-         any decision uses; nothing reads the override",
-    ),
-    (
-        "EE_REFLECTION_REQUEST_SHOW_SOURCE_LIMIT",
-        "documented as a downstream contract that paths 'should' report, not one they do",
-    ),
-    (
-        "EE_REFLECTION_SOURCE_BUDGET_BYTES",
-        "same reflection contract; no propose or ingest path reads the budget",
     ),
     (
         "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
@@ -122,7 +99,12 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) -> TestResult {
         let path = entry.path();
         if path.is_dir() {
             collect_rs_files(&path, out)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("._"))
+        {
             out.push(path);
         }
     }
@@ -307,6 +289,17 @@ fn registered_env_vars_are_read_by_production_code() -> TestResult {
             failures.push(format!(
                 "{name} is read by production code now: remove it from \
                  REGISTERED_WITHOUT_PRODUCTION_READ so the list keeps meaning something"
+            ));
+        }
+    }
+    for var in EnvVar::all() {
+        let expected_honored = !allowlisted.contains(var.name());
+        if var.is_honored_in_production() != expected_honored {
+            failures.push(format!(
+                "{} is_honored_in_production()={} disagrees with REGISTERED_WITHOUT_PRODUCTION_READ (expected {})",
+                var.name(),
+                var.is_honored_in_production(),
+                expected_honored
             ));
         }
     }

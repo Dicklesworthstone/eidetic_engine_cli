@@ -10644,7 +10644,10 @@ pub struct CurateAutoPromoteArgs {
 
     /// Minimum confidence for an episodic memory to be eligible for
     /// promotion to semantic.
-    #[arg(long = "min-confidence-episodic", default_value_t = 0.8_f32)]
+    #[arg(
+        long = "min-confidence-episodic",
+        default_value_t = default_curation_auto_promote_min_confidence_episodic()
+    )]
     pub min_confidence_episodic: f32,
 
     /// Minimum positive-feedback access count for a semantic memory to
@@ -10654,7 +10657,10 @@ pub struct CurateAutoPromoteArgs {
 
     /// Minimum confidence for a semantic memory to be eligible for
     /// promotion to procedural.
-    #[arg(long = "min-confidence-semantic", default_value_t = 0.9_f32)]
+    #[arg(
+        long = "min-confidence-semantic",
+        default_value_t = default_curation_auto_promote_min_confidence_semantic()
+    )]
     pub min_confidence_semantic: f32,
 
     /// Maximum number of promotions to propose (or apply) per run.
@@ -10711,6 +10717,20 @@ fn default_curation_auto_promote_max_per_run() -> u32 {
     EnvVar::CurationAutoPromoteMaxPerRun
         .parse_into::<u32>()
         .unwrap_or(10)
+}
+
+fn default_curation_auto_promote_min_confidence_episodic() -> f32 {
+    EnvVar::CurationAutoPromoteConfidenceFloor
+        .parse_into::<f32>()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .unwrap_or(0.8_f32)
+}
+
+fn default_curation_auto_promote_min_confidence_semantic() -> f32 {
+    EnvVar::CurationAutoPromoteConfidenceFloor
+        .parse_into::<f32>()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .map_or(0.9_f32, |floor| floor.max(0.9_f32))
 }
 
 /// Arguments for `ee curate propose-derived` (bd-kxm0c).
@@ -10810,7 +10830,7 @@ pub struct CurateCandidatesArgs {
     pub database: Option<PathBuf>,
 
     /// Maximum number of candidates to return.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = default_curation_candidates_limit())]
     pub limit: u32,
 
     /// Number of filtered candidates to skip.
@@ -10829,6 +10849,13 @@ pub struct CurateCandidatesArgs {
     /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+}
+
+fn default_curation_candidates_limit() -> u32 {
+    EnvVar::CurationDerivedPreviewLimit
+        .parse_into::<u32>()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(100)
 }
 
 /// Arguments for `ee curate show` (bd-18z8x).
@@ -19498,11 +19525,12 @@ where
         }
     }
 
+    let persisted = results.as_ref().is_some_and(|applied| !applied.is_empty());
     let data = serde_json::json!({
         "schema": CONFLICT_RESOLVE_SCHEMA_V1,
         "status": status,
         "dryRun": !args.apply,
-        "persisted": args.apply,
+        "persisted": persisted,
         "verb": verb.as_str(),
         "reason": reason,
         "plan": plan,
@@ -58932,7 +58960,7 @@ impl MemoryReviseReport {
                 "command": "memory revise",
                 "version": self.version,
                 "dry_run": self.dry_run,
-                "persisted": self.success && !self.dry_run,
+                "persisted": self.persisted,
                 "original_id": self.original_id,
                 "new_id": self.new_id,
                 "revision_group_id": self.revision_group_id,
@@ -58943,7 +58971,7 @@ impl MemoryReviseReport {
                 "audit_id": null,
                 "index_job_id": self.index_job_id,
                 "index_status": self.index_status,
-                "policy": if self.success && !self.dry_run {
+                "policy": if self.persisted {
                     "writes_enabled"
                 } else {
                     "dry_run_only"
@@ -61585,6 +61613,11 @@ where
         max_sources: args.max_sources.unwrap_or(default_limits.max_sources),
         max_total_excerpt_bytes: args
             .max_total_excerpt_bytes
+            .or_else(|| {
+                EnvVar::ReflectionSourceBudgetBytes
+                    .parse_into::<usize>()
+                    .filter(|bytes| *bytes > 0)
+            })
             .unwrap_or(default_limits.max_total_excerpt_bytes),
         max_excerpt_bytes_per_source: args
             .max_excerpt_bytes_per_source
@@ -61626,7 +61659,10 @@ where
                 human.push_str(&format!("  expiresAt: {}\n", report.expires_at));
                 human.push_str(&format!("  hmacKeyId: {}\n", report.hmac_key_id));
                 human.push_str(&format!("  sources: {} ref(s)\n", report.source_refs.len()));
-                for source in &report.source_refs {
+                let show_source_limit = EnvVar::ReflectionRequestShowSourceLimit
+                    .parse_into::<usize>()
+                    .unwrap_or(usize::MAX);
+                for source in report.source_refs.iter().take(show_source_limit) {
                     human.push_str(&format!("    - {}/{}\n", source.kind, source.id));
                 }
                 human.push_str(&format!("  persisted: {}\n", report.persisted));

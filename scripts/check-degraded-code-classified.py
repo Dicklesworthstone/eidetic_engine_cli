@@ -63,7 +63,21 @@ BASELINE = "scripts/degraded-code-classification-baseline.txt"
 #: notional: the predicate keys on the NAME containing "CODE", which an invite
 #: code satisfies. Without the exclusion the gate demands a taxonomy entry for
 #: a string that could never be emitted as a degradation.
-NOT_DEGRADED_CODES = ("TEAM_INVITE_CODE_PREFIX",)
+#:
+#: The five `src/core/memory.rs` constants (`REMEMBER_IDEMPOTENCY_CONFLICT_CODE`,
+#: `REMEMBER_KIND_IS_LEVEL_CODE`, `REMEMBER_LEVEL_IS_KIND_CODE`,
+#: `TYPED_FIELD_INVALID_CODE`, `TYPED_FIELD_UNKNOWN_CODE`) are `DomainError::UsageCodeWithDetails`
+#: usage/validation error codes, which `docs/degraded_code_taxonomy.md` §"Usage
+#: errors are not degraded codes" explicitly excludes from `data.degraded[]` and
+#: from the taxonomy.
+NOT_DEGRADED_CODES = (
+    "TEAM_INVITE_CODE_PREFIX",
+    "REMEMBER_IDEMPOTENCY_CONFLICT_CODE",
+    "REMEMBER_KIND_IS_LEVEL_CODE",
+    "REMEMBER_LEVEL_IS_KIND_CODE",
+    "TYPED_FIELD_INVALID_CODE",
+    "TYPED_FIELD_UNKNOWN_CODE",
+)
 
 #: A code written INLINE at the push site rather than declared as a constant.
 #:

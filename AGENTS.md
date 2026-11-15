@@ -1688,13 +1688,21 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 3. **Reserve**: Reserve the intended edit paths through Agent Mail.
 4. **Claim**: Use `br update <id> --status=in_progress --json` only after the gate and reservation are safe.
 5. **Work**: Implement the task.
-6. **Complete**: Use `br close <id> --reason "Completed: <specific proof>"`. The
+6. **Complete** (Close Checklist): Use `br close <id> --reason "Completed: <specific proof>"`. The
    proof must be an EXECUTION, not a compile: a green `cargo check` cannot
    observe that an arc was mined, a secret redacted or a field emitted, so a
    behavioural criterion closed on a build is closed on the wrong question
    (bd-lkizl measured 451 closures citing a compile). Cite the command, the
    counts and the base. `scripts/closeout_audit.sh --bead <id> --json` will
    pre-check the evidence for you.
+   - **Cross-Surface Twin Sweep (`bd-p1b4e`)**: Before closing any bead whose
+     fix touches a label, a scrubber, a `#[cfg(...)]` gate, or a serialized
+     field, run a twin sweep across sibling surfaces (`rg` for every emitter or
+     decider of that value/variant across `src/` and `tests/`). State in the
+     closeout which sibling emitters were updated and which were deliberately
+     left unchanged, and prefer a single shared decider + mechanical population
+     test over per-site conditionals so sibling surfaces cannot drift (`bd-ajl2b`,
+     `bd-czjln`, `bd-xivcz`).
 7. **Sync**: Run `br sync --flush-only` then manually commit.
 
 ### Key Concepts

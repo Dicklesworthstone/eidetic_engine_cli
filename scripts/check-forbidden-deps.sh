@@ -113,6 +113,9 @@ PY
 # Format: crate | required bound | why it exists
 LOAD_BEARING_CAPS=(
     'wasm-bindgen-futures|<0.4.79|0.4.79 adds a tokio dependency; ee reaches this crate through asupersync, which requires only "0.4" (bd-iuybr)'
+    'fnx-algorithms|=0.3.0|0.3.1 changes louvain_communities to 7 args (PythonSum) and Option<Vec<Vec<String>>>; bumping past =0.3.0 without migrating src/cli/mod.rs, src/graph/algorithms.rs, and src/graph/health.rs breaks compilation under --lib/--all-targets (bd-lrymw)'
+    'fnx-classes|=0.3.0|keep fnx crate family aligned at =0.3.0 with fnx-algorithms and fnx-runtime until call-site migration lands (bd-lrymw)'
+    'fnx-runtime|=0.3.0|0.3.1 changes runtime types paired with fnx-algorithms 0.3.1; bumping past =0.3.0 without migrating src/graph/algorithms.rs breaks compilation (bd-lrymw)'
 )
 
 # Assert every load-bearing cap is still declared in the manifest and still
@@ -225,13 +228,22 @@ for line in os.environ["CAPS_SPEC"].splitlines():
     if actual is None:
         reported.append(f"  {crate} {requirement} in {where} (not in the resolved graph) -- {why}")
         continue
-    limit = bound.lstrip("<=")
-    if parse_version(actual) >= parse_version(limit):
-        failures.append(
-            f"{crate}: cap says {bound} but the graph resolved {actual}, so the cap is declared "
-            f"but not effective.\n    {why}"
-        )
-        continue
+    if bound.startswith("="):
+        limit = bound.lstrip("=")
+        if parse_version(actual) != parse_version(limit):
+            failures.append(
+                f"{crate}: exact pin says {bound} but the graph resolved {actual}, so the pin is declared "
+                f"but not effective.\n    {why}"
+            )
+            continue
+    else:
+        limit = bound.lstrip("<=")
+        if parse_version(actual) >= parse_version(limit):
+            failures.append(
+                f"{crate}: cap says {bound} but the graph resolved {actual}, so the cap is declared "
+                f"but not effective.\n    {why}"
+            )
+            continue
     reported.append(f"  {crate} {requirement} in {where} -> resolved {actual} -- {why}")
 
 if failures:
@@ -376,10 +388,15 @@ if [[ "${1:-}" == "--self-test" ]]; then
 name = "fixture"
 version = "0.0.0"
 
+[dependencies]
+fnx-algorithms = { version = "=0.3.0" }
+fnx-classes = { version = "=0.3.0" }
+fnx-runtime = { version = "=0.3.0", default-features = false, features = ["asupersync-integration"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
 CAPFIXTURE
-    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"}]}\n' \
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.3.0"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
         > "${fixture_dir}/caps-ok.json"
     if ! check_load_bearing_caps "${caps_manifest}" "${fixture_dir}/caps-ok.json" \
         > "${fixture_dir}/caps-ok.out" 2>&1; then
@@ -387,8 +404,8 @@ CAPFIXTURE
         echo "error: self-test rejected a manifest whose cap is present and honoured" >&2
         exit 2
     fi
-    if ! grep -Fq 'wasm-bindgen-futures' "${fixture_dir}/caps-ok.out"; then
-        echo "error: cap check passed without naming the capped crate" >&2
+    if ! grep -Fq 'wasm-bindgen-futures' "${fixture_dir}/caps-ok.out" || ! grep -Fq 'fnx-algorithms' "${fixture_dir}/caps-ok.out"; then
+        echo "error: cap check passed without naming the capped crates" >&2
         exit 2
     fi
     echo "ok: load-bearing cap accepted when present and honoured"
@@ -421,16 +438,42 @@ CAPFIXTURE
 name = "fixture"
 version = "0.0.0"
 
+[dependencies]
+fnx-algorithms = { version = "=0.3.0" }
+fnx-classes = { version = "=0.3.0" }
+fnx-runtime = { version = "=0.3.0" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
 CAPFIXTURE
     expect_cap_failure cap_unbounded 'none of which carries' \
         "${fixture_dir}/caps-unbounded.toml" "${fixture_dir}/caps-ok.json"
 
-    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.79"}]}\n' \
+    cat > "${fixture_dir}/caps-fnx-bumped.toml" <<'CAPFIXTURE'
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[dependencies]
+fnx-algorithms = { version = "=0.3.1" }
+fnx-classes = { version = "=0.3.1" }
+fnx-runtime = { version = "=0.3.1" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
+CAPFIXTURE
+    expect_cap_failure cap_fnx_bumped 'bd-lrymw' \
+        "${fixture_dir}/caps-fnx-bumped.toml" "${fixture_dir}/caps-ok.json"
+
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.79"},{"name":"fnx-algorithms","version":"0.3.0"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
         > "${fixture_dir}/caps-violated.json"
     expect_cap_failure cap_not_effective 'not effective' \
         "${caps_manifest}" "${fixture_dir}/caps-violated.json"
+
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.3.1"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
+        > "${fixture_dir}/caps-fnx-lock-violated.json"
+    expect_cap_failure cap_fnx_lock_not_effective 'exact pin says =0.3.0' \
+        "${caps_manifest}" "${fixture_dir}/caps-fnx-lock-violated.json"
 
     # The cap may legitimately move between dependency tables; only deleting it
     # is a regression. If this arm ever fails, the search narrowed by accident.
@@ -441,6 +484,9 @@ version = "0.0.0"
 
 [dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79" }
+fnx-algorithms = { version = "=0.3.0" }
+fnx-classes = { version = "=0.3.0" }
+fnx-runtime = { version = "=0.3.0" }
 CAPFIXTURE
     if ! check_load_bearing_caps "${fixture_dir}/caps-moved.toml" "${fixture_dir}/caps-ok.json" \
         > "${fixture_dir}/caps-moved.out" 2>&1; then

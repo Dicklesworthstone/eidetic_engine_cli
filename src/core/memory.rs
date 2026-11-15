@@ -11912,6 +11912,8 @@ pub struct MemoryReviseReport {
     pub dry_run: bool,
     /// Whether the revision was successful.
     pub success: bool,
+    /// Whether durable revision state was committed to storage.
+    pub persisted: bool,
     /// Original memory ID that was revised.
     pub original_id: String,
     /// New memory ID (if created).
@@ -11950,6 +11952,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run,
             success: true,
+            persisted: !dry_run,
             original_id,
             new_id: Some(new_id),
             revision_group_id: Some(revision_group_id),
@@ -11978,6 +11981,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: true,
             success: true,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12002,6 +12006,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12025,6 +12030,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12045,6 +12051,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12065,6 +12072,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12087,6 +12095,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -12107,6 +12116,7 @@ impl MemoryReviseReport {
             version: env!("CARGO_PKG_VERSION"),
             dry_run: false,
             success: false,
+            persisted: false,
             original_id,
             new_id: None,
             revision_group_id: None,
@@ -18711,6 +18721,7 @@ mod tests {
 
         ensure(report.success, true, "success")?;
         ensure(report.dry_run, false, "dry_run")?;
+        ensure(report.persisted, true, "persisted")?;
         ensure(report.original_id, "mem_old".to_string(), "original_id")?;
         ensure(report.new_id, Some("mem_new".to_string()), "new_id")?;
         ensure(
@@ -18734,6 +18745,7 @@ mod tests {
 
         ensure(report.success, true, "success")?;
         ensure(report.dry_run, true, "dry_run")?;
+        ensure(report.persisted, false, "persisted is false for dry run")?;
         ensure(report.new_id.is_none(), true, "no new_id for dry run")?;
         ensure(
             report.revision_group_id.is_none(),

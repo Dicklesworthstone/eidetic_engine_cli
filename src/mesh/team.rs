@@ -554,6 +554,8 @@ pub struct TeamIdpPolicyReport {
     pub oidc_capability: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leases: Vec<TeamIdentityLease>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded_codes: Vec<&'static str>,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -625,6 +627,8 @@ pub struct TeamIdpPollReport {
     pub jwt: Option<String>,
     pub has_access_token: bool,
     pub has_refresh_token: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded_codes: Vec<&'static str>,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -4583,6 +4587,7 @@ pub fn require_tailnet_attested(
         oidc_issuer: None,
         oidc_capability: None,
         leases: Vec::new(),
+        degraded_codes: Vec::new(),
         mesh_primitives: vec!["team_idp_policy", "teamIdpPolicySet"],
     })
 }
@@ -4861,9 +4866,9 @@ pub fn plan_team_idp_device(
         .next()
         .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
     let capability = classify_oidc_provider(discovery);
-    if !capability.accepted() {
+    if let Some(code) = capability.degraded_code() {
         return Err(OriginStreamError::Encode(format!(
-            "OIDC provider is unsupported ({})",
+            "OIDC provider is unsupported ({}, degraded={code})",
             capability.as_str()
         )));
     }
@@ -4962,6 +4967,27 @@ pub fn execute_team_idp_token_poll(
     let gate = parsed
         .as_ref()
         .and_then(|value| crate::mesh::idp::classify_token_response(value).ok());
+    let mut degraded_codes = Vec::new();
+    let poll_disposition = crate::mesh::idp::decide_device_poll(
+        0,
+        planned.deadline_secs,
+        planned.interval,
+        1,
+        token_error.as_deref(),
+    );
+    if let Some(code) = poll_disposition.degraded_code() {
+        degraded_codes.push(code);
+    }
+    if let Some(code) = gate.as_ref().and_then(|value| value.jwt.degraded_code()) {
+        if !degraded_codes.contains(&code) {
+            degraded_codes.push(code);
+        }
+    } else if executed.exit_code == 0 && token_error.is_none() && gate.is_none() {
+        let code = crate::mesh::idp::TEAM_IDP_TOKEN_INVALID_CODE;
+        if !degraded_codes.contains(&code) {
+            degraded_codes.push(code);
+        }
+    }
     Ok(TeamIdpPollReport {
         schema: TEAM_IDP_POLL_SCHEMA_V1,
         command: "team idp device --execute",
@@ -4973,6 +4999,7 @@ pub fn execute_team_idp_token_poll(
         jwt: gate.as_ref().map(|value| value.jwt.as_str().to_owned()),
         has_access_token: gate.as_ref().is_some_and(|value| value.has_access_token),
         has_refresh_token: gate.as_ref().is_some_and(|value| value.has_refresh_token),
+        degraded_codes,
         mesh_primitives: vec!["team_idp_oidc", "rfc8628", "constrained_https"],
     })
 }
@@ -5011,14 +5038,12 @@ pub fn set_team_oidc_provider(
     discovery_https_endpoint(discovery, "jwks_uri").ok_or_else(|| {
         OriginStreamError::Encode("OIDC discovery jwks_uri must be https".to_owned())
     })?;
-    match classify_oidc_provider(discovery) {
-        IdpProviderCapability::SecretlessPublic => {}
-        other => {
-            return Err(OriginStreamError::Encode(format!(
-                "OIDC provider is unsupported ({})",
-                other.as_str()
-            )));
-        }
+    let capability = classify_oidc_provider(discovery);
+    if let Some(code) = capability.degraded_code() {
+        return Err(OriginStreamError::Encode(format!(
+            "OIDC provider is unsupported ({}, degraded={code})",
+            capability.as_str()
+        )));
     }
     let team = load_local_teams(connection)?
         .into_iter()
@@ -5064,6 +5089,12 @@ pub fn team_idp_status(
         .get_team_idp_oidc(&team.team_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let leases = identity_leases(connection, &team.team_id)?;
+    let mut degraded_codes = Vec::new();
+    if oidc.as_ref().is_some_and(|row| {
+        row.capability != crate::mesh::idp::IdpProviderCapability::SecretlessPublic.as_str()
+    }) {
+        degraded_codes.push(crate::mesh::idp::TEAM_IDP_PROVIDER_UNSUPPORTED_CODE);
+    }
     Ok(TeamIdpPolicyReport {
         schema: TEAM_IDP_SCHEMA_V1,
         command: "team idp status",
@@ -5080,6 +5111,7 @@ pub fn team_idp_status(
         oidc_issuer: oidc.as_ref().map(|row| row.issuer.clone()),
         oidc_capability: oidc.as_ref().map(|row| row.capability.clone()),
         leases,
+        degraded_codes,
         mesh_primitives: vec!["team_idp_policy", "team_idp_oidc", "team_member_identity"],
     })
 }
@@ -13763,6 +13795,7 @@ mod tests {
         let status = team_idp_status(&connection).expect("status");
         assert_eq!(status.oidc_issuer.as_deref(), Some("https://idp.example"));
         assert_eq!(status.oidc_capability.as_deref(), Some("secretless_public"));
+        assert!(status.degraded_codes.is_empty());
         let rejected = set_team_oidc_provider(
             &connection,
             "https://idp.example",
@@ -13777,7 +13810,9 @@ mod tests {
             "2026-08-13T19:01:00Z",
         )
         .expect_err("secret");
-        assert!(rejected.to_string().contains("client_secret_required"));
+        let rejected_msg = rejected.to_string();
+        assert!(rejected_msg.contains("client_secret_required"));
+        assert!(rejected_msg.contains(crate::mesh::idp::TEAM_IDP_PROVIDER_UNSUPPORTED_CODE));
     }
 
     #[test]

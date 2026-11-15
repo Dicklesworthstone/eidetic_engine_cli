@@ -231,8 +231,9 @@ impl BetaPosterior {
     }
 
     /// Equal-tailed credible interval at the given confidence level
-    /// in `(0.0, 1.0)`. For example, `credible_interval(0.9)` returns
-    /// `(lo, hi)` where `lo = Beta.ppf(0.05)` and `hi = Beta.ppf(0.95)`.
+    /// in `(0.0, 1.0)` for the stored `Beta(alpha, beta)` distribution.
+    /// For example, `credible_interval(0.9)` returns `(lo, hi)` where
+    /// `lo = Beta.ppf(0.05)` and `hi = Beta.ppf(0.95)`.
     ///
     /// Returns `None` if the level is outside `(0.0, 1.0)` or if the
     /// inverse-CDF iteration fails to converge (rare; happens only on
@@ -248,6 +249,89 @@ impl BetaPosterior {
         let hi = beta_inv_cdf(1.0 - tail, self.alpha, self.beta)?;
         Some((lo, hi))
     }
+
+    /// Recover the conjugate `Beta(alpha_raw, beta_raw)` posterior over the
+    /// raw Bernoulli helpful rate `p` when harmful outcomes were accumulated
+    /// with step `harmful_weight` above `prior_beta`.
+    #[must_use]
+    pub fn raw_bernoulli_posterior(&self, prior_beta: f64, harmful_weight: f64) -> Option<Self> {
+        if !prior_beta.is_finite()
+            || prior_beta <= 0.0
+            || !harmful_weight.is_finite()
+            || harmful_weight <= 0.0
+        {
+            return None;
+        }
+        let harmful_excess = (self.beta - prior_beta).max(0.0);
+        let raw_beta = prior_beta + (harmful_excess / harmful_weight);
+        Self::new(self.alpha, raw_beta)
+    }
+
+    /// Equal-tailed credible interval at `level` in the weighted-utility
+    /// parameterization `mu_w = p / (p + w * (1 - p))`, where `w` is
+    /// `harmful_weight`.
+    ///
+    /// While [`Self::credible_interval`] reports exact quantiles of the stored
+    /// `Beta(alpha, beta)` pseudo-count distribution (used directly by ADR 0032
+    /// trust-class hysteresis gates), scaling harmful outcomes by `w != 1`
+    /// inflates `alpha + beta` relative to raw event count `N` and warps the
+    /// parameter space from `p` to `mu_w`. Descaling the harmful count above
+    /// [`DEFAULT_PRIOR_BETA`] back to raw Bernoulli observations and pushing
+    /// the resulting conjugate quantiles through the monotone bijection
+    /// [`weighted_utility_rate`] yields a credible interval with nominal
+    /// coverage for `mu_w`.
+    #[must_use]
+    pub fn weighted_credible_interval(
+        &self,
+        level: f64,
+        harmful_weight: f64,
+    ) -> Option<(f64, f64)> {
+        let raw_posterior = self.raw_bernoulli_posterior(DEFAULT_PRIOR_BETA, harmful_weight)?;
+        let (raw_lo, raw_hi) = raw_posterior.credible_interval(level)?;
+        let lo = weighted_utility_rate(raw_lo, harmful_weight)?;
+        let hi = weighted_utility_rate(raw_hi, harmful_weight)?;
+        Some((lo, hi))
+    }
+}
+
+/// Map a raw Bernoulli helpful rate `p` in `(0.0, 1.0)` into the weighted
+/// utility rate `mu_w = p / (p + w * (1 - p))` under `harmful_weight = w`.
+#[must_use]
+pub fn weighted_utility_rate(raw_bernoulli_rate: f64, harmful_weight: f64) -> Option<f64> {
+    if !raw_bernoulli_rate.is_finite()
+        || !harmful_weight.is_finite()
+        || !(0.0..=1.0).contains(&raw_bernoulli_rate)
+        || harmful_weight <= 0.0
+    {
+        return None;
+    }
+    let denom = raw_bernoulli_rate + harmful_weight * (1.0 - raw_bernoulli_rate);
+    if denom <= 0.0 || !denom.is_finite() {
+        return None;
+    }
+    Some((raw_bernoulli_rate / denom).clamp(0.0, 1.0))
+}
+
+/// Inverse bijection of [`weighted_utility_rate`]: map a weighted utility rate
+/// `mu_w` in `(0.0, 1.0)` back to the raw Bernoulli helpful probability
+/// `p = (w * mu_w) / (1 - mu_w + w * mu_w)`.
+#[must_use]
+pub fn raw_bernoulli_rate_for_weighted_utility(
+    weighted_utility: f64,
+    harmful_weight: f64,
+) -> Option<f64> {
+    if !weighted_utility.is_finite()
+        || !harmful_weight.is_finite()
+        || !(0.0..=1.0).contains(&weighted_utility)
+        || harmful_weight <= 0.0
+    {
+        return None;
+    }
+    let denom = (1.0 - weighted_utility) + (harmful_weight * weighted_utility);
+    if denom <= 0.0 || !denom.is_finite() {
+        return None;
+    }
+    Some(((harmful_weight * weighted_utility) / denom).clamp(0.0, 1.0))
 }
 
 /// Direction of an ADR 0032 trust-class transition.

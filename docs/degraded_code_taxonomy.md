@@ -416,7 +416,17 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_evidence_near_duplicates_collapsed` | low | bd-reality-core-convergence-1azkt.11 |
 | `context_rule_hit_unhydrated` | low | bd-3h6bz |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |
+| `bead_affinity_capped` | info | bd-6oqlx / bd-nnheo — bead-affinity score adjustment hit the configured cap |
+| `bead_affinity_cold_start` | info | bd-6oqlx / bd-nnheo — selected bead has no historical affinity observations yet |
+| `bead_affinity_lookup_failed` | warning | bd-6oqlx / bd-nnheo — bead-affinity table query failed; retrieval proceeded without boost |
+| `bead_affinity_unavailable` | warning | bd-6oqlx / bd-nnheo — bead-affinity table or schema unavailable |
+| `cache_admission_denied` | info | bd-6oqlx / bd-nnheo — speculative context-pack cache admission refused by policy |
+| `qos_back_pressure` | warning | bd-6oqlx / bd-nnheo — speculative context-pack warmup skipped due to QoS backpressure |
+| `ring_empty` | info | bd-6oqlx / bd-nnheo — speculative context-pack ring buffer has no warm entry |
 | `cass_prefetch_budget_exceeded` | info | bd-16pwc.2 (SRR5) |
+| `cass_prefetch_history_oversized` | info | bd-1suaa / bd-nnheo — speculative prefetch history exceeded observation or topic-byte bounds |
+| `cass_prefetch_stale_corpus_revision` | info | bd-1eh60 / bd-nnheo — speculative prefetch skipped after corpus revision stamp advanced |
+| `cass_prefetch_stale_generation` | info | bd-qud3c / bd-nnheo — speculative prefetch skipped after workspace or index generation advanced |
 | `duplicates_collapsed` | low | bd-17c65.2.3 (B3) |
 | `expired_filtered` | low | bd-17c65.2.8 (B8) |
 | `explanation_budget_config_invalid` | low | bd-1nxz4.4 (optional explanation admission) |
@@ -856,10 +866,11 @@ that helper is the thing to change.
 | `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
-#### Other (7)
+#### Other (9)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
+| `graph_feature_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the graph feature flag's value is unknown; distinct from `graph_feature_disabled` (`insights`, `graph feature-enrichment`) |
 | `graph_skyline_disabled` | info | bd-reality-core-convergence-1azkt.31 — config-time: `[graph.feature.skyline] enabled = false` on a graph-enabled build; do not confuse with the build-time codes above |
 | `graph_skyline_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the flag's value is unknown; distinct from `graph_skyline_disabled`, which asserts the operator turned the section off. Previously folded into the same `None` as "no workspace" and emitted nothing, so an empty skyline came back with `success: true` and no signal |
 | `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
@@ -950,6 +961,9 @@ that helper is the thing to change.
 | `mesh_approval_token_invalid` | high | bd-tc-epic-qzk7o.2.2 |
 | `mesh_approval_token_stale` | warning | bd-tc-epic-qzk7o.2.2 |
 | `mesh_store_authentication_unavailable` | high | bd-tc-epic-qzk7o.2.4 (TC-D14) |
+| `team_idp_device_flow_expired` | warning | bd-n8r09 / bd-nnheo — OIDC RFC 8628 device authorization or poll budget expired |
+| `team_idp_provider_unsupported` | medium | bd-n8r09 / bd-nnheo — OIDC provider requires a client secret or omits required HTTPS endpoints |
+| `team_idp_token_invalid` | high | bd-n8r09 / bd-nnheo — OIDC token poll or compact JWT failed structural, claim, or signature validation |
 
 `mesh_approval_token_invalid` collapses malformed, forged, wrong-context, and
 non-current-key inputs so grant errors do not become an authentication oracle.
@@ -1107,21 +1121,31 @@ the closed daemon hot-mode surface.
 | Code | Severity | Bead |
 |------|----------|------|
 | `daemon_ann_warmload_not_yet_implemented` | medium | bd-oja31 |
+| `daemon_context_deadline_exceeded` | warning | bd-oja31 / bd-nnheo — `ee.daemon.context` refused a request whose explicit deadline had already expired |
+| `daemon_context_execution_failed` | high | bd-oja31 / bd-nnheo — `ee.daemon.context` pack execution failed before producing a response envelope |
+| `daemon_context_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.context` parameters failed strict request mapping |
+| `daemon_echo_disabled` | medium | bd-oja31 / bd-nnheo — diagnostic `ee.daemon.echo` method is disabled by daemon policy |
 | `daemon_handler_panic` | high | bd-b82q4 |
+| `daemon_journal_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.journal` parameters failed strict decoding |
 | `daemon_method_unauthorized` | high | bd-3mbao |
 | `daemon_request_decode_failed` | medium | bd-oja31 |
 | `daemon_request_schema_mismatch` | medium | bd-oja31 |
+| `daemon_search_execution_failed` | high | bd-oja31 / bd-nnheo — `ee.daemon.search` canonical execution or response encoding failed |
 | `daemon_search_fallback` | warning | bd-search-warm-latency-0bh05 |
+| `daemon_search_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.search` parameters failed strict decoding |
 | `daemon_memory_read_fallback` | info | gh-39: requested orientation/recall daemon path unavailable; local retrieval used |
 | `daemon_setsockopt_failed` | high | bd-3pnno (SRR1) |
 | `daemon_shutting_down` | medium | bd-36dp2 (SRR1) |
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
+| `daemon_telemetry_encode_failed` | high | bd-oja31 / bd-nnheo — `ee.daemon.telemetry` snapshot serialization failed |
 | `daemon_unknown_method` | medium | bd-oja31 |
+| `daemon_write_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.write` parameters failed strict decoding |
 
-#### Integrity / schema (16)
+#### Integrity / schema (17)
 | Code | Severity | Bead |
 |------|----------|------|
 | `shard_fanout_apply_plan_blocked` | high | bd-nnheo (classified); src/db/migrate.rs refuses the shard fan-out migration when the planner reports blockers |
+| `shard_fanout_target_hash_mismatch` | high | bd-n8r09 / bd-nnheo — existing shard database hash does not match the hash recorded in `shard_fanout_catalog` |
 | `handoff_capsule_machine_mismatch` | critical | bd-17c65.13.6 (M5) |
 | `handoff_capsule_tampered` | critical | bd-17c65.13.6 (M5) |
 | `handoff_hmac_missing` | critical | bd-17c65.13.6 (M5) |
@@ -1221,6 +1245,7 @@ the closed daemon hot-mode surface.
 | `backup_schema_coverage_incomplete` | warning | bd-reality-core-convergence-1azkt.13 — required table family has no portable typed coverage |
 | `backup_source_rows_not_covered` | high | bd-reality-core-convergence-1azkt.13 — the exported snapshot contains non-empty required rows that restore cannot rehydrate |
 | `backup_table_inventory_unclassified` | high | bd-reality-core-convergence-1azkt.13 — a migrated table has no explicit recovery disposition |
+| `unauthenticated_native_import_trust` | high | bd-cjt23 / bd-nnheo — native-source JSONL artifact claims `human_explicit` trust without authenticating under the store key (ADR 0086 TC-D14) |
 | `verified_backup_trust_downgraded` | warning | bd-cjt23 — recovered native records do not authenticate under the selected source keys |
 | `degraded_context` | info | bd-17c65.5.2 (E2) — retired tombstone for legacy meta-signal; context emits concrete degraded[] entries instead |
 | `dry_run_recommended` | info | (TBD) |

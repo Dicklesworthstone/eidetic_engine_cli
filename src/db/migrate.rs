@@ -237,6 +237,7 @@ pub fn plan_shard_fanout_migration_from_database(
     if let Some(source) = source.as_ref() {
         annotate_workspace_row_counts(source, &mut plan)?;
     }
+    annotate_catalog_hash_mismatch_blockers(&mut plan)?;
 
     Ok(plan)
 }
@@ -437,6 +438,64 @@ fn annotate_workspace_row_counts(
         let counts = workspace_row_counts(source, &source_tables, &workspace.workspace_id, None)?;
         workspace.planned_row_count = Some(counts.values().copied().sum());
         workspace.row_counts_by_table = counts;
+    }
+    Ok(())
+}
+
+fn annotate_catalog_hash_mismatch_blockers(
+    plan: &mut ShardFanoutMigrationPlan,
+) -> Result<(), DomainError> {
+    let Some(catalog_path) = plan.catalog_path.as_ref() else {
+        return Ok(());
+    };
+    if !catalog_path.exists() {
+        return Ok(());
+    }
+    let catalog = DbConnection::open_file(catalog_path).map_err(|error| {
+        storage_error(
+            format!(
+                "Failed to open shard fan-out catalog {}: {error}",
+                catalog_path.display()
+            ),
+            Some("Inspect catalog directory permissions and rerun the migration.".to_owned()),
+        )
+    })?;
+    if !source_user_tables(&catalog)?.contains(CATALOG_TABLE) {
+        return Ok(());
+    }
+    let mut top_level_added = false;
+    for workspace in &mut plan.workspaces {
+        let Some(shard_path) = workspace.shard_path.as_ref() else {
+            continue;
+        };
+        if !shard_path.exists() {
+            continue;
+        }
+        let Some(recorded_hash) = catalog_target_hash(&catalog, &workspace.workspace_id)? else {
+            continue;
+        };
+        let (current_hash, _) = blake3_file_hash(shard_path).map_err(|error| {
+            storage_error(
+                format!(
+                    "Failed to hash existing shard {}: {error}",
+                    shard_path.display()
+                ),
+                None,
+            )
+        })?;
+        if recorded_hash != current_hash {
+            let blocker = shard::ShardFanoutDegradation::new(
+                SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE,
+                "high",
+                "Existing shard database hash does not match the hash recorded in shard_fanout_catalog.",
+                "Move the corrupt shard aside after operator review, then rerun `ee migrate shard-fanout --dry-run --json`.",
+            );
+            workspace.blockers.push(blocker.clone());
+            if !top_level_added {
+                plan.blockers.push(blocker);
+                top_level_added = true;
+            }
+        }
     }
     Ok(())
 }
@@ -1659,6 +1718,41 @@ mod tests {
                 .workspaces
                 .iter()
                 .all(|workspace| workspace.copied_row_count == 0)
+        );
+
+        let shard_a_tampered = DbConnection::open_file(shard_root.join(format!("{WSP_A}.db")))
+            .map_err(|error| error.to_string())?;
+        shard_a_tampered
+            .execute_raw(&format!(
+                "UPDATE memories SET content = 'tampered after migration' WHERE id = '{MEM_A}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        shard_a_tampered
+            .wal_checkpoint(WalCheckpointMode::Truncate)
+            .map_err(|error| error.to_string())?;
+        drop(shard_a_tampered);
+
+        let drifted_plan = plan_shard_fanout_migration_from_database(
+            source_path.clone(),
+            Some(shard_root.clone()),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            drifted_plan
+                .blockers
+                .iter()
+                .any(|blocker| blocker.code == SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE),
+            "planner must emit SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE when shard bytes drift from catalog"
+        );
+        let drifted_apply =
+            apply_shard_fanout_migration(&drifted_plan).map_err(|error| error.to_string())?;
+        assert_eq!(drifted_apply.outcome, ShardFanoutMigrationOutcome::Blocked);
+        assert!(
+            drifted_apply
+                .degraded
+                .iter()
+                .any(|entry| entry.code == SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE),
+            "apply report must surface SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE in degraded[]"
         );
 
         Ok(())

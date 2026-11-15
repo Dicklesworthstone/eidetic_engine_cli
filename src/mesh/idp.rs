@@ -44,6 +44,15 @@ impl IdpProviderCapability {
     pub const fn accepted(self) -> bool {
         matches!(self, Self::SecretlessPublic)
     }
+
+    #[must_use]
+    pub const fn degraded_code(self) -> Option<&'static str> {
+        if self.accepted() {
+            None
+        } else {
+            Some(TEAM_IDP_PROVIDER_UNSUPPORTED_CODE)
+        }
+    }
 }
 
 #[must_use]
@@ -410,6 +419,20 @@ pub enum DevicePollDisposition {
     Terminal { reason: &'static str },
 }
 
+impl DevicePollDisposition {
+    #[must_use]
+    pub fn degraded_code(self) -> Option<&'static str> {
+        match self {
+            Self::Wait { .. } => None,
+            Self::Expired { .. }
+            | Self::Terminal {
+                reason: "expired_token",
+            } => Some(TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE),
+            Self::Terminal { .. } => Some(TEAM_IDP_TOKEN_INVALID_CODE),
+        }
+    }
+}
+
 #[must_use]
 pub fn parse_device_authorization(value: &Value) -> Result<DeviceAuthorizationGrant, &'static str> {
     let object = value.as_object().ok_or("device_authorization_not_object")?;
@@ -544,6 +567,15 @@ impl CompactJwtDisposition {
     #[must_use]
     pub const fn accepted(self) -> bool {
         matches!(self, Self::Eligible)
+    }
+
+    #[must_use]
+    pub const fn degraded_code(self) -> Option<&'static str> {
+        if self.accepted() {
+            None
+        } else {
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        }
     }
 }
 
@@ -867,6 +899,15 @@ impl IdTokenClaimDisposition {
     pub const fn accepted(self) -> bool {
         matches!(self, Self::Accepted)
     }
+
+    #[must_use]
+    pub const fn degraded_code(self) -> Option<&'static str> {
+        if self.accepted() {
+            None
+        } else {
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        }
+    }
 }
 
 /// Issuer/audience/time checks on a structurally eligible ID token. No signature verify.
@@ -944,6 +985,15 @@ impl JwtSignatureDisposition {
     #[must_use]
     pub const fn accepted(self) -> bool {
         matches!(self, Self::Verified)
+    }
+
+    #[must_use]
+    pub const fn degraded_code(self) -> Option<&'static str> {
+        if self.accepted() {
+            None
+        } else {
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        }
     }
 }
 
@@ -1143,6 +1193,45 @@ mod tests {
             IdpProviderCapability::SecretlessPublic
         );
         assert!(classify_oidc_provider(&discovery).accepted());
+        assert_eq!(classify_oidc_provider(&discovery).degraded_code(), None);
+        assert_eq!(
+            IdpProviderCapability::ClientSecretRequired.degraded_code(),
+            Some(TEAM_IDP_PROVIDER_UNSUPPORTED_CODE)
+        );
+        assert_eq!(
+            DevicePollDisposition::Wait { delay_secs: 5 }.degraded_code(),
+            None
+        );
+        assert_eq!(
+            DevicePollDisposition::Expired { reason: "deadline" }.degraded_code(),
+            Some(TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE)
+        );
+        assert_eq!(
+            DevicePollDisposition::Terminal {
+                reason: "expired_token"
+            }
+            .degraded_code(),
+            Some(TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE)
+        );
+        assert_eq!(
+            DevicePollDisposition::Terminal {
+                reason: "access_denied"
+            }
+            .degraded_code(),
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        );
+        assert_eq!(
+            CompactJwtDisposition::Malformed.degraded_code(),
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        );
+        assert_eq!(
+            IdTokenClaimDisposition::Expired.degraded_code(),
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        );
+        assert_eq!(
+            JwtSignatureDisposition::SignatureInvalid.degraded_code(),
+            Some(TEAM_IDP_TOKEN_INVALID_CODE)
+        );
     }
 
     #[test]

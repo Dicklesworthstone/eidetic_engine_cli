@@ -10,7 +10,10 @@
 
 #![allow(clippy::expect_used)]
 
-use ee::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
+use ee::core::bayes::{
+    BetaPosterior, DEFAULT_HARMFUL_WEIGHT, raw_bernoulli_rate_for_weighted_utility,
+    weighted_utility_rate,
+};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
@@ -122,8 +125,8 @@ fn lcg_unit(state: u64) -> f64 {
 }
 
 fn raw_success_probability_for_weighted_rate(weighted_rate: f64) -> f64 {
-    let harmful_weight = DEFAULT_HARMFUL_WEIGHT;
-    (weighted_rate * harmful_weight) / (1.0 - weighted_rate + weighted_rate * harmful_weight)
+    raw_bernoulli_rate_for_weighted_utility(weighted_rate, DEFAULT_HARMFUL_WEIGHT)
+        .expect("valid weighted rate in (0, 1)")
 }
 
 fn coverage_for(p_true: f64, n_per_trial: usize, trials: usize, seed: u64) -> f64 {
@@ -141,7 +144,7 @@ fn coverage_for(p_true: f64, n_per_trial: usize, trials: usize, seed: u64) -> f6
                 p = p.update_harmful(DEFAULT_HARMFUL_WEIGHT);
             }
         }
-        if let Some((lo, hi)) = p.credible_interval(0.90) {
+        if let Some((lo, hi)) = p.weighted_credible_interval(0.90, DEFAULT_HARMFUL_WEIGHT) {
             if lo <= p_true && p_true <= hi {
                 covered += 1;
             }
@@ -152,24 +155,17 @@ fn coverage_for(p_true: f64, n_per_trial: usize, trials: usize, seed: u64) -> f6
 
 #[test]
 fn ci90_covers_at_calibrated_frequency_for_balanced_rate() {
-    // p_true = 0.5 is the regime where the Jeffreys prior is least
-    // informative and the Beta CI is most symmetric. Coverage must
-    // be within ±5pp of the nominal 90%.
-    //
-    // Note: because we use the harmful_weight=2.5 rule, the effective
-    // posterior is biased toward "helpful" for the same number of
-    // events. We compensate by sampling with the same `harmful_weight`
-    // bias (i.e. treat the model itself as the calibration target,
-    // not raw Bernoulli observations). This still tests that the
-    // CI's coverage matches its nominal width on streams drawn
-    // *under the model the posterior assumes*.
-    //
-    // Tolerance reasoning: stderr ~0.0095, three-sigma is ~3pp, so
-    // 5pp leaves plenty of headroom for the harmful_weight bias.
+    // p_true = 0.5 is the weighted utility rate mu_w = p / (p + w*(1 - p)).
+    // Because harmful outcomes accumulate with weight w = 2.5, the stored
+    // Beta(alpha, beta) distribution has effective sample size inflated on the
+    // harmful side; `weighted_credible_interval(0.90, DEFAULT_HARMFUL_WEIGHT)`
+    // descales the raw Bernoulli posterior and pushes its quantiles through the
+    // monotone bijection `weighted_utility_rate` so nominal 90% coverage holds
+    // within ±5pp without altering stored-Beta `credible_interval` semantics.
     let coverage = coverage_for(0.5, 40, 500, 0xfeed_face_d00d_cafe);
     assert!(
-        coverage > 0.80 && coverage < 1.0,
-        "ci90 coverage must be reasonably calibrated at p_true=0.5; got {coverage}"
+        (0.85..=0.95).contains(&coverage),
+        "weighted ci90 coverage must stay within ±5pp of 0.90 at mu_w=0.5; got {coverage}"
     );
 }
 
@@ -177,9 +173,31 @@ fn ci90_covers_at_calibrated_frequency_for_balanced_rate() {
 fn ci90_covers_at_calibrated_frequency_for_high_rate() {
     let coverage = coverage_for(0.85, 40, 500, 0x00c0_ffee_dead_beef);
     assert!(
-        coverage > 0.80 && coverage < 1.0,
-        "ci90 coverage must be reasonably calibrated at p_true=0.85; got {coverage}"
+        (0.85..=0.95).contains(&coverage),
+        "weighted ci90 coverage must stay within ±5pp of 0.90 at mu_w=0.85; got {coverage}"
     );
+}
+
+#[test]
+fn weighted_utility_bijection_roundtrips_and_matches_stored_ci_at_unit_weight() {
+    for rate in [0.1, 0.25, 0.5, 0.714_285_714_285_714_3, 0.85, 0.95] {
+        let p_raw = raw_bernoulli_rate_for_weighted_utility(rate, DEFAULT_HARMFUL_WEIGHT)
+            .expect("raw Bernoulli rate");
+        let recovered =
+            weighted_utility_rate(p_raw, DEFAULT_HARMFUL_WEIGHT).expect("weighted utility rate");
+        assert!(
+            approx_eq(rate, recovered, 1e-12),
+            "bijection roundtrip drift for {rate}: got {recovered}"
+        );
+    }
+
+    let posterior = BetaPosterior::new(12.5, 8.0).expect("valid posterior");
+    let stored = posterior.credible_interval(0.90).expect("stored CI");
+    let unit_weighted = posterior
+        .weighted_credible_interval(0.90, 1.0)
+        .expect("unit-weight CI");
+    assert!(approx_eq(stored.0, unit_weighted.0, 1e-12));
+    assert!(approx_eq(stored.1, unit_weighted.1, 1e-12));
 }
 
 // ---------------------------------------------------------------------------

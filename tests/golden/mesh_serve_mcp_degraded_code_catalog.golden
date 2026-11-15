@@ -6,7 +6,7 @@
 #
 # Total codes:                67
 # With failure-mode fixture:  62
-# In docs/degraded_code_taxonomy.md: 63
+# In docs/degraded_code_taxonomy.md: 66
 # In docs/degraded_codes.md (## header): 62
 #
 # Columns: code | fixture | taxonomy | gen-docs | const | source
@@ -75,6 +75,6 @@ steward_auto_enroll_daily_cap_reached                ✓         ✓          �
 steward_auto_enroll_disabled                         ✓         ✓          ✓      STEWARD_AUTO_ENROLL_DISABLED_CODE :: src/mesh/steward_decision.rs
 tailscale_peer_list_unavailable                      ✓         ✓          ✓      TAILSCALE_PEER_LIST_UNAVAILABLE_CODE :: src/mesh/tailscale_autodiscovery.rs
 tailscale_peer_probe_timeout                         ✓         ✓          ✓      TAILSCALE_PEER_PROBE_TIMEOUT_CODE :: src/mesh/tailscale_autodiscovery.rs
-team_idp_device_flow_expired                         ·         ·          ·      TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE :: src/mesh/idp.rs
-team_idp_provider_unsupported                        ·         ·          ·      TEAM_IDP_PROVIDER_UNSUPPORTED_CODE :: src/mesh/idp.rs
-team_idp_token_invalid                               ·         ·          ·      TEAM_IDP_TOKEN_INVALID_CODE :: src/mesh/idp.rs
+team_idp_device_flow_expired                         ·         ✓          ·      TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE :: src/mesh/idp.rs
+team_idp_provider_unsupported                        ·         ✓          ·      TEAM_IDP_PROVIDER_UNSUPPORTED_CODE :: src/mesh/idp.rs
+team_idp_token_invalid                               ·         ✓          ·      TEAM_IDP_TOKEN_INVALID_CODE :: src/mesh/idp.rs
