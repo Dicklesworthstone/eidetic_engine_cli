@@ -156,9 +156,10 @@ fn drift_path(entry: &str) -> String {
 /// trap in widening this further: narrowing the instrument BEFORE the product
 /// question was settled would have turned the row green and destroyed the
 /// only signal pointing at the read-write open. That question is settled now
-/// -- `search`/`similar`/`search --all-workspaces` are declared
-/// `append_only_write` -- so the instrument may finally be aligned with the
-/// contract its own failure message states.
+/// -- ordinary `search` and `similar` are declared `append_only_write` -- so
+/// the instrument may finally be aligned with the contract its own failure
+/// message states. The explicit all-workspaces diagnostic uses the separate
+/// inspection pipeline and is checked as a read below.
 fn is_open_artifact(path: &str) -> bool {
     let database = format!(".ee{}ee.db", std::path::MAIN_SEPARATOR);
     path == format!(".ee{}ee.write.lock", std::path::MAIN_SEPARATOR)
@@ -542,14 +543,31 @@ fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> Test
         "index rebuild should succeed",
     )?;
 
-    // `search` is deliberately ABSENT from these cases. It appends a retrieval
+    // Ordinary `search` is deliberately ABSENT from these cases. It appends a retrieval
     // audit row on every user-facing query (ADR 0071, bd-l8dn0), so it cannot
     // leave the workspace byte-identical and never could -- this case asserted
     // the behaviour the manifest claimed, not the behaviour the code has.
     // `retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else` below
     // replaces it with the opposite assertion, which is the stronger one:
-    // deleting a case only stops a red, and stops it by asking less.
+    // deleting a case only stops a red, and stops it by asking less. The
+    // all-workspaces diagnostic is present because its inspection pipeline
+    // deliberately performs neither retrieval audit writes nor index repair.
     let cases = [
+        (
+            "search --all-workspaces",
+            vec![
+                "--workspace",
+                workspace_arg,
+                "--json",
+                "search",
+                "release",
+                "--all-workspaces",
+                "--source-mode",
+                "lexical_only",
+                "--kind",
+                "rule",
+            ],
+        ),
         (
             "why",
             vec![

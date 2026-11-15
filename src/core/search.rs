@@ -9315,6 +9315,35 @@ pub fn run_search_with_read_connection(
     })
 }
 
+/// Inspect one workspace and its optional global lane without index repair or
+/// durable retrieval audits. Filters are applied during candidate collection,
+/// before top-K and relevance accounting. Reuse the pack retrieval preparation:
+/// it pins read-only sources and selects only the workspace's cached local
+/// producer, without downloading models or submitting content remotely.
+pub(crate) fn run_inspection_search_with_filters(
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<SearchReport, SearchError> {
+    let timeout = search_request_timeout();
+    let run = crate::core::run_cli_with_cx(timeout, |cx| async move {
+        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+            &cx,
+            options,
+            kind_filter,
+            typed_field_filters,
+            Duration::ZERO,
+            timeout,
+            None,
+            true,
+            false,
+        )
+        .await
+    })
+    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?;
+    run.map(|run| run.report)
+}
+
 pub async fn run_search_with_read_connection_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
