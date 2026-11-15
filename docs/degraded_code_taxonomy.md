@@ -569,11 +569,11 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
-#### Swarm replay ledger (13)
-All thirteen are emitted by `src/core/lab.rs` (introduced in `07c432833`,
+#### Swarm replay ledger (19)
+All nineteen are emitted by `src/core/lab.rs` (introduced in `07c432833`,
 "feat(lab): add redaction-safe swarm replay ledgers"), and every one is
 state-dependent on the replay host, the trace, or the observed command
-result, so all are `response_time`. Classified under bd-nnheo.
+result, so all are `response_time`. Classified under bd-nnheo and bd-klpq6.
 
 The severity in each row is the value the emission site itself assigns, not a
 judgement, EXCEPT for the two marked (derived): those two reach the caller
@@ -581,23 +581,50 @@ through the warnings channel, which carries no severity field, so they are
 classified from the behaviour that is observable — both escalate a passing
 replay to `Degraded`, which is what `warning` means here. The third
 warnings-channel code, `swarm_replay_dry_run_admission_only`, is `info`
-because it escalates nothing and is the expected outcome of a dry run.
+because it escalates nothing and is the expected outcome of a dry run. The six
+host/environment precondition codes pushed by `evaluate_swarm_replay_preconditions`
+inherit their severities from the precondition posture they enforce: `warning`
+for unprobed CPU/memory telemetry (`swarm_replay_cpu_count_unknown`,
+`swarm_replay_memory_unknown`) and `high` for hard host-profile, RCH-availability,
+or external-volume admission blockers (`swarm_replay_host_profile_too_small`,
+`swarm_replay_rch_unavailable`, `swarm_replay_target_dir_not_external`,
+`swarm_replay_tmpdir_not_external`), matching `swarm_replay_host_profile_refused`
+and `swarm_replay_local_cargo_refused` (owner: `bd-ppbue` / `bd-klpq6`).
 
 | Code | Severity | Meaning at the emission site |
 |------|----------|------------------------------|
 | `swarm_replay_command_not_allowlisted` | medium | Command is outside the replay allowlist and was refused before execution |
 | `swarm_replay_command_spawn_failed` | high | The runner could not spawn the replay command |
 | `swarm_replay_command_timeout` | high | Command exceeded the trace timeout |
+| `swarm_replay_cpu_count_unknown` | warning | Host CPU core count could not be probed during swarm replay precondition checks (`bd-ppbue` / `bd-klpq6`) |
 | `swarm_replay_dry_run_admission_only` | info | Commands were admitted but not executed |
 | `swarm_replay_execution_not_enabled` | medium | Non-dry-run swarm command execution is not enabled in this runner slice |
 | `swarm_replay_expected_exit_mismatch` | medium | Observed exit code differs from the trace expectation |
 | `swarm_replay_expected_schema_mismatch` | medium | Observed stdout schema differs from the trace expectation |
 | `swarm_replay_host_profile_refused` | high | Host does not satisfy the trace's resource profile hints |
+| `swarm_replay_host_profile_too_small` | high | Host CPU or memory capacity is below the minimum required for the swarm replay trace (`bd-ppbue` / `bd-klpq6`) |
 | `swarm_replay_local_cargo_refused` | high | Local Cargo commands are not admitted by the replay runner; use the RCH proof path |
+| `swarm_replay_memory_unknown` | warning | Host total memory could not be probed during swarm replay precondition checks (`bd-ppbue` / `bd-klpq6`) |
 | `swarm_replay_prerequisite_unavailable` | medium | A step needs an artifact an earlier step was supposed to produce, or a shape the runner cannot safely reconstruct |
 | `swarm_replay_rch_proof_missing` | warning (derived) | The trace requires an RCH proof and none is attached to the ledger |
+| `swarm_replay_rch_unavailable` | high | Trace requires remote RCH execution, but no healthy RCH worker path is available (`bd-ppbue` / `bd-klpq6`) |
 | `swarm_replay_slo_budget_failed` | high | A command exceeded its SLO failure budget |
 | `swarm_replay_slo_budget_warned` | warning (derived) | One or more commands exceeded SLO warning budgets |
+| `swarm_replay_target_dir_not_external` | high | Trace requires an external `CARGO_TARGET_DIR` and the current target directory is not on an external volume (`bd-ppbue` / `bd-klpq6`) |
+| `swarm_replay_tmpdir_not_external` | high | Trace requires an external `TMPDIR` and the current temporary directory is not on an external volume (`bd-ppbue` / `bd-klpq6`) |
+
+#### Regression causality evidence normalization (4)
+All four are emitted by `RegressionEvidencePointer::normalize` in
+`src/models/regression_causality.rs` when sanitizing or bounding regression
+evidence pointers for redaction-safe persistence and replay, so all are
+`response_time`. Classified under `bd-391ze.1` / `bd-klpq6`.
+
+| Code | Severity | Meaning at the emission site |
+|------|----------|------------------------------|
+| `regression_evidence_private_path_redacted` | warning | A user-home or temp-root path in `sourceRef` was redacted to a bounded placeholder before persistence (`bd-391ze.1` / `bd-klpq6`) |
+| `regression_evidence_raw_output_suppressed` | info | Raw command output was suppressed in favor of bounded structured evidence fields (`bd-391ze.1` / `bd-klpq6`) |
+| `regression_evidence_schema_missing` | low | Evidence pointer did not supply an explicit schema identifier and fell back to `ee.regression.evidence_pointer.v1` (`bd-391ze.1` / `bd-klpq6`) |
+| `regression_evidence_source_not_materialized` | warning | Referenced regression evidence source artifact was not materialized on disk at normalization time (`bd-391ze.1` / `bd-klpq6`) |
 
 #### Git ahead probe (7)
 All seven are emitted by `src/core/git_ahead.rs` and describe what the local

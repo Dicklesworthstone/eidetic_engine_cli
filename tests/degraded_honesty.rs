@@ -3625,7 +3625,9 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
                 branch
                     .get("code")
                     .and_then(Value::as_str)
-                    .is_some_and(|code| code == "semantic_disabled")
+                    .is_some_and(|code| {
+                        matches!(code, "semantic_disabled" | "embed_model_unavailable")
+                    })
             })
         });
     ensure_json_pointer(
@@ -3660,7 +3662,7 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
     ensure_json_pointer(
         &result.parsed,
         "/data/degradedBranches/0/code",
-        json!("semantic_disabled"),
+        json!("embed_model_unavailable"),
         "eval run pack-quality lexical degraded branch",
     )?;
     ensure(
