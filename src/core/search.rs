@@ -9268,6 +9268,50 @@ fn map_index_generation_selection_error(
     }
 }
 
+/// A producer upgrade invalidates vector comparisons, not an independently
+/// admitted lexical tier. Only a relaxed hybrid request may choose that tier,
+/// and only before retrieval has started. Runtime producer refusals still fail
+/// closed: this does not recover a failed inference, cancellation or query.
+#[cfg(unix)]
+fn lexical_generation_after_producer_change(
+    cx: &asupersync::Cx,
+    lease: &crate::core::index::IndexGenerationLease,
+    options: &SearchOptions,
+    index_dir: &Path,
+    source_generation: u64,
+    embedder: &dyn crate::search::Embedder,
+) -> Result<Option<PathBuf>, SearchError> {
+    if !cfg!(feature = "lexical-bm25")
+        || options.source_mode != SearchSourceMode::Hybrid
+        || options.strict_source_mode
+        || !embedder
+            .identity()
+            .is_ok_and(|identity| identity.validate().is_ok())
+    {
+        return Ok(None);
+    }
+    // Re-select under the SAME lease and source watermark. Removing only the
+    // query-vector identity check still validates corpus/security revisions,
+    // every native tier, paths and counts. A corrupt or redirected generation
+    // cannot become lexical recovery, nor can a generation newer than source.
+    let selected = lease
+        .index_for_snapshot_with_identity(cx, index_dir, source_generation, None)
+        .map_err(map_index_generation_error)?;
+    Ok(lexical_search_available(&selected).then_some(selected))
+}
+
+fn producer_change_lexical_degradations(
+    error: &SearchError,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    degraded.push(SearchDegradation::incompatible_index(&error.to_string()));
+    degraded.push(SearchDegradation::source_mode_fallback(
+        SearchSourceMode::Hybrid,
+        SearchSourceMode::LexicalOnly,
+        "stored vectors use a different embedding producer; the complete lexical generation was independently verified against the source snapshot",
+    ));
+}
+
 fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
 where
     F: FnOnce(asupersync::Cx) -> Fut,
@@ -10919,6 +10963,10 @@ async fn run_search_inner_with_performance(
     let index_exists_start = Instant::now();
     #[cfg(unix)]
     let mut generation_lease = None;
+    #[cfg(unix)]
+    let mut producer_fallback = None;
+    #[cfg(not(unix))]
+    let producer_fallback: Option<SearchError> = None;
     // Prefer an admitted published/retained generation. Only a genuine
     // NoIndex result may use source-only retrieval; corruption, incompatible
     // bytes, symlinks, lease failures and cancellation keep their typed error.
@@ -10965,10 +11013,18 @@ async fn run_search_inner_with_performance(
                 ) {
                     Ok(selected) => (selected, None),
                     Err(error @ crate::core::index::IndexGenerationSelectionError::ProducerIncompatible(_)) => {
-                        // Keep the live path only for diagnostics. Carry the
-                        // refusal into the established report builder below;
-                        // neither retrieval nor lexical fallback may execute.
-                        (index_dir.clone(), Some(map_index_generation_selection_error(error)))
+                        let lexical = lexical_generation_after_producer_change(
+                            cx, &lease, options, &index_dir, generation, embedder,
+                        )?;
+                        let error = map_index_generation_selection_error(error);
+                        if let Some(selected) = lexical {
+                            producer_fallback = Some(error);
+                            (selected, None)
+                        } else {
+                            // A strict or semantic-only request retains its
+                            // producer refusal without running either engine.
+                            (index_dir.clone(), Some(error))
+                        }
                     }
                     Err(error) => return Err(map_index_generation_selection_error(error)),
                 },
@@ -11031,14 +11087,23 @@ async fn run_search_inner_with_performance(
         || crate::config::workspace_output_redaction_enabled(&options.workspace_path),
         |state| state.output_redaction_enabled,
     );
+    let lexical_options = producer_fallback.as_ref().map(|_| {
+        let mut lexical = options.clone();
+        lexical.source_mode = SearchSourceMode::LexicalOnly;
+        lexical
+    });
+    let index_options = lexical_options.as_ref().unwrap_or(options);
     let (mut degraded, index_freshness, snapshot_index_status) =
         search_degradations_with_connection(
-            options,
+            index_options,
             &index_dir,
             read_connection,
             fast_embedder_override.as_deref(),
             source_snapshot.is_some(),
         );
+    if let Some(error) = &producer_fallback {
+        producer_change_lexical_degradations(error, &mut degraded);
+    }
     if producer_selection_error.is_some() {
         // The stale advisory promises lexical fallback results. A refused
         // producer runs no retrieval; keep the freshness object and report
@@ -11079,7 +11144,7 @@ async fn run_search_inner_with_performance(
         && crate::core::index::index_generation_is_verified_empty(&index_dir)
             .map_err(SearchError::IndexIncompatible)?;
     let source_mode_start = Instant::now();
-    let source_mode = if live_snapshot_retrieval.is_some() {
+    let source_mode = if live_snapshot_retrieval.is_some() || producer_fallback.is_some() {
         SourceModeResolution {
             applied: SearchSourceMode::LexicalOnly,
             fallback_applied: options.source_mode != SearchSourceMode::LexicalOnly,
@@ -11137,7 +11202,7 @@ async fn run_search_inner_with_performance(
     };
     let lifecycle_start = Instant::now();
     push_model_lifecycle_search_degradation(
-        options,
+        index_options,
         read_connection,
         lifecycle_index_status,
         &mut degraded,
@@ -11147,6 +11212,7 @@ async fn run_search_inner_with_performance(
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
     let rerank_runtime = if producer_selection_error.is_some()
+        || producer_fallback.is_some()
         || live_snapshot_retrieval.is_some()
         || empty_generation
         || source_mode.unavailable_no_results
@@ -11955,15 +12021,44 @@ async fn run_diag_search_in_snapshot(
         return Err(SearchError::NoIndex);
     }
     #[cfg(unix)]
+    let mut producer_fallback = None;
+    #[cfg(not(unix))]
+    let producer_fallback: Option<SearchError> = None;
+    #[cfg(unix)]
     let index_dir = match (prepared_empty_path, source_generation) {
         (Some(selected), _) => selected,
         (None, Some(generation)) if !options.source_mode.uses_embeddings() => generation_lease
             .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
             .map_err(map_index_generation_error)?,
         (None, Some(generation)) => match fast_embedder_override.as_deref() {
-            Some(embedder) => generation_lease
+            Some(embedder) => match generation_lease
                 .index_for_snapshot_with_embedder(cx, &index_dir, generation, embedder)
-                .map_err(map_index_generation_selection_error)?,
+            {
+                Ok(selected) => selected,
+                Err(
+                    error
+                    @ crate::core::index::IndexGenerationSelectionError::ProducerIncompatible(
+                        _,
+                    ),
+                ) => {
+                    let lexical = lexical_generation_after_producer_change(
+                        cx,
+                        &generation_lease,
+                        options,
+                        &index_dir,
+                        generation,
+                        embedder,
+                    )?;
+                    let error = map_index_generation_selection_error(error);
+                    if let Some(selected) = lexical {
+                        producer_fallback = Some(error);
+                        selected
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(map_index_generation_selection_error(error)),
+            },
             None => generation_lease
                 .index_for_snapshot(cx, &index_dir, generation)
                 .map_err(map_index_generation_error)?,
@@ -11988,14 +12083,23 @@ async fn run_diag_search_in_snapshot(
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
+    let lexical_options = producer_fallback.as_ref().map(|_| {
+        let mut lexical = options.clone();
+        lexical.source_mode = SearchSourceMode::LexicalOnly;
+        lexical
+    });
+    let index_options = lexical_options.as_ref().unwrap_or(options);
     let (mut degraded, mut index_freshness, snapshot_index_status) =
         search_degradations_with_connection(
-            options,
+            index_options,
             &index_dir,
             read_connection,
             fast_embedder_override.as_deref(),
             read_connection.is_some(),
         );
+    if let Some(error) = &producer_fallback {
+        producer_change_lexical_degradations(error, &mut degraded);
+    }
     // Ordinary search only needs an explicit freshness object when degraded.
     // Diagnostics must also identify the healthy generation actually selected,
     // including a retained generation serving an older source snapshot. Read
@@ -12006,7 +12110,7 @@ async fn run_diag_search_in_snapshot(
             .map_or_else(
                 || {
                     cached_index_status_for_search(
-                        options,
+                        index_options,
                         &index_dir,
                         read_connection,
                         fast_embedder_override.as_deref(),
@@ -12038,7 +12142,13 @@ async fn run_diag_search_in_snapshot(
     }
     let empty_generation = crate::core::index::index_generation_is_verified_empty(&index_dir)
         .map_err(SearchError::IndexIncompatible)?;
-    let source_mode = if resolve_runtime_source_mode && !model_free_empty_generation {
+    let source_mode = if producer_fallback.is_some() {
+        SourceModeResolution {
+            applied: SearchSourceMode::LexicalOnly,
+            fallback_applied: true,
+            unavailable_no_results: false,
+        }
+    } else if resolve_runtime_source_mode && !model_free_empty_generation {
         resolve_source_mode(
             options,
             &index_dir,
@@ -12080,7 +12190,7 @@ async fn run_diag_search_in_snapshot(
         None
     };
     push_model_lifecycle_search_degradation(
-        options,
+        index_options,
         read_connection,
         lifecycle_index_status,
         &mut degraded,
@@ -18781,6 +18891,84 @@ mod tests {
                 before,
                 "refused producer read must not repair the store"
             );
+
+            // The same mismatch must not make default hybrid recall useless:
+            // a separately validated lexical generation can still return the
+            // exact stored memory, without calling either vector producer.
+            let mut relaxed = fixture.options.clone();
+            relaxed.strict_source_mode = false;
+            let assert_lexical = |report: &SearchReport| {
+                assert_eq!(report.status, SearchStatus::Success);
+                assert_eq!(report.source_mode_requested, SearchSourceMode::Hybrid);
+                assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+                assert!(report.source_mode_fallback);
+                assert_eq!(report.embed_backend, EmbedBackend::HashFallback);
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+                let hit = report.results.first().expect("lexical repair recall");
+                assert_eq!(hit.doc_id, memory_id);
+                assert!(hit.lexical_score.is_some());
+                assert!(hit.fast_score.is_none() && hit.quality_score.is_none());
+                for code in ["index_incompatible", "source_mode_fallback"] {
+                    assert!(report.degraded.iter().any(|entry| entry.code == code));
+                }
+                assert!(report.degraded.iter().any(|entry| {
+                    entry.code == "index_incompatible"
+                        && entry.repair.as_deref() == Some("ee index rebuild --workspace .")
+                }));
+                assert!(!report.degraded.iter().any(|entry| matches!(
+                    entry.code.as_str(),
+                    "index_corrupt" | "search_index_stale" | "search_live_snapshot_lexical"
+                )));
+            };
+            let fallback = run_pack_search(&relaxed).expect("verified lexical producer fallback");
+            assert_lexical(&fallback.report);
+            assert_eq!(fallback.snapshot.generation, generation);
+            let diagnostic = run_diag_search(&relaxed).expect("lexical producer diagnostics");
+            assert_lexical(&diagnostic.final_report);
+            assert!(diagnostic.pre_fusion.semantic_fast.results.is_empty());
+            assert!(!diagnostic.pre_fusion.semantic_fast.available);
+            assert_eq!(
+                diagnostic
+                    .final_report
+                    .index_freshness
+                    .expect("lexical source freshness")
+                    .index_generation,
+                Some(generation)
+            );
+            assert_eq!(selected.calls.load(Ordering::Relaxed), query_calls);
+            assert_eq!(foreign.calls.load(Ordering::Relaxed), foreign_calls);
+            assert_eq!(snapshot(), before, "lexical recovery must remain read-only");
+
+            let mut semantic = relaxed.clone();
+            semantic.source_mode = SearchSourceMode::SemanticOnly;
+            let rejected = run_pack_search(&semantic).expect("semantic-only refusal");
+            assert_eq!(rejected.report.status, SearchStatus::IndexError);
+            assert!(rejected.report.results.is_empty());
+            assert!(!rejected.report.source_mode_fallback);
+            assert!(run_diag_search(&semantic).is_err());
+
+            // Producer mismatch is the only recovery authority. A future
+            // watermark or stale policy cannot authorize even lexical reads.
+            let metadata_path = fixture.index().join("meta.json");
+            let metadata = std::fs::read(&metadata_path).expect("original generation metadata");
+            fixture.edit_metadata(|value| value["generation"] = (generation + 1).into());
+            assert!(run_pack_search(&relaxed).is_err());
+            assert!(run_diag_search(&relaxed).is_err());
+            std::fs::write(&metadata_path, &metadata).expect("restore fixture watermark");
+            fixture.edit_metadata(|value| value["evidenceSecurityPolicyEpoch"] = 0.into());
+            assert!(run_pack_search(&relaxed).is_err());
+            assert!(run_diag_search(&relaxed).is_err());
+            std::fs::write(&metadata_path, &metadata).expect("restore fixture policy");
+
+            let fast_path = fixture.index().join("vector.fast.idx");
+            let mut bytes = std::fs::read(&fast_path).expect("native fast tier");
+            assert!(bytes.starts_with(b"FSVI"));
+            bytes[0] ^= 0xff;
+            std::fs::write(&fast_path, bytes).expect("corrupt fixture fast tier");
+            assert!(run_pack_search(&relaxed).is_err());
+            assert!(run_diag_search(&relaxed).is_err());
+            assert_eq!(selected.calls.load(Ordering::Relaxed), query_calls);
+            assert_eq!(foreign.calls.load(Ordering::Relaxed), foreign_calls);
             println!("{SENTINEL}");
         }
 
