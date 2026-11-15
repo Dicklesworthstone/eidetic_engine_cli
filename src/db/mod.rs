@@ -2600,6 +2600,40 @@ fn sqlite_u64_column(
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
 const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
 
+thread_local! {
+    static INJECTED_STORAGE_PANIC: std::cell::RefCell<Option<(Option<DbOperation>, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Inject a one-shot simulated FrankenSQLite panic on the next guarded database
+/// operation matching `target_operation` (or any guarded operation when `None`)
+/// within `run`.
+///
+/// The panic is raised inside [`guard_storage_panic`]'s `catch_unwind` closure
+/// so callers exercise the full `panic -> DbError::StoragePanic ->
+/// DomainError::Storage -> exit 3 + ee.error.v2` path end-to-end (`bd-12ybp`).
+#[doc(hidden)]
+pub fn with_injected_storage_panic<R>(
+    target_operation: Option<DbOperation>,
+    message: impl Into<String>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct ResetGuard;
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            INJECTED_STORAGE_PANIC.with(|slot| {
+                *slot.borrow_mut() = None;
+            });
+        }
+    }
+
+    INJECTED_STORAGE_PANIC.with(|slot| {
+        *slot.borrow_mut() = Some((target_operation, message.into()));
+    });
+    let _reset = ResetGuard;
+    run()
+}
+
 /// Run a frankensqlite operation, converting a panic into a recoverable
 /// [`DbError::StoragePanic`] instead of letting it unwind past the CLI
 /// response-envelope boundary.
@@ -2616,7 +2650,21 @@ const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
 /// only the unwinding is intercepted. A `StoragePanic` is never transient
 /// contention, so the retry loops return it immediately rather than spinning.
 fn guard_storage_panic<T>(operation: DbOperation, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(injected) = INJECTED_STORAGE_PANIC.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            match guard.as_ref() {
+                Some((None, _)) => guard.take().map(|(_, message)| message),
+                Some((Some(expected), _)) if *expected == operation => {
+                    guard.take().map(|(_, message)| message)
+                }
+                _ => None,
+            }
+        }) {
+            std::panic::panic_any(injected);
+        }
+        f()
+    })) {
         Ok(result) => result,
         Err(payload) => Err(DbError::storage_panic(
             operation,
@@ -29434,7 +29482,7 @@ impl DbConnection {
         } else {
             sql.push_str(" ORDER BY id ASC LIMIT ?2");
         }
-        params.push(Value::Integer(i64::from(limit)));
+        params.push(Value::BigInt(i64::from(limit)));
         self.query_for(DbOperation::Query, &sql, &params)?
             .iter()
             .map(stored_memory_from_row)

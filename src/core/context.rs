@@ -3103,6 +3103,14 @@ async fn run_context_pack_attempt(
             )
         }
         .map_err(|error| {
+            if let frankensearch::SearchError::SubsystemError {
+                subsystem: "model registry",
+                source,
+            } = &error
+                && let Some(db_error) = source.downcast_ref::<crate::db::DbError>()
+            {
+                return ContextPackError::Storage(format!("Failed to open database: {db_error}"));
+            }
             ContextPackError::Search(map_frankensearch_error(
                 control.cx,
                 "context embedder preparation",

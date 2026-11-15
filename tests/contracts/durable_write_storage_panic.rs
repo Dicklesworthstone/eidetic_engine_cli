@@ -107,3 +107,189 @@ fn durable_write_storage_panics_render_storage_exit_and_error_v2() -> TestResult
         ))
     }
 }
+
+#[test]
+fn durable_write_handlers_convert_injected_storage_panic_to_storage_exit_and_error_v2() -> TestResult
+{
+    let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+    let workspace = temp
+        .path()
+        .canonicalize()
+        .map_err(|err| format!("canonicalize workspace: {err}"))?;
+    let ws = workspace.to_string_lossy().into_owned();
+
+    let mut init_stdout = Vec::new();
+    let mut init_stderr = Vec::new();
+    let init_exit = ee::cli::run(
+        ["ee", "init", "--workspace", ws.as_str(), "--json"].map(std::ffi::OsString::from),
+        &mut init_stdout,
+        &mut init_stderr,
+    );
+    if init_exit != ProcessExitCode::Success {
+        return Err(format!(
+            "ee init failed with {init_exit:?}: stdout={} stderr={}",
+            String::from_utf8_lossy(&init_stdout),
+            String::from_utf8_lossy(&init_stderr),
+        ));
+    }
+
+    let panic_payload = "range end index 27 out of range for slice of length 26";
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "remember (direct DomainError::Storage mapping)",
+            &[
+                "ee",
+                "remember",
+                "storage panic probe",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+        (
+            "workflow close (direct DomainError::Storage mapping)",
+            &[
+                "ee",
+                "workflow",
+                "close",
+                "wf_01234567890123456789012345",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+        (
+            "curate apply (db_failure_or_storage_panic over MigrationRequired)",
+            &[
+                "ee",
+                "curate",
+                "apply",
+                "curate_01234567890123456789012345",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+        (
+            "journal append (db_failure_or_storage_panic over MigrationRequired)",
+            &[
+                "ee",
+                "journal",
+                "append",
+                "storage panic probe",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+        (
+            "curate doctor (db_failure_or_storage_panic over MigrationRequired)",
+            &[
+                "ee",
+                "curate",
+                "doctor",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+        (
+            "causal promote-plan (db_failure_or_storage_panic over MigrationRequired)",
+            &[
+                "ee",
+                "causal",
+                "promote-plan",
+                "chn_01234567890123456789012345",
+                "--workspace",
+                ws.as_str(),
+                "--json",
+            ],
+        ),
+    ];
+
+    for (label, argv) in cases {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = ee::db::with_injected_storage_panic(None, panic_payload, || {
+            ee::cli::run(
+                argv.iter().copied().map(std::ffi::OsString::from),
+                &mut stdout,
+                &mut stderr,
+            )
+        });
+        let raw_stdout = String::from_utf8_lossy(&stdout);
+        let raw_stderr = String::from_utf8_lossy(&stderr);
+        if exit != ProcessExitCode::Storage {
+            return Err(format!(
+                "{label}: expected ProcessExitCode::Storage (exit 3), got {exit:?}\nstdout: {raw_stdout}\nstderr: {raw_stderr}"
+            ));
+        }
+
+        let parsed: Value = serde_json::from_str(&raw_stdout).map_err(|err| {
+            format!(
+                "{label}: expected valid JSON error envelope on stdout: {err}\nstdout: {raw_stdout}"
+            )
+        })?;
+        if parsed.get("schema").and_then(Value::as_str) != Some(ERROR_SCHEMA_V2) {
+            return Err(format!(
+                "{label}: expected top-level schema {ERROR_SCHEMA_V2}, got {parsed}"
+            ));
+        }
+        if parsed.pointer("/error/code").and_then(Value::as_str) != Some("storage") {
+            return Err(format!(
+                "{label}: expected /error/code == \"storage\", got {parsed}"
+            ));
+        }
+        if parsed.pointer("/error/severity").and_then(Value::as_str) != Some("high") {
+            return Err(format!(
+                "{label}: expected /error/severity == \"high\", got {parsed}"
+            ));
+        }
+        let message = parsed
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if (!message.contains("recovered from panic") && !message.contains("storage panic"))
+            || !message.contains(panic_payload)
+        {
+            return Err(format!(
+                "{label}: expected /error/message to carry recovered StoragePanic payload, got {message:?}"
+            ));
+        }
+    }
+
+    // Negative/recovery twin: after the one-shot injected panics above, a normal
+    // durable_write succeeds and proves neither the thread-local injection state
+    // nor the workspace write-owner lock was poisoned or orphaned.
+    let mut ok_stdout = Vec::new();
+    let mut ok_stderr = Vec::new();
+    let ok_exit = ee::cli::run(
+        [
+            "ee",
+            "remember",
+            "post-panic healthy write",
+            "--workspace",
+            ws.as_str(),
+            "--json",
+        ]
+        .map(std::ffi::OsString::from),
+        &mut ok_stdout,
+        &mut ok_stderr,
+    );
+    if ok_exit != ProcessExitCode::Success {
+        return Err(format!(
+            "post-panic healthy remember failed with {ok_exit:?}: stdout={} stderr={}",
+            String::from_utf8_lossy(&ok_stdout),
+            String::from_utf8_lossy(&ok_stderr),
+        ));
+    }
+    let ok_json: Value = serde_json::from_slice(&ok_stdout)
+        .map_err(|err| format!("post-panic remember JSON parse: {err}"))?;
+    if ok_json.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "expected post-panic remember success=true, got {ok_json}"
+        ));
+    }
+
+    Ok(())
+}
