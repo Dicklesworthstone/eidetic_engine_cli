@@ -5152,7 +5152,7 @@ pub fn render_context_markdown_with_analysis(
         "**Status:** `{}`\n\n",
         advisory_banner.status.as_str()
     ));
-    output.push_str(&escape_markdown_text(&advisory_banner.summary));
+    output.push_str(&advisory_banner.summary);
     output.push_str("\n\n");
     if !advisory_banner.notes.is_empty() {
         for note in &advisory_banner.notes {
@@ -18526,6 +18526,54 @@ mod tests {
         ensure(
             summary.contains("keeps workspace posture ok"),
             format!("embed arm must reconcile with doctor's advisory-tier verdict, got: {summary}"),
+        )
+    }
+
+    #[test]
+    fn render_markdown_preserves_advisory_banner_inline_code_while_escaping_note_messages()
+    -> TestResult {
+        let request = ContextRequest::from_query("format before release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let draft = assemble_draft(
+            request.query.clone(),
+            request.budget,
+            vec![candidate(1, 0.9, 0.8, 10)?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let degraded = vec![
+            ContextResponseDegradation::new(
+                "embed_model_unavailable",
+                ContextResponseSeverity::Warning,
+                "Embedding model `fast` unavailable; [fallback] used.",
+                Some("ee index reembed --workspace .".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        ];
+        let rendered = super::render_context_markdown_with_analysis(
+            &request,
+            &draft,
+            &degraded,
+            &[],
+            &[],
+            None,
+        );
+        ensure(
+            rendered.contains("`ee doctor` reports this as advisory"),
+            format!(
+                "advisory banner summary must preserve inline code span `ee doctor`, got:\n{rendered}"
+            ),
+        )?;
+        ensure(
+            !rendered.contains("\\`ee doctor\\`"),
+            format!(
+                "advisory banner summary must not backslash-escape its own inline code span, got:\n{rendered}"
+            ),
+        )?;
+        ensure(
+            rendered.contains("\\`fast\\`") && rendered.contains("\\[fallback\\]"),
+            format!(
+                "caller-supplied degradation note messages must remain escaped, got:\n{rendered}"
+            ),
         )
     }
 }
