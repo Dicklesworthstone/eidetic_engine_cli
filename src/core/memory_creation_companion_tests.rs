@@ -629,6 +629,7 @@ fn concurrent_guarded_key_creates_one_guarded_memory_and_replays_the_winner() {
                         creation_companions: companions,
                     }),
                     companions,
+                    RememberWriteOrigin::Manual,
                 )
             })
         });
@@ -714,6 +715,7 @@ fn concurrent_guarded_key_creates_one_guarded_memory_and_replays_the_winner() {
             creation_companions: changed,
         }),
         changed,
+        RememberWriteOrigin::Manual,
     )
     .unwrap_err();
     assert_eq!(error.code(), REMEMBER_IDEMPOTENCY_CONFLICT_CODE);

@@ -683,6 +683,102 @@ pub fn remember_memory(
     remember_memory_inner(options, &mut id_source, None, false, &[], None)
 }
 
+/// Screen sandbox artifacts before either scratch or authoritative storage.
+/// The rejection report contains hashes and detector codes, never source text.
+pub(crate) fn screen_sandbox_import(
+    content: &str,
+) -> Result<crate::policy::ExternalIngestionScreenReport, DomainError> {
+    let canonical =
+        MemoryContent::parse(content).map_err(|error| remember_usage_error(error.to_string()))?;
+    let screen = crate::policy::screen_external_text_for_ingestion(canonical.as_str());
+    let withheld = screen
+        .redacted_reasons
+        .iter()
+        .any(|reason| reason.starts_with("external_ingestion_"))
+        || screen.content.contains("[REDACTED:external_ingestion_");
+    if screen.instruction_like || withheld {
+        return Err(DomainError::PolicyDeniedWithDetails {
+            message: "Sandbox import requires quarantine review; no memory was written."
+                .to_owned(),
+            repair: Some(
+                "Review the original artifact outside the memory store and import only the safe evidence."
+                    .to_owned(),
+            ),
+            details_json: serde_json::json!({
+                "auditEvent": "sandbox_import_ingestion_security",
+                "sourceSurface": "sandbox_import",
+                "sourceClass": "external",
+                "action": "quarantine",
+                "storageDisposition": "quarantine_not_store",
+                "sourceHash": format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+                "redactedContentHash": format!("blake3:{}", blake3::hash(screen.content.as_bytes()).to_hex()),
+                "rawContentStored": false,
+                "redacted": screen.redacted,
+                "redactedReasons": screen.redacted_reasons,
+                "instructionRisk": screen.instruction_risk,
+                "instructionScore": screen.instruction_score,
+                "rejectedReasons": screen.rejected_reasons,
+                "signalCodes": screen.signal_codes,
+                "screenWithheldContent": withheld,
+            })
+            .to_string(),
+        });
+    }
+    // Replacement markers can be longer than the original token. Validate the
+    // exact admitted body as well as the input, before making an overlay entry.
+    MemoryContent::parse(&screen.content)
+        .map_err(|error| remember_usage_error(error.to_string()))?;
+    Ok(screen)
+}
+
+/// Persist a sandbox artifact through the normal audited writer without
+/// granting externally produced text the manual remember authority class.
+pub(crate) fn remember_sandbox_import(
+    options: &RememberMemoryOptions<'_>,
+) -> Result<RememberMemoryReport, DomainError> {
+    let screen = screen_sandbox_import(options.content)?;
+    let confidence = UnitScore::parse(options.confidence)
+        .map_err(|error| remember_usage_error(error.to_string()))?;
+    let source = options
+        .source
+        .filter(|source| source.starts_with("ee://sandbox-import/"))
+        .ok_or_else(|| {
+            remember_usage_error("Sandbox import requires sandbox provenance.".to_owned())
+        })?;
+    let imported_options = RememberMemoryOptions {
+        content: &screen.content,
+        confidence: confidence.into_inner().min(0.5),
+        source: Some(source),
+        allow_secret_mention: false,
+        ..options.clone()
+    };
+    validate_remember_level_kind_cross_wire(imported_options.level, imported_options.kind)?;
+    match remember_memory_outcome_inner_with_store(
+        &imported_options,
+        &mut RememberIdSource::Ambient,
+        None,
+        false,
+        None,
+        &[],
+        None,
+        None,
+        RememberCreationCompanions::default(),
+        RememberWriteOrigin::SandboxImport,
+    )? {
+        RememberOutcome::Created(report) => Ok(*report),
+        _ => Err(DomainError::Storage {
+            message: "Sandbox import unexpectedly returned a replay outcome".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RememberWriteOrigin {
+    Manual,
+    SandboxImport,
+}
+
 /// [`remember_memory`] with search-index publication optionally deferred.
 /// The source transaction enqueues the job; a batch drain, daemon, or explicit
 /// rebuild publishes the source later.
@@ -1402,6 +1498,7 @@ fn remember_memory_inner_with_store(
         attempt_family,
         None,
         RememberCreationCompanions::default(),
+        RememberWriteOrigin::Manual,
     )? {
         RememberOutcome::Created(report) => Ok(*report),
         _ => Err(DomainError::Storage {
@@ -1425,6 +1522,7 @@ fn remember_memory_outcome_inner_with_store(
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
     creation_companions: RememberCreationCompanions<'_>,
+    origin: RememberWriteOrigin,
 ) -> Result<RememberOutcome, DomainError> {
     let mut prepared = prepare_remember_memory_with_store(
         options,
@@ -1497,6 +1595,17 @@ fn remember_memory_outcome_inner_with_store(
         .as_ref()
         .map(|_| id_source.next_audit_id());
     let index_job_id = id_source.next_search_index_job_id();
+    let agent_name = super::memory_scope::current_agent_name();
+    // External artifacts always enter as assertions. Existing manual writes
+    // retain ADR 0009's human_explicit posture; registered-agent attempt-family
+    // writes keep their existing multiplicity-aware assertion posture.
+    let trust_class = if origin == RememberWriteOrigin::SandboxImport
+        || (prepared.attempt_family.is_some() && agent_name.is_some())
+    {
+        TrustClass::AgentAssertion
+    } else {
+        TrustClass::HumanExplicit
+    };
     let memory_input = CreateMemoryInput {
         workspace_id: prepared.workspace_id.clone(),
         level: prepared.level.as_str().to_owned(),
@@ -1507,23 +1616,11 @@ fn remember_memory_outcome_inner_with_store(
         utility: UnitScore::neutral().into_inner(),
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
-        trust_class: if prepared.attempt_family.is_some()
-            && super::memory_scope::current_agent_name().is_some()
-        {
-            // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
-            // a registered agent identity (the same actor signal
-            // remember_trust_subclass records) is an agent fan-out record and
-            // enters at agent_assertion — the class the promotion gate holds
-            // it at until every declared sibling slot is recorded. Human
-            // --family writes keep ADR 0009's human_explicit posture; their
-            // multiplicity still surfaces through reporting and ranking
-            // discounts. The actor signal, never the flag alone, decides the
-            // class.
-            TrustClass::AgentAssertion.as_str().to_owned()
-        } else {
-            TrustClass::HumanExplicit.as_str().to_owned()
-        },
-        trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
+        trust_class: trust_class.as_str().to_owned(),
+        trust_subclass: super::memory_scope::remember_trust_subclass(match origin {
+            RememberWriteOrigin::Manual => "ee remember",
+            RememberWriteOrigin::SandboxImport => "ee sandbox import; external",
+        }),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
         valid_to: prepared.valid_to.clone(),
@@ -1576,30 +1673,18 @@ fn remember_memory_outcome_inner_with_store(
         // and all of them were being handed an empty window forever. The
         // capability existed everywhere except at the one call site that feeds it.
         //
-        // The identity is the one the acceptance names first (EE_AGENT_NAME),
-        // read through the SAME accessor the trust_class branch three lines
-        // below already consults, so the two cannot disagree about who is
-        // writing. A write with no agent identity still yields None and still
-        // records no observation, which is correct: the sources this layer
-        // reasons about are agents, import batches and mesh peers, not an
-        // anonymous human at a terminal.
-        source_id: super::memory_scope::current_agent_name(),
-        trust_class: if prepared.attempt_family.is_some()
-            && super::memory_scope::current_agent_name().is_some()
-        {
-            // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
-            // a registered agent identity (the same actor signal
-            // remember_trust_subclass records) is an agent fan-out record and
-            // enters at agent_assertion — the class the promotion gate holds
-            // it at until every declared sibling slot is recorded. Human
-            // --family writes keep ADR 0009's human_explicit posture; their
-            // multiplicity still surfaces through reporting and ranking
-            // discounts. The actor signal, never the flag alone, decides the
-            // class.
-            TrustClass::AgentAssertion.as_str().to_owned()
-        } else {
-            TrustClass::HumanExplicit.as_str().to_owned()
-        },
+        // The agent identity is the same snapshot used for trust above.
+        // Sandbox imports without an agent still have an external source;
+        // anonymous manual captures retain their existing None posture.
+        source_id: agent_name.or_else(|| match origin {
+            RememberWriteOrigin::Manual => None,
+            RememberWriteOrigin::SandboxImport => prepared
+                .provenance_uri
+                .as_deref()
+                .and_then(|source| source.rsplit_once('/'))
+                .map(|(session_source, _)| session_source.to_owned()),
+        }),
+        trust_class: trust_class.as_str().to_owned(),
         provenance_uri: prepared.provenance_uri.clone(),
         observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
     };
@@ -5634,7 +5719,7 @@ fn remember_audit_details(
     policy_bypass: Option<&RememberPolicyBypassReport>,
     attempt_family: Option<&crate::db::MemoryAttemptFamily>,
 ) -> String {
-    serde_json::json!({
+    let mut details = serde_json::json!({
         "schema": "ee.audit.memory_create.v1",
         "command": "ee remember",
         "memoryId": memory_id,
@@ -5659,8 +5744,27 @@ fn remember_audit_details(
             "disposition": family.disposition,
         })),
         "policyBypass": policy_bypass.map(policy_bypass_audit_json),
-    })
-    .to_string()
+    });
+    if input
+        .trust_subclass
+        .as_deref()
+        .is_some_and(|subclass| subclass.starts_with("ee sandbox import;"))
+    {
+        let screen = crate::policy::screen_external_text_for_ingestion(&input.content);
+        details["command"] = serde_json::json!("ee sandbox import");
+        details["ingestionSecurity"] = serde_json::json!({
+            "auditEvent": "sandbox_import_ingestion_security",
+            "sourceSurface": "sandbox_import",
+            "sourceClass": "external",
+            "action": "admit_screened",
+            "contentHash": format!("blake3:{}", blake3::hash(input.content.as_bytes()).to_hex()),
+            "redacted": screen.redacted || input.content.contains("[REDACTED:"),
+            "instructionRisk": screen.instruction_risk,
+            "signalCodes": screen.signal_codes,
+            "trustClass": input.trust_class,
+        });
+    }
+    details.to_string()
 }
 
 fn policy_bypass_audit_details(policy_bypass: &RememberPolicyBypassReport) -> String {
@@ -8226,6 +8330,7 @@ pub(crate) fn remember_memory_with_creation_companions(
         attempt_family,
         idempotency,
         creation_companions,
+        RememberWriteOrigin::Manual,
     )
 }
 
@@ -8413,6 +8518,7 @@ fn remember_global_memory_with_creation_companions_at_paths(
         None,
         idempotency,
         creation_companions,
+        RememberWriteOrigin::Manual,
     )
 }
 
@@ -22649,6 +22755,7 @@ mod tests {
                         creation_companions: RememberCreationCompanions::default(),
                     }),
                     RememberCreationCompanions::default(),
+                    RememberWriteOrigin::Manual,
                 )
                 .map_err(|error| error.message())
             }));
@@ -22716,6 +22823,7 @@ mod tests {
                 creation_companions: RememberCreationCompanions::default(),
             }),
             RememberCreationCompanions::default(),
+            RememberWriteOrigin::Manual,
         )
         .expect_err("changed payload must conflict inside source fence");
         ensure(
