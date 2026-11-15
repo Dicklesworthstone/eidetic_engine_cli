@@ -1021,6 +1021,68 @@ fn hash_index_corpus_component(hasher: &mut blake3::Hasher, name: &str, value: &
     hasher.update(value.as_bytes());
 }
 
+pub(crate) fn compute_index_corpus_revision_with_lexical_analyzer(
+    lexical_analyzer_revision: &str,
+) -> CorpusRevision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(INDEX_CORPUS_REVISION_DOMAIN);
+    hash_index_corpus_component(
+        &mut hasher,
+        "canonical_document_schema",
+        crate::search::CANONICAL_DOCUMENT_SCHEMA,
+    );
+    hash_index_corpus_component(&mut hasher, "lexical_analyzer", lexical_analyzer_revision);
+    for source in ["memory", "session", "artifact", "rule", "import"] {
+        hash_index_corpus_component(&mut hasher, "admitted_source", source);
+    }
+    for (source, projection, eligibility) in [
+        (
+            "memory",
+            MEMORY_INDEX_PROJECTION_SCHEMA_V1,
+            MEMORY_INDEX_ELIGIBILITY_REVISION_V2,
+        ),
+        (
+            "session",
+            SESSION_INDEX_PROJECTION_SCHEMA_V1,
+            SESSION_INDEX_ELIGIBILITY_REVISION_V1,
+        ),
+        (
+            "artifact",
+            ARTIFACT_INDEX_PROJECTION_SCHEMA_V1,
+            ARTIFACT_INDEX_ELIGIBILITY_REVISION_V1,
+        ),
+        (
+            "rule",
+            RULE_INDEX_PROJECTION_SCHEMA_V1,
+            RULE_INDEX_ELIGIBILITY_REVISION_V1,
+        ),
+        (
+            "import",
+            EVIDENCE_INDEX_PROJECTION_SCHEMA_V4,
+            EVIDENCE_INDEX_ADMISSION_REVISION_V2,
+        ),
+    ] {
+        hash_index_corpus_component(&mut hasher, &format!("{source}_projection"), projection);
+        hash_index_corpus_component(&mut hasher, &format!("{source}_eligibility"), eligibility);
+    }
+    hash_index_corpus_component(
+        &mut hasher,
+        "evidence_screening_version",
+        &EVIDENCE_SCREENING_VERSION.to_string(),
+    );
+    hash_index_corpus_component(
+        &mut hasher,
+        "evidence_security_policy_epoch",
+        &EVIDENCE_SECURITY_POLICY_EPOCH.to_string(),
+    );
+    hash_index_corpus_component(
+        &mut hasher,
+        "evidence_canonical_provenance_revision",
+        &EVIDENCE_CANONICAL_PROVENANCE_REVISION.to_string(),
+    );
+    CorpusRevision::new(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
 /// Deterministic compatibility token for the complete workspace search corpus.
 ///
 /// This deliberately excludes row counts, timestamps, generations, and
@@ -1029,67 +1091,9 @@ fn hash_index_corpus_component(hasher: &mut blake3::Hasher, name: &str, value: &
 /// projection/eligibility/redaction semantics change.
 pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
     INDEX_CORPUS_REVISION.get_or_init(|| {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(INDEX_CORPUS_REVISION_DOMAIN);
-        hash_index_corpus_component(
-            &mut hasher,
-            "canonical_document_schema",
-            crate::search::CANONICAL_DOCUMENT_SCHEMA,
-        );
-        hash_index_corpus_component(
-            &mut hasher,
-            "lexical_analyzer",
+        compute_index_corpus_revision_with_lexical_analyzer(
             crate::search::LEXICAL_ANALYZER_REVISION,
-        );
-        for source in ["memory", "session", "artifact", "rule", "import"] {
-            hash_index_corpus_component(&mut hasher, "admitted_source", source);
-        }
-        for (source, projection, eligibility) in [
-            (
-                "memory",
-                MEMORY_INDEX_PROJECTION_SCHEMA_V1,
-                MEMORY_INDEX_ELIGIBILITY_REVISION_V2,
-            ),
-            (
-                "session",
-                SESSION_INDEX_PROJECTION_SCHEMA_V1,
-                SESSION_INDEX_ELIGIBILITY_REVISION_V1,
-            ),
-            (
-                "artifact",
-                ARTIFACT_INDEX_PROJECTION_SCHEMA_V1,
-                ARTIFACT_INDEX_ELIGIBILITY_REVISION_V1,
-            ),
-            (
-                "rule",
-                RULE_INDEX_PROJECTION_SCHEMA_V1,
-                RULE_INDEX_ELIGIBILITY_REVISION_V1,
-            ),
-            (
-                "import",
-                EVIDENCE_INDEX_PROJECTION_SCHEMA_V4,
-                EVIDENCE_INDEX_ADMISSION_REVISION_V2,
-            ),
-        ] {
-            hash_index_corpus_component(&mut hasher, &format!("{source}_projection"), projection);
-            hash_index_corpus_component(&mut hasher, &format!("{source}_eligibility"), eligibility);
-        }
-        hash_index_corpus_component(
-            &mut hasher,
-            "evidence_screening_version",
-            &EVIDENCE_SCREENING_VERSION.to_string(),
-        );
-        hash_index_corpus_component(
-            &mut hasher,
-            "evidence_security_policy_epoch",
-            &EVIDENCE_SECURITY_POLICY_EPOCH.to_string(),
-        );
-        hash_index_corpus_component(
-            &mut hasher,
-            "evidence_canonical_provenance_revision",
-            &EVIDENCE_CANONICAL_PROVENANCE_REVISION.to_string(),
-        );
-        CorpusRevision::new(format!("blake3:{}", hasher.finalize().to_hex()))
+        )
     })
 }
 
@@ -7365,6 +7369,106 @@ pub(crate) async fn build_lexical_tier(
     index_checkpoint(cx)
 }
 
+/// `frankensearch` e2acbedf drops a quality embedder inside `IndexBuilder::build`
+/// unless both tiers report `is_semantic() == true`. In `ee`, `build_empty_index`,
+/// `DocDigests::new`, `delta::apply`, `delta::stage_tier_refresh`, and
+/// `verify_published_tier_counts` all treat an explicit `stack.quality().is_some()`
+/// as an authoritative two-tier contract (including deterministic hash-backed
+/// two-tier fixtures). Preserve that explicit quality tier across `IndexBuilder`
+/// while leaving single-tier hash stacks untouched.
+struct ExplicitTwoTierEmbedder(Arc<dyn crate::search::Embedder>);
+
+impl crate::search::Embedder for ExplicitTwoTierEmbedder {
+    fn embed<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+        self.0.embed(cx, text)
+    }
+
+    fn embed_batch<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        texts: &'a [&'a str],
+    ) -> frankensearch::SearchFuture<'a, Vec<Vec<f32>>> {
+        self.0.embed_batch(cx, texts)
+    }
+
+    fn embed_bound<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, frankensearch::core::traits::IdentityBoundEmbedding> {
+        self.0.embed_bound(cx, text)
+    }
+
+    fn embed_batch_bound<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        texts: &'a [&'a str],
+    ) -> frankensearch::SearchFuture<'a, Vec<frankensearch::core::traits::IdentityBoundEmbedding>>
+    {
+        self.0.embed_batch_bound(cx, texts)
+    }
+
+    fn bound_batch_is_native(&self) -> bool {
+        self.0.bound_batch_is_native()
+    }
+
+    fn identity(
+        &self,
+    ) -> frankensearch::SearchResult<&frankensearch::core::generation::EmbeddingIdentityBundleV1>
+    {
+        self.0.identity()
+    }
+
+    fn dimension(&self) -> usize {
+        self.0.dimension()
+    }
+
+    fn id(&self) -> &str {
+        self.0.id()
+    }
+
+    fn model_name(&self) -> &str {
+        self.0.model_name()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.0.is_ready()
+    }
+
+    fn is_semantic(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ModelCategory {
+        self.0.category()
+    }
+}
+
+fn preserve_explicit_quality_tier_for_builder(stack: EmbedderStack) -> EmbedderStack {
+    let Some(quality) = stack.quality_arc() else {
+        return stack;
+    };
+    let fast = stack.fast_arc();
+    if fast.is_semantic() && quality.is_semantic() {
+        return stack;
+    }
+    let fast: Arc<dyn crate::search::Embedder> = if fast.is_semantic() {
+        fast
+    } else {
+        Arc::new(ExplicitTwoTierEmbedder(fast))
+    };
+    let quality: Arc<dyn crate::search::Embedder> = if quality.is_semantic() {
+        quality
+    } else {
+        Arc::new(ExplicitTwoTierEmbedder(quality))
+    };
+    EmbedderStack::from_parts(fast, Some(quality))
+}
+
 pub(crate) async fn build_index(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -7378,6 +7482,7 @@ pub(crate) async fn build_index(
     } else {
         prepare_index_embedder_stack(cx, stack).await?
     };
+    let stack = preserve_explicit_quality_tier_for_builder(stack);
     // frankensearch d117ce1f made Quill the backend of its `lexical`
     // feature, so `IndexBuilder` no longer compiles a Tantivy write arm under
     // ee's `lexical-tantivy` lane. Stage the same corpus for ee's Tantivy tier.
@@ -10589,13 +10694,13 @@ pub struct IndexStatusOptions {
 }
 
 impl IndexStatusOptions {
-    fn resolve_database_path(&self) -> PathBuf {
+    pub(crate) fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
             .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
-    fn resolve_index_dir(&self) -> PathBuf {
+    pub(crate) fn resolve_index_dir(&self) -> PathBuf {
         crate::config::workspace::resolve_store_index_dir(
             &self.workspace_path,
             self.database_path.as_deref(),
@@ -27775,6 +27880,55 @@ mod tests {
                 metadata["tierDocumentCounts"]["lexical"].is_null()
             },
             "metadata lexical count must match the compiled tier posture",
+        )
+    }
+
+    #[test]
+    fn corpus_revision_interlock_rejects_index_built_under_different_lexical_analyzer_revision()
+    -> TestResult {
+        let index_dir = unique_test_dir("lexical-analyzer-corpus-revision-interlock");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let counts = IndexDocumentCounts::checked(2, 0, 0, 0, 0)?;
+        write_index_metadata(&index_dir, 29, counts, None).map_err(|error| error.to_string())?;
+        let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+        let fresh_metadata = parse_index_metadata(&index_dir)?
+            .ok_or_else(|| "fresh index metadata must parse".to_owned())?;
+        // Positive control: the freshly written metadata matches the active
+        // lexical analyzer revision.
+        ensure(
+            index_metadata_compatibility_error_with_identity(&metadata_path, &fresh_metadata, None)
+                .is_none(),
+            "freshly written metadata must match active lexical analyzer revision",
+        )?;
+
+        // Simulate an index built under a bumped/previous LEXICAL_ANALYZER_REVISION
+        // by computing the corpus revision through the exact production hash function
+        // with a different analyzer revision string and writing it to ee-index-meta.json.
+        let bumped_revision = compute_index_corpus_revision_with_lexical_analyzer(
+            "ee.lexical_analyzer.tantivy_en_stem.v0_simulated_drift",
+        );
+        ensure(
+            bumped_revision.as_str() != expected_index_corpus_revision().as_str(),
+            "changing lexical_analyzer revision must change the computed CorpusRevision",
+        )?;
+        let mut metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&metadata_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        metadata["corpusRevision"] = serde_json::json!(bumped_revision.as_str());
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let err = validate_index_corpus_compatibility_for_lexical_search(&index_dir)
+            .expect_err("index built under a different lexical analyzer revision must be rejected");
+        ensure(
+            err.contains("incompatible corpus revision")
+                && err.contains(bumped_revision.as_str())
+                && err.contains(expected_index_corpus_revision().as_str()),
+            format!("corpus revision mismatch error must name both revisions: {err}"),
         )
     }
 

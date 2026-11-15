@@ -1793,6 +1793,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dry_run_leaves_memory_anchor_index_unchanged_while_real_rebuild_refreshes_it() {
+        let (root, db, path) = fixture_with_content(
+            "Dry-run check. anchor:path:src/core/index.rs anchor:symbol:rebuild_index_with_cx",
+        );
+        let workspace = root.path().canonicalize().expect("root");
+        let _hash = super::super::install_test_hash_workspace_embedder(WORKSPACE);
+
+        let initial = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(path.clone()),
+            index_dir: Some(workspace.join(".ee/index")),
+            dry_run: false,
+        })
+        .expect("initial real rebuild");
+        assert!(!initial.dry_run);
+        assert_eq!(initial.memories_indexed, 1);
+
+        let initial_rows = db
+            .count_table_rows("memory_anchor_index")
+            .expect("derived rows after initial rebuild");
+        assert_eq!(initial_rows, 2);
+        let initial_path_candidates = db
+            .query_anchor_index_path_candidates(
+                WORKSPACE,
+                Some(&["src/core/index.rs".to_owned()]),
+                10,
+            )
+            .expect("path candidate lookup");
+        assert_eq!(initial_path_candidates.len(), 1);
+        assert_eq!(initial_path_candidates[0].memory_id, MEMORY);
+
+        db.execute_raw(
+            "UPDATE memory_anchor_index SET updated_at = '2000-01-01T00:00:00Z' WHERE memory_id = 'mem_00000000000000000000000071'",
+        )
+        .expect("stamp sentinel updated_at");
+        let before_anchors = db
+            .list_memory_anchors(MEMORY)
+            .expect("anchors before dry run");
+        let before_generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let before_bytes = std::fs::read(&path).expect("database bytes before dry run");
+
+        let preview = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(path.clone()),
+            index_dir: Some(workspace.join(".ee/index")),
+            dry_run: true,
+        })
+        .expect("dry-run rebuild");
+        assert_eq!(preview.status, super::super::IndexRebuildStatus::DryRun);
+        assert!(preview.dry_run);
+        assert_eq!(preview.memories_indexed, 1);
+        assert_eq!(
+            std::fs::read(&path).expect("database bytes after dry run"),
+            before_bytes,
+            "dry-run rebuild must not mutate database file bytes"
+        );
+        assert_eq!(
+            db.list_memory_anchors(MEMORY)
+                .expect("anchors after dry run"),
+            before_anchors,
+            "dry-run rebuild must not mutate memory_anchors"
+        );
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            before_generation
+        );
+        db.execute_raw(
+            "DELETE FROM memory_anchor_index WHERE updated_at != '2000-01-01T00:00:00Z'",
+        )
+        .expect("prune any rows rewritten by dry-run");
+        assert_eq!(
+            db.count_table_rows("memory_anchor_index")
+                .expect("rows preserving sentinel timestamp"),
+            2,
+            "dry-run rebuild must not rewrite memory_anchor_index updated_at timestamps"
+        );
+
+        let refreshed = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace,
+            database_path: Some(path),
+            index_dir: Some(root.path().join(".ee/index")),
+            dry_run: false,
+        })
+        .expect("positive-arm real rebuild");
+        assert!(!refreshed.dry_run);
+        db.execute_raw("DELETE FROM memory_anchor_index WHERE updated_at = '2000-01-01T00:00:00Z'")
+            .expect("prune unrefreshed sentinel rows");
+        assert_eq!(
+            db.count_table_rows("memory_anchor_index")
+                .expect("rows refreshed by real rebuild"),
+            2,
+            "real rebuild must refresh memory_anchor_index updated_at timestamps"
+        );
+    }
+
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn cass_scale_partial_import_plans_and_recovers_without_hook_corpus_scans() {

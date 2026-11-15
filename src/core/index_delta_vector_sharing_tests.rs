@@ -79,12 +79,7 @@ async fn build(
     stack: &EmbedderStack,
     documents: &[IndexableDocument],
 ) -> TestResult {
-    let builder = super::super::IndexBuilder::new(directory).with_embedder_stack(stack.clone());
-    #[cfg(feature = "lexical-bm25")]
-    let builder = builder.with_tantivy_lexical();
-    builder
-        .add_documents(documents.to_vec())
-        .build(cx)
+    super::super::build_index(cx, directory, stack.clone(), documents.to_vec())
         .await
         .map_err(|error| error.to_string())?;
     DocDigests::new(stack, documents)

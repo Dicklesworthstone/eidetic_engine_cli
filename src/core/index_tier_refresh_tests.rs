@@ -969,7 +969,7 @@ fn failed_inference_producer_drift_and_cancelled_refresh_preserve_source_bytes()
             assert_eq!(fast.inputs.load(Ordering::SeqCst), 0);
             assert_eq!(generation_files(&live)?, before);
             assert_eq!(rows(&reader)?, retained);
-            Ok(())
+            Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
     }
@@ -1045,7 +1045,7 @@ fn cancelled_publisher_does_not_retry_full_and_commit_failure_rolls_back() -> Te
                 "a cancelled selective build must not fall through to a complete rebuild"
             );
             assert_eq!(generation_files(&live)?, before);
-            Ok(())
+            Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
     }
