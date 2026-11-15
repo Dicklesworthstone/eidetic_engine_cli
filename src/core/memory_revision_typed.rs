@@ -1,4 +1,4 @@
-//! Preserve first-class typed memory data through immutable revisions.
+//! Preserve first-class memory data and guards through immutable revisions.
 //!
 //! A prose or metadata edit must not turn a structured decision, failure, or
 //! rule into an untyped row. Same-kind revisions inherit the validated sidecar;
@@ -6,6 +6,8 @@
 //! Changing kind starts a destination-kind projection, never a mismatched copy.
 //! Preparation and dry runs are read-only. The transaction rechecks both source
 //! projections before writing and persists the sidecar before indexing.
+//! Sentinel specs follow the revision with freshly bound identities. Results
+//! remain evidence about the prior revision: a new revision needs a new check.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -18,10 +20,14 @@ use crate::models::memory::{
     canonicalize_typed_memory_fields_json, extract_typed_memory_fields_json_with_redactor,
     merge_typed_memory_fields_json,
 };
-use crate::models::{MemoryContent, MemoryKind};
+use crate::models::{
+    CreateMemorySentinelSpecInput, MemoryContent, MemoryKind, MemorySentinelSpec,
+    StoredMemorySentinelSpec,
+};
 
 pub(super) struct Prepared {
     source_json: Option<String>,
+    source_sentinels: Vec<StoredMemorySentinelSpec>,
     projected_json: Option<String>,
     policy_bypass: Option<super::RememberPolicyBypassReport>,
     workspace_id: String,
@@ -50,6 +56,19 @@ impl Prepared {
             .map_err(|_| {
                 "Original typed fields are invalid; revision was not written".to_owned()
             })?;
+        let source_sentinels = db.list_memory_sentinel_specs(&original.id).map_err(|_| {
+            "Could not read original sentinel guards; revision was not written".to_owned()
+        })?;
+        for spec in &source_sentinels {
+            let canonical = MemorySentinelSpec::new(sentinel_input(spec, &original.id))
+                .map_err(|_| invalid_sentinel_message().to_owned())?;
+            if spec.memory_id != original.id
+                || canonical.spec_hash != spec.spec_hash
+                || canonical.safety_class != spec.safety_class
+            {
+                return Err(invalid_sentinel_message().to_owned());
+            }
+        }
         let body = content.unwrap_or(&original.content);
         MemoryContent::parse(body).map_err(|error| format!("Invalid revision content: {error}"))?;
         // Revisions are another write ingress, not a policy exception. Reuse
@@ -88,6 +107,7 @@ impl Prepared {
         let changed = canonical_source != projected_json;
         Ok(Self {
             source_json,
+            source_sentinels,
             projected_json,
             policy_bypass,
             workspace_id: original.workspace_id.clone(),
@@ -103,6 +123,7 @@ impl Prepared {
     ) -> crate::db::Result<()> {
         if db.get_memory(&original.id)?.as_ref() != Some(original)
             || db.get_memory_typed_fields_json(&original.id)? != self.source_json
+            || db.list_memory_sentinel_specs(&original.id)? != self.source_sentinels
         {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Execute,
@@ -118,6 +139,19 @@ impl Prepared {
         new_id: &str,
         recorded_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::db::Result<()> {
+        // Hashes bind the memory ID, so copying a row or its prior pass/fail
+        // result would misattribute evidence. Rebuild each immutable guard and
+        // let the next explicit sentinel check establish this revision's state.
+        for source in &self.source_sentinels {
+            let rebound =
+                MemorySentinelSpec::new(sentinel_input(source, new_id)).map_err(|_| {
+                    DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: invalid_sentinel_message().to_owned(),
+                    }
+                })?;
+            db.upsert_memory_sentinel_spec(&rebound)?;
+        }
         if let Some(json) = &self.projected_json
             && !db.set_memory_typed_fields_json_at(new_id, Some(json), recorded_at)?
         {
@@ -152,6 +186,25 @@ impl Prepared {
         }
         Ok(())
     }
+}
+
+fn sentinel_input(
+    source: &StoredMemorySentinelSpec,
+    memory_id: &str,
+) -> CreateMemorySentinelSpecInput {
+    CreateMemorySentinelSpecInput {
+        memory_id: memory_id.to_owned(),
+        sentinel_kind: source.sentinel_kind,
+        polarity: source.polarity,
+        target: source.target.clone(),
+        expected_predicate: Some(source.expected_predicate.clone()),
+        provenance: source.provenance.clone(),
+        stale_threshold_seconds: source.stale_threshold_seconds,
+    }
+}
+
+fn invalid_sentinel_message() -> &'static str {
+    "Original sentinel guards are invalid; revision was not written"
 }
 
 #[cfg(test)]
@@ -231,6 +284,220 @@ mod tests {
             .get_memory_typed_fields_json(id)?
             .ok_or("typed fields missing")?;
         Ok(serde_json::from_str::<Value>(&raw)?["fields"].clone())
+    }
+
+    fn seed_sentinels(db: &DbConnection, memory_id: &str) -> TestResult {
+        use crate::models::{
+            MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultInput,
+            MemorySentinelResultStatus,
+        };
+
+        for (raw, polarity) in [
+            ("path_exists:Cargo.toml", MemorySentinelPolarity::Gate),
+            ("path_exists:ready.marker", MemorySentinelPolarity::Revive),
+        ] {
+            let spec = MemorySentinelSpec::from_raw(
+                memory_id,
+                raw,
+                polarity,
+                None,
+                "manual://revision-guard",
+                Some(600),
+            )?;
+            db.upsert_memory_sentinel_spec(&spec)?;
+            db.insert_memory_sentinel_result(&MemorySentinelResult::new(
+                MemorySentinelResultInput {
+                    spec_hash: spec.spec_hash,
+                    status: MemorySentinelResultStatus::Pass,
+                    checked_at: chrono::Utc::now().to_rfc3339(),
+                    evidence_summary: "Observed against the original revision.".to_owned(),
+                    stale_threshold_seconds: Some(600),
+                },
+            )?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn revisions_preserve_gate_and_revival_specs_without_reusing_old_check_results() -> TestResult {
+        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
+        let db = DbConnection::open_file(&path)?;
+        seed_sentinels(&db, &source)?;
+        let original_specs = db.list_memory_sentinel_specs(&source)?;
+        let original_results = db.latest_memory_sentinel_results_for_memory(&source)?;
+        let workspace = db
+            .get_memory(&source)?
+            .ok_or("source missing")?
+            .workspace_id;
+        db.close()?;
+        let mut request = options(&path, &source);
+        request.tags = Some(vec!["reviewed".into()]);
+        let report = revise_memory(&request);
+        assert!(report.success, "{:?}", report.error);
+        let first_id = report.new_id.as_deref().ok_or("new revision missing")?;
+        let db = DbConnection::open_file(&path)?;
+        let first_specs = db.list_memory_sentinel_specs(first_id)?;
+        assert_eq!(first_specs.len(), original_specs.len());
+        for original in &original_specs {
+            let expected = MemorySentinelSpec::new(sentinel_input(original, first_id))?;
+            let actual = first_specs
+                .iter()
+                .find(|spec| spec.spec_hash == expected.spec_hash)
+                .ok_or("rebound sentinel missing")?;
+            assert_eq!(actual.memory_id, first_id);
+            assert_eq!(actual.polarity, original.polarity);
+            assert_eq!(actual.target, original.target);
+            assert_eq!(actual.expected_predicate, original.expected_predicate);
+            assert_eq!(actual.safety_class, original.safety_class);
+            assert_eq!(actual.provenance, original.provenance);
+            assert_eq!(actual.stale_threshold_seconds, Some(600));
+            assert_ne!(actual.spec_hash, original.spec_hash);
+            assert!(
+                db.latest_memory_sentinel_result(&actual.spec_hash)?
+                    .is_none()
+            );
+        }
+        assert_eq!(db.list_memory_sentinel_specs(&source)?, original_specs);
+        assert_eq!(
+            db.latest_memory_sentinel_results_for_memory(&source)?,
+            original_results
+        );
+        let revival = db.list_current_memory_revival_specs_bounded(
+            &workspace,
+            &chrono::Utc::now().to_rfc3339(),
+            20,
+        )?;
+        assert_eq!(revival.total_count, 1);
+        assert_eq!(revival.specs[0].memory_id, first_id);
+        db.close()?;
+
+        let mut second = options(&path, first_id);
+        second.content = Some("Chosen: SQLite\nRationale: Retain local storage while guards hold.");
+        let report = revise_memory(&second);
+        assert!(report.success, "{:?}", report.error);
+        let second_id = report.new_id.as_deref().ok_or("second revision missing")?;
+        let db = DbConnection::open_file(&path)?;
+        let second_specs = db.list_memory_sentinel_specs(second_id)?;
+        assert_eq!(second_specs.len(), original_specs.len());
+        for original in &original_specs {
+            let expected = MemorySentinelSpec::new(sentinel_input(original, second_id))?;
+            assert!(
+                second_specs
+                    .iter()
+                    .any(|spec| spec.spec_hash == expected.spec_hash)
+            );
+        }
+        assert_eq!(db.list_memory_sentinel_specs(first_id)?, first_specs);
+        assert!(
+            db.latest_memory_sentinel_results_for_memory(second_id)?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sentinel_revision_preview_and_failed_commit_preserve_the_complete_original_state()
+    -> TestResult {
+        use crate::core::memory::{UnchangedRevisionPolicy, revise_memory_with_transaction_hook};
+
+        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
+        let db = DbConnection::open_file(&path)?;
+        seed_sentinels(&db, &source)?;
+        let original = db.get_memory(&source)?;
+        let specs = db.list_memory_sentinel_specs(&source)?;
+        let results = db.latest_memory_sentinel_results_for_memory(&source)?;
+        let audits = db.count_table_rows("audit_log")?;
+        let jobs = db.count_table_rows("search_index_jobs")?;
+        db.close()?;
+        let mut request = options(&path, &source);
+        request.tags = Some(vec!["reviewed".into()]);
+        request.dry_run = true;
+        let preview = revise_memory(&request);
+        assert!(preview.success && preview.dry_run);
+        let db = DbConnection::open_file(&path)?;
+        assert_eq!(db.count_memory_chain(&source)?, 1);
+        assert_eq!(db.count_table_rows("memory_sentinel_specs")?, 2);
+        assert_eq!(db.count_table_rows("audit_log")?, audits);
+        assert_eq!(db.count_table_rows("search_index_jobs")?, jobs);
+        db.close()?;
+
+        request.dry_run = false;
+        let mut attempted_id = None;
+        let rejected = revise_memory_with_transaction_hook(
+            &request,
+            UnchangedRevisionPolicy::Reject,
+            |db, context| {
+                attempted_id = Some(context.new_id.clone());
+                assert_eq!(db.list_memory_sentinel_specs(&context.new_id)?.len(), 2);
+                assert!(
+                    db.latest_memory_sentinel_results_for_memory(&context.new_id)?
+                        .is_empty()
+                );
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Planted failure after sentinel inheritance".to_owned(),
+                })
+            },
+        );
+        assert!(!rejected.success);
+        let db = DbConnection::open_file(&path)?;
+        let attempted_id = attempted_id.ok_or("transaction hook never ran")?;
+        assert!(db.get_memory(&attempted_id)?.is_none());
+        assert!(db.list_memory_sentinel_specs(&attempted_id)?.is_empty());
+        assert_eq!(db.get_memory(&source)?, original);
+        assert_eq!(db.list_memory_sentinel_specs(&source)?, specs);
+        assert_eq!(
+            db.latest_memory_sentinel_results_for_memory(&source)?,
+            results
+        );
+        assert!(db.get_memory_superseded_at(&source)?.is_none());
+        assert_eq!(db.count_table_rows("audit_log")?, audits);
+        assert_eq!(db.count_table_rows("search_index_jobs")?, jobs);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_or_changed_sentinel_authority_cannot_be_erased_by_revision() -> TestResult {
+        use crate::models::MemorySentinelPolarity;
+
+        let (_temp, path, source) = fixture("decision", json!({"chosen":"SQLite"}))?;
+        let db = DbConnection::open_file(&path)?;
+        let original = db.get_memory(&source)?.ok_or("source missing")?;
+        let prepared = Prepared::prepare(&db, &original, Some("Clarify release guidance."), None)?;
+        seed_sentinels(&db, &source)?;
+        assert!(
+            prepared.check_source(&db, &original).is_err(),
+            "a newly attached guard must win"
+        );
+        let prepared = Prepared::prepare(&db, &original, Some("Clarify release guidance."), None)?;
+        let additional = MemorySentinelSpec::from_raw(
+            &source,
+            "path_exists:extra.marker",
+            MemorySentinelPolarity::Gate,
+            None,
+            "manual://revision-guard",
+            Some(60),
+        )?;
+        db.upsert_memory_sentinel_spec(&additional)?;
+        assert!(prepared.check_source(&db, &original).is_err());
+        db.execute_raw("UPDATE memory_sentinel_specs SET target = 'private-sentinel-target' WHERE polarity = 'gate'")?;
+        db.close()?;
+        for dry_run in [true, false] {
+            let mut request = options(&path, &source);
+            request.tags = Some(vec!["reviewed".into()]);
+            request.dry_run = dry_run;
+            let rejected = revise_memory(&request);
+            assert!(!rejected.success);
+            let error = rejected.error.ok_or("sentinel validation error missing")?;
+            assert!(error.contains("sentinel"));
+            assert!(!error.contains("private-sentinel-target"));
+        }
+        let db = DbConnection::open_file(&path)?;
+        assert_eq!(db.count_memory_chain(&source)?, 1);
+        assert!(db.get_memory_superseded_at(&source)?.is_none());
+        assert_eq!(db.count_table_rows("memory_sentinel_specs")?, 3);
+        assert_eq!(db.count_table_rows("memory_sentinel_results")?, 2);
+        Ok(())
     }
 
     #[test]
