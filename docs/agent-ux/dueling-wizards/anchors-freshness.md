@@ -116,7 +116,7 @@ Envelope is `ee.response.v2`; `data.command` is `"impact"`:
     "scopeStats": { },
     "results": [
       { "rank": 1, "memoryId": "mem_…", "matchType": "exact_anchor",
-        "score": 1.0, "memory": { } }
+        "score": 1.0, "scoreKind": "stored_confidence", "memory": { } }
     ],
     "resultCount": 1,
     "elapsedMs": 3

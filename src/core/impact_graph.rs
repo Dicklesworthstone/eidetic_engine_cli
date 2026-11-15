@@ -513,6 +513,7 @@ fn collect(
                         memory_id: target.memory_id,
                         match_type: ImpactMatchType::GraphNeighbor,
                         score,
+                        score_kind: super::IMPACT_GRAPH_NEIGHBOR_SCORE_KIND,
                         memory: target_memory.summary,
                         anchor: None,
                         fallback_hit: None,

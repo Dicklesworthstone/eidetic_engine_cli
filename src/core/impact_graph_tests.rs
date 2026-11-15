@@ -520,10 +520,24 @@ fn public_impact_fallback_fills_after_exact_duplicates_and_private_sources() {
     assert_eq!(report.results.len(), 2);
     assert_eq!(report.results[0].memory_id, exact);
     assert_eq!(report.results[0].match_type, ImpactMatchType::ExactAnchor);
+    assert_eq!(
+        report.results[0].score_kind,
+        super::super::IMPACT_EXACT_ANCHOR_SCORE_KIND
+    );
     assert_eq!(report.results[1].memory_id, live);
     assert_eq!(
         report.results[1].match_type,
         ImpactMatchType::SearchFallback
+    );
+    assert_eq!(report.results[1].score_kind, "query_relative_pool_minmax");
+    let data = report.data_json();
+    assert_eq!(
+        data["results"][0]["scoreKind"],
+        super::super::IMPACT_EXACT_ANCHOR_SCORE_KIND
+    );
+    assert_eq!(
+        data["results"][1]["scoreKind"],
+        "query_relative_pool_minmax"
     );
     let candidates = report.fallback_report.as_ref().unwrap();
     assert_eq!(

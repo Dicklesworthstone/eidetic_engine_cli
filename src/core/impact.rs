@@ -91,11 +91,15 @@ pub struct ImpactResult {
     pub memory_id: String,
     pub match_type: ImpactMatchType,
     pub score: f32,
+    pub score_kind: &'static str,
     pub memory: ImpactMemorySummary,
     pub anchor: Option<ImpactAnchorSummary>,
     pub fallback_hit: Option<serde_json::Value>,
     pub graph_path: Option<serde_json::Value>,
 }
+
+pub const IMPACT_EXACT_ANCHOR_SCORE_KIND: &str = "stored_confidence";
+pub const IMPACT_GRAPH_NEIGHBOR_SCORE_KIND: &str = "anchor_path_support";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImpactMatchType {
@@ -230,6 +234,7 @@ impl ImpactResult {
             "memoryId": self.memory_id,
             "matchType": self.match_type.as_str(),
             "score": self.score,
+            "scoreKind": self.score_kind,
             "memory": self.memory.data_json(),
         });
         if let Some(object) = value.as_object_mut() {
@@ -506,6 +511,7 @@ fn exact_impact_results(
             memory_id,
             match_type: ImpactMatchType::ExactAnchor,
             score: anchor.confidence,
+            score_kind: IMPACT_EXACT_ANCHOR_SCORE_KIND,
             memory: admitted.summary,
             anchor: Some(anchor),
             fallback_hit: None,
@@ -563,6 +569,7 @@ fn append_fallback_results(
             memory_id: memory_id.to_owned(),
             match_type: ImpactMatchType::SearchFallback,
             score: hit.relevance_score(),
+            score_kind: hit.score_kind(),
             memory: admitted.summary,
             anchor: None,
             fallback_hit: rendered_by_memory_id.get(memory_id).cloned(),
@@ -703,6 +710,10 @@ mod tests {
                 .starts_with("blake3:")
         );
         assert_eq!(data["results"][0]["matchType"], "exact_anchor");
+        assert_eq!(
+            data["results"][0]["scoreKind"],
+            IMPACT_EXACT_ANCHOR_SCORE_KIND
+        );
         let anchor_block = data["results"][0]["anchor"].to_string();
         assert!(!anchor_block.contains("src/core/impact.rs"));
         Ok(())

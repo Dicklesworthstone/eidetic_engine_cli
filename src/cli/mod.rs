@@ -41734,7 +41734,7 @@ where
             human.push_str(&format!(
                 "  Global quarantine: {list}\n  Review release: {release}\n"
             ));
-            data["quarantineRecovery"] = json!({
+            data["quarantineRecovery"] = serde_json::json!({
                 "listCommand": list,
                 "releaseCommand": release,
                 "rejectCommand": reject,
@@ -78200,7 +78200,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::SearchIndex,
+            &ProcessExitCode::Storage,
             "full orient pack failure exit",
         )?;
         ensure(
@@ -78217,7 +78217,7 @@ mod tests {
         )?;
         ensure_equal(
             &envelope["error"]["code"],
-            &serde_json::json!("search_index"),
+            &serde_json::json!("storage"),
             "full orient pack failure code",
         )?;
         ensure(
@@ -78338,13 +78338,10 @@ mod tests {
         let classification = (exit, envelope["error"]["code"].clone());
         ensure_equal(
             &classification,
-            &(
-                ProcessExitCode::SearchIndex,
-                serde_json::json!("search_index"),
-            ),
+            &(ProcessExitCode::Storage, serde_json::json!("storage")),
             "1 ms classification must EQUAL the 300 s classification above \
-             (bd-5tl24: measured identical at both budgets; a red here means \
-             the budget started mattering, or the misattribution was fixed)",
+             (bd-5tl24 / bd-so0vj: directory-as-database storage fault surfaces \
+             as Storage / \"storage\" at both budgets)",
         )
     }
 
@@ -98306,6 +98303,7 @@ mod tests {
                 memory_id: "mem_impact000000000000000000001".to_owned(),
                 match_type: ImpactMatchType::ExactAnchor,
                 score: 1.0,
+                score_kind: crate::core::impact::IMPACT_EXACT_ANCHOR_SCORE_KIND,
                 memory: ImpactMemorySummary {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
@@ -98356,6 +98354,11 @@ mod tests {
             &json["data"]["results"][0]["matchType"],
             &serde_json::json!("exact_anchor"),
             "impact match type",
+        )?;
+        ensure_equal(
+            &json["data"]["results"][0]["scoreKind"],
+            &serde_json::json!(crate::core::impact::IMPACT_EXACT_ANCHOR_SCORE_KIND),
+            "impact score kind",
         )
     }
 
