@@ -523,8 +523,7 @@ fn scope_split_refuses_collapsed_scopes_in_preview_proposal_and_direct_apply() -
                 format!("collapsed scopes must be refused in mode {mode:?}: {response}"),
             )?;
             ensure(
-                fixture.durable_counts()? == before_counts
-                    && fixture.sources()? == before_sources,
+                fixture.durable_counts()? == before_counts && fixture.sources()? == before_sources,
                 "an invalid scope split must not create queue, decision, audit, or index work",
             )?;
             let after_tags = {
@@ -536,7 +535,10 @@ fn scope_split_refuses_collapsed_scopes_in_preview_proposal_and_direct_apply() -
                         .map_err(|error| error.to_string())?,
                 ]
             };
-            ensure(after_tags == before_tags, "refusal must preserve both tag sets")?;
+            ensure(
+                after_tags == before_tags,
+                "refusal must preserve both tag sets",
+            )?;
             let active = fixture.success(&["conflict", "list"])?;
             ensure(
                 active["data"]["pairs"]
@@ -831,7 +833,7 @@ fn conflict_merge_refuses_unreviewed_unsafe_and_ambiguous_requests_without_write
         args.extend_from_slice(&extra);
         let (output, refused) = fixture.run(&args)?;
         ensure(
-            !output.status.success() && refused["success"] == false,
+            !output.status.success() && refused["schema"] == "ee.error.v2",
             format!("unsafe or ambiguous merge request must fail: {refused}"),
         )?;
         if extra.contains(&"--apply") {
@@ -875,7 +877,7 @@ fn conflict_merge_refuses_unreviewed_unsafe_and_ambiguous_requests_without_write
         let (output, refused) = scoped.run(&args)?;
         ensure(
             !output.status.success()
-                && refused["success"] == false
+                && refused["schema"] == "ee.error.v2"
                 && refused["error"]["code"] == "conflict_merge_sources_incompatible"
                 && scoped.sources()? == scoped_sources
                 && scoped.durable_counts()? == scope_counts,
@@ -985,7 +987,7 @@ fn reviewed_conflict_merge_rolls_back_all_effects_when_completion_audit_fails() 
     let (output, failed) = fixture.run(&["curate", "apply", candidate_id])?;
     ensure(
         !output.status.success()
-            && failed["success"] == false
+            && failed["schema"] == "ee.error.v2"
             && failed["error"]["code"] == "storage"
             && failed["error"]["message"]
                 .as_str()

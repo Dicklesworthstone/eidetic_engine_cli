@@ -1075,7 +1075,10 @@ mod tests {
             assert_eq!(CassAgent::parse_lossy(slug), CassAgent::Unknown);
         }
         assert_eq!(CassAgent::parse_lossy(&"a".repeat(65)), CassAgent::Unknown);
-        assert_eq!(CassAgent::parse_lossy(&"a".repeat(64)).as_str(), "a".repeat(64));
+        assert_eq!(
+            CassAgent::parse_lossy(&"a".repeat(64)).as_str(),
+            "a".repeat(64)
+        );
     }
 
     #[test]

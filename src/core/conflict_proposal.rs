@@ -1114,8 +1114,14 @@ mod tests {
             Err(DomainError::Usage { .. })
         ));
         assert_eq!(counts(), before);
-        assert_eq!(connection.get_memory_tags(MEMORY_A).unwrap(), ["development"]);
-        assert_eq!(connection.get_memory_tags(MEMORY_B).unwrap(), ["production"]);
+        assert_eq!(
+            connection.get_memory_tags(MEMORY_A).unwrap(),
+            ["development"]
+        );
+        assert_eq!(
+            connection.get_memory_tags(MEMORY_B).unwrap(),
+            ["production"]
+        );
         assert_eq!(
             assemble_conflict_surface_for_workspace(
                 &connection,

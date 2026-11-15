@@ -810,14 +810,14 @@ fn conflict_supersession_refuses_a_foreign_workspace_side_without_mutation() {
             },
         )
         .unwrap();
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let plan = fixture.conflict_plan(&keeper, &loser);
     fixture
         .db
         .execute_raw(&format!(
             "UPDATE memories SET workspace_id = '{foreign_workspace}' WHERE id = '{loser}'"
         ))
         .unwrap();
-    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
-    let plan = fixture.conflict_plan(&keeper, &loser);
     let before = fixture.state();
     assert!(matches!(
         record_resolution(&fixture.conflict_options(&plan), &plan),

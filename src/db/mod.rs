@@ -57338,14 +57338,8 @@ UPDATE memories
             })?;
             let plan_rows = connection.query_for(
                 DbOperation::Query,
-                &format!(
-                    "EXPLAIN QUERY PLAN {}",
-                    super::EVIDENCE_QUARANTINE_STATUS_IDS_SQL
-                ),
-                &[
-                    Value::Text(WORKSPACE.to_owned()),
-                    Value::BigInt(i64::from(super::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS)),
-                ],
+                &format!("EXPLAIN QUERY PLAN {}", super::EVIDENCE_SPAN_BY_ID_SQL),
+                &[Value::Text("ev_plan_probe".to_owned())],
             )?;
             let plan = plan_rows
                 .iter()
@@ -57358,14 +57352,37 @@ UPDATE memories
                 plan.contains("SEARCH evidence_spans")
                     && !plan.contains("SCAN evidence_spans")
                     && !plan.contains("TEMP B-TREE"),
-                "bounded quarantine inspection must seek the admission index without sorting: {plan}"
+                "bounded quarantine hydration must seek the primary key without sorting: {plan}"
             );
             connection.begin_read_snapshot()?;
-            let report =
-                connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)?;
+            let (report, statements) = super::capture_query_sql_for_test(|| {
+                connection.inspect_evidence_quarantine_reasons_in_current_snapshot(WORKSPACE)
+            });
+            let report = report?;
             connection.commit_read_snapshot()?;
             let byte_bound = super::EVIDENCE_QUARANTINE_STATUS_MAX_BYTES / body.len() as u64;
             let expected = u64::from(super::EVIDENCE_QUARANTINE_STATUS_MAX_ROWS).min(byte_bound);
+            assert_eq!(
+                statements
+                    .iter()
+                    .filter(|sql| sql.as_str() == super::EVIDENCE_QUARANTINE_STATUS_IDS_SQL)
+                    .count(),
+                1,
+                "quarantine inspection issues one bounded id query per snapshot"
+            );
+            assert!(
+                !super::EVIDENCE_QUARANTINE_STATUS_IDS_SQL.contains("excerpt")
+                    && !super::EVIDENCE_QUARANTINE_STATUS_IDS_SQL.contains("metadata_json"),
+                "bounded id query must not hydrate full evidence bodies"
+            );
+            let hydrated_reads = statements
+                .iter()
+                .filter(|sql| sql.as_str() == super::EVIDENCE_SPAN_BY_ID_SQL)
+                .count() as u64;
+            assert!(
+                hydrated_reads <= expected.saturating_add(1),
+                "quarantine inspection hydrates at most one body past the budget ({hydrated_reads} > {expected} + 1)"
+            );
             assert_eq!(u64::from(report.inspected), expected);
             assert!(
                 report.inspected < count,
@@ -57748,8 +57765,7 @@ UPDATE memories
                 name: None,
             },
         )?;
-        let mut other_session = session_input("rescreen-other-source");
-        other_session.workspace_id = OTHER_WORKSPACE.to_owned();
+        let other_session = session_input("rescreen-other-source");
         connection.insert_session(&other_session_id, &other_session)?;
         let safe = r#"{"role":"assistant","content":"The release check completed successfully."}"#;
         let tool = r#"{"role":"tool","content":"The release check completed successfully."}"#;
@@ -57769,7 +57785,13 @@ UPDATE memories
                 0x8568_0100 + index as u128,
             ))
             .to_string();
-            let mut input = source_committed_rescreen_input(&session_id, slot, excerpt, *original);
+            let owner_session_id = if *slot == "scope" {
+                &other_session_id
+            } else {
+                &session_id
+            };
+            let mut input =
+                source_committed_rescreen_input(owner_session_id, slot, excerpt, *original);
             if *slot == "tool" {
                 input.role = Some("tool".to_owned());
             }
@@ -57793,10 +57815,10 @@ UPDATE memories
         )?;
         connection.execute_for(
             DbOperation::Execute,
-            "UPDATE evidence_spans SET session_id = ?1 WHERE id = ?2",
+            "UPDATE sessions SET workspace_id = ?1 WHERE id = ?2",
             &[
+                Value::Text(OTHER_WORKSPACE.to_owned()),
                 Value::Text(other_session_id.clone()),
-                Value::Text(ids[5].clone()),
             ],
         )?;
         connection

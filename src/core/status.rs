@@ -7752,7 +7752,7 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             let status = gather_status_index_status(Some(temp.path()), Some(connection))
                 .ok_or_else(|| "explicit workspace must produce an index status probe".to_owned())?
-                .map_err(|()| {
+                .map_err(|_error| {
                     "pinned status snapshot must not start a nested evidence transaction".to_owned()
                 })?;
 

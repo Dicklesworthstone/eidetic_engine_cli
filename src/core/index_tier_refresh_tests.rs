@@ -459,7 +459,7 @@ fn metadata_beyond_delta_budget_rebuilds_lexical_without_any_vector_inference() 
         let lock = index::IndexPublishLockOwner::acquire(&cx, &db, WORKSPACE)
             .map_err(|error| error.to_string())?;
         let live = parent.join("index");
-        let original = documents(8193);
+        let original = documents(64);
         let fast = Arc::new(CountingHash::new(16, 17));
         let quality = Arc::new(CountingHash::new(32, 29));
         let stack = selected(&fast, Some(&quality));
@@ -479,8 +479,12 @@ fn metadata_beyond_delta_budget_rebuilds_lexical_without_any_vector_inference() 
         fast.inputs.store(0, Ordering::SeqCst);
         quality.inputs.store(0, Ordering::SeqCst);
         let mut current = original;
+        let payload = "x".repeat(512 * 1024 + 64);
         for document in &mut current {
             document.title = Some("refreshedmarker".to_owned());
+            document
+                .metadata
+                .insert("bulk_payload".to_owned(), payload.clone());
         }
         assert!(
             super::super::plan(&live, &stack, &current).is_err(),

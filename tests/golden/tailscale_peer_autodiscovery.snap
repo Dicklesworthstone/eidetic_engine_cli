@@ -1,0 +1,38 @@
+{
+  "schema": "ee.tailscale.autodiscovery.v1",
+  "tailnetId": "tailnet-alpha",
+  "tailnetDisplayName": "alpha.example",
+  "selfNodeKey": "nodekey:self",
+  "probedPeerCount": 2,
+  "eligiblePeerCount": 1,
+  "eeCapablePeers": [
+    {
+      "nodeKey": "nodekey:alpha",
+      "stableNodeId": null,
+      "tailscaleIp": "100.64.0.2",
+      "magicDnsName": "nodekey:alpha.tailnet.test.",
+      "hostname": "host-alpha",
+      "eeProtocolVersion": "1.0",
+      "workspaceMatchSet": [
+        "workspace-alpha"
+      ],
+      "lastProbedAt": "1970-01-01T00:00:00Z",
+      "latencyMs": 17,
+      "discoveryPolicyDecision": "service_tag_match"
+    }
+  ],
+  "skippedPeers": [
+    {
+      "nodeKey": "nodekey:beta",
+      "reason": "workspace_mismatch"
+    }
+  ],
+  "degraded": [
+    {
+      "code": "peer_discovery_workspace_mismatch",
+      "severity": "info",
+      "message": "At least one ee peer advertised only different workspace IDs and was not enrolled.",
+      "repair": "Use explicit `ee mesh peer add` or auto-enroll only when cross-workspace sharing is intended."
+    }
+  ]
+}

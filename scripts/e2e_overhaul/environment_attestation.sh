@@ -608,7 +608,8 @@ validate_attestation_case() {
             "passed"
     fi
 
-    if grep -Eq '/Users/|/Volumes/|/data/projects/|/private/tmp/|SECRET_TOKEN|body_md|mail body|raw source' "$LAST_STDOUT"; then
+    if sed 's|/private/tmp/ee-agent-mail-snapshot\.json|[AGENT_MAIL_SNAPSHOT_TEMPLATE]|g' "$LAST_STDOUT" \
+        | grep -Eq '/Users/|/Volumes/|/data/projects/|/private/tmp/|SECRET_TOKEN|body_md|mail body|raw source'; then
         fail_with_artifacts \
             "${label}_redaction_failed" \
             "$command_text" \

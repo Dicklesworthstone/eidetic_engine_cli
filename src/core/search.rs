@@ -9248,6 +9248,11 @@ async fn pin_search_generation(
 fn map_index_generation_error(error: crate::core::index::IndexRebuildError) -> SearchError {
     match error {
         crate::core::index::IndexRebuildError::Cancelled(reason) => SearchError::Cancelled(reason),
+        crate::core::index::IndexRebuildError::Index(reason)
+            if reason.contains("rebuild the index") =>
+        {
+            SearchError::IndexIncompatible(reason)
+        }
         error => SearchError::Index(error.to_string()),
     }
 }

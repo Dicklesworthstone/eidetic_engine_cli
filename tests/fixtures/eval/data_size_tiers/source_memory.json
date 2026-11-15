@@ -44,13 +44,13 @@
       },
       "generator": {
         "profile": "profile.data_size_tiers.medium.v1",
-        "template": "Medium tier memory {n}: release workflow evidence with module tag {module}, repeated checks, and occasional redundant status notes.",
+        "template": "Medium tier memory {n}: release workflow evidence with module tag {module}, section quotas, repeated checks, and occasional redundant status notes.",
         "relevant_every": 2,
         "distractor_every": 5
       },
       "expected_query_match": [
         "medium workspace history",
-        "repeated checks",
+        "section quotas",
         "redundant memories suppressed"
       ]
     },

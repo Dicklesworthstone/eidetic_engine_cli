@@ -35,16 +35,28 @@ struct ConformanceCase {
     args: Vec<String>,
 }
 
+fn configure_hermetic_ee_env(command: &mut Command, registry: &Path) {
+    let xdg_root =
+        std::env::temp_dir().join(format!("ee-error-recovery-xdg-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&xdg_root);
+    command
+        .env("EE_WORKSPACE_REGISTRY", registry)
+        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("HOME", xdg_root.join("home"))
+        .env("XDG_CONFIG_HOME", xdg_root.join("config"))
+        .env("XDG_DATA_HOME", xdg_root.join("data"))
+        .env("XDG_CACHE_HOME", xdg_root.join("cache"))
+        .env("XDG_STATE_HOME", xdg_root.join("state"));
+}
+
 fn run_ee(args: &[String]) -> Result<Output, String> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
-    command.env(
-        "EE_WORKSPACE_REGISTRY",
-        std::env::temp_dir().join(format!(
-            "ee-error-recovery-no-registry-{}.db",
-            std::process::id()
-        )),
-    );
-    command.env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS);
+    let registry = std::env::temp_dir().join(format!(
+        "ee-error-recovery-no-registry-{}.db",
+        std::process::id()
+    ));
+    configure_hermetic_ee_env(&mut command, &registry);
     command
         .args(args)
         .output()
@@ -52,24 +64,22 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
 }
 
 fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .env("EE_WORKSPACE_REGISTRY", registry)
-        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    configure_hermetic_ee_env(&mut command, registry);
+    command
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .env(
-            "EE_WORKSPACE_REGISTRY",
-            std::env::temp_dir().join(format!(
-                "ee-error-recovery-stdin-registry-{}.db",
-                std::process::id()
-            )),
-        )
-        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let registry = std::env::temp_dir().join(format!(
+        "ee-error-recovery-stdin-registry-{}.db",
+        std::process::id()
+    ));
+    configure_hermetic_ee_env(&mut command, &registry);
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -100,11 +110,11 @@ fn run_emitted_ee_command_with_registry(command: &str, registry: &Path) -> Resul
     }
     let shell_path = std::env::join_paths(path_entries)
         .map_err(|error| format!("failed to construct shell PATH: {error}"))?;
-    Command::new("/bin/sh")
-        .arg("-c")
+    let mut sh = Command::new("/bin/sh");
+    configure_hermetic_ee_env(&mut sh, registry);
+    sh.arg("-c")
         .arg(command)
         .env("PATH", shell_path)
-        .env("EE_WORKSPACE_REGISTRY", registry)
         .output()
         .map_err(|error| format!("failed to execute emitted command through /bin/sh: {error}"))
 }

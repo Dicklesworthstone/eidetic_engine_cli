@@ -321,6 +321,41 @@ fn isolated_registry_path() -> PathBuf {
         .join("workspaces.db")
 }
 
+/// Is the per-spawn private HOME active? `EE_CONTRACTS_PRIVATE_HOME=0` turns it
+/// off and restores the behaviour main had before bd-i8yqn.
+fn private_home_enabled() -> bool {
+    !matches!(
+        std::env::var("EE_CONTRACTS_PRIVATE_HOME").as_deref(),
+        Ok("0")
+    )
+}
+
+/// A private HOME for one spawn, so concurrent children cannot share or leak
+/// the user-global memory lane.
+///
+/// bd-i8yqn / bd-ykuwq. `ee` resolves its user-data root from `XDG_DATA_HOME`
+/// else `$HOME/.local/share/ee` (`src/core/global_store.rs`
+/// `default_user_data_root_from_values`), and the global lane lives at
+/// `<root>/global/ee.db`. Isolating `HOME` per spawn removes the user-global
+/// state leak `bd-28kky` measured in snapshot output while keeping
+/// `XDG_DATA_HOME` untouched so model discovery is unaffected.
+/// `the_private_home_actually_moves_the_global_lane` in `tests/contracts.rs`
+/// fails loudly if `XDG_DATA_HOME` is ever set in the test environment.
+pub(super) fn isolated_home_dir() -> PathBuf {
+    static HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = HOME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir()
+        .join("ee-contracts-home")
+        .join(format!("{}-{sequence}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap_or_else(|error| {
+        panic!(
+            "failed to create isolated spawn HOME {}: {error}",
+            path.display()
+        )
+    });
+    path
+}
+
 /// Path of the real `ee` binary provided by the Cargo test harness. This is
 /// the only `CARGO_BIN_EXE_ee` reference allowed in `tests/contracts`.
 pub fn ee_binary() -> &'static str {
@@ -344,6 +379,9 @@ where
     command
         .args(&arguments)
         .env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
+    if private_home_enabled() {
+        command.env("HOME", isolated_home_dir());
+    }
     output_with_timeout(&mut command, None)
         .map_err(|error| format!("failed to run ee {}: {error}", arguments.join(" ")))
 }
@@ -403,6 +441,12 @@ where
         .any(|(key, value)| key.to_str() == Some("EE_WORKSPACE_REGISTRY") && value.is_some());
     if !caller_chose_registry {
         command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
+    }
+    let caller_chose_home = command
+        .get_envs()
+        .any(|(key, value)| key.to_str() == Some("HOME") && value.is_some());
+    if private_home_enabled() && !caller_chose_home {
+        command.env("HOME", isolated_home_dir());
     }
     output_with_timeout(&mut command, stdin)
 }

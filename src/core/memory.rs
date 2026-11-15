@@ -12199,9 +12199,7 @@ fn prepare_revision_seal(
                 content.unwrap_or(&original.content).as_bytes(),
             ) != source.content_commitment
             {
-                return Err(
-                    "Memory reveal content does not match the sealed commitment".to_owned(),
-                );
+                return Err("Memory reveal content does not match the sealed commitment".to_owned());
             }
         }
     }
@@ -12290,20 +12288,16 @@ where
     // A plain edit must not retire the only revealable row or publish an
     // unsealed successor. The internal reveal path binds the committed bytes
     // here and must open this same seal inside the revision transaction.
-    let revision_seal = match prepare_revision_seal(
-        &conn,
-        &original,
-        options.content,
-        unchanged_revision_policy,
-    ) {
-        Ok(seal) => seal,
-        Err(message) => {
-            let mut report =
-                MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
-            report.dry_run = options.dry_run;
-            return report;
-        }
-    };
+    let revision_seal =
+        match prepare_revision_seal(&conn, &original, options.content, unchanged_revision_policy) {
+            Ok(seal) => seal,
+            Err(message) => {
+                let mut report =
+                    MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
+                report.dry_run = options.dry_run;
+                return report;
+            }
+        };
 
     // Typed data belongs to the immutable revision. Prepare before preview
     // and recheck the source inside the transaction before publication.
@@ -19036,7 +19030,11 @@ mod tests {
                 options.dry_run = dry_run;
                 // A user-supplied reason cannot grant the internal reveal exception.
                 let report = revise_memory(&options);
-                ensure(report.success, false, "closed seal denies ordinary revision")?;
+                ensure(
+                    report.success,
+                    false,
+                    "closed seal denies ordinary revision",
+                )?;
                 ensure(report.dry_run, dry_run, "denial preserves preview mode")?;
                 ensure(
                     report.error.as_deref(),
@@ -19096,7 +19094,11 @@ mod tests {
             options.content = Some("Another uncommitted successor.");
             options.dry_run = dry_run;
             let report = revise_memory(&options);
-            ensure(report.success, false, "closed root blocks successor revision")?;
+            ensure(
+                report.success,
+                false,
+                "closed root blocks successor revision",
+            )?;
             ensure(
                 report.error.as_deref(),
                 Some("Cannot revise sealed memory"),
@@ -19150,7 +19152,11 @@ mod tests {
             },
         );
         ensure(hook_called.get(), true, "no-transition hook was exercised")?;
-        ensure(no_transition.success, false, "a no-op reveal hook cannot publish")?;
+        ensure(
+            no_transition.success,
+            false,
+            "a no-op reveal hook cannot publish",
+        )?;
         ensure(
             seal_revision_snapshot(&database_path, &seal.memory_id)?,
             before,
@@ -19179,7 +19185,11 @@ mod tests {
         let mut revision = seal_revision_options(&database_path, &revealed_id);
         revision.content = Some("An ordinary revision after verified reveal.");
         let revised = revise_memory(&revision);
-        ensure(revised.success, true, "revealed lineage can be revised normally")?;
+        ensure(
+            revised.success,
+            true,
+            "revealed lineage can be revised normally",
+        )?;
         let revised_id = revised
             .new_id
             .ok_or_else(|| "post-reveal revision omitted its successor".to_owned())?;
@@ -19198,7 +19208,11 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "post-reveal revision lost its seal lineage".to_owned())?;
         ensure(inherited.is_sealed(), false, "root seal remains revealed")?;
-        ensure(inherited.reveal_verified, Some(true), "reveal stays verified")?;
+        ensure(
+            inherited.reveal_verified,
+            Some(true),
+            "reveal stays verified",
+        )?;
         ensure(
             inherited.content_commitment,
             seal.content_commitment,
@@ -19241,7 +19255,11 @@ mod tests {
         let result = connection.with_transaction(|| {
             require_unchanged_revision_seal(&connection, &original, &prepared)
         });
-        ensure(result.is_err(), true, "newly attached seal invalidates prepared revision")?;
+        ensure(
+            result.is_err(),
+            true,
+            "newly attached seal invalidates prepared revision",
+        )?;
         ensure(
             connection
                 .get_memory_superseded_at(memory_id)

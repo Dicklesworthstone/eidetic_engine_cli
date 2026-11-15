@@ -667,6 +667,51 @@ mod handoff_export_backup_conformance;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// The private HOME must actually MOVE the global lane, not merely be set.
+///
+/// bd-i8yqn / bd-ykuwq. Isolating HOME is only meaningful if `ee` resolves its
+/// user-data root THROUGH HOME. `default_user_data_root_from_values` prefers
+/// `XDG_DATA_HOME` and returns `None` when neither is usable.
+#[test]
+fn the_private_home_actually_moves_the_global_lane() {
+    let home = common_spawn::isolated_home_dir();
+
+    let resolved =
+        ee::core::global_store::default_user_data_root_from_values(None, Some(home.as_os_str()))
+            .expect("a private HOME must resolve to a user-data root");
+    assert!(
+        resolved.starts_with(&home),
+        "private HOME did not move the user-data root: {} is not under {}",
+        resolved.display(),
+        home.display()
+    );
+
+    let hijacked = ee::core::global_store::default_user_data_root_from_values(
+        Some(std::ffi::OsStr::new("/somewhere/else")),
+        Some(home.as_os_str()),
+    )
+    .expect("XDG_DATA_HOME must resolve to a user-data root");
+    assert!(
+        !hijacked.starts_with(&home),
+        "XDG_DATA_HOME is documented to take precedence over HOME, but the \
+         resolver honoured HOME instead; the isolation story in \
+         `isolated_home_dir` depends on that precedence and must be rewritten"
+    );
+
+    assert!(
+        std::env::var_os("XDG_DATA_HOME").is_none_or(|value| value.is_empty()),
+        "XDG_DATA_HOME is set in this environment, so the per-spawn private HOME \
+         does NOT move the global lane and the spawns still share one write lock; \
+         isolate XDG_DATA_HOME too before trusting this suite"
+    );
+
+    assert_ne!(
+        common_spawn::isolated_home_dir(),
+        common_spawn::isolated_home_dir(),
+        "each spawn needs its own HOME; a shared one preserves the contention"
+    );
+}
+
 /// The deadline must actually fire on a child that never exits.
 ///
 /// Without this the timeout is an untested guard: the suite would pass whether

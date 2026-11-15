@@ -1171,7 +1171,15 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         "apply_tampered_candidate",
         &["curate", "apply", tampered_candidate_id],
     )?;
-    require_success_envelope("apply_tampered_candidate", &tampered_apply)?;
+    ws.check(
+        "tampered_candidate_apply_envelope",
+        json_str(&tampered_apply, &["schema"]).as_deref() == Some("ee.response.v2")
+            && json_bool(&tampered_apply, &["success"]) == Some(false)
+            && json_at(&tampered_apply, &["data"]).is_some_and(JsonValue::is_object),
+        &format!(
+            "blocked curate apply must emit an ee.response.v2 envelope with success=false and structured data: {tampered_apply}"
+        ),
+    )?;
     let tampered_error_codes = json_at(&tampered_apply, &["data", "application", "errors"])
         .and_then(JsonValue::as_array)
         .map(|errors| {

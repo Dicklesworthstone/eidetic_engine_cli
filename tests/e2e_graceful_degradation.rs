@@ -526,9 +526,26 @@ fn corrupt_index_metadata_requires_rebuild_before_search() -> TestResult {
     let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "initial index rebuild")?;
     assert_success(&rebuild, "initial index rebuild")?;
 
-    let metadata_path = workspace.join(".ee").join("index").join("meta.json");
+    let ee_dir = workspace.join(".ee");
+    let metadata_path = ee_dir.join("index").join("meta.json");
+    let mut retained_metadata_paths = Vec::new();
     fs::write(&metadata_path, "{ not-json")
         .map_err(|error| format!("failed to corrupt {}: {error}", metadata_path.display()))?;
+    for entry in fs::read_dir(&ee_dir)
+        .map_err(|error| format!("failed to list {}: {error}", ee_dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read entry: {error}"))?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("index.previous") {
+            let retained_meta = entry.path().join("meta.json");
+            if retained_meta.exists() {
+                fs::write(&retained_meta, "{ not-json").map_err(|error| {
+                    format!("failed to corrupt {}: {error}", retained_meta.display())
+                })?;
+                retained_metadata_paths.push(retained_meta);
+            }
+        }
+    }
 
     let corrupt_status = run_ee_json(&workspace, ["index", "status"], "corrupt index status")?;
     assert_success(&corrupt_status, "corrupt index status")?;
@@ -564,6 +581,15 @@ fn corrupt_index_metadata_requires_rebuild_before_search() -> TestResult {
         metadata_path.with_file_name("corrupt-meta.retained.json"),
     )
     .map_err(|error| format!("failed to retain corrupt metadata: {error}"))?;
+    for retained_meta in &retained_metadata_paths {
+        if retained_meta.exists() {
+            fs::rename(
+                retained_meta,
+                retained_meta.with_file_name("corrupt-meta.retained.json"),
+            )
+            .map_err(|error| format!("failed to retain previous corrupt metadata: {error}"))?;
+        }
+    }
     let missing_search = run_ee_json(
         &workspace,
         [
@@ -685,16 +711,22 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
         "stale search",
     )?;
     assert_success(&stale_search, "stale search")?;
-    let stale_doc_ids = result_doc_ids(&stale_search.json)?;
+    let stale_live_doc_ids = result_doc_ids(&stale_search.json)?;
     ensure(
-        stale_doc_ids.iter().any(|doc_id| {
+        stale_live_doc_ids.iter().any(|doc_id| {
             doc_id == &first_memory || doc_id == &second_memory || doc_id == &third_memory
         }),
-        format!("stale search should still return old indexed lexical results: {stale_doc_ids:?}"),
+        format!(
+            "stale search should still return old indexed lexical results: {stale_live_doc_ids:?}"
+        ),
     )?;
     ensure(
-        !stale_doc_ids.iter().any(|doc_id| doc_id == &new_memory),
-        "stale search should not claim the unindexed new memory before rebuild",
+        stale_live_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &new_memory),
+        format!(
+            "stale search should project the bounded live lexical snapshot for new active memories: {stale_live_doc_ids:?}"
+        ),
     )?;
     let stale_degraded_codes = degraded_codes(&stale_search.json);
     ensure(
@@ -704,12 +736,55 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
         format!("stale search should expose stale-index degradation: {stale_degraded_codes:?}"),
     )?;
     ensure(
+        stale_degraded_codes
+            .iter()
+            .any(|code| code == "search_live_snapshot_lexical"),
+        format!(
+            "stale search should disclose live snapshot lexical fallback: {stale_degraded_codes:?}"
+        ),
+    )?;
+    ensure(
         stale_search
             .json
             .pointer("/data/degraded/0/message")
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("lexical") && message.contains("fallback")),
         "stale search degradation must explain lexical fallback",
+    )?;
+
+    let stale_persisted_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "staleindex alpha bravo fallback",
+            "--include-tombstoned",
+            "--limit",
+            "10",
+        ],
+        "stale persisted-index search",
+    )?;
+    assert_success(&stale_persisted_search, "stale persisted-index search")?;
+    let stale_doc_ids = result_doc_ids(&stale_persisted_search.json)?;
+    ensure(
+        stale_doc_ids.iter().any(|doc_id| {
+            doc_id == &first_memory || doc_id == &second_memory || doc_id == &third_memory
+        }),
+        format!(
+            "persisted stale index search should still return old indexed lexical results: {stale_doc_ids:?}"
+        ),
+    )?;
+    ensure(
+        !stale_doc_ids.iter().any(|doc_id| doc_id == &new_memory),
+        "persisted stale index search should not claim the unindexed new memory before rebuild",
+    )?;
+    let stale_persisted_codes = degraded_codes(&stale_persisted_search.json);
+    ensure(
+        stale_persisted_codes
+            .iter()
+            .any(|code| code == "search_live_snapshot_unavailable"),
+        format!(
+            "persisted stale index search should disclose unavailable live snapshot fallback: {stale_persisted_codes:?}"
+        ),
     )?;
 
     let final_rebuild = run_ee_json(&workspace, ["index", "rebuild"], "final index rebuild")?;
@@ -1021,21 +1096,50 @@ fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> 
     )?;
     assert_success(&stale_search, "stale unique-phrase search")?;
     let stale_result_ids = result_doc_ids(&stale_search.json)?;
+    let stale_search_degraded = degraded_codes(&stale_search.json);
     ensure(
-        !stale_result_ids
-            .iter()
-            .any(|doc_id| doc_id == SNAPSHOT_RACE_MEMORY_ID),
-        format!(
-            "pre-writer snapshot must not silently claim the second memory is indexed: {stale_result_ids:?}"
-        ),
-    )?;
-    ensure(
-        degraded_codes(&stale_search.json).iter().any(|code| {
+        stale_search_degraded.iter().any(|code| {
             code == "search_index_stale" || code == "stale_index" || code == "search_index_degraded"
         }),
         format!(
-            "missing second memory must be paired with stale-or-degraded index disclosure: {}",
+            "stale search must always disclose stale-or-degraded index state: {}",
             stale_search.stdout
+        ),
+    )?;
+    ensure(
+        !stale_result_ids
+            .iter()
+            .any(|doc_id| doc_id == SNAPSHOT_RACE_MEMORY_ID)
+            || stale_search_degraded
+                .iter()
+                .any(|code| code == "search_live_snapshot_lexical"),
+        format!(
+            "pre-writer snapshot must not silently claim the second memory is indexed without live-snapshot fallback disclosure: ids={stale_result_ids:?} degraded={stale_search_degraded:?}"
+        ),
+    )?;
+
+    let stale_persisted_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            SNAPSHOT_RACE_CONTENT,
+            "--include-tombstoned",
+            "--limit",
+            "10",
+        ],
+        "stale unique-phrase persisted-index search",
+    )?;
+    assert_success(
+        &stale_persisted_search,
+        "stale unique-phrase persisted-index search",
+    )?;
+    let stale_persisted_ids = result_doc_ids(&stale_persisted_search.json)?;
+    ensure(
+        !stale_persisted_ids
+            .iter()
+            .any(|doc_id| doc_id == SNAPSHOT_RACE_MEMORY_ID),
+        format!(
+            "persisted pre-writer index must not contain the unindexed second memory before coalesce: {stale_persisted_ids:?}"
         ),
     )?;
 

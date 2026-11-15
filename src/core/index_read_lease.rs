@@ -207,6 +207,7 @@ impl IndexGenerationLease {
             Ok(generation)
         };
         let mut producer_rejection = None;
+        let mut live_rejection = None;
         let parent = index_parent(index_dir);
         verify_parent_identity(parent, &self._directory)?;
         ensure_index_path_has_no_symlinks(index_dir, "select snapshot index")?;
@@ -221,24 +222,46 @@ impl IndexGenerationLease {
             &metadata_path,
             "select snapshot metadata",
         )?;
-        let current = super::parse_index_metadata(index_dir)
-            .ok()
-            .flatten()
-            .filter(|metadata| {
-                super::index_metadata_compatibility_error_with_identity(
-                    &metadata_path,
-                    metadata,
-                    identity,
-                )
-                .is_none()
-            })
-            .and_then(|metadata| metadata.generation);
+        let current = match super::parse_index_metadata(index_dir) {
+            Ok(Some(metadata)) => match super::index_metadata_compatibility_error_with_identity(
+                &metadata_path,
+                &metadata,
+                identity,
+            ) {
+                Some(reason) => {
+                    live_rejection = Some(reason);
+                    None
+                }
+                None => metadata.generation,
+            },
+            Ok(None) => {
+                if index_dir.exists() {
+                    live_rejection = Some(format!(
+                        "index metadata '{}' is missing; a full index rebuild is required",
+                        metadata_path.display()
+                    ));
+                }
+                None
+            }
+            Err(reason) => {
+                live_rejection = Some(reason);
+                None
+            }
+        };
         inspection.checkpoint(cx)?;
         if let Some(generation) = current.filter(|generation| *generation <= maximum_generation) {
             inspect_generation_entries(cx, index_dir, &mut inspection)?;
             let validated = validate(index_dir);
-            if let Err(IndexGenerationSelectionError::ProducerIncompatible(reason)) = &validated {
-                producer_rejection = Some(reason.clone());
+            match &validated {
+                Err(IndexGenerationSelectionError::ProducerIncompatible(reason)) => {
+                    producer_rejection = Some(reason.clone());
+                }
+                Err(IndexGenerationSelectionError::Generation(IndexRebuildError::Index(
+                    reason,
+                ))) => {
+                    live_rejection = Some(reason.clone());
+                }
+                _ => {}
             }
             let valid = validated.ok() == Some(generation);
             index_checkpoint(cx)?;
@@ -322,15 +345,22 @@ impl IndexGenerationLease {
         }
         inspection.checkpoint(cx)?;
         let reason = if current.is_some_and(|generation| generation > maximum_generation) {
-            "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot"
+            "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot".to_owned()
+        } else if let Some(detail) = live_rejection.as_deref()
+            && producer_rejection.is_none()
+        {
+            format!(
+                "No complete index generation is available for the source snapshot; rebuild the index: {detail}"
+            )
         } else {
             "No complete index generation is available for the source snapshot; rebuild the index"
+                .to_owned()
         };
         Err(match producer_rejection {
             Some(rejection) => IndexGenerationSelectionError::ProducerIncompatible(format!(
                 "{reason}: {rejection}"
             )),
-            None => IndexRebuildError::Index(reason.to_owned()).into(),
+            None => IndexRebuildError::Index(reason).into(),
         })
     }
 

@@ -93,10 +93,13 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: The floor. Raise it in the same commit that adds a consumer; never lower it.
 #:
 #: 2 on 2026-10-28, raised to 3 on 2026-11-11 when probe.py --self-test wired
-#: consumption of tests/golden/probe-fail-closed.snap (bd-qzr0v / .67). This is
-#: NOT a target -- 114 would be the wrong target, since most of these artifacts
-#: are declarations. It is a tripwire against losing the three that are real.
-READ_FLOOR = 3
+#: consumption of tests/golden/probe-fail-closed.snap (bd-qzr0v / .67), and
+#: raised to 4 on 2026-11-15 when src/mesh/tailscale_autodiscovery.rs wired
+#: consumption of tests/golden/tailscale_peer_autodiscovery.snap (bd-36bbk.1.2).
+#: This is NOT a target -- 114 would be the wrong target, since most of these
+#: artifacts are declarations. It is a tripwire against losing the ones that are
+#: real.
+READ_FLOOR = 4
 
 #: Directories searched for consumers. Kept explicit rather than "the whole
 #: repo": a mention in docs/ or in a bead is not a consumer, and counting one

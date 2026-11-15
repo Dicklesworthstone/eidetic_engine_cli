@@ -2436,12 +2436,19 @@ durable. The import ledger records that committed progress. Rerun the same impor
 to finish remaining sessions and recover pending derivation/publication without
 counting the committed evidence twice.
 
-Fresh imported spans have no memory link, but remain searchable and directly
-packable when their live source row passes current admission. In JSON packs
-they are typed as `entityKind: "evidence_span"`, retain their exact session and
-line-range provenance, and never receive a synthetic `memoryId`. Curation is
-still how an excerpt becomes a durable memory or procedural rule; rebuilding
-the derived index after curation makes that new linkage visible to retrieval.
+Fresh imported conversational spans (`user` and `assistant` text) have no memory
+link, but remain searchable and directly packable when their live source row
+passes current admission. Raw `tool_call`, `tool_result`, and non-text blocks
+are quarantined from general search and pack indexing by default
+(`search_eligibility = "quarantined"`) so noisy command/file outputs and
+untrusted tool payloads do not pollute retrieval; verified failure-to-fix
+sequences still feed structured incident cards and error-fingerprint repair
+recall (`ee diagnose-error`, `ee pack --error-log`) with exact session and
+line-range provenance. In JSON packs admitted excerpts are typed as
+`entityKind: "evidence_span"`, retain their exact session and line-range
+provenance, and never receive a synthetic `memoryId`. Curation is still how an
+excerpt becomes a durable memory or procedural rule; rebuilding the derived
+index after curation makes that new linkage visible to retrieval.
 
 When a pack selects an ordinary imported user or assistant message, it can use
 remaining token and result capacity to include the other half of that exchange.
@@ -3555,7 +3562,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Releases are cut outside GitHub Actions and ship checksums and a manifest without Sigstore bundles or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.18.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
 | Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.15` as an external blocker. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |

@@ -3242,3 +3242,110 @@ fn every_discovered_fixture_passes_cross_file_validation() -> TestResult {
         ))
     }
 }
+
+fn lexical_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "a", "an", "and", "are", "at", "be", "by", "does", "for", "from", "how", "in", "is",
+        "must", "of", "on", "or", "should", "the", "to", "was", "what", "when", "where", "which",
+        "with",
+    ];
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| !STOPWORDS.contains(&token.as_str()))
+        .collect()
+}
+
+fn validate_materialized_query_lexical_anchors(
+    label: &str,
+    source: &ee::eval::SourceMemoryFile,
+) -> Result<(), String> {
+    let memories = materialize_source_memories(source).map_err(|error| error.to_string())?;
+    let mut corpus_tokens = std::collections::BTreeSet::new();
+    for memory in &memories {
+        corpus_tokens.extend(lexical_tokens(&memory.content));
+        for tag in &memory.tags {
+            corpus_tokens.extend(lexical_tokens(tag));
+        }
+        corpus_tokens.extend(lexical_tokens(&memory.level));
+        corpus_tokens.extend(lexical_tokens(&memory.kind));
+    }
+
+    let queries: std::collections::BTreeSet<&str> = memories
+        .iter()
+        .flat_map(|memory| memory.expected_query_match.iter().map(String::as_str))
+        .collect();
+    for query in queries {
+        let query_tokens = lexical_tokens(query);
+        if query_tokens.is_empty() || query_tokens.is_disjoint(&corpus_tokens) {
+            return Err(format!(
+                "{label}: expected_query_match `{query}` shares no lexical anchor tokens with its materialized corpus"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_discovered_fixture_expected_query_match_is_anchored_in_materialized_corpus_and_rejects_unanchored_query()
+-> TestResult {
+    let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
+        .map_err(|error| error.to_string())?;
+    ensure(
+        fixtures.len() >= 10,
+        &format!(
+            "fixture discovery must find the reviewed population of 10 or more; found {}",
+            fixtures.len()
+        ),
+    )?;
+    let mut failures = Vec::new();
+    for fixture in &fixtures {
+        let label = fixture.fixture_id.as_str();
+        let source_text =
+            std::fs::read_to_string(&fixture.source_memory_path).map_err(|error| {
+                format!(
+                    "{label}: read {}: {error}",
+                    fixture.source_memory_path.display()
+                )
+            })?;
+        let source = parse_source_model(&source_text, label)?;
+        if let Err(error) = validate_materialized_query_lexical_anchors(label, &source) {
+            failures.push(error);
+        }
+    }
+    ensure(
+        failures.is_empty(),
+        &format!(
+            "unanchored expected_query_match declarations:\n  {}",
+            failures.join("\n  ")
+        ),
+    )?;
+
+    let mut unanchored = parse_source_model(DATA_SIZE_TIERS_SOURCE, "data_size_tiers source")?;
+    let medium = unanchored
+        .tiers
+        .iter_mut()
+        .find(|tier| tier.name == "medium")
+        .ok_or("missing medium tier")?;
+    ensure(
+        medium
+            .expected_query_match
+            .iter()
+            .any(|query| query == "section quotas"),
+        "medium tier must declare `section quotas`",
+    )?;
+    medium
+        .generator
+        .as_mut()
+        .ok_or("missing medium generator")?
+        .template =
+        "Medium tier memory {n}: release workflow evidence with module tag {module}, repeated checks, and occasional redundant status notes."
+            .to_owned();
+    let error = validate_materialized_query_lexical_anchors("fx.data_size_tiers.v1", &unanchored)
+        .err()
+        .ok_or("removing `section quotas` from the medium template must fail lexical anchor validation")?;
+    ensure(
+        error.contains("section quotas"),
+        &format!("expected error to name `section quotas`, got: {error}"),
+    )
+}

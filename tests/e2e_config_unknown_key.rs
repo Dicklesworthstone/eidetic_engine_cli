@@ -384,8 +384,8 @@ fn scoring_config_cli_dry_run_set_get_show_and_invalid_value() -> TestResult {
                 .as_array()
                 .ok_or("config show entries missing")?;
             ensure(
-                entries.len() == 8,
-                "config show must list the eight active scoring knobs",
+                entries.len() == 9,
+                "config show must list the nine active scoring knobs",
             )?;
             ensure(
                 entries.iter().any(|entry| {

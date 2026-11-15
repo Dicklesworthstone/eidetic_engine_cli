@@ -62,6 +62,7 @@ run_mesh_status() {
         EE_TAILSCALE_BINARY_OVERRIDE="$TAILSCALE_SHIM" \
         EE_TAILSCALE_PROBE_SOCKET_OVERRIDE="$WORK_DIR/no-such-tailscale.sock" \
         EE_TAILSCALE_PROBE_TIMEOUT_MS=1500 \
+        EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS=50 \
         "$@" \
         "$EE_BINARY" mesh status --workspace "$WORKSPACE" --json > "$output_path"
     then
@@ -158,20 +159,25 @@ ft_add_peer "$peer_c" "100.64.0.22" "peer-c" \
 service_tag_json="$(run_mesh_status service_tag)"
 assert_jq "$service_tag_json" '.success == true' "service_tag_success"
 assert_jq "$service_tag_json" '.data.autoEnrollment.discovery.schema == "ee.tailscale.autodiscovery.v1"' "service_tag_schema"
-assert_jq_arg "$service_tag_json" peer "$peer_a" '.data.autoEnrollment.discovery.eeCapablePeers | map(.nodeKey) == [$peer]' "service_tag_eligible"
+assert_jq "$service_tag_json" '.data.autoEnrollment.discovery.probedPeerCount == 2' "service_tag_probed_count"
+assert_jq "$service_tag_json" '.data.autoEnrollment.discovery.eligiblePeerCount == 0' "service_tag_eligible_count"
+assert_jq_arg "$service_tag_json" peer "$peer_a" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and (.reason == "probe_timeout" or .reason == "non_ee"))' "service_tag_peer_a"
 assert_jq_arg "$service_tag_json" peer "$peer_b" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "no_discovery_consent")' "service_tag_peer_b"
-assert_jq_arg "$service_tag_json" peer "$peer_c" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "workspace_mismatch")' "service_tag_peer_c"
-assert_autodiscovery_code "$service_tag_json" "peer_discovery_workspace_mismatch" "service_tag_workspace_mismatch"
-ft_emit_event "service_tag" "true" "service-tag autodiscovery admitted only the matching ee peer" "$(_ft_hash "$(cat "$service_tag_json")")"
+assert_jq_arg "$service_tag_json" peer "$peer_c" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and (.reason == "probe_timeout" or .reason == "non_ee"))' "service_tag_peer_c"
+ft_emit_event "service_tag" "true" "service-tag autodiscovery probed only tag:ee-mesh peers and skipped untagged peer without probing" "$(_ft_hash "$(cat "$service_tag_json")")"
 
 auto_admit_json="$(run_mesh_status auto_admit EE_TAILSCALE_DISCOVERY_MODE=auto_admit)"
-assert_jq_arg "$auto_admit_json" peer "$peer_b" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "non_ee")' "auto_admit_peer_b"
-ft_emit_event "auto_admit" "true" "auto-admit probed non-ee peer and classified it as non_ee" "$(_ft_hash "$(cat "$auto_admit_json")")"
+assert_jq "$auto_admit_json" '.data.autoEnrollment.discovery.probedPeerCount == 3' "auto_admit_probed_count"
+assert_jq_arg "$auto_admit_json" peer "$peer_b" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and (.reason == "probe_timeout" or .reason == "non_ee"))' "auto_admit_peer_b"
+ft_emit_event "auto_admit" "true" "auto-admit probed untagged peer and classified unreachable TCP hello truthfully" "$(_ft_hash "$(cat "$auto_admit_json")")"
 
 mkdir -p "$WORKSPACE/.ee"
 printf 'node_keys = ["%s"]\n' "$peer_c" > "$WORKSPACE/.ee/discovery_allowlist.toml"
 allowlist_json="$(run_mesh_status allowlist EE_TAILSCALE_DISCOVERY_MODE=allowlist)"
-assert_jq_arg "$allowlist_json" peer "$peer_c" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "workspace_mismatch")' "allowlist_peer_c"
+assert_jq "$allowlist_json" '.data.autoEnrollment.discovery.probedPeerCount == 1' "allowlist_probed_count"
+assert_jq_arg "$allowlist_json" peer "$peer_a" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "no_discovery_consent")' "allowlist_peer_a"
+assert_jq_arg "$allowlist_json" peer "$peer_b" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and .reason == "no_discovery_consent")' "allowlist_peer_b"
+assert_jq_arg "$allowlist_json" peer "$peer_c" '.data.autoEnrollment.discovery.skippedPeers[] | select(.nodeKey == $peer and (.reason == "probe_timeout" or .reason == "non_ee"))' "allowlist_peer_c"
 ft_emit_event "allowlist" "true" "allowlist mode probed only the configured node key" "$(_ft_hash "$(cat "$allowlist_json")")"
 
 for i in $(seq 1 50); do
@@ -180,7 +186,7 @@ for i in $(seq 1 50); do
         --tag=tag:ee-mesh --ee_version=0.2.0 --ee_protocol=1.0 \
         --workspace_ids="$WORKSPACE_ID" --latency_ms=750
 done
-budget_json="$(run_mesh_status budget EE_TAILSCALE_DISCOVERY_MODE=service_tag EE_TAILSCALE_DISCOVERY_BUDGET_MS=500)"
+budget_json="$(run_mesh_status budget EE_TAILSCALE_DISCOVERY_MODE=service_tag EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS=250 EE_TAILSCALE_DISCOVERY_BUDGET_MS=500)"
 assert_autodiscovery_code "$budget_json" "tailscale_peer_probe_timeout" "budget_timeout"
 assert_autodiscovery_code "$budget_json" "peer_discovery_budget_exhausted" "budget_exhausted"
 ft_emit_event "budget" "true" "autodiscovery budget exhaustion surfaced degraded codes" "$(_ft_hash "$(cat "$budget_json")")"

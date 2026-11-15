@@ -80,6 +80,10 @@ future changelog pass expands those rows into full capability sections.
 
 ### Added
 
+- `ee why <memory-id|rule-id>` (and `result:<rule-id>`) now explains native
+  procedural rules directly on `main` (post-`v0.16.0`), returning canonical
+  rule provenance under `data.entity` with `data.memoryId: null` rather than
+  requiring a memory ID.
 - Native Go terminal failures now feed imported-session error recall, interactive
   `diagnose-error`, and `pack --error-log` with the same fingerprints as Go JSON.
   Quiet failures remain recallable; repair attribution requires a complete

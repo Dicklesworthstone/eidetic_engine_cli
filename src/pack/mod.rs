@@ -9525,8 +9525,18 @@ fn candidate_signature_similarity(
         return 1.0;
     }
 
-    // Exact content match is fully redundant
+    // Exact content match is fully redundant unless the candidates explicitly
+    // declare distinct diversity keys (for example, consolidation preserves
+    // identical text across different memory kinds/sections such as fact vs
+    // decision), in which case similarity is capped so both kinds remain
+    // eligible in StrictMmr.
     if candidate.normalized_content == selected.normalized_content {
+        if matches!(
+            (&candidate.diversity_key, &selected.diversity_key),
+            (Some(left), Some(right)) if left != right
+        ) {
+            return 0.5;
+        }
         return 1.0;
     }
 
@@ -18575,5 +18585,66 @@ mod tests {
                 "caller-supplied degradation note messages must remain escaped, got:\n{rendered}"
             ),
         )
+    }
+
+    #[test]
+    fn exact_content_with_distinct_diversity_keys_survives_strict_mmr_and_preserves_coverage_fill()
+    -> TestResult {
+        let budget =
+            TokenBudget::new(400).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let canonical_body =
+            "Consolidation maintain loop alpha beta gamma delta epsilon zeta eta theta";
+        let wording_body =
+            "Consolidation maintain loop alpha beta gamma delta epsilon kappa lambda";
+
+        let survivor =
+            candidate_in_section(1, PackSection::Artifacts, 0.45, 0.72, 16, canonical_body)?
+                .with_diversity_key("semantic:fact:untagged");
+        let kind_control =
+            candidate_in_section(2, PackSection::Decisions, 0.20, 0.69, 16, canonical_body)?
+                .with_diversity_key("semantic:decision:untagged");
+        let same_kind_duplicate =
+            candidate_in_section(3, PackSection::Artifacts, 0.20, 0.69, 16, canonical_body)?
+                .with_diversity_key("semantic:fact:untagged");
+        let wording_control =
+            candidate_in_section(4, PackSection::Artifacts, 0.20, 0.69, 16, wording_body)?
+                .with_diversity_key("semantic:fact:untagged");
+
+        let survivor_sig = CandidateSignature::from(&survivor);
+        ensure_close(
+            candidate_similarity(&same_kind_duplicate, &survivor_sig),
+            1.0,
+            "identical content with matching diversity key remains fully redundant",
+        )?;
+        ensure_close(
+            candidate_similarity(&kind_control, &survivor_sig),
+            0.5,
+            "identical content with distinct diversity key is capped so StrictMmr retains distinct kinds",
+        )?;
+
+        let draft = assemble_draft(
+            "Consolidation maintain loop alpha beta gamma",
+            budget,
+            vec![survivor, kind_control, wording_control],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let selected_ids: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
+        ensure_equal(
+            &selected_ids,
+            &vec![memory_id(1), memory_id(2), memory_id(4)],
+            "survivor and kind control pack in StrictMmr while wording control packs in CoverageFill",
+        )?;
+        ensure_equal(
+            &draft.items.get(1).map(|item| item.selected_in),
+            &Some(PackSelectionPhase::StrictMmr),
+            "distinct-diversity-key control selected in StrictMmr",
+        )?;
+        ensure_equal(
+            &draft.items.get(2).map(|item| item.selected_in),
+            &Some(PackSelectionPhase::CoverageFill),
+            "wording control selected in CoverageFill",
+        )?;
+        ensure_equal(&draft.omitted.len(), &0, "no control omitted as redundant")
     }
 }

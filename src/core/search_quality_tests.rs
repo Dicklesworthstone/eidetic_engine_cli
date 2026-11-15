@@ -1266,9 +1266,9 @@ fn native_rule_kind_refill_rejects_stale_and_unadmitted_index_candidates() {
     // must not consume the ranking pool or imply that the query is exhausted.
     for number in 1..=120 {
         let id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-        documents.push(IndexableDocument::new(id, short).with_kind("rule"));
+        documents.push(IndexableDocument::new(id, short).with_metadata("kind", "rule"));
         let memory = fixture.memory_with_content(number, 1.0, 1.0, now, short);
-        documents.push(IndexableDocument::new(memory, short).with_kind("rule"));
+        documents.push(IndexableDocument::new(memory, short).with_metadata("kind", "rule"));
     }
     let tombstoned = fixture.rule(201, short, "validated");
     fixture.db.execute_raw(&format!(
@@ -1302,18 +1302,18 @@ fn native_rule_kind_refill_rejects_stale_and_unadmitted_index_candidates() {
         .unwrap();
     let stale = fixture.rule(204, short, "validated");
     for id in [tombstoned, superseded, quarantined] {
-        documents.push(IndexableDocument::new(id, short).with_kind("rule"));
+        documents.push(IndexableDocument::new(id, short).with_metadata("kind", "rule"));
     }
     documents.push(
         IndexableDocument::new(stale, short)
-            .with_kind("rule")
-            .with_metadata_entry("entity_revision", "stale-rule-revision"),
+            .with_metadata("kind", "rule")
+            .with_metadata("entity_revision", "stale-rule-revision"),
     );
     let evidence = fixture.evidence(205, short);
-    documents.push(IndexableDocument::new(evidence.clone(), short).with_kind("rule"));
+    documents.push(IndexableDocument::new(evidence.clone(), short).with_metadata("kind", "rule"));
     let matching = fixture.rule(206, BODY, "validated");
     // Native identity and current DB authority outrank stale indexed kind.
-    documents.push(IndexableDocument::new(matching.as_str(), BODY).with_kind("fact"));
+    documents.push(IndexableDocument::new(matching.as_str(), BODY).with_metadata("kind", "fact"));
     let _producer = build_filtered_candidate_test_index(&fixture, documents);
     let mut options = fixture.options();
     options.limit = 1;

@@ -6241,6 +6241,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
         render_doctor_advisories_json(d, &report.checks, true, true);
+        render_doctor_config_lint_json(d, report);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             render_doctor_check_json(obj, check, true, true);
         });
@@ -6309,6 +6310,7 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
                 obj.field_bool("permanent", true);
             },
         );
+        render_doctor_config_lint_json(d, report);
     });
     b.finish()
 }
@@ -6431,6 +6433,109 @@ fn render_doctor_advisories_json(
         if doctor_advisory_is_permanent(check) {
             obj.field_bool("permanent", true);
         }
+    });
+}
+
+fn gather_doctor_config_lint_findings(
+    report: &DoctorReport,
+) -> Vec<crate::core::config_explain::ConfigLintFinding> {
+    use crate::config::{EmbeddingTrapEnvVar, EnvVar, read_env_var_os, workspace_config};
+    use crate::core::config_explain::{
+        ConfigLintFacts, LINT_WEIGHT_WITHOUT_NEURAL_TIER, run_config_lint,
+    };
+    use crate::core::index::SemanticReadiness;
+
+    let Some(embedding_check) = report
+        .checks
+        .iter()
+        .find(|check| check.name == "embedding_posture")
+    else {
+        return Vec::new();
+    };
+
+    let workspace_path = crate::core::status::default_workspace_path();
+    let config = workspace_path.as_deref().and_then(workspace_config);
+    let mut facts = ConfigLintFacts {
+        semantic_weight: config.as_ref().and_then(|cfg| cfg.search.semantic_weight),
+        neural_tier_active: if embedding_check
+            .message
+            .contains(LINT_WEIGHT_WITHOUT_NEURAL_TIER)
+            || matches!(
+                report.semantic_readiness,
+                Some(SemanticReadiness::LexicalOnly | SemanticReadiness::ModelUnavailable)
+            ) {
+            Some(false)
+        } else if matches!(
+            report.semantic_readiness,
+            Some(SemanticReadiness::Available)
+        ) {
+            Some(true)
+        } else {
+            None
+        },
+        task_lens_source_modes: config
+            .as_ref()
+            .map(|cfg| {
+                cfg.task_lens
+                    .overrides
+                    .iter()
+                    .filter_map(|lens| {
+                        lens.overlay
+                            .source_mode
+                            .as_ref()
+                            .map(|mode| (lens.id.clone(), mode.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..ConfigLintFacts::default()
+    };
+    for trap in EmbeddingTrapEnvVar::all() {
+        if embedding_check.message.contains(trap.name()) {
+            facts.env_vars.push((trap.name().to_owned(), false));
+        }
+    }
+    for variable in [EnvVar::EmbedModelDir, EnvVar::EmbedModelPath] {
+        let Some(value) = read_env_var_os(variable).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = if variable == EnvVar::EmbedModelPath {
+            let Some(value) = value
+                .to_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            std::path::PathBuf::from(value)
+        } else {
+            std::path::PathBuf::from(value)
+        };
+        let Ok(exists) = path.try_exists() else {
+            continue;
+        };
+        if variable == EnvVar::EmbedModelPath && !exists {
+            facts.neural_tier_active = Some(false);
+        }
+        facts.embedding_model_paths.push((
+            variable.name().to_owned(),
+            path.to_string_lossy().into_owned(),
+            exists,
+        ));
+    }
+    run_config_lint(&facts)
+}
+
+fn render_doctor_config_lint_json(parent: &mut JsonBuilder, report: &DoctorReport) {
+    let findings = gather_doctor_config_lint_findings(report);
+    if findings.is_empty() {
+        return;
+    }
+    parent.field_array_of_objects("configLint", &findings, |obj, finding| {
+        obj.field_str("code", finding.code);
+        obj.field_str("key", &finding.key);
+        obj.field_str("message", &finding.message);
+        obj.field_str("severity", finding.severity);
     });
 }
 
@@ -16627,6 +16732,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
                 profile.include_summary_metrics(),
                 profile.include_verbose_details(),
             );
+            render_doctor_config_lint_json(d, report);
             d.field_array_of_objects("checks", &report.checks, |obj, check| {
                 render_doctor_check_json(
                     obj,
@@ -26767,6 +26873,65 @@ mod tests {
             &Some(15),
             "mesh auto-enrollment check count",
         )
+    }
+
+    #[test]
+    fn render_doctor_config_lint_surfaces_advisory_findings_without_flipping_posture() -> TestResult
+    {
+        let mut report = DoctorReport::gather();
+        report.overall_healthy = true;
+        report.posture = Posture::Ok;
+        report.semantic_readiness = None;
+        report.checks = vec![
+            CheckResult::ok("runtime", "runtime ok"),
+            CheckResult::ok(
+                "embedding_posture",
+                "Semantic retrieval mode could not be determined (no workspace). Note: EMBEDDING_MODEL set but ee does not consume it — ee uses its own bundled local embedder (current retrieval mode: unknown).",
+            )
+            .advisory(),
+        ];
+
+        for rendered in [
+            render_doctor_concise_json(&report),
+            render_doctor_json(&report),
+            render_doctor_json_filtered(&report, FieldProfile::Standard),
+        ] {
+            let value = serde_json::from_str::<serde_json::Value>(&rendered)
+                .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+            ensure_equal(
+                &value["data"]["posture"],
+                &serde_json::json!("ok"),
+                "posture",
+            )?;
+            ensure_equal(
+                &value["data"]["healthy"],
+                &serde_json::json!(true),
+                "healthy",
+            )?;
+            let findings = value["data"]["configLint"]
+                .as_array()
+                .ok_or_else(|| "doctor JSON should expose data.configLint".to_string())?;
+            ensure(
+                !findings.is_empty(),
+                "configLint findings should not be empty when EMBEDDING_MODEL trap is present",
+            )?;
+            ensure_equal(
+                &findings[0]["code"],
+                &serde_json::json!("config_unknown_env_var"),
+                "configLint code",
+            )?;
+            ensure_equal(
+                &findings[0]["key"],
+                &serde_json::json!("EMBEDDING_MODEL"),
+                "configLint key",
+            )?;
+            ensure_equal(
+                &findings[0]["severity"],
+                &serde_json::json!("advisory"),
+                "configLint severity",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

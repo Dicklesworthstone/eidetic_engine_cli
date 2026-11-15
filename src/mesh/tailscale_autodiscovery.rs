@@ -1203,4 +1203,49 @@ mod tests {
                 .any(|item| item.code == PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE)
         );
     }
+
+    #[test]
+    fn autodiscovery_report_matches_golden_snapshot_and_rejects_drift() {
+        let allowlist = BTreeSet::new();
+        let denylist = BTreeSet::new();
+        let mut probe = FakeProbe::default()
+            .with(
+                "nodekey:alpha",
+                TailscalePeerHelloProbe::Granted {
+                    response: response("nodekey:alpha", &["workspace-alpha"]),
+                    latency_ms: 17,
+                },
+            )
+            .with(
+                "nodekey:beta",
+                TailscalePeerHelloProbe::Granted {
+                    response: response("nodekey:beta", &["workspace-beta"]),
+                    latency_ms: 3,
+                },
+            );
+
+        let mut report = autodiscover_tailscale_peers(
+            Some(&local_report(vec![
+                peer("nodekey:alpha", &[EE_MESH_SERVICE_TAG]),
+                peer("nodekey:beta", &[EE_MESH_SERVICE_TAG]),
+            ])),
+            &config(
+                "workspace-alpha",
+                DiscoveryMode::ServiceTag,
+                &allowlist,
+                &denylist,
+            ),
+            &mut probe,
+        );
+
+        let expected =
+            include_str!("../../tests/golden/tailscale_peer_autodiscovery.snap").trim_end();
+        let actual = serde_json::to_string_pretty(&report).expect("serialize autodiscovery report");
+        assert_eq!(actual, expected);
+
+        report.eligible_peer_count = 99;
+        let drifted =
+            serde_json::to_string_pretty(&report).expect("serialize drifted autodiscovery report");
+        assert_ne!(drifted, expected);
+    }
 }

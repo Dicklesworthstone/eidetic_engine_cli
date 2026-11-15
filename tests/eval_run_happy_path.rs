@@ -85,7 +85,7 @@ const RETRIEVAL_WORKLOADS: &[(&str, &[&str])] = &[
             "redundant memories suppressed",
             "release memory",
             "release note verification",
-            "repeated checks",
+            "section quotas",
             "small workspace history",
         ],
     ),
