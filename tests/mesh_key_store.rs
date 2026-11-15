@@ -87,7 +87,10 @@ fn degraded_contract_is_stable_high_severity_with_repair() {
         MESH_KEY_STORE_UNAVAILABLE_CODE,
         "mesh_key_store_unavailable"
     );
-    assert_eq!(MESH_KEY_STORE_UNAVAILABLE_SEVERITY, "high");
+    assert_eq!(
+        MESH_KEY_STORE_UNAVAILABLE_SEVERITY,
+        ee::models::DegradationSeverity::High
+    );
     let error = KeyStoreError::PlatformUnsupported {
         operation: "open mesh key store".to_owned(),
     };

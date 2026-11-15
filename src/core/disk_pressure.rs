@@ -3033,17 +3033,20 @@ mod tests {
     fn external_path_classification_uses_external_build_root_prefix() -> TestResult {
         let external_root = Path::new("/mnt/external_build_root");
         ensure(
-            path_string_is_within("/mnt/external_build_root/cargo-target/debug", external_root),
+            trusted_external_path(
+                Path::new("/mnt/external_build_root/cargo-target/debug"),
+                external_root,
+            ),
             true,
             "external target path",
         )?;
         ensure(
-            path_string_is_within("/tmp/ee-local-target", external_root),
+            trusted_external_path(Path::new("/tmp/ee-local-target"), external_root),
             false,
             "local target path",
         )?;
         ensure(
-            path_string_is_within("./target/debug", external_root),
+            trusted_external_path(Path::new("./target/debug"), external_root),
             false,
             "relative target path",
         )?;

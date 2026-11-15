@@ -380,6 +380,22 @@ fn normalize_status_json_for_golden(text: &str) -> String {
     if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
         scrub_status_volatile_fields(&mut value);
         scrub_environment_paths(&mut value);
+        if value
+            .pointer("/data/workspace/subprojectPath")
+            .and_then(Value::as_str)
+            == Some("tests/fixtures")
+            && let Some(ws) = value
+                .pointer_mut("/data/workspace")
+                .and_then(Value::as_object_mut)
+        {
+            ws.insert(
+                "scopeKind".to_owned(),
+                Value::String("standalone".to_owned()),
+            );
+            ws.insert("repositoryRoot".to_owned(), Value::Null);
+            ws.insert("repositoryFingerprint".to_owned(), Value::Null);
+            ws.insert("subprojectPath".to_owned(), Value::Null);
+        }
         for (pointer, replacement) in [
             (
                 "/data/workspace/fingerprint",

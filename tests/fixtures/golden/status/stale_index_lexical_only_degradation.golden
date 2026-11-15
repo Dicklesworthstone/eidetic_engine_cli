@@ -8,7 +8,9 @@
       "message": "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
       "repair": "Run `ee index status --workspace . --json`.",
       "repairKind": "unknown",
-      "sources": ["status"]
+      "sources": [
+        "status"
+      ]
     }
   ],
   "data": {

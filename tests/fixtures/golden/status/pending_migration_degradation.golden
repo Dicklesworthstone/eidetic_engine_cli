@@ -8,7 +8,9 @@
       "message": "Memory health is unavailable because the database could not be opened.",
       "repair": "Run `ee doctor --json`.",
       "repairKind": "unknown",
-      "sources": ["status"]
+      "sources": [
+        "status"
+      ]
     },
     {
       "code": "search_index_degraded",
@@ -16,7 +18,9 @@
       "message": "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
       "repair": "Run `ee index status --workspace . --json`.",
       "repairKind": "unknown",
-      "sources": ["status"]
+      "sources": [
+        "status"
+      ]
     },
     {
       "code": "storage_degraded",
@@ -24,7 +28,9 @@
       "message": "Workspace storage exists but could not be opened or needs migration.",
       "repair": "Run `ee doctor --json`.",
       "repairKind": "unknown",
-      "sources": ["status"]
+      "sources": [
+        "status"
+      ]
     }
   ],
   "data": {

@@ -4553,6 +4553,11 @@ mod tests {
         // Restore permissions so tempdir cleanup succeeds.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;
+        if permission_probe.is_ok() {
+            // Root (CAP_DAC_READ_SEARCH) or filesystems that ignore 0o000
+            // bypass directory mode checks; skip rather than fail on root workers.
+            return Ok(());
+        }
         ensure(
             matches!(
                 permission_probe,

@@ -930,7 +930,7 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
         return Ok(());
     }
 
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let temp = closure_lint_worker_local_tempdir("closure-lint-lock-")?;
     write_workspace(
         temp.path(),
         &[
@@ -942,25 +942,26 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
 
     let lock_path = temp.path().join(".beads").join(".write.lock");
     let ready_path = temp.path().join("lock-ready");
+    let release_path = temp.path().join("lock-release");
     let mut holder = Command::new("flock")
         .arg("-x")
         .arg(&lock_path)
         .arg("sh")
         .arg("-c")
-        // THE LOCK WINDOW IS LOAD-SENSITIVE, so it is held far longer than the
-        // linter should need. At 2s this fixture raced: closure-lint is a large
-        // bash script and on a busy worker its startup can outlast the window,
-        // after which the lock is FREE and the linter runs normally -- the test
-        // then observes a clean run and reports whatever the assertions happen
-        // to catch, rather than the contention it meant to create.
-        // The holder is waited on below, so this bounds the test's own runtime.
-        .arg("printf ready > \"$1\"; sleep 10")
+        // THE LOCK WINDOW IS LOAD-SENSITIVE, so hold the lock until the test
+        // writes `release_path` (with a 60s safety bound so the child never
+        // leaks if the parent aborts). Previously a fixed `sleep 10` raced on
+        // busy workers whenever closure-lint startup took longer than 10s,
+        // freeing the lock before the linter checked it and returning "pass"
+        // instead of "skipped".
+        .arg("printf ready > \"$1\"; i=0; while [ ! -f \"$2\" ] && [ \"$i\" -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done")
         .arg("sh")
         .arg(&ready_path)
+        .arg(&release_path)
         .spawn()
         .map_err(|error| format!("start lock holder: {error}"))?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !ready_path.exists() && Instant::now() < deadline {
         if let Some(status) = holder
             .try_wait()
@@ -977,9 +978,10 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
     // "timeout must be greater than 0", exit 64. Under that build the linter
     // would skip because its FLOCK INVOCATION was invalid, not because the
     // lock was contended, and this test would pass while exercising the wrong
-    // path. 1 fails fast against the 10s holder above and means the same thing
+    // path. 1 fails fast against the holder above and means the same thing
     // everywhere.
     let linter_result = run_linter_with_env(temp.path(), &[("EE_BEADS_LOCK_WAIT_SECONDS", "1")]);
+    let _ = fs::write(&release_path, "release");
     let holder_status = holder
         .wait()
         .map_err(|error| format!("wait for lock holder: {error}"))?;

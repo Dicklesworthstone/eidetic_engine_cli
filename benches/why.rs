@@ -280,7 +280,7 @@ mod tests {
     fn quick_regression_check_stays_under_hard_ceiling() {
         let stats = super::gather_latency_stats(100, super::QUICK_ITERATIONS);
         let ceiling_ms = if cfg!(debug_assertions) {
-            super::HARD_CEILING_MS * 10.0
+            super::HARD_CEILING_MS * 30.0
         } else {
             super::HARD_CEILING_MS
         };

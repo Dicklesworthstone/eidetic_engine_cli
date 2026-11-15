@@ -121,6 +121,12 @@ pub(super) fn capture_default_start(
     db: &DbConnection,
     memory: &StoredMemory,
 ) -> crate::db::Result<Option<DefaultStartProof>> {
+    let Some(created_instant) = instant(&memory.created_at) else {
+        return Ok(None);
+    };
+    if memory.valid_from.as_deref().and_then(instant) != Some(created_instant) {
+        return Ok(None);
+    }
     let receipts = receipts(db, memory, "memory.create")?;
     let [Some(details)] = receipts.as_slice() else {
         return Ok(None);

@@ -181,9 +181,9 @@ fn pending_source_review_cannot_escape_into_a_new_global_identity() {
     review_hold(&fixture.db, 1, WORKSPACE, "memory", MEMORY);
     // Even an unusable destination must not be inspected for a held source.
     std::fs::write(&fixture.global.root, b"not a directory").unwrap();
-    let before = disk(&fixture.root);
     let source = fixture.db.get_memory(MEMORY).unwrap().unwrap();
     assert_eq!(source.trust_class, "human_explicit");
+    let before = disk(&fixture.root);
     for dry_run in [true, false] {
         assert_review_refusal(&promote_global(&fixture.options(dry_run)).unwrap(), None);
         assert_eq!(disk(&fixture.root), before);
@@ -300,7 +300,6 @@ fn selected_global_twin_review_is_rechecked_without_mutation_or_duplicate_fallba
     assert!(preview.plan.allowed() && preview.already_promoted);
     assert_eq!(preview.global_memory_id.as_deref(), Some(OTHER));
     let hold = review_hold(&global, 3, &workspace, "memory", OTHER);
-    let before_disk = disk(&fixture.root);
     let source = fixture.db.get_memory(MEMORY).unwrap().unwrap();
     let target = global.get_memory(OTHER).unwrap().unwrap();
     let generation = global.get_workspace_generation(&workspace).unwrap();
@@ -313,6 +312,7 @@ fn selected_global_twin_review_is_rechecked_without_mutation_or_duplicate_fallba
         "feedback_events",
     ]
     .map(|table| (table, global.count_table_rows(table).unwrap()));
+    let before_disk = disk(&fixture.root);
     assert_review_refusal(
         &promote_global(&fixture.options(true)).unwrap(),
         Some(OTHER),

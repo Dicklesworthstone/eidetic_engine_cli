@@ -290,6 +290,7 @@ fn write_fake_cass_files(workspace_path: &Path, message_count: usize) -> Result<
     }
 
     let view_payload = json!({
+        "total_lines": message_count,
         "lines": lines,
     });
     let view_json = serde_json::to_string(&view_payload)

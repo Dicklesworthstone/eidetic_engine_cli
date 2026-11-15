@@ -5239,7 +5239,7 @@ max_bytes = 1048576
             degraded.code,
             crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
         );
-        assert_eq!(degraded.severity, "low");
+        assert_eq!(degraded.severity, crate::models::DegradationSeverity::Low);
         assert!(
             degraded.message.contains("3 active peer(s)"),
             "message must say why a round was warranted: {}",

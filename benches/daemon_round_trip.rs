@@ -2573,7 +2573,7 @@ mod pack_benchmark_contracts {
             "hash": format!("blake3:{}", blake3::hash(b"persistence fixture").to_hex()),
             "budget": {"maxTokens": 400, "usedTokens": 10},
             "items": [{"rank": 1, "memoryId": SEARCH_TARGET_MEMORY_ID,
-                "section": "facts", "content": "persisted benchmark fact",
+                "section": "decisions", "content": "persisted benchmark fact",
                 "estimatedTokens": 10, "trust": {"class": "human_explicit"},
                 "provenance": [], "selectedIn": "mmr"}]
         }}});
@@ -2604,7 +2604,7 @@ mod pack_benchmark_contracts {
                     pack_id: id.to_owned(),
                     memory_id: SEARCH_TARGET_MEMORY_ID.to_owned(),
                     rank: 1,
-                    section: "facts".to_owned(),
+                    section: "decisions".to_owned(),
                     estimated_tokens: 10,
                     relevance: 0.75,
                     utility: 0.75,

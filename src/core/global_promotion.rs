@@ -2387,11 +2387,13 @@ mod tests {
         source
             .execute_raw("ALTER TABLE unavailable_origin_audit RENAME TO audit_log")
             .expect("repair origin audit");
+        source.close().expect("close repaired source");
         let retry = promote_global(&options).expect("repair through re-promotion");
         assert!(retry.executed && retry.already_promoted);
         assert_eq!(retry.global_memory_id.as_deref(), Some(copy.id.as_str()));
         assert_eq!(f.count("memories"), 1);
         assert_eq!(f.count("search_index_jobs"), 1);
+        let source = DbConnection::open_file(&f.source_path).expect("reopen source");
         assert_eq!(
             source
                 .get_memory(&f.memory.id)
@@ -3191,19 +3193,27 @@ mod tests {
         source
             .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_backflow_audit")
             .unwrap();
+        source.close().unwrap();
         let report = backflow_global_feedback(&backflow_options(&f, &id)).unwrap();
         assert_eq!(report.origin_status, "pending");
         let error = report.origin_error.as_deref().unwrap();
         assert!(error.contains("global_feedback_origin_pending"));
         assert!(error.contains("feedback fb_") && error.contains("--event-id"));
         assert!(!error.contains(&f.memory.content));
-        assert_eq!(source.get_memory(&f.memory.id).unwrap(), before);
-        assert_eq!(source.count_table_rows("search_index_jobs").unwrap(), jobs);
+        let source_check = DbConnection::open_file(&f.source_path).unwrap();
+        assert_eq!(source_check.get_memory(&f.memory.id).unwrap(), before);
+        assert_eq!(
+            source_check.count_table_rows("search_index_jobs").unwrap(),
+            jobs
+        );
+        source_check.close().unwrap();
         assert_eq!(f.count("feedback_events"), 1);
         let learned = f.destination.get_memory_bayes_posterior(&id).unwrap();
-        source
+        let source_repair = DbConnection::open_file(&f.source_path).unwrap();
+        source_repair
             .execute_raw("ALTER TABLE unavailable_backflow_audit RENAME TO audit_log")
             .unwrap();
+        source_repair.close().unwrap();
         let mut retry = backflow_options(&f, &id);
         retry.event_id = report.feedback_event_id.as_deref();
         let recovered = backflow_global_feedback(&retry).unwrap();
@@ -3213,11 +3223,14 @@ mod tests {
             f.destination.get_memory_bayes_posterior(&id).unwrap(),
             learned
         );
-        let after = source.get_memory(&f.memory.id).unwrap();
+        let source_after = DbConnection::open_file(&f.source_path).unwrap();
+        let after = source_after.get_memory(&f.memory.id).unwrap();
+        source_after.close().unwrap();
         let replay = backflow_global_feedback(&retry).unwrap();
         assert_eq!(replay.origin_status, "already_applied");
         assert_eq!(replay.applied_delta, 0.0);
-        assert_eq!(source.get_memory(&f.memory.id).unwrap(), after);
+        let source_final = DbConnection::open_file(&f.source_path).unwrap();
+        assert_eq!(source_final.get_memory(&f.memory.id).unwrap(), after);
     }
 
     #[test]

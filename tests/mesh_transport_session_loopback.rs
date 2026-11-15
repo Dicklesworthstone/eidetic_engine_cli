@@ -609,7 +609,7 @@ async fn raw_responder(mut stream: TcpStream) -> TestResult<(TcpStream, Establis
         FrameDraft {
             direction: SessionDirection::ResponderToInitiator,
             counter: 1,
-            correlation_id: negotiation_correlation(),
+            correlation_id: offer.correlation_id,
             kind: FrameKind::Response,
             capability: FrameCapability::Hello,
             requested_budget_ms: 0,
@@ -1510,7 +1510,8 @@ fn real_loopback_rejects_response_capability_mismatch_on_send() -> TestResult {
 
 #[test]
 fn deadlines_and_cancellation_fail_before_application_mutation() -> TestResult {
-    let (address, server) = spawn_server(move |_cx, _stream| async move {
+    let (address, server) = spawn_server(move |_cx, stream| async move {
+        let _keep_open = stream;
         asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(200)).await;
         Ok(())
     })?;
@@ -1529,7 +1530,8 @@ fn deadlines_and_cancellation_fail_before_application_mutation() -> TestResult {
     })?;
     join_server(server)?;
 
-    let (address, server) = spawn_server(move |_cx, _stream| async move {
+    let (address, server) = spawn_server(move |_cx, stream| async move {
+        let _keep_open = stream;
         asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(200)).await;
         Ok(())
     })?;
@@ -1554,7 +1556,8 @@ fn deadlines_and_cancellation_fail_before_application_mutation() -> TestResult {
     })?;
     join_server(server)?;
 
-    let (address, server) = spawn_server(move |_cx, _stream| async move {
+    let (address, server) = spawn_server(move |_cx, stream| async move {
+        let _keep_open = stream;
         asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(200)).await;
         Ok(())
     })?;
