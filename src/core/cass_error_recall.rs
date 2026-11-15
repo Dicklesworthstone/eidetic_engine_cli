@@ -88,7 +88,12 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// the latest turns; over-budget episodes retain their successful proof alone.
 /// V26 mines native code-less rustc parser failures only with their own valid
 /// location and rendered source, preserving the exact retry proof requirement.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v26";
+/// V27 also mines ordinary Go terminal failures with the JSON diagnostic key;
+/// repair proof requires a complete verbose package/test inventory and exit.
+/// V28 learns native unittest failures when a test body, tearDown or multiple
+/// cleanup callbacks fail the same subject, reconciling callback counts with
+/// unique executed tests before a complete passing retry can prove a repair.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v28";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1368,6 +1373,13 @@ impl ToolOutput {
 
     /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
+        if let Ok(Some(decoded)) = compiler::inspect(&self.text)
+            && decoded.go_test_coverage.is_some()
+        {
+            // Printed test logs are data; Go's validated lifecycle and the
+            // tool's exit status establish failure, not error-looking stdout.
+            return self.metadata_failed() || decoded.failed;
+        }
         match test_coverage::nextest::decode(&self.text) {
             Ok(Some(decoded)) => return self.metadata_failed() || decoded.failed,
             Err(()) => return self.metadata_failed(),
@@ -1396,6 +1408,15 @@ impl ToolOutput {
     }
 
     fn succeeded(&self) -> bool {
+        if let Ok(Some(decoded)) = compiler::inspect(&self.text)
+            && decoded.go_test_coverage.is_some()
+        {
+            // Native test stdout can print exit-looking text. The report
+            // validates subjects; only decoded tool metadata ends the process.
+            return decoded.allows_completion
+                && (self.is_error == Some(false) || self.exit_code == Some(0))
+                && outcome::succeeded(self);
+        }
         match test_coverage::nextest::decode(&self.text) {
             Ok(Some(decoded)) => {
                 // Captured test stdout cannot supply the process exit.
@@ -1665,6 +1686,11 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
         // compiler failure. Structured output must match its complete schema.
         return structured_error_diagnostics(&output.text);
     }
+    match compiler::inspect(&output.text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     let text = bounded(&output.text);
     let mut seen = BTreeSet::new();
     let mut diagnostics = Vec::new();
@@ -1902,10 +1928,6 @@ fn structured_output_allows_completion(text: &str) -> bool {
     if !matches!(typescript::decode(text), Ok(None)) {
         return false;
     }
-    let start = text.trim_start();
-    if !start.starts_with(['{', '[']) {
-        return true;
-    }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return false;
     }
@@ -1913,6 +1935,10 @@ fn structured_output_allows_completion(text: &str) -> bool {
         Ok(Some(output)) => return output.allows_completion,
         Err(()) => return false,
         Ok(None) => {}
+    }
+    let start = text.trim_start();
+    if !start.starts_with(['{', '[']) {
+        return true;
     }
     if start.starts_with('[') {
         // Unrecognized arrays remain ordinary data. Recognized checker arrays
@@ -2057,6 +2083,16 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
                     diagnostic.message_template
                 )
             });
+    }
+    match compiler::inspect(&output.text) {
+        Ok(Some(decoded)) => {
+            return decoded
+                .diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
     }
     let text = bounded(&output.text);
     let lines = text.lines().map(str::trim).collect::<Vec<_>>();

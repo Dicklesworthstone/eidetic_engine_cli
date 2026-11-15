@@ -1282,6 +1282,14 @@ pub fn plan_conflict_resolution(
                         .to_owned(),
                 };
             };
+            if positional_a_tags == positional_b_tags {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: "--verb scope-split requires different scopes for the two memories after tag normalization."
+                        .to_owned(),
+                    repair: "Choose distinct scope labels, or use --verb both-valid when both memories should remain valid in the same scope."
+                        .to_owned(),
+                };
+            }
             // Scopes name the positional CLI arguments, which may be reversed
             // relative to the canonical pair ordering used by the surface.
             let (scope_a_tags, scope_b_tags) = if request.memory_a == pair.memory_a.id {
@@ -2496,6 +2504,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scope_split_rejects_equal_scopes_after_normalizing_order_case_and_unicode() {
+        let mut req = request(ResolveVerb::ScopeSplit, None);
+        req.scope_a_tags = vec![
+            " Scope:PROD ".to_owned(),
+            "Cafe\u{301}".to_owned(),
+            "scope:prod".to_owned(),
+        ];
+        req.scope_b_tags = vec!["CAFÉ".to_owned(), "scope:prod".to_owned()];
+        assert!(matches!(
+            plan_conflict_resolution(&fixture_surface(), &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+
+        req.scope_b_tags = vec!["scope:development".to_owned(), "café".to_owned()];
+        assert!(matches!(
+            plan_conflict_resolution(&fixture_surface(), &req),
+            ConflictResolutionOutcome::Plan(_)
+        ));
     }
 
     #[test]

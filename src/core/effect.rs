@@ -1950,9 +1950,13 @@ impl EffectManifest {
             CommandEffect::read_only_db("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
-            // `search`, `search --all-workspaces` and `similar` all moved to
-            // append_only_write_commands (bd-czj3e): every user retrieval
-            // appends a retrieval audit row.
+            // Ordinary `search` and `similar` append retrieval audits. This
+            // diagnostic uses the inspection pipeline instead: scanning other
+            // workspaces must not count as memory consumption or repair them.
+            CommandEffect::read_only_db(
+                "search --all-workspaces",
+                "Inspect matching memories across registered workspaces plus the global lane, preserving filters and reporting each workspace without index repair or durable retrieval audits; never a pack input",
+            ),
             CommandEffect::read_only_db(
                 "sentinel explain",
                 "Explain sentinel specifications and prior results",
@@ -2462,7 +2466,7 @@ impl EffectManifest {
                 "audit row id",
                 "Render handoff resume payload, appending an audit row when capsule HMAC verification fails or is bypassed",
             ),
-            // `search`, `search --all-workspaces` and `similar` are RETRIEVAL
+            // Ordinary `search` and `similar` are RETRIEVAL
             // surfaces that nevertheless append to the audit hash-chain on
             // every user-facing invocation, so they are declared for what they
             // do rather than for what they look like (bd-czj3e).
@@ -2496,25 +2500,14 @@ impl EffectManifest {
             // scored retrieved memories as never-retrieved. The declaration was
             // the wrong half.
             //
-            // `search --all-workspaces` is the same writer, fanned out:
-            // handle_search_all_workspaces (src/cli/mod.rs:49345) calls the
-            // recording `run_search` once per registered workspace, up to
-            // ALL_WORKSPACES_SCAN_CAP = 16 of them, so a single invocation
-            // appends an audit row to as many as sixteen databases. Its old
-            // description called it a "Read-only diagnostic ... inspection
-            // surface"; the read-only handle it opens at :49282 is only for
-            // enumerating the workspaces, not for the searches it then runs.
+            // `search --all-workspaces` is declared above as a diagnostic.
+            // It now invokes the retrieval-only inspection pipeline rather
+            // than this audited user-retrieval path for every destination.
             CommandEffect::append_only_write(
                 "search",
                 vec!["audit_log"],
                 "retrieval audit row id",
                 "Search memories, appending one retrieval audit row per user-facing query",
-            ),
-            CommandEffect::append_only_write(
-                "search --all-workspaces",
-                vec!["audit_log"],
-                "retrieval audit row id",
-                "Run one query across every workspace registered in the addressed database plus the global lane, rows labeled per workspace, appending one retrieval audit row to each workspace searched; inspection surface, never a pack input",
             ),
             CommandEffect::append_only_write(
                 "similar",
@@ -4945,6 +4938,7 @@ mod tests {
             "diag provenance",
             "trust report",
             "swarm brief",
+            "search --all-workspaces",
         ];
 
         for command in db_backed {
@@ -4977,14 +4971,14 @@ mod tests {
         Ok(())
     }
 
-    /// The positive half of moving the three retrieval surfaces out of the
+    /// The positive half of moving ordinary retrieval surfaces out of the
     /// read-only lists (bd-czj3e).
     ///
-    /// All three open a WRITABLE handle after the read pin is released and
+    /// Both open a WRITABLE handle after the read pin is released and
     /// append a retrieval audit row on every user-facing invocation
-    /// (`src/core/search.rs:7652-7669` and `:8169`; the `--all-workspaces`
-    /// fan-out reaches the same writer once per workspace through
-    /// `run_search`). A declaration of `read_only_db` told agents and the
+    /// through the normal search/similar pipeline. The explicit diagnostic
+    /// `--all-workspaces` uses the retrieval-only pipeline instead. A
+    /// declaration of `read_only_db` for ordinary retrieval told agents and the
     /// boundary inventory that they take no write gate and leave the database
     /// byte-identical; both statements were false. Asserting what they ARE,
     /// rather than only deleting them from a list, is what keeps the next
@@ -4993,7 +4987,7 @@ mod tests {
     fn retrieval_surfaces_declare_the_audit_row_they_append() -> TestResult {
         let manifest = EffectManifest::build();
 
-        for command in ["search", "search --all-workspaces", "similar"] {
+        for command in ["search", "similar"] {
             let effect = manifest
                 .get(command)
                 .ok_or_else(|| format!("{command} not in manifest"))?;
@@ -5030,7 +5024,7 @@ mod tests {
                 IdempotencyClass::Idempotent,
                 &format!("{command} stays idempotent under retry"),
             )?;
-            // The read-only lists these three came from all carry
+            // The read-only lists these commands came from all carry
             // `requires_read_snapshot`. Append-only writers must not, or
             // `db_backed_read_only_commands_declare_read_snapshot_requirement`
             // and this test could both pass with the entry in both places.
@@ -5040,6 +5034,22 @@ mod tests {
                 &format!("{command} is no longer a read-snapshot surface"),
             )?;
         }
+
+        let inspection = manifest
+            .get("search --all-workspaces")
+            .ok_or_else(|| "search --all-workspaces not in manifest".to_owned())?;
+        ensure(
+            inspection.write_surfaces.db_tables.is_empty()
+                && inspection.write_surfaces.derived_paths.is_empty()
+                && inspection.write_surfaces.workspace_files.is_empty(),
+            true,
+            "all-workspaces inspection declares no source or index writes",
+        )?;
+        ensure(
+            inspection.requires_audit,
+            false,
+            "inspection does not count as consumed memory",
+        )?;
 
         // The neighbouring recalibration path is a DIFFERENT write, not the
         // same one: it rewrites a derived artifact and touches no DB table.

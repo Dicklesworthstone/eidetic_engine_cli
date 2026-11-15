@@ -1001,6 +1001,78 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
+    fn revised_memory_requires_a_fresh_check_of_its_inherited_sentinel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::models::{
+            MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultInput,
+            MemorySentinelResultStatus, MemorySentinelSpec,
+        };
+
+        let (options, _workspace, source, _guard) = daemon_pack_retrieval_fixture()?;
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let db = DbConnection::open_file(database)?;
+        assert!(matches!(
+            super::sentinel_candidate_freshness(&db, &source, Utc::now())?,
+            super::SentinelCandidateFreshness::NoSentinels
+        ));
+        let spec = MemorySentinelSpec::from_raw(
+            &source,
+            "path_exists:Cargo.toml",
+            MemorySentinelPolarity::Gate,
+            None,
+            "manual://revision-freshness",
+            Some(600),
+        )?;
+        db.upsert_memory_sentinel_spec(&spec)?;
+        let passing_result = |spec_hash| {
+            MemorySentinelResult::new(MemorySentinelResultInput {
+                spec_hash,
+                status: MemorySentinelResultStatus::Pass,
+                checked_at: Utc::now().to_rfc3339(),
+                evidence_summary: "Explicit check for this revision.".to_owned(),
+                stale_threshold_seconds: Some(600),
+            })
+        };
+        db.insert_memory_sentinel_result(&passing_result(spec.spec_hash.clone())?)?;
+        assert!(matches!(
+            super::sentinel_candidate_freshness(&db, &source, Utc::now())?,
+            super::SentinelCandidateFreshness::Fresh
+        ));
+        db.close()?;
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: database,
+            original_memory_id: &source,
+            content: None,
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: Some(vec!["reviewed".to_owned()]),
+            provenance_uri: None,
+            reason: ReviseReason::Refinement,
+            actor: Some("sentinel-revision-test"),
+            dry_run: false,
+        });
+        assert!(report.success, "{:?}", report.error);
+        let revision = report.new_id.ok_or("revision missing")?;
+        let db = DbConnection::open_file(database)?;
+        assert!(matches!(
+            super::sentinel_candidate_freshness(&db, &revision, Utc::now())?,
+            super::SentinelCandidateFreshness::Blocked("missing_result")
+        ), "metadata edits must not bypass --require-fresh-sentinels or inherit an old pass");
+        let specs = db.list_memory_sentinel_specs(&revision)?;
+        assert_eq!(specs.len(), 1);
+        db.insert_memory_sentinel_result(&passing_result(specs[0].spec_hash.clone())?)?;
+        assert!(matches!(
+            super::sentinel_candidate_freshness(&db, &revision, Utc::now())?,
+            super::SentinelCandidateFreshness::Fresh
+        ));
+        assert!(db.latest_memory_sentinel_result(&spec.spec_hash)?.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
     fn query_exclusions_gate_graph_and_focus_before_result_limits() -> TestResult {
         let (mut options, workspace_id, seed, _guard) = daemon_pack_retrieval_fixture()?;
         let database = options.database_path.as_ref().ok_or("fixture database")?;

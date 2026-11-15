@@ -6054,6 +6054,19 @@ pub fn validate_curation_candidate(
             Vec::new(),
         );
     }
+    if let Err(error) =
+        crate::core::outcome::validate_anti_pattern_candidate_feedback(&connection, &stored)
+    {
+        decision = blocked_validation(
+            &stored,
+            vec![validation_issue(
+                error.code(),
+                error.message(),
+                error.repair().unwrap_or("ee curate show <ID> --json"),
+            )],
+            Vec::new(),
+        );
+    }
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -6559,6 +6572,22 @@ fn apply_curation_candidate_with_recipe(
                 error.code(),
                 error.message(),
                 error.repair().unwrap_or("ee outcome harvest --help"),
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+    }
+    if decision.application.status != "already_applied"
+        && let Err(error) =
+            crate::core::outcome::validate_anti_pattern_candidate_feedback(&connection, &stored)
+    {
+        decision = blocked_apply(
+            &stored,
+            decision.target_before.clone(),
+            vec![validation_issue(
+                error.code(),
+                error.message(),
+                error.repair().unwrap_or("ee curate show <ID> --json"),
             )],
             Vec::new(),
             "ee curate candidates --json".to_owned(),
@@ -11106,6 +11135,7 @@ fn validate_guarded_candidate_for_review(
         },
     )?;
     crate::core::outcome_harvest::validate_candidate(connection, workspace_id, stored)?;
+    crate::core::outcome::validate_anti_pattern_candidate_feedback(connection, stored)?;
     if crate::core::conflict_proposal::is_candidate(stored) {
         let current = connection
             .get_curation_candidate(&stored.workspace_id, &stored.id)
@@ -15940,6 +15970,7 @@ fn revalidate_generic_candidate_application_in_transaction(
     if stored.status != CandidateStatus::Approved.as_str() {
         return Err(stale("candidate is no longer approved"));
     }
+    crate::core::outcome::validate_anti_pattern_candidate_feedback(connection, stored)?;
 
     let target_memory_id = required_stored_target_memory_id(stored)?;
     let target = connection

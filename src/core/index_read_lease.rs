@@ -94,6 +94,30 @@ impl From<IndexRebuildError> for IndexGenerationSelectionError {
 }
 
 impl IndexGenerationLease {
+    /// Pin a passive inspection without waiting or creating a missing parent.
+    /// A busy publisher is an unmeasured state, not an absent or corrupt index.
+    /// `None` is only the observed absence of the parent; callers must keep that
+    /// observation instead of reading a generation created after this check.
+    pub(crate) fn try_read_for_inspection(
+        index_dir: &Path,
+    ) -> Result<Option<Self>, IndexRebuildError> {
+        let parent = index_parent(index_dir);
+        ensure_index_path_has_no_symlinks(parent, "inspect index generation")?;
+        match std::fs::symlink_metadata(parent) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(lease_error("inspect parent", error)),
+            Ok(_) => {}
+        }
+        let directory = open_directory(parent)?;
+        if !try_lease(&directory, false)? {
+            return Err(generation_busy_error());
+        }
+        verify_parent_identity(parent, &directory)?;
+        Ok(Some(Self {
+            _directory: directory,
+        }))
+    }
+
     /// Select a complete generation no newer than the pinned source snapshot.
     ///
     /// The live directory is preferred only after validating its actual tiers.
@@ -609,6 +633,67 @@ mod tests {
                 .count(),
             0
         );
+        Ok(())
+    }
+
+    #[test]
+    fn passive_inspection_lease_shares_reads_and_never_waits_for_a_publisher() -> TestResult {
+        let (root, index) = fixture()?;
+        let first = IndexGenerationLease::try_read_for_inspection(&index)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "existing parent must be leased".to_owned())?;
+        let second = IndexGenerationLease::try_read_for_inspection(&index)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "nested shared inspection must be admitted".to_owned())?;
+        let publisher = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
+        assert!(!try_lease(&publisher, true).map_err(|error| error.to_string())?);
+        drop(first);
+        assert!(!try_lease(&publisher, true).map_err(|error| error.to_string())?);
+        drop(second);
+        assert!(try_lease(&publisher, true).map_err(|error| error.to_string())?);
+
+        let busy = IndexGenerationLease::try_read_for_inspection(&index);
+        assert!(
+            matches!(busy, Err(IndexRebuildError::Index(message)) if message.contains("busy")),
+            "an exclusive publisher must produce an unmeasured result"
+        );
+        drop(publisher);
+        assert!(
+            IndexGenerationLease::try_read_for_inspection(&index)
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .map_err(|error| error.to_string())?
+                .count(),
+            0,
+            "passive inspection must not create the index or a lease sidecar"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passive_inspection_lease_preserves_absence_and_rejects_parent_aliases() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let (root, _) = fixture()?;
+        let canonical = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let missing_parent = canonical.join("missing-parent");
+        assert!(
+            IndexGenerationLease::try_read_for_inspection(&missing_parent.join("index"))
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        assert!(!missing_parent.exists());
+        let target = canonical.join("real-parent");
+        std::fs::create_dir(&target).map_err(|error| error.to_string())?;
+        let alias = canonical.join("alias");
+        symlink(&target, &alias).map_err(|error| error.to_string())?;
+        assert!(IndexGenerationLease::try_read_for_inspection(&alias.join("index")).is_err());
         Ok(())
     }
 

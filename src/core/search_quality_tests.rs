@@ -133,6 +133,30 @@ impl Fixture {
         self.feedback("memory", id, number, "harmful");
     }
 
+    fn rule(&self, number: u128, content: &str, maturity: &str) -> String {
+        let id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        self.db
+            .insert_procedural_rule(
+                &id,
+                &CreateProceduralRuleInput {
+                    workspace_id: self.workspace.clone(),
+                    content: content.to_owned(),
+                    confidence: 1.0,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: maturity.to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .unwrap();
+        id
+    }
+
     fn feedback(&self, target_type: &str, id: &str, number: u128, signal: &str) {
         self.db
             .insert_feedback_event(
@@ -1129,6 +1153,248 @@ fn published_search_filters_matching_candidates_before_top_one_and_diagnostics()
 }
 
 #[test]
+fn published_kind_filters_include_native_rules_and_keep_typed_fields_memory_only() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let memory_rule = fixture.memory_with_kind(1, 1.0, 1.0, now, BODY, "rule");
+    let anti_pattern = fixture.memory_with_kind(2, 1.0, 1.0, now, BODY, "anti-pattern");
+    let fact = fixture.memory_with_kind(3, 1.0, 1.0, now, BODY, "fact");
+    let evidence = fixture.evidence(4, BODY);
+    fixture
+        .db
+        .set_memory_typed_fields_json(&memory_rule, Some(r#"{"condition":"before release"}"#))
+        .unwrap();
+    fixture
+        .db
+        .set_memory_typed_fields_json(&anti_pattern, Some(r#"{"trigger":"before release"}"#))
+        .unwrap();
+    // Search keeps draft and deprecated rules available for inspection; only
+    // context-pack admission restricts native rules to candidate/validated.
+    let native: Vec<_> = ["draft", "candidate", "validated", "deprecated"]
+        .into_iter()
+        .enumerate()
+        .map(|(number, maturity)| fixture.rule(10 + number as u128, BODY, maturity))
+        .collect();
+    let mut rules = native.clone();
+    rules.push(memory_rule.clone());
+    let mut all = rules.clone();
+    all.extend([anti_pattern.clone(), fact.clone(), evidence]);
+    let options = fixture.options();
+    let _embedder = fixture.publish_index();
+    fixture.db.close().unwrap();
+
+    for (kind, field, expected) in [
+        (None, None, all),
+        (Some("rule"), None, rules),
+        (Some("anti-pattern"), None, vec![anti_pattern.clone()]),
+        (Some("fact"), None, vec![fact]),
+        (
+            None,
+            Some("condition=before release"),
+            vec![memory_rule.clone()],
+        ),
+        (
+            Some("rule"),
+            Some("condition=before release"),
+            vec![memory_rule],
+        ),
+        (
+            Some("anti-pattern"),
+            Some("condition=before release"),
+            Vec::new(),
+        ),
+        (
+            None,
+            Some("trigger=before release"),
+            vec![anti_pattern.clone()],
+        ),
+        (
+            Some("anti-pattern"),
+            Some("trigger=before release"),
+            vec![anti_pattern],
+        ),
+        (Some("rule"), Some("trigger=before release"), Vec::new()),
+    ] {
+        let fields: Vec<_> = field
+            .map(|field| TypedMemoryFieldFilter::parse(field).unwrap())
+            .into_iter()
+            .collect();
+        let run = run_search_with_performance_and_filters(&options, kind, &fields).unwrap();
+        assert_eq!(
+            run.report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected.iter().cloned().collect::<BTreeSet<_>>(),
+            "kind={kind:?}, field={field:?}",
+        );
+        assert_eq!(
+            run.audit_facts.as_ref().unwrap().floor_counts.considered,
+            expected.len()
+        );
+        assert_eq!(
+            run.report.status,
+            if expected.is_empty() {
+                SearchStatus::NoResults
+            } else {
+                SearchStatus::Success
+            }
+        );
+        for hit in run
+            .report
+            .results
+            .iter()
+            .filter(|hit| native.contains(&hit.doc_id))
+        {
+            let metadata = hit.metadata.as_ref().unwrap();
+            assert_eq!(metadata["source"], "rule");
+            assert_eq!(metadata["kind"], "rule");
+            assert!(metadata["entity_revision"].as_str().is_some());
+        }
+    }
+}
+
+#[test]
+fn native_rule_kind_refill_rejects_stale_and_unadmitted_index_candidates() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let short = "qualityquasar qualityquasar";
+    let mut documents = Vec::new();
+    // Neither of the first two retrieval windows contains an admissible
+    // requested rule: native-looking index orphans and wrong-kind memories
+    // must not consume the ranking pool or imply that the query is exhausted.
+    for number in 1..=120 {
+        let id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        documents.push(IndexableDocument::new(id, short).with_kind("rule"));
+        let memory = fixture.memory_with_content(number, 1.0, 1.0, now, short);
+        documents.push(IndexableDocument::new(memory, short).with_kind("rule"));
+    }
+    let tombstoned = fixture.rule(201, short, "validated");
+    fixture.db.execute_raw(&format!(
+        "UPDATE procedural_rules SET tombstoned_at = '2026-01-01T00:00:00Z' WHERE id = '{tombstoned}'"
+    )).unwrap();
+    let superseded = fixture.rule(202, short, "superseded");
+    let quarantined = fixture.rule(203, short, "validated");
+    fixture
+        .db
+        .insert_feedback_quarantine_for_recovery(&crate::db::StoredFeedbackQuarantine {
+            id: "fq_00000000000000000000000203".to_owned(),
+            workspace_id: fixture.workspace.clone(),
+            source_id: "rule-kind-filter-review".to_owned(),
+            target_type: "rule".to_owned(),
+            target_id: quarantined.clone(),
+            signal: "harmful".to_owned(),
+            weight: 0.5,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+            reason: "Pending rule review".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{:064x}", 203),
+            status: "pending".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            released_feedback_event_id: None,
+        })
+        .unwrap();
+    let stale = fixture.rule(204, short, "validated");
+    for id in [tombstoned, superseded, quarantined] {
+        documents.push(IndexableDocument::new(id, short).with_kind("rule"));
+    }
+    documents.push(
+        IndexableDocument::new(stale, short)
+            .with_kind("rule")
+            .with_metadata_entry("entity_revision", "stale-rule-revision"),
+    );
+    let evidence = fixture.evidence(205, short);
+    documents.push(IndexableDocument::new(evidence.clone(), short).with_kind("rule"));
+    let matching = fixture.rule(206, BODY, "validated");
+    // Native identity and current DB authority outrank stale indexed kind.
+    documents.push(IndexableDocument::new(matching.as_str(), BODY).with_kind("fact"));
+    let _producer = build_filtered_candidate_test_index(&fixture, documents);
+    let mut options = fixture.options();
+    options.limit = 1;
+    let index = options.resolve_index_dir();
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        let snapshot =
+            rule_admission::memory_revisions::RevisionReadSnapshot::begin(&reader).unwrap();
+        let filters = SearchMemoryFilters {
+            kind: Some("rule"),
+            fields: &[],
+        };
+        let candidate_filter = SearchCandidateFilter::Workspace {
+            connection: &reader,
+            filters,
+        };
+        for id in [evidence.as_str(), "rule_not-a-canonical-id"] {
+            let forged = SearchHit {
+                doc_id: id.to_owned(),
+                score: 1.0,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(1.0),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({"source": "rule", "kind": "rule"})),
+                explanation: None,
+            };
+            assert!(!candidate_filter.matches(&forged).unwrap());
+        }
+        for include_tombstoned in [false, true] {
+            options.include_tombstoned = include_tombstoned;
+            let mut trace = SearchPerformanceTrace::default();
+            let result = search_filtered_sync_with_performance(
+                &cx,
+                &index,
+                &options,
+                100,
+                SearchSourceMode::LexicalOnly,
+                Deterministic::from_seed(0),
+                SearchRerankRuntime::disabled(),
+                SearchFusionWeights::default(),
+                None,
+                Some((&options, &reader)),
+                SearchCandidateFilter::Workspace {
+                    connection: &reader,
+                    filters,
+                },
+                &mut trace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                trace
+                    .timings
+                    .iter()
+                    .filter(|timing| timing.name == "searchSync::lexicalSearch")
+                    .count(),
+                3
+            );
+            assert!(result.degraded.is_empty());
+            let mut degraded = result.degraded;
+            let admitted =
+                rule_admission::admit_hits(&options, result.hits, &mut degraded, Some(&reader));
+            assert_eq!(admitted.len(), 1);
+            assert_eq!(admitted[0].doc_id, matching);
+            assert_eq!(admitted[0].metadata.as_ref().unwrap()["kind"], "rule");
+            assert_eq!(
+                degraded
+                    .iter()
+                    .filter(|entry| entry.code == "rule_live_admission_filtered")
+                    .count(),
+                1
+            );
+        }
+        snapshot.finish().unwrap();
+    })
+    .unwrap();
+}
+
+#[test]
 fn published_memory_filters_refill_past_the_initial_candidate_pool() {
     let fixture = Fixture::new();
     let now = Utc::now() - chrono::Duration::seconds(1);
@@ -1214,6 +1480,198 @@ fn published_memory_filters_refill_past_the_initial_candidate_pool() {
             .iter()
             .all(|entry| { entry.code != "search_filter_candidate_budget_exhausted" })
     );
+}
+
+#[test]
+fn published_scoped_search_refills_past_assertions_for_memories_and_native_rules() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    for number in 1..=240 {
+        fixture.memory_with_content(number, 1.0, 1.0, now, "qualityquasar qualityquasar");
+    }
+    fixture
+        .db
+        .execute_raw("UPDATE memories SET trust_class = 'agent_assertion'")
+        .unwrap();
+    let memory = fixture.memory(241, 1.0, 1.0, now);
+    let rule = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(242)).to_string();
+    fixture
+        .db
+        .insert_procedural_rule(
+            &rule,
+            &CreateProceduralRuleInput {
+                workspace_id: fixture.workspace.clone(),
+                content: BODY.to_owned(),
+                confidence: 1.0,
+                utility: 1.0,
+                importance: 0.5,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )
+        .unwrap();
+    let mut options = fixture.options();
+    options.limit = 2;
+    let _embedder = fixture.publish_index();
+    fixture.db.close().unwrap();
+    let rounds = |run: &SearchPerformanceRun| {
+        run.performance
+            .timings
+            .iter()
+            .filter(|timing| timing.name == "searchSync::lexicalSearch")
+            .count()
+    };
+
+    let unscoped = run_search_with_performance_and_filters(&options, None, &[]).unwrap();
+    assert_eq!(rounds(&unscoped), 1);
+    assert!(
+        unscoped
+            .report
+            .results
+            .iter()
+            .all(|hit| { hit.doc_id != memory && hit.doc_id != rule })
+    );
+
+    options.memory_scope = MemoryScope::Verified;
+    let scoped = run_search_with_performance_and_filters(&options, None, &[]).unwrap();
+    assert_eq!(scoped.report.status, SearchStatus::Success);
+    assert_eq!(
+        scoped
+            .report
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([memory, rule.clone()]),
+    );
+    assert_eq!(rounds(&scoped), 3, "100, 200, then 400 candidates");
+    assert_eq!(scoped.report.scope_stats.candidates_excluded_by_scope, 240);
+    assert_eq!(
+        scoped
+            .report
+            .degraded
+            .iter()
+            .filter(|entry| entry.code == "scope_excluded_evidence")
+            .count(),
+        1,
+        "admission probes must not duplicate final diagnostics"
+    );
+    let native = scoped
+        .report
+        .results
+        .iter()
+        .find(|hit| hit.doc_id == rule)
+        .unwrap();
+    assert_eq!(native.metadata.as_ref().unwrap()["source"], "rule");
+    assert!(
+        scoped
+            .report
+            .degraded
+            .iter()
+            .all(|entry| { entry.code != "search_filter_candidate_budget_exhausted" })
+    );
+
+    options.strict_scope = true;
+    let strict = run_search_with_performance_and_filters(&options, None, &[]).unwrap();
+    assert_eq!(strict.report.status, SearchStatus::NoResults);
+    assert!(strict.report.results.is_empty());
+    assert_eq!(strict.report.scope_stats.strict_violations, 240);
+    assert_eq!(
+        strict
+            .report
+            .degraded
+            .iter()
+            .filter(|entry| entry.code == "scope_strict_excluded_evidence")
+            .count(),
+        1,
+        "rejected candidates must reach the final strict-scope gate"
+    );
+}
+
+#[test]
+fn live_admission_refills_past_tombstones_and_preserves_inclusion_flags() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let mut documents = Vec::new();
+    for number in 1..=240 {
+        let content = "qualityquasar qualityquasar";
+        let id = fixture.memory_with_content(number, 1.0, 1.0, now, content);
+        fixture.db.tombstone_memory(&id).unwrap();
+        // Deliberately retain an obsolete index projection. The source row,
+        // not its indexed body, decides whether it occupies a ranking slot.
+        documents.push(IndexableDocument::new(id, content));
+    }
+    let matching = fixture.memory(241, 1.0, 1.0, now);
+    documents.push(IndexableDocument::new(matching.as_str(), BODY));
+    let _producer = build_filtered_candidate_test_index(&fixture, documents);
+    let mut options = fixture.options();
+    options.limit = 1;
+    let index = options.resolve_index_dir();
+    let reader = DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        let snapshot =
+            rule_admission::memory_revisions::RevisionReadSnapshot::begin(&reader).unwrap();
+        for include_tombstoned in [false, true] {
+            options.include_tombstoned = include_tombstoned;
+            let mut trace = SearchPerformanceTrace::default();
+            let result = search_filtered_sync_with_performance(
+                &cx,
+                &index,
+                &options,
+                100,
+                SearchSourceMode::LexicalOnly,
+                Deterministic::from_seed(0),
+                SearchRerankRuntime::disabled(),
+                SearchFusionWeights::default(),
+                None,
+                Some((&options, &reader)),
+                SearchCandidateFilter::Workspace {
+                    connection: &reader,
+                    filters: SearchMemoryFilters::default(),
+                },
+                &mut trace,
+            )
+            .await
+            .unwrap();
+            let rounds = trace
+                .timings
+                .iter()
+                .filter(|timing| timing.name == "searchSync::lexicalSearch")
+                .count();
+            assert_eq!(rounds, if include_tombstoned { 1 } else { 3 });
+            assert!(result.degraded.is_empty());
+            let mut degraded = result.degraded;
+            let visible = apply_tombstone_visibility_collecting(
+                &options,
+                result.hits,
+                &mut degraded,
+                Some(&reader),
+                None,
+            );
+            if include_tombstoned {
+                assert_eq!(visible.len(), 100);
+                assert!(visible.iter().all(|hit| hit.doc_id != matching));
+            } else {
+                assert_eq!(result.raw_candidate_count, 241);
+                assert_eq!(visible.len(), 1);
+                assert_eq!(visible[0].doc_id, matching);
+                assert_eq!(
+                    degraded
+                        .iter()
+                        .filter(|entry| entry.code == "tombstoned_filtered")
+                        .count(),
+                    1,
+                );
+            }
+        }
+        snapshot.finish().unwrap();
+    })
+    .unwrap();
 }
 
 #[test]

@@ -1620,9 +1620,10 @@ fn distill_surprise_seed(entry: &JournalEntryRecord) -> DistillProposalSeed {
 /// Deterministic, extractive, candidates-only:
 ///
 /// 1. Scope: undistilled, non-tombstoned entries, optionally narrowed by
-///    `--session`/`--agent`/`--since`. Instruction-risk-excluded entries
-///    abstain (`instruction_risk_excluded`); already-distilled entries in
-///    scope abstain (`already_distilled`).
+///    `--session`/`--agent`/`--since`. Each bounded batch admits the oldest
+///    actionable entries first so repeated applies drain the backlog.
+///    Spare slots report instruction-risk-excluded, low-signal, and
+///    already-distilled entries as diagnostic abstentions.
 /// 2. `command_failure` entries group by normalized command root + exit
 ///    code, refined by HashEmbedder agglomerative clustering under
 ///    `[learn] cluster_coherence_threshold`.
@@ -1638,6 +1639,13 @@ fn distill_surprise_seed(entry: &JournalEntryRecord) -> DistillProposalSeed {
 ///    re-running over distilled entries proposes nothing.
 pub fn distill_journal_entries(
     options: &JournalDistillOptions<'_>,
+) -> Result<JournalDistillReport, DomainError> {
+    distill_journal_entries_with_limit(options, JOURNAL_DISTILL_SCAN_LIMIT)
+}
+
+fn distill_journal_entries_with_limit(
+    options: &JournalDistillOptions<'_>,
+    scan_limit: u32,
 ) -> Result<JournalDistillReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     if !journal_capture_enabled(&workspace_path) {
@@ -1666,19 +1674,18 @@ pub fn distill_journal_entries(
         &[workspace_path.as_path(), options.workspace_path],
     )?;
 
-    // Scope selection. `undistilled_only` stays false so already-distilled
-    // entries in scope surface as explicit `already_distilled` abstentions
-    // instead of vanishing silently.
+    // Pending actionable entries own the bounded batch first. Diagnostic
+    // history can fill spare slots, but cannot hide older work behind the cap.
     let filter = JournalEntryListFilter {
         session_key: options.session_key.clone(),
         agent_name: options.agent_name.clone(),
         since: since.clone(),
         kind: None,
         undistilled_only: false,
-        limit: JOURNAL_DISTILL_SCAN_LIMIT,
+        limit: scan_limit,
     };
     let stored = connection
-        .list_journal_entries(&workspace_id, &filter)
+        .list_journal_entries_for_distillation(&workspace_id, &filter)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list journal entries for distillation: {error}"),
             repair: Some("ee doctor".to_owned()),
@@ -1688,8 +1695,8 @@ pub fn distill_journal_entries(
         .filter(|entry| entry.tombstoned_at.is_none())
         .map(JournalEntryRecord::from_stored)
         .collect::<Result<Vec<_>, _>>()?;
-    // The DB returns newest-first; distillation iterates oldest-first by
-    // UUIDv7 entry id so grouping, clustering, and ids are deterministic.
+    // The DB prioritizes the oldest pending rows. Stable entry-id order keeps
+    // grouping, clustering, and proposal identities independent of fill order.
     entries.sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
     let scanned_count = entries.len();
 
@@ -2711,13 +2718,14 @@ mod tests {
         JournalAppendOptions, JournalDistillOptions, JournalEntryDraft, JournalKind,
         JournalListOptions, JournalShowOptions, JournalSource, append_journal_entries_stdin,
         append_journal_entry, append_journal_entry_with_id, distill_journal_entries,
-        generate_journal_entry_id, journal_retention_days, list_journal_entries,
-        normalize_command_root, show_journal_entry, truncate_at_char_boundary,
+        distill_journal_entries_with_limit, generate_journal_entry_id, journal_retention_days,
+        list_journal_entries, normalize_command_root, show_journal_entry,
+        truncate_at_char_boundary,
     };
     use crate::curate::CandidateType;
     use crate::db::{
         CreateJournalEntryInput, CreateMemoryInput, DbConnection, JournalEntryListFilter,
-        audit_actions,
+        StoredJournalEntry, audit_actions,
     };
     use crate::models::{DomainError, MemoryId};
 
@@ -3429,6 +3437,259 @@ mod tests {
             &"unknown".to_owned(),
             "all-numeric argv[0] sanitizes to nothing",
         )
+    }
+
+    fn distill_queue_entry(
+        workspace_id: &str,
+        entry_id: &str,
+        created_at: &str,
+    ) -> StoredJournalEntry {
+        StoredJournalEntry {
+            entry_id: entry_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            agent_name: None,
+            session_key: None,
+            kind: JournalKind::Surprise.as_str().to_owned(),
+            source: JournalSource::Hook.as_str().to_owned(),
+            body: format!("Surprising result recorded by {entry_id}"),
+            structured: None,
+            redaction_report: "{\"classesApplied\":[],\"spanCount\":0}".to_owned(),
+            instruction_risk: "none".to_owned(),
+            created_at: created_at.to_owned(),
+            distilled_at: None,
+            tombstoned_at: None,
+        }
+    }
+
+    #[test]
+    fn distill_drains_old_pending_entries_past_newer_nonactionable_history() -> TestResult {
+        let (_dir, workspace_path, database_path) = seed_journal_workspace("jrn-dst-drain")?;
+        append_journal_entry(
+            &append_options(&workspace_path, None, JournalSource::Manual),
+            &body_draft("plain note registering this workspace"),
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let mut expected_evidence = Vec::new();
+        for index in 0..5 {
+            let entry_id = format!("jrn_queue_pending_{index}");
+            let mut entry = distill_queue_entry(
+                &workspace_id,
+                &entry_id,
+                &format!("2000-01-0{}T00:00:00Z", index + 1),
+            );
+            if index % 2 == 0 {
+                entry.kind = JournalKind::CommandFailure.as_str().to_owned();
+                entry.structured = Some(
+                    serde_json::json!({
+                        "cmd": "cargo check",
+                        "exitCode": 101,
+                        "stderrTail": "mismatched types",
+                    })
+                    .to_string(),
+                );
+            }
+            connection
+                .insert_journal_entry_for_recovery(&entry)
+                .map_err(|error| error.to_string())?;
+            expected_evidence.push(format!("journal://{entry_id}"));
+        }
+        for kind in ["consumed", "note", "observation", "excluded", "tombstoned"] {
+            let mut entry = distill_queue_entry(
+                &workspace_id,
+                &format!("jrn_queue_history_{kind}"),
+                "2050-01-01T00:00:00Z",
+            );
+            match kind {
+                "consumed" => entry.distilled_at = Some("2050-01-02T00:00:00Z".to_owned()),
+                "note" => entry.kind = JournalKind::Note.as_str().to_owned(),
+                "observation" => entry.kind = JournalKind::Observation.as_str().to_owned(),
+                "excluded" => entry.instruction_risk = "high".to_owned(),
+                "tombstoned" => entry.tombstoned_at = Some("2050-01-02T00:00:00Z".to_owned()),
+                _ => return Err("unknown queue fixture kind".to_owned()),
+            }
+            connection
+                .insert_journal_entry_for_recovery(&entry)
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut consumed = Vec::new();
+        for batch in 0..3 {
+            let dry_run =
+                distill_journal_entries_with_limit(&distill_options(&workspace_path, false), 2)
+                    .map_err(|error| error.to_string())?;
+            let repeated =
+                distill_journal_entries_with_limit(&distill_options(&workspace_path, false), 2)
+                    .map_err(|error| error.to_string())?;
+            ensure_equal(
+                &dry_run.data_json(),
+                &repeated.data_json(),
+                "repeated dry runs select the same bounded batch",
+            )?;
+            ensure(
+                dry_run.scanned_count <= 2,
+                "selection respects the scan bound",
+            )?;
+            let mut batch_evidence = dry_run
+                .proposals
+                .iter()
+                .flat_map(|proposal| proposal.evidence.iter().cloned())
+                .collect::<Vec<_>>();
+            batch_evidence.sort();
+            let offset = batch * 2;
+            let end = (offset + 2).min(expected_evidence.len());
+            ensure_equal(
+                &batch_evidence,
+                &expected_evidence[offset..end].to_vec(),
+                "oldest pending entries survive newer history and drain in order",
+            )?;
+            let applied =
+                distill_journal_entries_with_limit(&distill_options(&workspace_path, true), 2)
+                    .map_err(|error| error.to_string())?;
+            ensure_equal(
+                &applied.proposals,
+                &dry_run.proposals,
+                "apply consumes exactly the batch previewed by dry run",
+            )?;
+            consumed.extend(batch_evidence);
+        }
+        ensure_equal(
+            &consumed,
+            &expected_evidence,
+            "each eligible source is consumed once across bounded batches",
+        )?;
+        let replay = distill_journal_entries_with_limit(&distill_options(&workspace_path, true), 2)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            replay.proposals.is_empty(),
+            "drained queue replay proposes nothing",
+        )?;
+        ensure(
+            replay.applied.as_ref().is_some_and(|applied| {
+                applied.candidate_ids.is_empty() && applied.audit_ids.is_empty()
+            }),
+            "drained queue replay writes no candidates or audits",
+        )?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        for index in 0..5 {
+            let entry = connection
+                .get_journal_entry(&workspace_id, &format!("jrn_queue_pending_{index}"))
+                .map_err(|error| error.to_string())?
+                .ok_or("pending queue entry must remain durable")?;
+            ensure(
+                entry.distilled_at.is_some(),
+                "every old pending row was consumed",
+            )?;
+        }
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&candidates.len(), &5, "replay adds no duplicate candidates")
+    }
+
+    #[test]
+    fn distill_pending_priority_respects_all_scope_selectors() -> TestResult {
+        let (_dir, workspace_path, database_path) = seed_journal_workspace("jrn-dst-scope")?;
+        append_journal_entry(
+            &append_options(&workspace_path, None, JournalSource::Manual),
+            &body_draft("plain note registering this workspace"),
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        for (suffix, created_at, agent, session) in [
+            ("before", "2000-01-01T00:00:00Z", "agent-a", "session-a"),
+            (
+                "other_agent",
+                "2000-01-04T00:00:00Z",
+                "agent-b",
+                "session-a",
+            ),
+            (
+                "other_session",
+                "2000-01-04T00:00:00Z",
+                "agent-a",
+                "session-b",
+            ),
+            ("pending", "2000-01-05T00:00:00Z", "agent-a", "session-a"),
+            ("noise", "2050-01-01T00:00:00Z", "agent-a", "session-a"),
+        ] {
+            let mut entry =
+                distill_queue_entry(&workspace_id, &format!("jrn_scope_{suffix}"), created_at);
+            entry.agent_name = Some(agent.to_owned());
+            entry.session_key = Some(session.to_owned());
+            if suffix == "noise" {
+                entry.kind = JournalKind::Observation.as_str().to_owned();
+            }
+            connection
+                .insert_journal_entry_for_recovery(&entry)
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+        let report = distill_journal_entries_with_limit(
+            &JournalDistillOptions {
+                workspace_path: &workspace_path,
+                database_path: None,
+                session_key: Some("session-a".to_owned()),
+                agent_name: Some("agent-a".to_owned()),
+                since: Some("2000-01-03T00:00:00Z".to_owned()),
+                apply: false,
+            },
+            1,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &report.scanned_count,
+            &1,
+            "only the scoped pending row is selected",
+        )?;
+        let evidence = report
+            .proposals
+            .iter()
+            .flat_map(|proposal| proposal.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &evidence,
+            &vec!["journal://jrn_scope_pending".to_owned()],
+            "priority selection preserves session, agent, and since scope",
+        )
+    }
+
+    #[test]
+    fn distill_pending_selection_rejects_corrupt_structured_evidence() -> TestResult {
+        let (_dir, workspace_path, database_path) = seed_journal_workspace("jrn-dst-corrupt")?;
+        append_journal_entry(
+            &append_options(&workspace_path, None, JournalSource::Manual),
+            &body_draft("plain note registering this workspace"),
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let mut entry =
+            distill_queue_entry(&workspace_id, "jrn_corrupt_pending", "2000-01-01T00:00:00Z");
+        entry.kind = JournalKind::CommandFailure.as_str().to_owned();
+        entry.structured = Some("{".to_owned());
+        connection
+            .insert_journal_entry_for_recovery(&entry)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let result = distill_journal_entries_with_limit(&distill_options(&workspace_path, true), 1);
+        ensure(
+            matches!(result, Err(DomainError::Storage { .. })),
+            "malformed structured evidence fails closed before apply",
+        )?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        ensure(candidates.is_empty(), "corrupt source creates no candidate")
     }
 
     #[test]

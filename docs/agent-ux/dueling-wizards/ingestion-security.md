@@ -68,6 +68,26 @@ Sandbox output is external text even when it came from this repository. The
 surface must redact, guard, audit, and quarantine before any imported text is
 linked into memories or graph-derived explanations.
 
+`ee sandbox import` uses the shared external-ingestion screen before writing
+the scratch session. Safe evidence retains its technical context, secrets are
+replaced, and the overlay identity and content hash describe the screened body.
+Instruction-bearing or withheld records return `policy_denied`; only hashes,
+redaction state, and detector findings enter
+`.ee/sandbox/<session>.quarantine.jsonl` under the
+`sandbox_import_ingestion_security` event name. The original rejected body does
+not enter the overlay or truth database. This scratch receipt is a review aid,
+not a curation approval: review the original artifact and submit safe evidence
+as a new import.
+
+`ee sandbox apply` re-screens every import, including legacy or hand-edited
+session entries, before writing any memory. A refused import keeps the original
+session intact for review and retry. Admitted legacy secrets are redacted in
+scratch before promotion. Imported memories use the normal transactional writer
+at `agent_assertion` trust with confidence capped at `0.5`, retain
+`ee://sandbox-import/<session>/<screened-content-hash>` provenance, and record an
+`ingestionSecurity` receipt in the memory creation audit. Manual
+`ee sandbox remember` proposals retain the existing manual capture contract.
+
 ## Current Source Anchors
 
 The existing reusable primitives are in `src/policy/mod.rs`:

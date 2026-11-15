@@ -1,4 +1,4 @@
-//! Bounded compiler JSON diagnostics and completion checks.
+//! Bounded compiler and native Go diagnostics and completion checks.
 //!
 //! Cargo's compiler-message embeds a rustc diagnostic. Use its typed level,
 //! code and message, never rendered output, children, artifacts or examples.
@@ -22,6 +22,9 @@ mod checkers;
 #[path = "cass_error_recall_go.rs"]
 mod go;
 
+#[path = "cass_error_recall_go_terminal.rs"]
+mod go_terminal;
+
 const MAX_COMPILER_RECORDS: usize = 256;
 
 #[derive(Debug, Default)]
@@ -33,7 +36,7 @@ pub(super) struct CompilerOutput {
     pub has_test_execution: bool,
     /// Transient commitments to linted files, never source text or provenance.
     pub eslint_coverage: Option<EslintCoverage>,
-    /// Explicit package/test subjects from native Go test JSON.
+    /// Explicit package/test subjects from native Go JSON or terminal reports.
     pub go_test_coverage: Option<GoTestCoverage>,
 }
 
@@ -103,7 +106,7 @@ fn cargo_reason(reason: &str) -> bool {
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     let start = text.trim_start();
     if !start.starts_with(['{', '[']) {
-        return Ok(None);
+        return go_terminal::inspect(text);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return Err(());

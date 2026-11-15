@@ -276,6 +276,101 @@ fn unittest_report(status: &str, counts: &str) -> String {
     )
 }
 
+// Native CPython TextTestRunner callback shape: the same TestCase can fail
+// in its body and tearDown, or in multiple addCleanup callbacks. Tracebacks
+// are intentionally not diagnostic identities; callback multiplicity is.
+fn unittest_callback_report(body_failure: bool) -> String {
+    let first = if body_failure { "FAIL" } else { "ERROR" };
+    let exception = if body_failure {
+        "AssertionError"
+    } else {
+        "RuntimeError"
+    };
+    let counts = if body_failure {
+        "failures=1, errors=1"
+    } else {
+        "errors=2"
+    };
+    let error_separator = "=".repeat(70);
+    let run_separator = "-".repeat(70);
+    format!(
+        "test_control (tests.test_queue.QueueTests.test_control) ... ok\n{UNITTEST_DRAIN}\nChecks queue isolation. ... {first}\n{UNITTEST_DRAIN}\nChecks queue isolation. ... ERROR\n\n{error_separator}\nERROR: {UNITTEST_DRAIN}\nChecks queue isolation.\n{run_separator}\nTraceback (most recent call last):\nRuntimeError: private cleanup traceback sentinel\n\n{error_separator}\n{first}: {UNITTEST_DRAIN}\nChecks queue isolation.\n{run_separator}\nTraceback (most recent call last):\n{exception}: private body traceback sentinel\n\n{run_separator}\nRan 2 tests in 0.001s\n\nFAILED ({counts})\n"
+    )
+}
+
+#[test]
+fn unittest_cleanup_failures_reach_persisted_recall_once() -> TestResult {
+    for body_failure in [false, true] {
+        let failure = unittest_callback_report(body_failure);
+        let proof = unittest_report("ok", "OK");
+        let episode = episode_with_reports(&failure, UNITTEST_COMMAND, &proof, UNITTEST_COMMAND)?;
+        let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.fingerprints_recorded, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.repair_links_recorded, 2);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let diagnostic = crate::core::cass_error_recall::structured_error_diagnostics(&failure)
+            .into_iter()
+            .next()
+            .ok_or("repeated unittest callback diagnostic")?;
+        let recall = error_recall_report(&episode.db, WS, &diagnostic)?;
+        assert!(recall.exact);
+        assert!(recall.helpful_repairs.contains(&episode.repair));
+        assert_eq!(recall.proof_links, std::slice::from_ref(&episode.proof));
+        let links = episode
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+        assert!(
+            links
+                .iter()
+                .all(|link| link.evidence_ref.as_deref() == Some(episode.failure.as_str()))
+        );
+        let evidence = recalled_repair_evidence(&episode.db, WS, &recall)?;
+        assert!(evidence.iter().all(|item| {
+            item.text
+                .as_deref()
+                .is_none_or(|text| !text.contains("traceback sentinel"))
+        }));
+        let query = pack_error_recall_query_seed(&episode.db, WS, &diagnostic)?;
+        assert!(query.contains("prior fix:") && query.contains("fresh queue"));
+        let rerun = record_session_error_recall(&episode.db, WS, &episode.session)?;
+        assert_eq!(rerun.incident_cards_recorded, 0);
+        assert_eq!(
+            episode
+                .db
+                .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                .len(),
+            links.len()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unittest_repeated_test_executions_and_skipped_retries_remain_unresolved() -> TestResult {
+    let failure = unittest_callback_report(true);
+    for (failure, proof) in [
+        (
+            failure.replace("Ran 2 tests", "Ran 3 tests"),
+            unittest_report("ok", "OK"),
+        ),
+        (
+            failure,
+            unittest_report("skipped 'not exercised'", "OK (skipped=1)"),
+        ),
+    ] {
+        let episode = episode_with_reports(&failure, UNITTEST_COMMAND, &proof, UNITTEST_COMMAND)?;
+        let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.fingerprints_recorded, 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn unittest_skipped_retry_then_matching_execution_populates_cited_recall() -> TestResult {
     let failure = unittest_report("FAIL", "FAILED (failures=1)");

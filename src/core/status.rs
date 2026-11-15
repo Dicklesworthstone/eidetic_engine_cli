@@ -60,9 +60,9 @@ use super::derived_asset_freshness::{
     plan_derived_asset_freshness,
 };
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, SemanticReadiness,
-    SemanticReadinessDegradation, get_index_status, get_index_status_in_current_snapshot,
-    prepare_index_status_embedder_for_workspace,
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
+    SemanticReadiness, SemanticReadinessDegradation, get_index_status,
+    get_index_status_in_current_snapshot, prepare_index_status_embedder_for_workspace,
 };
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::source_run::SourceRunKind;
@@ -93,6 +93,7 @@ const PACK_L2_CACHE_PATH: &str = "cache.pack_l2";
 const GRAPH_SNAPSHOT_PATH: &str = ".ee/graph";
 const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --workspace .";
 const SEARCH_INDEX_REBUILD_COMMAND: &str = "ee index rebuild --workspace .";
+const SEARCH_INDEX_STATUS_COMMAND: &str = "ee index status --workspace . --json";
 const PACK_L2_CACHE_REPAIR_COMMAND: &str = "ee pack \"<task>\" --workspace . --json";
 const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
 #[cfg(not(feature = "graph"))]
@@ -540,6 +541,21 @@ impl DerivedAssetReport {
             path,
             Some("Run `ee doctor --json` to inspect storage and filesystem access."),
         )
+    }
+
+    fn from_index_status_error(error: &IndexStatusError) -> Self {
+        if matches!(error, IndexStatusError::GenerationInspectionUnavailable(_)) {
+            // An unmeasured generation has no known watermark or rebuild
+            // requirement. A later passive probe can establish its health.
+            Self::unavailable_with_kind(
+                SEARCH_INDEX_ASSET_NAME,
+                SEARCH_INDEX_ASSET_KIND,
+                SEARCH_INDEX_PATH,
+                Some(SEARCH_INDEX_STATUS_COMMAND),
+            )
+        } else {
+            Self::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
+        }
     }
 
     #[must_use]
@@ -1193,7 +1209,7 @@ impl CapabilityReport {
     fn gather_with_workspace_connection_and_index(
         workspace_path: Option<&Path>,
         connection: Option<&DbConnection>,
-        index_status: Option<&Result<IndexStatusReport, ()>>,
+        index_status: Option<&Result<IndexStatusReport, IndexStatusError>>,
     ) -> Self {
         Self {
             runtime: probe_runtime_capability(),
@@ -1309,7 +1325,7 @@ pub enum SearchSemanticPosture {
 /// [`Available`]: SearchSemanticPosture::Available
 /// [`HashFallback`]: SearchSemanticPosture::HashFallback
 fn search_semantic_posture_from_index_status(
-    index_status: Option<&Result<IndexStatusReport, ()>>,
+    index_status: Option<&Result<IndexStatusReport, IndexStatusError>>,
 ) -> SearchSemanticPosture {
     match index_status {
         Some(Ok(report)) => {
@@ -1328,7 +1344,7 @@ fn search_semantic_posture_from_index_status(
                     },
                 )
         }
-        Some(Err(())) | None => SearchSemanticPosture::NotProbed,
+        Some(Err(_)) | None => SearchSemanticPosture::NotProbed,
     }
 }
 
@@ -1340,7 +1356,7 @@ pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatu
 fn probe_search_capability_with_connection(
     workspace_path: Option<&Path>,
     connection: Option<&DbConnection>,
-    index_status: Option<&Result<IndexStatusReport, ()>>,
+    index_status: Option<&Result<IndexStatusReport, IndexStatusError>>,
 ) -> CapabilityStatus {
     if diag_forced_capability_gap("search") {
         return CapabilityStatus::Unimplemented;
@@ -1366,7 +1382,7 @@ fn probe_search_capability_with_connection(
 
     match index_status {
         Some(Ok(report)) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
-        Some(Ok(_)) | Some(Err(())) => CapabilityStatus::Degraded,
+        Some(Ok(_)) | Some(Err(_)) => CapabilityStatus::Degraded,
         None => match get_index_status(&options) {
             Ok(report) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
             Ok(_) | Err(_) => CapabilityStatus::Degraded,
@@ -3878,7 +3894,11 @@ fn status_posture_report(
             if identity_mismatch {
                 Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
             } else {
-                pack_posture_fallback(storage_status, search_status)
+                pack_posture_fallback(
+                    storage_status,
+                    search_status,
+                    search_posture_fallback(capabilities.search, storage_status, search_semantic),
+                )
             },
         ),
         posture_row(
@@ -4264,6 +4284,7 @@ const fn pack_posture_reason(
 const fn pack_posture_fallback(
     storage_status: SubsystemPostureStatus,
     search_status: SubsystemPostureStatus,
+    search_repair: Option<&'static str>,
 ) -> Option<&'static str> {
     match pack_posture_status(storage_status, search_status) {
         SubsystemPostureStatus::Ok => None,
@@ -4271,7 +4292,12 @@ const fn pack_posture_fallback(
             Some("ee init --workspace .")
         }
         SubsystemPostureStatus::DegradedRequired => Some("ee doctor --json"),
-        SubsystemPostureStatus::DegradedRecoverable => Some("ee index rebuild --workspace ."),
+        // Degraded search also includes an inspection that could not acquire
+        // a generation lease. Establish health before recommending a rebuild.
+        SubsystemPostureStatus::DegradedRecoverable => match search_repair {
+            Some(repair) => Some(repair),
+            None => Some(SEARCH_INDEX_STATUS_COMMAND),
+        },
         SubsystemPostureStatus::Unimplemented => {
             Some("use a binary built with required pack dependencies")
         }
@@ -4542,7 +4568,26 @@ fn maintenance_posture_reason(assets: &[DerivedAssetReport]) -> Option<&'static 
 fn maintenance_posture_fallback(assets: &[DerivedAssetReport]) -> Option<&'static str> {
     match maintenance_posture_status(assets) {
         SubsystemPostureStatus::Ok => None,
-        SubsystemPostureStatus::DegradedRecoverable => Some("ee index rebuild --workspace ."),
+        SubsystemPostureStatus::DegradedRecoverable => {
+            if let Some(asset) = assets
+                .iter()
+                .find(|asset| asset.status == DerivedAssetStatus::Unavailable)
+            {
+                return asset.repair.or(Some("ee doctor --json"));
+            }
+            assets
+                .iter()
+                .find(|asset| {
+                    matches!(
+                        asset.status,
+                        DerivedAssetStatus::Stale
+                            | DerivedAssetStatus::Missing
+                            | DerivedAssetStatus::Corrupt
+                    )
+                })
+                .and_then(|asset| asset.repair)
+                .or(Some("ee doctor --json"))
+        }
         SubsystemPostureStatus::DegradedRequired
         | SubsystemPostureStatus::Blocked
         | SubsystemPostureStatus::Initializing => Some("ee doctor --json"),
@@ -4675,13 +4720,13 @@ fn push_search_capability_degradation(
             degradations.push(DegradationReport {
                 code: "search_index_degraded",
                 severity: "medium",
-                message: "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+                message: "Search is compiled but readiness for the selected workspace is degraded or could not be measured.",
                 repair: "Run `ee index status --workspace . --json`.",
             });
             degradations.push(DegradationReport {
                 code: "search_unavailable",
                 severity: "medium",
-                message: "Workspace search is unavailable because the selected index is missing, stale, corrupt, or unreadable.",
+                message: "Workspace search readiness has not been confirmed; inspect the index before choosing a repair.",
                 repair: "Run `ee index status --workspace . --json`.",
             });
         }
@@ -5137,26 +5182,23 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
 fn gather_status_index_status(
     workspace_path: Option<&Path>,
     connection: Option<&DbConnection>,
-) -> Option<Result<IndexStatusReport, ()>> {
+) -> Option<Result<IndexStatusReport, IndexStatusError>> {
     let workspace_path = workspace_path?;
     let options = IndexStatusOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
         index_dir: None,
     };
-    Some(
-        match connection {
-            Some(connection) => get_index_status_in_current_snapshot(&options, connection),
-            None => get_index_status(&options),
-        }
-        .map_err(|_| ()),
-    )
+    Some(match connection {
+        Some(connection) => get_index_status_in_current_snapshot(&options, connection),
+        None => get_index_status(&options),
+    })
 }
 
 fn gather_evidence_admission_status(
     workspace_path: Option<&Path>,
     connection: Option<&DbConnection>,
-    index_status: Option<&Result<IndexStatusReport, ()>>,
+    index_status: Option<&Result<IndexStatusReport, IndexStatusError>>,
 ) -> EvidenceAdmissionStatusReport {
     // Totals already belong to status's pinned source snapshot. Reuse them;
     // another full admission scan would undo the evidence read-path hotfix.
@@ -5213,14 +5255,12 @@ fn gather_derived_assets(
 fn gather_derived_assets_with_index_status(
     workspace_path: Option<&Path>,
     graph_snapshot_artifact: &GraphSnapshotArtifactReport,
-    index_status: Option<&Result<IndexStatusReport, ()>>,
+    index_status: Option<&Result<IndexStatusReport, IndexStatusError>>,
 ) -> Vec<DerivedAssetReport> {
     let search_index = match workspace_path {
         Some(path) => match index_status {
             Some(Ok(report)) => DerivedAssetReport::from_index_status(report),
-            Some(Err(())) => {
-                DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
-            }
+            Some(Err(error)) => DerivedAssetReport::from_index_status_error(error),
             None => {
                 let options = IndexStatusOptions {
                     workspace_path: path.to_path_buf(),
@@ -5229,9 +5269,7 @@ fn gather_derived_assets_with_index_status(
                 };
                 match get_index_status(&options) {
                     Ok(report) => DerivedAssetReport::from_index_status(&report),
-                    Err(_) => {
-                        DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
-                    }
+                    Err(error) => DerivedAssetReport::from_index_status_error(&error),
                 }
             }
         },
@@ -7838,6 +7876,106 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn index_publication_contention_keeps_status_watermarks_and_repair_unknown() -> TestResult {
+        use rustix::fs::{FlockOperation, flock};
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let publisher = std::fs::File::open(&ee_dir).map_err(|error| error.to_string())?;
+        flock(&publisher, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+
+        let cached = gather_status_index_status(Some(&workspace), None);
+        assert!(matches!(
+            cached.as_ref(),
+            Some(Err(IndexStatusError::GenerationInspectionUnavailable(_)))
+        ));
+        assert_eq!(
+            search_semantic_posture_from_index_status(cached.as_ref()),
+            SearchSemanticPosture::NotProbed
+        );
+        let assets = gather_derived_assets_with_index_status(
+            Some(&workspace),
+            &gather_graph_snapshot_artifact(None),
+            cached.as_ref(),
+        );
+        let search = assets
+            .iter()
+            .find(|asset| asset.name == SEARCH_INDEX_ASSET_NAME)
+            .ok_or_else(|| "missing search asset".to_owned())?;
+        assert_eq!(search.status, DerivedAssetStatus::Unavailable);
+        assert_eq!(search.source_high_watermark, None);
+        assert_eq!(search.asset_high_watermark, None);
+        assert_eq!(search.high_watermark_lag, None);
+        assert_eq!(search.repair, Some(SEARCH_INDEX_STATUS_COMMAND));
+        assert_eq!(
+            maintenance_posture_fallback(&assets),
+            Some(SEARCH_INDEX_STATUS_COMMAND)
+        );
+        assert_eq!(
+            pack_posture_fallback(
+                SubsystemPostureStatus::Ok,
+                SubsystemPostureStatus::DegradedRecoverable,
+                Some(SEARCH_INDEX_STATUS_COMMAND),
+            ),
+            Some(SEARCH_INDEX_STATUS_COMMAND)
+        );
+
+        let mut degradations = Vec::new();
+        push_search_capability_degradation(
+            &mut degradations,
+            CapabilityStatus::Degraded,
+            Some(&workspace),
+            SearchSemanticPosture::NotProbed,
+        );
+        assert!(degradations.iter().all(|entry| {
+            !entry.message.contains("missing")
+                && !entry.message.contains("corrupt")
+                && !entry.repair.contains("rebuild")
+        }));
+        assert!(!ee_dir.join("index").exists());
+        assert!(!ee_dir.join("ee.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_repair_targets_the_measured_stale_asset() {
+        let mut index = index_report_with_embedding(None);
+        index.health = IndexHealth::Stale;
+        index.repair_hint = Some(SEARCH_INDEX_REBUILD_COMMAND);
+        let stale_index = DerivedAssetReport::from_index_status(&index);
+        assert_eq!(
+            maintenance_posture_fallback(&[stale_index]),
+            Some(SEARCH_INDEX_REBUILD_COMMAND)
+        );
+        assert_eq!(
+            pack_posture_fallback(
+                SubsystemPostureStatus::Ok,
+                SubsystemPostureStatus::DegradedRecoverable,
+                Some(SEARCH_LEXICAL_ONLY_REPAIR),
+            ),
+            Some(SEARCH_INDEX_REBUILD_COMMAND),
+            "a measured lexical-only index retains the search repair in pack posture"
+        );
+
+        let mut graph = gather_graph_snapshot_artifact(None);
+        graph.status = DerivedAssetStatus::Stale;
+        assert_eq!(
+            maintenance_posture_fallback(&[DerivedAssetReport::from_graph_snapshot_artifact(
+                &graph
+            )]),
+            Some(GRAPH_SNAPSHOT_REFRESH_COMMAND),
+            "a stale graph snapshot must not recommend rebuilding the search index"
+        );
+    }
+
     #[test]
     fn degraded_toon_output_reports_unavailable_code() -> TestResult {
         let mut degradations = Vec::new();
@@ -8879,7 +9017,11 @@ mod tests {
             "absent index status",
         )?;
         ensure(
-            search_semantic_posture_from_index_status(Some(&Err(()))),
+            search_semantic_posture_from_index_status(Some(&Err(
+                IndexStatusError::GenerationInspectionUnavailable(
+                    "publication in progress".to_owned(),
+                ),
+            ))),
             SearchSemanticPosture::NotProbed,
             "failed index status probe",
         )?;

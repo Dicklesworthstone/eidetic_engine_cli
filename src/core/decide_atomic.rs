@@ -502,6 +502,7 @@ fn validate_conflict_resolution(
     };
     match plan_conflict_resolution(&surface, &request) {
         ConflictResolutionOutcome::Plan(current) if &current == plan => {
+            crate::core::conflict_proposal::validate_scope_split_sources(connection, plan)?;
             if plan.verb == ResolveVerb::Merge {
                 crate::core::conflict_proposal::merge_sources(connection, workspace_id, plan)?;
             }

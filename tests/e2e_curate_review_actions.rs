@@ -472,6 +472,97 @@ impl ConflictProposalFixture {
 }
 
 #[test]
+fn scope_split_refuses_collapsed_scopes_in_preview_proposal_and_direct_apply() -> TestResult {
+    for crossed_existing_tags in [false, true] {
+        let fixture = if crossed_existing_tags {
+            ConflictProposalFixture::with_tags(
+                "conflict-scope-crossed-tags",
+                &["development"],
+                &["production"],
+            )?
+        } else {
+            ConflictProposalFixture::new("conflict-scope-equal-tags")?
+        };
+        let before_sources = fixture.sources()?;
+        let before_counts = fixture.durable_counts()?;
+        let before_tags = {
+            let db = fixture.database()?;
+            [
+                db.get_memory_tags(&fixture.memory_a)
+                    .map_err(|error| error.to_string())?,
+                db.get_memory_tags(&fixture.memory_b)
+                    .map_err(|error| error.to_string())?,
+            ]
+        };
+        for mode in [None, Some("--propose"), Some("--apply")] {
+            let mut args = vec![
+                "conflict",
+                "resolve",
+                fixture.memory_a.as_str(),
+                fixture.memory_b.as_str(),
+                "--verb",
+                "scope-split",
+                "--scope-a-tags",
+                " Production ,PRODUCTION",
+                "--scope-b-tags",
+                if crossed_existing_tags {
+                    "development"
+                } else {
+                    "production"
+                },
+                "--reason",
+                "These deployment statements need distinct contexts.",
+            ];
+            args.extend(mode);
+            let (output, response) = fixture.run(&args)?;
+            ensure(
+                output.status.code() == Some(1)
+                    && response["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("scope")),
+                format!("collapsed scopes must be refused in mode {mode:?}: {response}"),
+            )?;
+            ensure(
+                fixture.durable_counts()? == before_counts
+                    && fixture.sources()? == before_sources,
+                "an invalid scope split must not create queue, decision, audit, or index work",
+            )?;
+            let after_tags = {
+                let db = fixture.database()?;
+                [
+                    db.get_memory_tags(&fixture.memory_a)
+                        .map_err(|error| error.to_string())?,
+                    db.get_memory_tags(&fixture.memory_b)
+                        .map_err(|error| error.to_string())?,
+                ]
+            };
+            ensure(after_tags == before_tags, "refusal must preserve both tag sets")?;
+            let active = fixture.success(&["conflict", "list"])?;
+            ensure(
+                active["data"]["pairs"]
+                    .as_array()
+                    .is_some_and(|pairs| pairs.len() == 1),
+                format!("the conflict must remain active after refusal: {active}"),
+            )?;
+        }
+        let valid = fixture.propose(
+            "scope-split",
+            &[
+                "--scope-a-tags",
+                "scope:production",
+                "--scope-b-tags",
+                "scope:development",
+            ],
+        )?;
+        ensure(
+            valid["data"]["candidateStatus"] == "pending",
+            format!("distinct scopes must still permit an explicit proposal: {valid}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn queued_conflict_scope_split_preserves_both_memories_until_reviewed_apply() -> TestResult {
     let fixture = ConflictProposalFixture::new("queued-conflict-scope-split")?;
     let before = {

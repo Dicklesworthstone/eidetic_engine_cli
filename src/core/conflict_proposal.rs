@@ -5,6 +5,8 @@
 //! receipt again under its writer fence and commits candidate completion with
 //! the rationale, source effects, lineage, and terminal conflict audit.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -205,6 +207,7 @@ pub(crate) fn live_plan(
     }
     match plan_conflict_resolution(&surface, request) {
         ConflictResolutionOutcome::Plan(plan) => {
+            validate_scope_split_sources(connection, &plan)?;
             if plan.verb == ResolveVerb::Merge {
                 merge_sources(connection, workspace_id, &plan)?;
             }
@@ -225,6 +228,49 @@ pub(crate) fn live_plan(
             repair: Some(repair),
         }),
     }
+}
+
+/// Scope splitting adds labels rather than replacing existing scope. Distinct
+/// requested labels can therefore converge to the same final scope. Such a
+/// plan must not write a terminal resolution that disables conflict suppression.
+/// Both proposal/preview and the locked writer validate the authoritative tags.
+pub(crate) fn validate_scope_split_sources(
+    connection: &DbConnection,
+    plan: &ConflictResolutionPlan,
+) -> Result<(), DomainError> {
+    if plan.verb != ResolveVerb::ScopeSplit {
+        return Ok(());
+    }
+    let resulting_tags = |memory_id: &str| -> Result<BTreeSet<String>, DomainError> {
+        let mut tags: BTreeSet<_> = connection
+            .get_memory_tags(memory_id)
+            .map_err(storage_error)?
+            .into_iter()
+            .collect();
+        let additions = plan.actions.iter().find_map(|action| match action {
+            PlannedResolutionAction::AddTags {
+                memory_id: target,
+                tags,
+            } if target == memory_id => Some(tags),
+            _ => None,
+        });
+        let Some(additions) = additions else {
+            return Err(refusal(
+                "conflict_proposal_invalid",
+                "A scope split must specify both memories' complete scope additions.",
+            ));
+        };
+        tags.extend(additions.iter().cloned());
+        Ok(tags)
+    };
+    if resulting_tags(&plan.memory_a)? == resulting_tags(&plan.memory_b)? {
+        return Err(DomainError::Usage {
+            message: "Scope split would leave both memories with identical scope tags; the conflict remains unresolved."
+                .to_owned(),
+            repair: Some("Choose scope labels that remain distinct after existing tags are preserved, or use --verb both-valid to explicitly retain both memories in the same scope.".to_owned()),
+        });
+    }
+    Ok(())
 }
 
 /// The source facts and exact scope a reviewed textual merge may preserve.
@@ -1023,6 +1069,74 @@ mod tests {
             assert!(connection.get_memory_tags(MEMORY_A).unwrap().is_empty());
             assert!(connection.get_memory_tags(MEMORY_B).unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn scope_split_refuses_existing_tags_that_erase_the_proposed_distinction() {
+        let (connection, _) = fixture();
+        connection
+            .add_memory_tags(MEMORY_A, &["development".to_owned()])
+            .unwrap();
+        connection
+            .add_memory_tags(MEMORY_B, &["production".to_owned()])
+            .unwrap();
+        let request = ConflictResolveRequest {
+            memory_a: MEMORY_A,
+            memory_b: MEMORY_B,
+            verb: ResolveVerb::ScopeSplit,
+            keep: None,
+            reason: "These configurations have explicit deployment scopes.",
+            scope_a_tags: vec!["production".to_owned()],
+            scope_b_tags: vec!["development".to_owned()],
+            merge_content: None,
+        };
+        let tables = [
+            "memories",
+            "memory_tags",
+            "memory_links",
+            "curation_candidates",
+            "audit_log",
+            "search_index_jobs",
+        ];
+        let counts = || {
+            tables
+                .iter()
+                .map(|table| connection.count_table_rows(table).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let before = counts();
+        assert!(matches!(
+            live_plan(&connection, WORKSPACE, &request),
+            Err(DomainError::Usage { .. })
+        ));
+        assert!(matches!(
+            create_in_transaction(&connection, WORKSPACE, &request, Some("test")),
+            Err(DomainError::Usage { .. })
+        ));
+        assert_eq!(counts(), before);
+        assert_eq!(connection.get_memory_tags(MEMORY_A).unwrap(), ["development"]);
+        assert_eq!(connection.get_memory_tags(MEMORY_B).unwrap(), ["production"]);
+        assert_eq!(
+            assemble_conflict_surface_for_workspace(
+                &connection,
+                WORKSPACE,
+                ContradictionDetectionConfig::default(),
+            )
+            .pairs
+            .len(),
+            1,
+            "an invalid scope split must leave the conflict active"
+        );
+
+        let distinct = ConflictResolveRequest {
+            scope_a_tags: vec!["production".to_owned(), "scope:service-a".to_owned()],
+            scope_b_tags: vec!["development".to_owned(), "scope:service-b".to_owned()],
+            ..request
+        };
+        let proposal =
+            create_in_transaction(&connection, WORKSPACE, &distinct, Some("test")).unwrap();
+        assert!(proposal.created);
+        assert_eq!(proposal.candidate_status, "pending");
     }
 
     #[test]

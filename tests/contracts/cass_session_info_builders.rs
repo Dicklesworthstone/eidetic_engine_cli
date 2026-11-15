@@ -60,9 +60,10 @@ fn with_agent_round_trips_each_known_agent_variant() -> TestResult {
         CassAgent::Cursor,
         CassAgent::Gemini,
         CassAgent::ChatGpt,
+        CassAgent::Other("opencode".to_owned()),
         CassAgent::Unknown,
     ] {
-        let session = fresh().with_agent(agent);
+        let session = fresh().with_agent(agent.clone());
         if session.agent != agent {
             return Err(format!(
                 "with_agent({agent:?}) round-trip failed: agent={:?}",

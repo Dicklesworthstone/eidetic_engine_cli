@@ -40,10 +40,52 @@ impl Status {
             Self::UnexpectedSuccess => 5,
         }
     }
+}
+
+/// `TestResult` counts callbacks separately from `testsRun`: a failed body,
+/// `tearDown` and several `addCleanup` callbacks can all fail the same test.
+/// Preserve every failure kind/count without pretending they are executions
+/// of different subjects. A repeated success/skip/expected outcome is not
+/// this producer shape and must not become repair authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Outcomes([u64; 6]);
+
+impl Outcomes {
+    fn record(&mut self, status: Status) -> Result<(), ()> {
+        let repeated = self.0.iter().any(|count| *count > 0);
+        if repeated
+            && (!matches!(status, Status::Failed | Status::Error)
+                || [0, 3, 4, 5].iter().any(|index| self.0[*index] > 0))
+        {
+            return Err(());
+        }
+        self.0[status.index()] += 1;
+        Ok(())
+    }
 
     fn failed(self) -> bool {
-        matches!(self, Self::Failed | Self::Error | Self::UnexpectedSuccess)
+        [1, 2, 5].iter().any(|index| self.0[*index] > 0)
     }
+
+    fn include(&mut self, other: Self) {
+        for (count, observed) in self.0.iter_mut().zip(other.0) {
+            *count = (*count).max(observed);
+        }
+    }
+}
+
+fn record_progress<'a>(
+    nodes: &mut BTreeMap<&'a str, Outcomes>,
+    observed: &mut [u64; 6],
+    node: &'a str,
+    status: Status,
+) -> Result<(), ()> {
+    if observed.iter().sum::<u64>() >= MAX_TESTS as u64 {
+        return Err(());
+    }
+    nodes.entry(node).or_default().record(status)?;
+    observed[status.index()] += 1;
+    Ok(())
 }
 
 /// Accept a complete ordinary TestCase description, not a traceback or a
@@ -275,10 +317,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     let mut ran_count = None;
     let mut inventory_open = true;
     let mut ambiguous = false;
-    let mut nodes = BTreeMap::<&str, Status>::new();
-    let mut details = BTreeMap::<&str, Status>::new();
-    let mut fixture_progress = BTreeMap::<&str, u64>::new();
-    let mut fixture_details = BTreeMap::<&str, u64>::new();
+    let mut nodes = BTreeMap::<&str, Outcomes>::new();
+    let mut details = BTreeMap::<&str, Outcomes>::new();
+    let mut detail_count = 0;
     let mut observed = [0_u64; 6];
     let mut description = None;
     for (index, line) in lines.iter().enumerate() {
@@ -293,12 +334,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if let Some(status) = displayed_status
                 && started_at + 1 == index
             {
-                if observed.iter().sum::<u64>() >= MAX_TESTS as u64
-                    || nodes.insert(node, status).is_some()
-                {
-                    return Err(());
-                }
-                observed[status.index()] += 1;
+                record_progress(&mut nodes, &mut observed, node, status)?;
                 continue;
             }
             ambiguous = true;
@@ -327,19 +363,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         }
         if inventory_open && verbose {
             if let Some((node, status)) = progress(line) {
-                if observed.iter().sum::<u64>() >= MAX_TESTS as u64 {
-                    return Err(());
-                }
-                let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
-                if let Some(previous) = nodes.insert(node, status)
-                    && !(repeated_fixture && previous == Status::Error)
-                {
-                    return Err(());
-                }
-                if repeated_fixture {
-                    *fixture_progress.entry(node).or_default() += 1;
-                }
-                observed[status.index()] += 1;
+                record_progress(&mut nodes, &mut observed, node, status)?;
             } else if let Some(node) = test_identity(line) {
                 description = Some((node, index));
             } else {
@@ -352,61 +376,56 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 continue;
             };
             ambiguous |= !complete_subject;
-            if details.len() == MAX_TESTS && !details.contains_key(node) {
+            if detail_count == MAX_TESTS {
                 return Err(());
             }
-            let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
-            if let Some(previous) = details.insert(node, status)
-                && complete_subject
-                && !(repeated_fixture && previous == Status::Error)
-            {
-                return Err(());
-            }
-            if repeated_fixture {
-                if fixture_details.values().sum::<u64>() >= MAX_TESTS as u64 {
-                    return Err(());
-                }
-                *fixture_details.entry(node).or_default() += 1;
-            }
+            details.entry(node).or_default().record(status)?;
+            detail_count += 1;
         }
     }
-    // Each failed class cleanup can report the same _ErrorHolder again. Keep
-    // multiplicity for summary/proof checks but one diagnostic per identity.
-    // Test identities still cannot repeat. SkipTest is also a native fixture
-    // outcome (including teardown), but never supplies completion authority.
-    for (node, status) in nodes.iter().chain(details.iter()) {
-        if fixture_phase(node).is_some() && !matches!(status, Status::Error | Status::Skipped) {
+    // Class and test cleanups can both report their identity repeatedly.
+    // SkipTest is also a native fixture outcome (including teardown), but
+    // never supplies completion authority.
+    for (node, outcomes) in nodes.iter().chain(details.iter()) {
+        if fixture_phase(node).is_some() && [0, 1, 4, 5].iter().any(|index| outcomes.0[*index] > 0)
+        {
             return Err(());
         }
     }
-    for (node, status) in &details {
+    for (node, outcomes) in &details {
         match nodes.get(node) {
-            Some(progress_status) if progress_status != status => return Err(()),
+            Some(progress)
+                if outcomes
+                    .0
+                    .iter()
+                    .zip(progress.0)
+                    .any(|(detail, progress)| *detail > 0 && progress == 0) =>
+            {
+                return Err(());
+            }
             None if verbose => ambiguous = true,
             _ => {}
         }
     }
     let mut failures: BTreeMap<_, _> = nodes
         .iter()
-        .filter(|(_, status)| status.failed())
-        .map(|(node, status)| (*node, *status))
+        .filter(|(_, outcomes)| outcomes.failed())
+        .map(|(node, outcomes)| (*node, *outcomes))
         .collect();
-    failures.extend(details.iter().map(|(node, status)| (*node, *status)));
+    for (node, outcomes) in &details {
+        failures.entry(*node).or_default().include(*outcomes);
+    }
     if let Some(summary) = &summary {
         if summary.no_tests && ran_count != Some(0) {
             return Err(());
         }
         let mut known = [0_u64; 6];
-        for (node, status) in &failures {
+        for outcomes in failures.values() {
             // Progress and detail sections describe the same callbacks, not
             // two independent failures. Neither may contradict the footer.
-            let occurrences = fixture_progress
-                .get(node)
-                .copied()
-                .unwrap_or(0)
-                .max(fixture_details.get(node).copied().unwrap_or(0))
-                .max(1);
-            known[status.index()] += occurrences;
+            for (count, observed) in known.iter_mut().zip(outcomes.0) {
+                *count += observed;
+            }
         }
         if [1, 2, 5]
             .iter()
@@ -416,29 +435,27 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         }
     }
     let mut execution = Execution::default();
-    let has_fixture = nodes.keys().any(|node| fixture_phase(node).is_some());
-    let fixture_withheld = nodes.iter().any(|(node, status)| {
-        fixture_phase(node)
-            .is_some_and(|phase| phase == FixturePhase::Setup || *status == Status::Skipped)
+    let fixture_withheld = nodes.iter().any(|(node, outcomes)| {
+        fixture_phase(node).is_some_and(|phase| phase == FixturePhase::Setup || outcomes.0[3] > 0)
     });
-    let teardown_failed = nodes.iter().any(|(node, status)| {
-        fixture_phase(node) == Some(FixturePhase::Teardown) && *status == Status::Error
+    let teardown_failed = nodes.iter().any(|(node, outcomes)| {
+        fixture_phase(node) == Some(FixturePhase::Teardown) && outcomes.0[2] > 0
     });
     let mut tests_run = 0_u64;
-    for (node, status) in &nodes {
+    for (node, outcomes) in &nodes {
         if fixture_phase(node).is_some() {
             continue;
         }
         tests_run += 1;
         let name = subject(node);
         execution.inventory.insert(name);
-        if status.failed() || (teardown_failed && *status != Status::Skipped) {
+        if outcomes.failed() || (teardown_failed && outcomes.0[3] == 0) {
             // The private failed set is also a must-pass proof requirement.
             // A teardown can affect any executed subject in this run. Require
             // them all to pass on retry rather than inventing a fixture-test
             // alias or guessing ownership from dotted class/module names.
             execution.failed.insert(name);
-        } else if *status == Status::Passed {
+        } else if outcomes.0[0] > 0 {
             execution.passed.insert(name);
         }
     }
@@ -447,12 +464,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         && !fixture_withheld
         && description.is_none()
         && ran_count == Some(tests_run)
-        && (!has_fixture
-            || nodes.iter().all(|(node, status)| {
-                fixture_phase(node).is_none()
-                    || *status == Status::Skipped
-                    || fixture_progress.get(node) == fixture_details.get(node)
-            }))
+        && nodes
+            .iter()
+            .filter(|(_, outcomes)| outcomes.failed())
+            .all(|(node, outcomes)| details.get(node) == Some(outcomes))
         && summary
             .as_ref()
             .is_some_and(|summary| observed[1..] == summary.counts[1..]);
@@ -541,6 +556,144 @@ mod tests {
             );
             assert_eq!(failure.diagnostics.len(), 1);
         }
+    }
+
+    // Captured from CPython 3.12 TextTestRunner(verbosity=2): two addCleanup
+    // errors repeat the test's progress and detail rows while testsRun counts
+    // the test once. A body assertion plus tearDown error has the same shape,
+    // but errors are printed before failures in the detail section.
+    fn callback_report(body_failure: bool, descriptions: bool) -> String {
+        let description = if descriptions {
+            "\nA private description of the cache."
+        } else {
+            ""
+        };
+        let first = if body_failure { "FAIL" } else { "ERROR" };
+        let exception = if body_failure {
+            "AssertionError"
+        } else {
+            "RuntimeError"
+        };
+        let counts = if body_failure {
+            "failures=1, errors=1"
+        } else {
+            "errors=2"
+        };
+        format!(
+            "{CACHE}{description} ... {first}\n{CACHE}{description} ... ERROR\n{CONTROL} ... ok\n\n{ERROR_SEPARATOR}\nERROR: {CACHE}{description}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nRuntimeError: private cleanup body\n\n{ERROR_SEPARATOR}\n{first}: {CACHE}{description}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\n{exception}: private first body\n\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nFAILED ({counts})\n"
+        )
+    }
+
+    #[test]
+    fn repeated_test_cleanup_callbacks_and_body_teardown_failures_are_recallable() {
+        use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
+
+        for body_failure in [false, true] {
+            for descriptions in [false, true] {
+                let text = callback_report(body_failure, descriptions);
+                let failure = decoded(&text);
+                assert!(failure.failed);
+                assert!(failure.execution.has_known_failures());
+                assert_eq!(failure.execution.inventory.len(), 2);
+                assert_eq!(failure.execution.failed.len(), 1);
+                assert_eq!(failure.diagnostics, decoded(&report("ERROR")).diagnostics);
+                assert!(
+                    failure
+                        .execution
+                        .verified_by(&decoded(&report("ok")).execution)
+                );
+                assert!(!failure.symptom.unwrap().contains("private"));
+                let output = ToolOutput {
+                    text,
+                    is_error: Some(true),
+                    exit_code: Some(1),
+                };
+                assert_eq!(failure_diagnostics(&output), failure.diagnostics);
+                assert_eq!(
+                    structured_error_diagnostics(&output.text),
+                    failure.diagnostics
+                );
+                let required = Requirement::capture(&output, true);
+                let proof = ToolOutput {
+                    text: report("ok"),
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                };
+                assert!(required.is_verified_by(&Proof::capture(&proof)));
+                assert!(
+                    !Requirement::capture(&output, false).is_verified_by(&Proof::capture(&proof))
+                );
+                for proof in [
+                    ToolOutput {
+                        is_error: None,
+                        exit_code: None,
+                        ..proof.clone()
+                    },
+                    ToolOutput {
+                        exit_code: Some(1),
+                        ..proof.clone()
+                    },
+                    ToolOutput {
+                        text: report("skipped 'not exercised'"),
+                        ..proof.clone()
+                    },
+                    ToolOutput {
+                        text: report("expected failure"),
+                        ..proof.clone()
+                    },
+                    ToolOutput {
+                        text: report("ok").replace(CACHE, "test_other (m.C.test_other)"),
+                        ..proof
+                    },
+                ] {
+                    assert!(!required.is_verified_by(&Proof::capture(&proof)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failure_callback_counts_cannot_hide_duplicates_missing_details_or_repeated_tests() {
+        let text = callback_report(true, false);
+        let detail = format!("{ERROR_SEPARATOR}\nERROR: {CACHE}\n");
+        for malformed in [
+            text.replace("Ran 2 tests", "Ran 3 tests"),
+            text.replace("failures=1, errors=1", "failures=1, errors=2"),
+            text.replace(
+                &detail,
+                &format!("{ERROR_SEPARATOR}\nunrecognized callback\n"),
+            ),
+            text.replace(&detail, &format!("{ERROR_SEPARATOR}\nFAIL: {CACHE}\n")),
+            text.replacen(
+                &format!("{CACHE} ... ERROR\n"),
+                &format!("{CACHE} ... ERROR\n{CACHE} ... ERROR\n"),
+                1,
+            ),
+            text.replacen(
+                &format!("{CACHE} ... FAIL\n"),
+                &format!("{CACHE} ... ok\n"),
+                1,
+            ),
+        ] {
+            assert!(
+                !matches!(super::super::decode(&malformed), Ok(Some(report)) if report.execution.has_known_failures() || report.allows_completion),
+                "{malformed}"
+            );
+        }
+        // A quiet report retains the class but cannot invent named execution.
+        let quiet = text.replacen(
+            &format!("{CACHE} ... FAIL\n{CACHE} ... ERROR\n{CONTROL} ... ok"),
+            "FE.",
+            1,
+        );
+        let quiet = decoded(&quiet);
+        assert_eq!(quiet.diagnostics, decoded(&text).diagnostics);
+        assert!(!quiet.execution.has_known_failures());
+        assert!(
+            !quiet
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
     }
 
     #[test]

@@ -1529,9 +1529,12 @@ fn record_outcome_inner(
 
     // Candidate proposals are optional postcommit work. They must not extend
     // the owner interval needed for mandatory admission and learning.
-    if report.status == OutcomeRecordStatus::Recorded
-        && report.target_type == "memory"
+    if matches!(
+        report.status,
+        OutcomeRecordStatus::Recorded | OutcomeRecordStatus::AlreadyRecorded
+    ) && report.target_type == "memory"
         && is_harmful_signal(&report.signal)
+        && report.weight > 0.0
         && let Some(event_id) = report.event_id.as_deref()
     {
         #[cfg(test)]
@@ -2155,7 +2158,167 @@ fn trust_class_transition_trigger(direction: TrustClassTransitionDirection) -> &
     }
 }
 
+struct AntiPatternFeedback<'a> {
+    harmful_events: Vec<&'a StoredFeedbackEvent>,
+    helpful_count: usize,
+    distinct_harmful_sources: usize,
+}
+
+impl AntiPatternFeedback<'_> {
+    fn has_quorum(&self) -> bool {
+        self.harmful_events.len() >= ANTI_PATTERN_PROPOSAL_THRESHOLD
+            && self.distinct_harmful_sources >= 2
+    }
+}
+
+/// A proposal must describe accepted learning, not just rows in the ledger.
+/// Zero-weight and unapplied observations carry no learning authority; source
+/// labels are identities, so changing source_type cannot create a second vote.
+fn anti_pattern_feedback<'a>(
+    events: &'a [StoredFeedbackEvent],
+    workspace_id: &str,
+    memory_id: &str,
+) -> AntiPatternFeedback<'a> {
+    let eligible = |event: &&StoredFeedbackEvent| {
+        event.workspace_id == workspace_id
+            && event.target_type == "memory"
+            && event.target_id == memory_id
+            && event.weight.is_finite()
+            && event.weight > 0.0
+            && event.applied_at.is_some()
+    };
+    let harmful_events: Vec<_> = events
+        .iter()
+        .filter(eligible)
+        .filter(|event| {
+            is_harmful_signal(&event.signal)
+                && event
+                    .source_id
+                    .as_deref()
+                    .is_some_and(|source| !source.trim().is_empty())
+        })
+        .collect();
+    let distinct_harmful_sources = harmful_events
+        .iter()
+        .filter_map(|event| event.source_id.as_deref().map(str::trim))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let helpful_count = events
+        .iter()
+        .filter(eligible)
+        .filter(|event| HELPFUL_SIGNALS.contains(&event.signal.as_str()))
+        .count();
+    AntiPatternFeedback {
+        harmful_events,
+        helpful_count,
+        distinct_harmful_sources,
+    }
+}
+
+/// Recheck only the evidence named by this proposal. Additional observations
+/// cannot replace a withdrawn, zero-weight or foreign source after review.
+/// Callers keep this read inside their review/apply writer snapshot.
+pub(crate) fn validate_anti_pattern_candidate_feedback(
+    connection: &DbConnection,
+    stored: &crate::db::StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    if stored.candidate_type != CandidateType::AntiPatternProposal.as_str()
+        || stored.source_type != CandidateSource::FeedbackEvent.as_str()
+    {
+        return Ok(());
+    }
+    let Some(target_id) = stored.target_memory_id.as_deref() else {
+        return Ok(());
+    };
+    // This producer owns a deterministic identity. Manually authored curation
+    // candidates may contain different, explicitly reviewed wording.
+    if stored.id != anti_pattern_candidate_id(&stored.workspace_id, target_id) {
+        return Ok(());
+    }
+    let invalid = || {
+        DomainError::Usage {
+        message: "Anti-pattern proposal no longer has matching accepted feedback from independent sources; no rule was created.".to_owned(),
+        repair: Some("Review the memory and its feedback before proposing the anti-pattern again.".to_owned()),
+    }
+    };
+    let source_ids = stored
+        .source_id
+        .as_deref()
+        .ok_or_else(invalid)?
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let unique_ids = source_ids.iter().copied().collect::<BTreeSet<_>>();
+    if unique_ids.len() != source_ids.len() || unique_ids.contains("") {
+        return Err(invalid());
+    }
+    let events = connection
+        .list_feedback_events_for_target("memory", target_id)
+        .map_err(anti_pattern_feedback_storage_error)?;
+    let named_events: Vec<_> = events
+        .into_iter()
+        .filter(|event| unique_ids.contains(event.id.as_str()))
+        .collect();
+    let evidence = anti_pattern_feedback(&named_events, &stored.workspace_id, target_id);
+    if !evidence.has_quorum() || evidence.harmful_events.len() != unique_ids.len() {
+        return Err(invalid());
+    }
+    let memory = connection
+        .get_memory(target_id)
+        .map_err(anti_pattern_feedback_storage_error)?
+        .filter(|memory| {
+            memory.workspace_id == stored.workspace_id && memory.tombstoned_at.is_none()
+        })
+        .ok_or_else(invalid)?;
+    if stored.proposed_content.as_deref()
+        != Some(anti_pattern_candidate_content(&memory.content, unique_ids.len()).as_str())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn anti_pattern_feedback_storage_error(error: crate::db::DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to inspect anti-pattern feedback evidence: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    }
+}
+
 fn maybe_propose_anti_pattern_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    target_id: &str,
+    event_id: &str,
+    actor: Option<&str>,
+    id_source: &mut OutcomeIdSource<'_>,
+) -> Result<Option<OutcomeDegradation>, DomainError> {
+    // Feedback, source text, candidate deduplication and publication work must
+    // belong to one writer snapshot. This also makes concurrent retries safe.
+    let mut domain_error = None;
+    let result = connection.with_transaction(|| {
+        propose_anti_pattern_candidate_in_transaction(
+            connection,
+            workspace_id,
+            target_id,
+            event_id,
+            actor,
+            id_source,
+        )
+        .map_err(|error| {
+            let message = error.message();
+            domain_error = Some(error);
+            crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Execute,
+                message,
+            }
+        })
+    });
+    result
+        .map_err(|error| domain_error.unwrap_or_else(|| anti_pattern_feedback_storage_error(error)))
+}
+
+fn propose_anti_pattern_candidate_in_transaction(
     connection: &DbConnection,
     workspace_id: &str,
     target_id: &str,
@@ -2171,25 +2334,21 @@ fn maybe_propose_anti_pattern_candidate(
             ),
             repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
         })?;
-    let harmful_events = feedback_events
-        .iter()
-        .filter(|event| is_harmful_signal(&event.signal))
-        .collect::<Vec<_>>();
-    if harmful_events.len() < ANTI_PATTERN_PROPOSAL_THRESHOLD {
+    let evidence = anti_pattern_feedback(&feedback_events, workspace_id, target_id);
+    if !evidence.has_quorum() {
         return Ok(None);
     }
 
-    let memory = connection
+    let Some(memory) = connection
         .get_memory(target_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to load memory for anti-pattern proposal: {error}"),
             repair: Some("ee memory show <id> --json".to_owned()),
         })?
-        .ok_or_else(|| DomainError::NotFound {
-            resource: "memory".to_owned(),
-            id: target_id.to_owned(),
-            repair: Some("ee memory list --json".to_owned()),
-        })?;
+        .filter(|memory| memory.workspace_id == workspace_id && memory.tombstoned_at.is_none())
+    else {
+        return Ok(None);
+    };
 
     let candidate_id = anti_pattern_candidate_id(workspace_id, target_id);
     if connection
@@ -2203,13 +2362,11 @@ fn maybe_propose_anti_pattern_candidate(
         return Ok(None);
     }
 
-    let helpful_count = feedback_events
-        .iter()
-        .filter(|event| event.signal == "helpful" || event.signal == "positive")
-        .count();
-    let harmful_count = harmful_events.len();
+    let helpful_count = evidence.helpful_count;
+    let harmful_count = evidence.harmful_events.len();
     let severity = anti_pattern_severity(harmful_count, helpful_count);
-    let event_ids = harmful_events
+    let event_ids = evidence
+        .harmful_events
         .iter()
         .map(|event| event.id.clone())
         .collect::<Vec<_>>();
@@ -2229,58 +2386,57 @@ fn maybe_propose_anti_pattern_candidate(
     );
     let audit_id = id_source.next_audit_id();
 
-    connection
-        .with_transaction(|| {
-            connection.insert_curation_candidate(
-                &candidate_id,
-                &CreateCurationCandidateInput {
-                    workspace_id: workspace_id.to_owned(),
-                    candidate_type: CandidateType::AntiPatternProposal.as_str().to_owned(),
-                    target_memory_id: Some(target_id.to_owned()),
-                    proposed_content: Some(proposed_content.clone()),
-                    proposed_confidence: Some(severity),
-                    proposed_trust_class: None,
-                    source_type: CandidateSource::FeedbackEvent.as_str().to_owned(),
-                    source_id: Some(source_id.clone()),
-                    reason: reason.clone(),
-                    confidence: severity,
-                    status: Some(CandidateStatus::Pending.as_str().to_owned()),
-                    created_at: None,
-                    ttl_expires_at: None,
-                    derivation_source_refs_json: None,
-                    derivation_metadata_json: None,
-                },
-            )?;
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_owned()),
-                    actor: actor.map(str::to_owned),
-                    action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
-                    target_type: Some("curation_candidate".to_owned()),
-                    target_id: Some(candidate_id.clone()),
-                    details: Some(details.clone()),
-                },
-            )?;
-            // The feedback job can finish before this optional transaction
-            // starts. Candidate creation advances the workspace generation,
-            // so it needs its own durable publication work even though the
-            // memory's canonical search document has not changed.
-            connection.insert_search_index_job(
-                &anti_pattern_candidate_index_job_id(event_id),
-                &crate::db::CreateSearchIndexJobInput {
-                    workspace_id: workspace_id.to_owned(),
-                    job_type: crate::db::SearchIndexJobType::SingleDocument,
-                    document_source: Some("memory".to_owned()),
-                    document_id: Some(target_id.to_owned()),
-                    documents_total: 1,
-                },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to persist anti-pattern candidate: {error}"),
-            repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
-        })?;
+    (|| {
+        connection.insert_curation_candidate(
+            &candidate_id,
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.to_owned(),
+                candidate_type: CandidateType::AntiPatternProposal.as_str().to_owned(),
+                target_memory_id: Some(target_id.to_owned()),
+                proposed_content: Some(proposed_content.clone()),
+                proposed_confidence: Some(severity),
+                proposed_trust_class: None,
+                source_type: CandidateSource::FeedbackEvent.as_str().to_owned(),
+                source_id: Some(source_id.clone()),
+                reason: reason.clone(),
+                confidence: severity,
+                status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                created_at: None,
+                ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            },
+        )?;
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: actor.map(str::to_owned),
+                action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                target_type: Some("curation_candidate".to_owned()),
+                target_id: Some(candidate_id.clone()),
+                details: Some(details.clone()),
+            },
+        )?;
+        // The feedback job can finish before this optional transaction
+        // starts. Candidate creation advances the workspace generation,
+        // so it needs its own durable publication work even though the
+        // memory's canonical search document has not changed.
+        connection.insert_search_index_job(
+            &anti_pattern_candidate_index_job_id(event_id),
+            &crate::db::CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_owned(),
+                job_type: crate::db::SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(target_id.to_owned()),
+                documents_total: 1,
+            },
+        )
+    })()
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to persist anti-pattern candidate: {error}"),
+        repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
+    })?;
 
     tracing::info!(
         target: "ee::outcome::anti_pattern",
@@ -8166,7 +8322,9 @@ mod tests {
                 signal: "harmful".to_string(),
                 weight: None,
                 source_type: "outcome_observed".to_string(),
-                source_id: Some(format!("anti-pattern-source-{index}")),
+                // Three accepted observations need corroboration, but not a
+                // fresh source identity for every single observation.
+                source_id: Some(format!("anti-pattern-source-{}", index / 2)),
                 reason: Some(format!("Harmful outcome {index} should count.")),
                 evidence_json: Some(format!(r#"{{"case":"anti-pattern","index":{index}}}"#)),
                 session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
@@ -8192,7 +8350,7 @@ mod tests {
             ensure_equal(
                 &proposed,
                 &(index + 1 == ANTI_PATTERN_PROPOSAL_THRESHOLD),
-                "anti-pattern proposal fires exactly at threshold",
+                "anti-pattern proposal fires at threshold with independent sources",
             )?;
         }
 
@@ -8235,6 +8393,360 @@ mod tests {
                 .is_some_and(|confidence| confidence > 0.9),
             "candidate severity is high after three harmful events",
         )
+    }
+
+    fn anti_pattern_outcome_options<'a>(
+        database: &'a std::path::Path,
+        index: u32,
+        source: &str,
+    ) -> OutcomeRecordOptions<'a> {
+        let mut options =
+            native_rule_outcome_options(database, "harmful", &format!("fb_{index:026}"));
+        options.target_type = "memory".to_owned();
+        options.target_id = OUTCOME_TEST_MEMORY_ID.to_owned();
+        options.source_id = Some(source.to_owned());
+        options
+    }
+
+    #[test]
+    fn anti_pattern_quorum_ignores_unaccepted_unweighted_and_unowned_observations() {
+        let make = |index: u32, source: &str| crate::db::StoredFeedbackEvent {
+            id: format!("fb_{index:026}"),
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: Some(source.to_owned()),
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+            applied_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+        };
+        let initial = vec![
+            make(801, "source-a"),
+            make(802, "source-a"),
+            make(803, "source-b"),
+        ];
+        let inspect = |events: &[crate::db::StoredFeedbackEvent]| {
+            super::anti_pattern_feedback(events, OUTCOME_TEST_WORKSPACE_ID, OUTCOME_TEST_MEMORY_ID)
+                .has_quorum()
+        };
+        assert!(
+            inspect(&initial),
+            "three accepted events from two sources meet quorum"
+        );
+        for refusal in [
+            "zero",
+            "nan",
+            "unapplied",
+            "no_source",
+            "blank_source",
+            "same_source",
+            "foreign_workspace",
+            "foreign_memory",
+            "wrong_type",
+            "helpful",
+        ] {
+            let mut events = initial.clone();
+            match refusal {
+                "zero" => events[2].weight = 0.0,
+                "nan" => events[2].weight = f32::NAN,
+                "unapplied" => events[2].applied_at = None,
+                "no_source" => events[2].source_id = None,
+                "blank_source" => events[2].source_id = Some(" ".to_owned()),
+                "same_source" => {
+                    events[2].source_id = Some(" source-a ".to_owned());
+                    events[2].source_type = "human_explicit".to_owned();
+                }
+                "foreign_workspace" => {
+                    events[2].workspace_id = OUTCOME_OTHER_WORKSPACE_ID.to_owned()
+                }
+                "foreign_memory" => {
+                    events[2].target_id = OUTCOME_TEST_PROMPT_INJECTION_MEMORY_ID.to_owned()
+                }
+                "wrong_type" => events[2].target_type = "rule".to_owned(),
+                "helpful" => events[2].signal = "helpful".to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(!inspect(&events), "{refusal}");
+        }
+        let mut with_helpful = initial;
+        let mut helpful = make(804, "source-a");
+        helpful.signal = "helpful".to_owned();
+        with_helpful.push(helpful);
+        let evidence = super::anti_pattern_feedback(
+            &with_helpful,
+            OUTCOME_TEST_WORKSPACE_ID,
+            OUTCOME_TEST_MEMORY_ID,
+        );
+        assert!(
+            evidence.has_quorum(),
+            "later helpful feedback is not a retraction of accepted failures"
+        );
+        assert_eq!(evidence.helpful_count, 1);
+    }
+
+    #[test]
+    fn anti_pattern_proposal_needs_independent_sources_and_ignores_zero_weight() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-anti-pattern-sources")?;
+        for index in 801..804 {
+            let report =
+                record_outcome(&anti_pattern_outcome_options(&database, index, "source-a"))
+                    .map_err(|error| error.message())?;
+            assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+            assert!(
+                report
+                    .degraded
+                    .iter()
+                    .all(|entry| entry.code != ANTI_PATTERN_PROPOSED_CODE)
+            );
+        }
+        let mut zero = anti_pattern_outcome_options(&database, 804, "source-b");
+        zero.weight = Some(0.0);
+        let report = record_outcome(&zero).map_err(|error| error.message())?;
+        assert!(
+            report
+                .degraded
+                .iter()
+                .all(|entry| entry.code != ANTI_PATTERN_PROPOSED_CODE)
+        );
+        let report = record_outcome(&anti_pattern_outcome_options(&database, 805, "source-b"))
+            .map_err(|error| error.message())?;
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+        );
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidate = connection
+            .get_curation_candidate(
+                OUTCOME_TEST_WORKSPACE_ID,
+                &super::anti_pattern_candidate_id(
+                    OUTCOME_TEST_WORKSPACE_ID,
+                    OUTCOME_TEST_MEMORY_ID,
+                ),
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("candidate missing")?;
+        assert!(
+            !candidate
+                .source_id
+                .as_deref()
+                .unwrap_or_default()
+                .contains("00000000000000000000000804")
+        );
+        super::validate_anti_pattern_candidate_feedback(&connection, &candidate)
+            .map_err(|error| error.message())?;
+        Ok(())
+    }
+
+    #[test]
+    fn anti_pattern_quarantined_feedback_cannot_complete_a_proposal() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-anti-pattern-quarantine")?;
+        for (index, source) in [(811, "source-a"), (812, "source-b")] {
+            record_outcome(&anti_pattern_outcome_options(&database, index, source))
+                .map_err(|error| error.message())?;
+        }
+        let mut refused = anti_pattern_outcome_options(&database, 813, "source-a");
+        refused.harmful_per_source_per_hour = 1;
+        let report = record_outcome(&refused).map_err(|error| error.message())?;
+        assert_eq!(report.status, OutcomeRecordStatus::Quarantined);
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let id =
+            super::anti_pattern_candidate_id(OUTCOME_TEST_WORKSPACE_ID, OUTCOME_TEST_MEMORY_ID);
+        assert!(
+            connection
+                .get_curation_candidate(OUTCOME_TEST_WORKSPACE_ID, &id)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let report = record_outcome(&anti_pattern_outcome_options(&database, 814, "source-c"))
+            .map_err(|error| error.message())?;
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+        );
+        let candidate = connection
+            .get_curation_candidate(OUTCOME_TEST_WORKSPACE_ID, &id)
+            .map_err(|error| error.to_string())?
+            .ok_or("candidate missing")?;
+        assert!(
+            !candidate
+                .source_id
+                .as_deref()
+                .unwrap_or_default()
+                .contains("00000000000000000000000813")
+        );
+        super::validate_anti_pattern_candidate_feedback(&connection, &candidate)
+            .map_err(|error| error.message())?;
+        Ok(())
+    }
+
+    #[test]
+    fn anti_pattern_failed_postcommit_proposal_is_repaired_by_exact_outcome_replay() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-anti-pattern-retry")?;
+        for (index, source) in [(821, "source-a"), (822, "source-b")] {
+            record_outcome(&anti_pattern_outcome_options(&database, index, source))
+                .map_err(|error| error.message())?;
+        }
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.execute_raw("CREATE TRIGGER fail_anti_pattern_proposal BEFORE INSERT ON curation_candidates WHEN NEW.candidate_type = 'anti_pattern_proposal' BEGIN SELECT RAISE(ABORT, 'proposal temporarily unavailable'); END").map_err(|error| error.to_string())?;
+        let options = anti_pattern_outcome_options(&database, 823, "source-c");
+        let first = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(first.status, OutcomeRecordStatus::Recorded);
+        assert!(
+            first
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "anti_pattern_proposal_failed")
+        );
+        let learned = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        let events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("DROP TRIGGER fail_anti_pattern_proposal")
+            .map_err(|error| error.to_string())?;
+        let repaired = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(repaired.status, OutcomeRecordStatus::AlreadyRecorded);
+        assert!(
+            repaired
+                .degraded
+                .iter()
+                .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+        );
+        let jobs = connection
+            .list_search_index_jobs(OUTCOME_TEST_WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        let replay = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+        assert!(
+            replay
+                .degraded
+                .iter()
+                .all(|entry| entry.code != ANTI_PATTERN_PROPOSED_CODE)
+        );
+        assert_eq!(
+            connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            learned
+        );
+        assert_eq!(
+            connection
+                .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            events
+        );
+        assert_eq!(
+            connection
+                .list_search_index_jobs(OUTCOME_TEST_WORKSPACE_ID, None)
+                .map_err(|error| error.to_string())?,
+            jobs
+        );
+        assert_eq!(
+            connection
+                .list_curation_candidates(
+                    OUTCOME_TEST_WORKSPACE_ID,
+                    Some("anti_pattern_proposal"),
+                    None,
+                    Some(OUTCOME_TEST_MEMORY_ID)
+                )
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn anti_pattern_apply_rechecks_cited_feedback_and_source_body() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-anti-pattern-apply")?;
+        for (index, source) in [(831, "source-a"), (832, "source-b"), (833, "source-c")] {
+            record_outcome(&anti_pattern_outcome_options(&database, index, source))
+                .map_err(|error| error.message())?;
+        }
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let id =
+            super::anti_pattern_candidate_id(OUTCOME_TEST_WORKSPACE_ID, OUTCOME_TEST_MEMORY_ID);
+        let validated = crate::core::curate::validate_curation_candidate(
+            &crate::core::curate::CurateValidateOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                candidate_id: &id,
+                actor: Some("feedback-reviewer"),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        assert_eq!(validated.validation.decision, "approved");
+        let options = crate::core::curate::CurateApplyOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            candidate_id: &id,
+            actor: Some("feedback-reviewer"),
+            dry_run: true,
+            allow_tombstone_load_bearing: false,
+        };
+        let allowed = crate::core::curate::apply_curation_candidate(&options)
+            .map_err(|error| error.message())?;
+        assert_eq!(allowed.application.status, "would_apply");
+        for (change, restore) in [
+            (
+                "UPDATE feedback_events SET weight = 0 WHERE id = 'fb_00000000000000000000000833'",
+                "UPDATE feedback_events SET weight = 1 WHERE id = 'fb_00000000000000000000000833'",
+            ),
+            (
+                "UPDATE feedback_events SET applied_at = NULL WHERE id = 'fb_00000000000000000000000833'",
+                "UPDATE feedback_events SET applied_at = created_at WHERE id = 'fb_00000000000000000000000833'",
+            ),
+            (
+                "UPDATE feedback_events SET signal = 'helpful' WHERE id = 'fb_00000000000000000000000833'",
+                "UPDATE feedback_events SET signal = 'harmful' WHERE id = 'fb_00000000000000000000000833'",
+            ),
+            (
+                "UPDATE memories SET content = 'New reviewed release guidance.' WHERE id = 'mem_00000000000000000000000002'",
+                "UPDATE memories SET content = 'Run cargo fmt --check before release.' WHERE id = 'mem_00000000000000000000000002'",
+            ),
+        ] {
+            connection
+                .execute_raw(change)
+                .map_err(|error| error.to_string())?;
+            let blocked = crate::core::curate::apply_curation_candidate(
+                &crate::core::curate::CurateApplyOptions {
+                    dry_run: false,
+                    ..options
+                },
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(blocked.application.status, "blocked", "{change}");
+            assert!(
+                connection
+                    .list_procedural_rules(OUTCOME_TEST_WORKSPACE_ID, None, None, true)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert_eq!(
+                connection
+                    .get_curation_candidate(OUTCOME_TEST_WORKSPACE_ID, &id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("candidate missing")?
+                    .status,
+                "approved"
+            );
+            connection
+                .execute_raw(restore)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     #[test]

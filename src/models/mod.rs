@@ -2156,6 +2156,19 @@ impl DomainError {
                     });
                 vec![RecoveryAction::command(1, repair.clone(), rationale)]
             }
+            // A generation that cannot be inspected has no established repair
+            // need. Preserve its explicit retry command before message-based
+            // matching can turn temporary contention into a rebuild request.
+            Self::SearchIndex {
+                repair: Some(repair),
+                ..
+            } if repair == "ee index status" || repair.starts_with("ee index status ") => {
+                vec![RecoveryAction::command(
+                    1,
+                    repair.clone(),
+                    "Retry index inspection when it is available; determine whether repair is needed from the resulting status.",
+                )]
+            }
             // Search index missing / corrupt / stale.
             Self::SearchIndex { .. } if message.contains("index") => vec![
                 RecoveryAction {
@@ -3096,6 +3109,53 @@ mod tests {
                 .as_deref()
                 .is_some_and(|cmd| cmd.contains("ee index rebuild"))
         }));
+    }
+
+    #[test]
+    fn domain_error_recovery_for_unavailable_index_inspection_is_read_only() {
+        let status_error = crate::core::index::IndexStatusError::GenerationInspectionUnavailable(
+            "an index publisher is holding the generation lease".to_owned(),
+        );
+        // Match the conversion used by `ee index status` so the repair hint and
+        // structured JSON recovery cannot disagree during a publication race.
+        let error = super::DomainError::SearchIndex {
+            message: status_error.to_string(),
+            repair: status_error.repair_hint().map(str::to_owned),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1, "inspection must not suggest a rebuild");
+        assert_eq!(actions[0].kind, super::RecoveryKind::Command);
+        assert_eq!(
+            actions[0].command.as_deref(),
+            Some("ee index status --workspace . --json")
+        );
+        let recovery_json = actions[0].data_json();
+        assert_eq!(recovery_json["kind"], "command");
+        assert_eq!(
+            recovery_json["command"],
+            "ee index status --workspace . --json"
+        );
+        assert_eq!(recovery_json["riskClass"], "read_only_probe");
+        assert_eq!(recovery_json["requiresHumanApproval"], false);
+        assert_eq!(recovery_json["mutatesExternalState"], false);
+        assert_eq!(recovery_json["mutatesTrackerState"], false);
+    }
+
+    #[test]
+    fn domain_error_recovery_for_search_index_preserves_addressed_inspection() {
+        let command = "ee index status --workspace '/tmp/original workspace' --index-dir '/tmp/search index' --json";
+        let error = super::DomainError::SearchIndex {
+            message: "The index generation could not be inspected.".to_owned(),
+            repair: Some(command.to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Command);
+        assert_eq!(actions[0].command.as_deref(), Some(command));
+        assert_eq!(
+            actions[0].safety().risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
     }
 
     #[test]

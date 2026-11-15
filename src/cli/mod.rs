@@ -261,10 +261,11 @@ use crate::core::rule::{
 use crate::core::search::{
     FamilyRetrievalOptions, SearchAdvisorySession, SearchAdvisorySettlement, SearchContentPreview,
     SearchDedupMode, SearchDegradation, SearchError, SearchFamilyReport, SearchOptions,
-    SearchReport, SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions,
-    SimilarReport, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    recalibrate_search_score_calibration, run_diag_search, run_family_retrieval,
-    run_search_with_filters, run_search_with_performance_and_filters, run_similar,
+    SearchReport, SearchScoreRecalibrationReport, SearchSourceMode, SearchStatus, SimilarError,
+    SimilarOptions, SimilarReport, TypedMemoryFieldFilter, elapsed_timing_json,
+    normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
+    run_family_retrieval, run_search_with_filters, run_search_with_performance_and_filters,
+    run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel, observe_sentinel_explicit};
 use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
@@ -9582,6 +9583,8 @@ pub struct SearchArgs {
     /// Read-only diagnostic: run the query against every workspace
     /// registered in the addressed database (rows labeled per workspace)
     /// plus the global lane. An inspection surface, never a pack input.
+    /// Search filters apply to every workspace; database/index overrides
+    /// address the current workspace only.
     #[arg(long = "all-workspaces", conflicts_with = "family")]
     pub all_workspaces: bool,
 
@@ -15677,12 +15680,12 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => {
-            // The fence is evaluated HERE rather than inside handle_search,
-            // because handle_search fans out to handle_search_family and
-            // handle_search_all_workspaces as well, and a fence that only
-            // covered the plain path would be a fence with two holes in it
-            // (bd-1n0np.8.13).
-            if let Some(exit) = read_fence_preflight(
+            // A generation belongs to one workspace. Fan-out rejects explicit
+            // fences before opening any store; checking only the addressed
+            // workspace must not imply that every destination was fenced.
+            if args.all_workspaces {
+                handle_search(process, &cli, args, invocation_started, stdout, stderr)
+            } else if let Some(exit) = read_fence_preflight(
                 || IndexStatusOptions {
                     workspace_path: cli.resolve_workspace(),
                     database_path: args.database.clone(),
@@ -19438,7 +19441,7 @@ where
             ),
         };
     }
-    let plan = if verb == ResolveVerb::Merge {
+    let plan = if matches!(verb, ResolveVerb::Merge | ResolveVerb::ScopeSplit) {
         match crate::core::curate::preview_conflict_resolution(
             workspace,
             Some(&database_path),
@@ -42469,6 +42472,14 @@ fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -
             message: "Cannot revise tombstoned memory.".to_string(),
             repair: Some("Use ee memory show to inspect it.".to_string()),
         },
+        Some("Cannot revise sealed memory") => DomainError::PolicyDenied {
+            message: "Cannot revise sealed memory before revealing its committed content."
+                .to_owned(),
+            repair: Some(
+                "Use ee memory reveal <sealed-memory-id> --content-file <path> with the original committed bytes, then revise the revealed memory."
+                    .to_owned(),
+            ),
+        },
         Some(message) if message.starts_with("Memory revision writes are unavailable") => {
             DomainError::PolicyDenied {
                 message: message.to_string(),
@@ -51662,6 +51673,126 @@ where
 /// Bounded workspace fan-out for `ee search --all-workspaces`.
 const ALL_WORKSPACES_SCAN_CAP: usize = 16;
 
+#[cfg(all(test, feature = "lexical-bm25"))]
+mod search_all_workspaces_tests;
+
+fn all_workspaces_search_filters(
+    args: &SearchArgs,
+) -> Result<(Option<String>, Vec<TypedMemoryFieldFilter>), DomainError> {
+    let unsupported = [
+        (args.family.is_some(), "--family"),
+        (args.use_daemon, "--use-daemon"),
+        (args.daemon_socket.is_some(), "--daemon-socket"),
+        (args.explain_performance, "--explain-performance"),
+        (args.recalibrate_now, "--recalibrate-now"),
+        (args.mesh_mode != MeshCommandMode::Off, "--mesh"),
+        (args.cursor.is_some(), "--cursor"),
+        (
+            args.read_fence != crate::core::read_fence::ReadFence::Eventual,
+            "--read-fence",
+        ),
+        (args.strict_read_fence, "--strict-read-fence"),
+    ]
+    .into_iter()
+    .find_map(|(present, label)| present.then_some(label));
+    if let Some(label) = unsupported {
+        return Err(DomainError::Usage {
+            message: format!(
+                "{label} cannot be combined with --all-workspaces; inspection searches each workspace independently without writes or a shared generation"
+            ),
+            repair: Some(format!(
+                "Run a single-workspace search to use {label}, or omit it from the inspection."
+            )),
+        });
+    }
+    if args
+        .relevance_floor
+        .is_some_and(|floor| !floor.is_finite() || !(0.0..=1.0).contains(&floor))
+    {
+        return Err(DomainError::Usage {
+            message: "--relevance-floor must be a finite number from 0.0 to 1.0".to_owned(),
+            repair: Some("Pass --relevance-floor between 0.0 and 1.0.".to_owned()),
+        });
+    }
+    let usage = |message| DomainError::Usage {
+        message,
+        repair: Some(
+            "Use `ee search <query> --all-workspaces --kind rule --field condition=value --json`."
+                .to_owned(),
+        ),
+    };
+    let kind = args
+        .kind
+        .as_deref()
+        .map(normalize_memory_kind_filter)
+        .transpose()
+        .map_err(&usage)?;
+    let fields = args
+        .field_filters
+        .iter()
+        .map(|field| TypedMemoryFieldFilter::parse(field))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(usage)?;
+    Ok((kind, fields))
+}
+
+fn all_workspaces_search_options(
+    args: &SearchArgs,
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    is_current: bool,
+    query: &str,
+) -> SearchOptions {
+    SearchOptions {
+        workspace_path,
+        database_path: Some(database_path),
+        index_dir: if is_current {
+            args.index_dir.clone()
+        } else {
+            None
+        },
+        query: query.to_owned(),
+        limit: args.limit,
+        speed: args.speed,
+        explain: args.explain,
+        as_of: args.as_of,
+        include_tombstoned: args.include_tombstoned,
+        include_expired: args.include_expired,
+        include_future: args.include_future,
+        include_stale: args.include_stale,
+        relevance_floor: args.relevance_floor,
+        dedup_mode: args.dedupe,
+        source_mode: args.source_mode,
+        strict_source_mode: args.strict_source_mode,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
+    }
+}
+
+fn all_workspaces_search_failure(
+    workspace: &crate::db::StoredWorkspace,
+    error: &DomainError,
+) -> serde_json::Value {
+    // Preserve the existing error renderer's redaction and recovery fields.
+    let envelope = serde_json::from_str::<serde_json::Value>(&output::error_response_json(error))
+        .unwrap_or_else(|_| {
+            serde_json::json!({"error": {
+                "code": error.code(),
+                "message": output::redact_mesh_approval_bearers(&error.message()),
+                "repair": error.repair(),
+            }})
+        });
+    serde_json::json!({
+        "workspaceId": workspace.id,
+        "workspacePath": workspace.path,
+        "searched": false,
+        "reason": error.code(),
+        "error": envelope["error"],
+        "degraded": envelope.get("degraded").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "exitCode": error.exit_code() as u8,
+    })
+}
+
 fn handle_search_all_workspaces<W, E>(
     cli: &Cli,
     args: &SearchArgs,
@@ -51672,6 +51803,10 @@ where
     W: Write,
     E: Write,
 {
+    let (kind_filter, typed_field_filters) = match all_workspaces_search_filters(args) {
+        Ok(filters) => filters,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
     let Some(query) = args.query.as_ref() else {
         return write_domain_error(
             &DomainError::Usage {
@@ -51716,6 +51851,9 @@ where
     let truncated = total_registered > ALL_WORKSPACES_SCAN_CAP;
 
     let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut human_rows = Vec::new();
+    let mut exit_code = ProcessExitCode::Success;
+    let preview = search_content_preview_mode(args.full);
     for stored in registered.into_iter().take(ALL_WORKSPACES_SCAN_CAP) {
         let target_workspace = PathBuf::from(&stored.path);
         // The addressed workspace searches through its own resolved paths;
@@ -51734,62 +51872,103 @@ where
             }));
             continue;
         }
-        let options = crate::core::search::SearchOptions {
-            workspace_path: target_workspace,
-            database_path: None,
-            index_dir: None,
-            query: query.clone(),
-            limit: args.limit,
-            speed: args.speed,
-            explain: false,
-            as_of: None,
-            include_tombstoned: false,
-            include_expired: false,
-            include_future: false,
-            include_stale: false,
-            relevance_floor: None,
-            dedup_mode: crate::core::search::SearchDedupMode::DocId,
-            source_mode: crate::core::search::SearchSourceMode::Hybrid,
-            strict_source_mode: false,
-            memory_scope: crate::models::MemoryScope::default(),
-            strict_scope: false,
+        let target_database = if is_current {
+            database_path.clone()
+        } else {
+            target_workspace.join(".ee/ee.db")
         };
-        match crate::core::search::run_search(&options) {
+        let options = all_workspaces_search_options(
+            args,
+            target_workspace,
+            target_database.clone(),
+            is_current,
+            query,
+        );
+        let reader = match crate::db::DbConnection::open_file_read_only(&target_database) {
+            Ok(reader) => reader,
+            Err(error) => {
+                let error = DomainError::Storage {
+                    message: format!("Could not inspect {}: {error}", target_database.display()),
+                    repair: Some("ee doctor --workspace <workspace>".to_owned()),
+                };
+                if exit_code == ProcessExitCode::Success {
+                    exit_code = error.exit_code();
+                }
+                rows.push(all_workspaces_search_failure(&stored, &error));
+                continue;
+            }
+        };
+        // The canonical inspection wrapper owns its pooled source snapshot.
+        // This point-open only distinguishes an unreadable store from a
+        // retrieval failure, and never holds a second snapshot during search.
+        drop(reader);
+        match crate::core::search::run_inspection_search_with_filters(
+            &options,
+            kind_filter.as_deref(),
+            &typed_field_filters,
+        ) {
             Ok(report) => {
-                let hits: Vec<serde_json::Value> = report
-                    .results
-                    .iter()
-                    .map(|hit| {
-                        serde_json::json!({
-                            "docId": hit.doc_id,
-                            "score": hit.score,
-                            "relevanceScore": hit.relevance_score(),
-                            "scoreKind": hit.score_kind(),
-                            "source": hit.source.as_str(),
-                            "storeLane": hit
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.get("storeLane"))
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        })
-                    })
-                    .collect();
-                rows.push(serde_json::json!({
-                    "workspaceId": stored.id,
-                    "workspacePath": stored.path,
-                    "searched": true,
-                    "hitCount": hits.len(),
-                    "hits": hits,
-                }));
+                let mut data = report.data_json_with_advisory_session_for_workspace_and_preview(
+                    &mut SearchAdvisorySession::default(),
+                    &stored.id,
+                    preview,
+                );
+                let degraded = top_level_degraded_from_data(&data);
+                let mut hits = data["results"].take();
+                if let Some(hits) = hits.as_array_mut() {
+                    for hit in hits {
+                        let lane = hit
+                            .pointer("/metadata/storeLane")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        hit["storeLane"] = lane;
+                    }
+                }
+                if matches!(
+                    report.status,
+                    SearchStatus::IndexError | SearchStatus::IndexNotFound
+                ) && exit_code == ProcessExitCode::Success
+                {
+                    exit_code = ProcessExitCode::SearchIndex;
+                }
+                human_rows.push(format!(
+                    "\nWorkspace {} ({})\n{}",
+                    stored.path,
+                    stored.id,
+                    report.human_summary_with_preview(preview),
+                ));
+                // Preserve canonical diagnostics as they evolve, without
+                // duplicating bodies under both `results` and `hits`.
+                if let Some(object) = data.as_object_mut() {
+                    object.remove("results");
+                }
+                data["workspaceId"] = serde_json::json!(stored.id);
+                data["workspacePath"] = serde_json::json!(stored.path);
+                data["searched"] = serde_json::json!(true);
+                data["hitCount"] = data["resultCount"].clone();
+                data["hits"] = hits;
+                data["degraded"] = degraded;
+                rows.push(data);
             }
             Err(error) => {
-                rows.push(serde_json::json!({
-                    "workspaceId": stored.id,
-                    "workspacePath": stored.path,
-                    "searched": false,
-                    "reason": format!("search failed: {error}"),
-                }));
+                if matches!(error, SearchError::Cancelled(_)) {
+                    return write_search_error(&error, cli.renderer(), stdout, stderr);
+                }
+                let error = match error {
+                    SearchError::WorkspaceBinding(error) => *error,
+                    SearchError::Configuration(message) => DomainError::Configuration {
+                        message,
+                        repair: Some(crate::config::MEMORY_POLICY_REPAIR.to_owned()),
+                    },
+                    error => DomainError::SearchIndex {
+                        message: error.to_string(),
+                        repair: error.repair_hint().map(str::to_owned),
+                    },
+                };
+                if exit_code == ProcessExitCode::Success {
+                    exit_code = error.exit_code();
+                }
+                rows.push(all_workspaces_search_failure(&stored, &error));
             }
         }
     }
@@ -51820,13 +51999,32 @@ where
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("-");
                 out.push_str(&format!("  {path}: not searched ({reason})\n"));
+                if let Some(message) = row
+                    .pointer("/error/message")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    out.push_str(&format!("    {message}\n"));
+                }
             }
+        }
+        for summary in human_rows {
+            out.push_str(&summary);
         }
         out
     };
+    let degraded: Vec<_> = rows
+        .iter()
+        .flat_map(|row| {
+            row.get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .collect();
     let envelope = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
-        "success": true,
+        "success": exit_code == ProcessExitCode::Success,
         "data": {
             "command": "search --all-workspaces",
             "query": query,
@@ -51834,11 +52032,13 @@ where
             "registeredWorkspaces": total_registered,
             "scanCap": ALL_WORKSPACES_SCAN_CAP,
             "truncated": truncated,
+            "failedWorkspaces": rows.iter().filter(|row| row.get("error").is_some()
+                || matches!(row.get("status").and_then(serde_json::Value::as_str), Some("index_error" | "index_not_found"))).count(),
             "rows": rows,
         },
-        "degraded": [],
+        "degraded": degraded,
     });
-    match cli.renderer() {
+    let write_exit = match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
         output::Renderer::Toon => write_stdout(
             stdout,
@@ -51848,6 +52048,11 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    };
+    if write_exit == ProcessExitCode::Success {
+        exit_code
+    } else {
+        write_exit
     }
 }
 
@@ -99747,6 +99952,27 @@ demos:
                 )
             }
             _ => Err("expected Memory Revise command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_revise_closed_seal_report_maps_to_policy_denied() -> TestResult {
+        let report = crate::core::memory::MemoryReviseReport::error(
+            "mem_01234567890123456789012345".to_owned(),
+            "Cannot revise sealed memory".to_owned(),
+        );
+
+        match super::memory_revise_error_to_domain(&report, "mem_01234567890123456789012345") {
+            DomainError::PolicyDenied { repair, .. } => ensure_equal(
+                &repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("ee memory reveal")),
+                &true,
+                "sealed revision repair requires verified reveal",
+            ),
+            other => Err(format!(
+                "closed seal revision must map to PolicyDenied, got {other:?}"
+            )),
         }
     }
 

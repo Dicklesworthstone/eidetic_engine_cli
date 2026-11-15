@@ -29141,6 +29141,82 @@ impl DbConnection {
         rows.iter().map(stored_journal_entry_from_row).collect()
     }
 
+    /// Select a bounded distillation batch without letting recent history hide
+    /// pending work. Actionable, admitted entries get the oldest slots first;
+    /// spare slots retain the list reader's diagnostic abstention behavior.
+    /// Both reads use one snapshot and hydrate at most twice `filter.limit`.
+    pub(crate) fn list_journal_entries_for_distillation(
+        &self,
+        workspace_id: &str,
+        filter: &JournalEntryListFilter,
+    ) -> Result<Vec<StoredJournalEntry>> {
+        self.begin_read_snapshot()?;
+        let result = (|| {
+            // Keep this allowlist aligned with journal core's extractive
+            // dispatch. Unknown kinds and instruction-risk grades fail closed.
+            let mut sql = String::from(
+                "SELECT entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at FROM journal_entries WHERE workspace_id = ?1 AND distilled_at IS NULL AND tombstoned_at IS NULL AND kind IN ('command_failure', 'surprise') AND trim(instruction_risk) IN ('none', 'low', 'medium')",
+            );
+            let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+            if let Some(session_key) = filter.session_key.as_deref() {
+                params.push(Value::Text(session_key.to_string()));
+                sql.push_str(&format!(" AND session_key = ?{}", params.len()));
+            }
+            if let Some(agent_name) = filter.agent_name.as_deref() {
+                params.push(Value::Text(agent_name.to_string()));
+                sql.push_str(&format!(" AND agent_name = ?{}", params.len()));
+            }
+            if let Some(since) = filter.since.as_deref() {
+                params.push(Value::Text(since.to_string()));
+                sql.push_str(&format!(" AND created_at >= ?{}", params.len()));
+            }
+            if let Some(kind) = filter.kind.as_deref() {
+                params.push(Value::Text(kind.to_string()));
+                sql.push_str(&format!(" AND kind = ?{}", params.len()));
+            }
+            params.push(Value::BigInt(i64::from(filter.limit)));
+            sql.push_str(&format!(
+                " ORDER BY created_at ASC, entry_id ASC LIMIT ?{}",
+                params.len()
+            ));
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            let mut selected = rows
+                .iter()
+                .map(stored_journal_entry_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            let remaining = (filter.limit as usize).saturating_sub(selected.len());
+            if remaining > 0 {
+                let selected_ids: BTreeSet<String> = selected
+                    .iter()
+                    .map(|entry| entry.entry_id.clone())
+                    .collect();
+                selected.extend(
+                    self.list_journal_entries(workspace_id, filter)?
+                        .into_iter()
+                        .filter(|entry| {
+                            entry.tombstoned_at.is_none() && !selected_ids.contains(&entry.entry_id)
+                        })
+                        .take(remaining),
+                );
+            }
+            self.commit_read_snapshot()?;
+            Ok(selected)
+        })();
+        match result {
+            Ok(entries) => Ok(entries),
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback_read_snapshot() {
+                    tracing::error!(
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to roll back journal distillation selection snapshot"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Recover an exact journal row, including consumed and tombstoned history.
     /// Duplicate identities fail rather than silently dropping recovery data.
     pub(crate) fn insert_journal_entry_for_recovery(
