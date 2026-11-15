@@ -7332,26 +7332,20 @@ if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
         exit 2
     fi
 
-    # THE UNDECLARED CASE ONLY, AND THAT LIMIT IS DELIBERATE.
+    # Refuse both an UNDECLARED proof-broker bypass and any ad-hoc FREE-TEXT
+    # bypass on the pinned lane (bd-jui80).
     #
-    # Refusing every proof-broker bypass here is the clause's plain reading, and
-    # it is NOT what this does. A declared bypass (--proof-broker-bypass <reason>
-    # or RCH_VERIFY_PROOF_BROKER_BYPASS_REASON) still passes, because a real
-    # broker writes a ledger and takes reservations, which a hermetic contract
-    # test must not do -- that caller is a requirement, not a bug.
-    #
-    # So this refuses the SILENT bypass and leaves a NAMED one open. A caller who
-    # supplies free text still gets through, which means escape 4 is narrowed,
-    # not eliminated, and it is recorded that way on the bead rather than graded
-    # as met. What makes the narrowing worth having is that the declared and
-    # undeclared cases are no longer byte-identical in the proof: the preceding
-    # work split them into rch_verify_proof_broker_bypassed (both) and
-    # rch_verify_proof_broker_bypassed_undeclared (silent only), and this guard
-    # is the first consumer of that distinction.
-    if [ "$PROOF_BROKER_ENABLED" = "0" ] && [ -z "$PROOF_BROKER_BYPASS_REASON" ]; then
+    # A hermetic contract test in tests/rch_verify_contract.rs cannot run a real
+    # broker because the broker writes a ledger and takes reservations, so the
+    # single registered token 'hermetic contract test' is admitted for that
+    # test suite. Any silent bypass or caller-invented free-text reason (whether
+    # via RCH_VERIFY_PROOF_BROKER_ENABLED=0 or --proof-broker-bypass <reason>)
+    # is refused before source materialization or remote dispatch.
+    if { [ "$PROOF_BROKER_ENABLED" = "0" ] || [ -n "$PROOF_BROKER_BYPASS_REASON" ]; } \
+        && [ "$PROOF_BROKER_BYPASS_REASON" != "hermetic contract test" ]; then
         RCH_INVOCATION=()
         emit_json false null 0 "" \
-            "--pinned-franken-stack refuses an undeclared proof-broker bypass; unset RCH_VERIFY_PROOF_BROKER_ENABLED=0 or declare a reason with --proof-broker-bypass <reason>" \
+            "--pinned-franken-stack refuses an undeclared or unregistered proof-broker bypass; unset RCH_VERIFY_PROOF_BROKER_ENABLED=0 and drop --proof-broker-bypass (only 'hermetic contract test' is registered for hermetic contract tests)" \
             "rch_verify_pinned_proof_broker_bypass_refused"
         exit 2
     fi

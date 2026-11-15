@@ -9057,9 +9057,48 @@ fn pinned_lane_refuses_undeclared_proof_broker_bypass() -> TestResult {
         ));
     }
 
-    // CONTROL: the SAME bypass, declared, must get past this guard. It may still
-    // be refused further down the lane -- that is asserted by the verdict test
-    // below -- so this checks only that THIS code is absent.
+    // Unregistered free-text reason must ALSO be refused on the pinned lane
+    // (bd-jui80): caller-invented text does not open the proof-broker gate.
+    let (freetext_status, freetext_stdout, freetext_stderr) = run_script_with_env(
+        &args,
+        &[
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", base_arg),
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0"),
+            ("RCH_BIN", fake_rch_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            (
+                "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+                "ad-hoc free text reason",
+            ),
+        ],
+    )?;
+    if freetext_status.success() {
+        return Err(format!(
+            "pinned lane must refuse an unregistered free-text proof-broker bypass\nstdout:\n{freetext_stdout}\nstderr:\n{freetext_stderr}"
+        ));
+    }
+    let freetext_report: Value = serde_json::from_str(&freetext_stdout)
+        .map_err(|error| format!("parse pinned free-text broker-bypass refusal: {error}"))?;
+    if freetext_report["status"] != "refused"
+        || !degraded_contains(
+            &freetext_report,
+            "rch_verify_pinned_proof_broker_bypass_refused",
+        )?
+    {
+        return Err(format!(
+            "pinned unregistered free-text bypass refusal contract drifted: {freetext_report}"
+        ));
+    }
+    let dispatched_after_freetext = remote_exec_invocation_lines(&invocation_log)?;
+    if !dispatched_after_freetext.is_empty() {
+        return Err(format!(
+            "a refused free-text pinned run still dispatched: {dispatched_after_freetext:?}"
+        ));
+    }
+
+    // CONTROL: the registered hermetic contract test bypass must get past this
+    // guard. It may still be refused further down the lane -- that is asserted
+    // by the verdict test below -- so this checks only that THIS code is absent.
     let (_declared_status, declared_stdout, _declared_stderr) = run_script_with_env(
         &args,
         &[

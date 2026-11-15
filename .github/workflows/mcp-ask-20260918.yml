@@ -270,6 +270,17 @@ jobs:
             exit 1
           fi
           echo "ATTRIBUTION: mcp::tests:: ran $ran tests"
+      - name: Run FastMCP Rust adapter contract tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --features mcp --test contracts -- fastmcp_rust_adapter --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-fastmcp-contracts.log"
+          contract_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/mcp-ask-fastmcp-contracts.log" | head -1)
+          if test -z "$contract_ran" || test "$contract_ran" -lt 1; then
+            echo "ATTRIBUTION: contracts::fastmcp_rust_adapter produced no passing-with-zero-failures line (count '${contract_ran:-none}') -- refusing a vacuous pass"
+            exit 1
+          fi
+          echo "ATTRIBUTION: contracts::fastmcp_rust_adapter ran $contract_ran tests"
       - name: Commit verified MCP integration directly to main
         shell: bash
         run: |
