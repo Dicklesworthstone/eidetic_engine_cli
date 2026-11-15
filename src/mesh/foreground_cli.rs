@@ -92,7 +92,7 @@ const MESH_SYNC_SUPERVISOR_SLEEP_SLICE_MS: u64 = 250;
 #[serde(rename_all = "camelCase")]
 pub struct MeshCliDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub message: String,
     pub repair: String,
 }
@@ -103,7 +103,7 @@ impl MeshCliDegradation {
         let workspace_arg = mesh_shell_quote_arg(workspace_path);
         Self {
             code: MESH_WORKSPACE_UNINITIALIZED_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "Mesh foreground storage was not inspected because {workspace_path}/.ee/ee.db does not exist."
             ),
@@ -115,7 +115,7 @@ impl MeshCliDegradation {
     pub fn mesh_disabled() -> Self {
         Self {
             code: MESH_DISABLED_POSTURE_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             message: "Optional mesh memory is disabled; foreground commands remain local-only."
                 .to_owned(),
             repair: "Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces."
@@ -127,7 +127,7 @@ impl MeshCliDegradation {
     pub fn sync_once_network_deferred() -> Self {
         Self {
             code: MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             message: "Foreground sync --once did not contact peers because no usable foreground peer transport path was available."
                 .to_owned(),
             repair: "Inspect enrolled peers with `ee mesh peers --json`, then use `ee mesh export` and `ee mesh import --file mesh-export.json` for a foreground peer transfer, or configure a peer transport before retrying sync. Use `ee export` or `ee backup` for local backups."
@@ -142,7 +142,7 @@ impl MeshCliDegradation {
     pub fn anti_entropy_transport_unavailable(active_peer_count: usize) -> Self {
         Self {
             code: crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE,
-            severity: "low",
+            severity: crate::models::DegradationSeverity::Low,
             message: format!(
                 "An anti-entropy round was warranted ({active_peer_count} active peer(s) enrolled) but no peer transport path is available; no round ran."
             ),
@@ -155,7 +155,7 @@ impl MeshCliDegradation {
     pub fn sync_supervisor_budget_exhausted(resource: &str, limit: impl std::fmt::Display) -> Self {
         Self {
             code: MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "Mesh sync supervisor exhausted the {resource} budget before peer contact."
             ),
@@ -169,7 +169,7 @@ impl MeshCliDegradation {
     pub fn sync_supervisor_backpressure(active_peers: usize, peer_concurrency: u32) -> Self {
         Self {
             code: MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             message: format!(
                 "Mesh sync supervisor limited {active_peers} active peers to {peer_concurrency} concurrent peer slots."
             ),
@@ -182,7 +182,7 @@ impl MeshCliDegradation {
     pub fn sync_supervisor_runtime_error(message: &str) -> Self {
         Self {
             code: MESH_SYNC_SUPERVISOR_RUNTIME_ERROR_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!("Mesh sync supervisor did not start: {message}"),
             repair: "Retry after the Asupersync runtime is healthy; foreground export/import remains available."
                 .to_owned(),
@@ -193,7 +193,7 @@ impl MeshCliDegradation {
     pub fn import_peer_not_consented(rejected_peer_count: usize) -> Self {
         Self {
             code: MESH_IMPORT_PEER_NOT_CONSENTED_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "Mesh import rejected {rejected_peer_count} peer row(s) without an exact enabled local enrollment."
             ),
@@ -206,7 +206,7 @@ impl MeshCliDegradation {
     pub fn import_cursor_unverified(rejected_cursor_count: usize) -> Self {
         Self {
             code: MESH_IMPORT_CURSOR_UNVERIFIED_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "Mesh import rejected {rejected_cursor_count} cursor row(s) that were not backed by locally durable contiguous accepted replay."
             ),
@@ -3246,7 +3246,7 @@ fn auto_status_signals_from_autodiscovery(
                 .iter()
                 .map(|item| MeshCliDegradation {
                     code: item.code,
-                    severity: item.severity,
+                    severity: crate::models::DegradationSeverity::parse_lossy(item.severity),
                     message: item.message.clone(),
                     repair: item.repair.to_owned(),
                 })
@@ -3608,7 +3608,7 @@ fn auto_status_degradations(
     if signals.tailnet_changed {
         degraded.push(MeshCliDegradation {
             code: AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message: "Auto-enrollment materialized state belongs to a different tailnet."
                 .to_owned(),
             repair: format!(
@@ -3619,7 +3619,7 @@ fn auto_status_degradations(
     if signals.node_key_changed {
         degraded.push(MeshCliDegradation {
             code: AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message:
                     "Auto-enrollment materialized state was created on a different Tailscale node key."
                     .to_owned(),
@@ -3631,7 +3631,7 @@ fn auto_status_degradations(
     if signals.manual_conflict_present {
         degraded.push(MeshCliDegradation {
             code: "auto_enrollment_manual_conflict",
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message: "Manual peer configuration conflicts with the auto-enrollment peer group."
                 .to_owned(),
             repair: "Resolve the manual peer group before re-running `ee mesh auto-enroll`."
@@ -5049,7 +5049,8 @@ max_bytes = 1048576
         assert!(status.auto_enrollment.drift.node_key_changed);
         assert!(!status.auto_enrollment.drift.tailnet_changed);
         assert!(status.auto_enrollment.degraded.iter().any(|item| {
-            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE && item.severity == "medium"
+            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE
+                && item.severity == crate::models::DegradationSeverity::Medium
         }));
     }
 

@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 pub const MESH_KEY_STORE_UNAVAILABLE_CODE: &str = "mesh_key_store_unavailable";
 
 /// Severity for every [`MESH_KEY_STORE_UNAVAILABLE_CODE`] emission.
-pub const MESH_KEY_STORE_UNAVAILABLE_SEVERITY: &str = "high";
+pub const MESH_KEY_STORE_UNAVAILABLE_SEVERITY: crate::models::DegradationSeverity =
+    crate::models::DegradationSeverity::High;
 
 /// Schema identifier pinned inside every key-store record document.
 pub const KEY_STORE_RECORD_SCHEMA: &str = "ee.mesh.key_store.record.v2";
@@ -226,7 +227,7 @@ pub struct KeyStoreFailureGuidance {
     /// Stable degraded code.
     pub code: &'static str,
     /// Stable severity.
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     /// Typed root failure class.
     pub class: KeyStoreFailureClass,
     /// Whether the attempted credential-bearing operation was refused.
@@ -246,7 +247,7 @@ impl KeyStoreError {
 
     /// The stable severity for this failure.
     #[must_use]
-    pub const fn severity(&self) -> &'static str {
+    pub const fn severity(&self) -> crate::models::DegradationSeverity {
         MESH_KEY_STORE_UNAVAILABLE_SEVERITY
     }
 
@@ -3405,7 +3406,7 @@ mod tests {
             operation: "open mesh key store".to_owned(),
         };
         assert_eq!(error.degraded_code(), "mesh_key_store_unavailable");
-        assert_eq!(error.severity(), "high");
+        assert_eq!(error.severity(), crate::models::DegradationSeverity::High);
         assert!(!error.message().is_empty());
         assert!(!error.repair().is_empty());
         assert!(error.message().contains("Mesh key store"));

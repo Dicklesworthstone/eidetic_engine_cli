@@ -228,7 +228,7 @@ pub struct DriftPeerRef {
     pub peer_node_key: String,
     pub peer_group_id: String,
     pub reason: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -243,7 +243,7 @@ pub struct MeshDriftGraceReport {
 #[serde(rename_all = "camelCase")]
 pub struct MeshDriftGraceDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub message: String,
     pub repair: &'static str,
 }
@@ -258,13 +258,13 @@ pub fn drift_grace_report(rows: &[MeshPeerStateRow]) -> MeshDriftGraceReport {
                 peer_node_key: row.peer_node_key.clone(),
                 peer_group_id: row.peer_group_id.clone(),
                 reason: "grace_period_soft_stale",
-                severity: "info",
+                severity: crate::models::DegradationSeverity::Info,
             }),
             MeshDriftPeerState::HardStale => report.stale_peers_in_config.push(DriftPeerRef {
                 peer_node_key: row.peer_node_key.clone(),
                 peer_group_id: row.peer_group_id.clone(),
                 reason: "consecutive_probes_missed",
-                severity: "warning",
+                severity: crate::models::DegradationSeverity::Warning,
             }),
         }
     }
@@ -287,7 +287,7 @@ pub fn drift_grace_report(rows: &[MeshPeerStateRow]) -> MeshDriftGraceReport {
     if materialized > 0 && soft.saturating_mul(4) > materialized {
         report.degraded.push(MeshDriftGraceDegradation {
             code: DRIFT_GRACE_SOFT_STALE_PEER_COUNT_HIGH_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "{soft} of {materialized} materialized mesh peers are soft-stale; the tailnet may be partitioning."
             ),
@@ -394,7 +394,10 @@ mod tests {
 
         assert_eq!(report.transient_unreachable.len(), 1);
         assert!(report.stale_peers_in_config.is_empty());
-        assert_eq!(report.transient_unreachable[0].severity, "info");
+        assert_eq!(
+            report.transient_unreachable[0].severity,
+            crate::models::DegradationSeverity::Info
+        );
     }
 
     #[test]

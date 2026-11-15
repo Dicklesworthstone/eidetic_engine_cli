@@ -263,7 +263,7 @@ fn unkeyed_route_returns_structured_pairing_guidance_before_authentication() -> 
     if guidance.status != PairingGuidanceStatus::PairingRequired
         || guidance.ceremony != PairingCeremonyAvailability::UnavailableInM1
         || guidance.degraded_code != "mesh_frame_auth_failed"
-        || guidance.severity != "high"
+        || guidance.severity != ee::models::DegradationSeverity::High
         || !guidance.blocks_authenticated_transport
         || !guidance.retry_after_pairing
         || guidance.command.is_some()

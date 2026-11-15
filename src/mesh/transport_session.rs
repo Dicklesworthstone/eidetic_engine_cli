@@ -2189,7 +2189,7 @@ pub struct PairingRequiredGuidance {
     /// Existing degraded classification owned by T2.1's emission registry.
     pub degraded_code: &'static str,
     /// Severity of refusing an unkeyed authenticated transport operation.
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     /// Missing pair material blocks the authenticated session.
     pub blocks_authenticated_transport: bool,
     /// The original operation may be retried after a real ceremony succeeds.
@@ -2206,7 +2206,7 @@ impl PairingRequiredGuidance {
             status: PairingGuidanceStatus::PairingRequired,
             ceremony: PairingCeremonyAvailability::UnavailableInM1,
             degraded_code: "mesh_frame_auth_failed",
-            severity: "high",
+            severity: crate::models::DegradationSeverity::High,
             blocks_authenticated_transport: true,
             retry_after_pairing: true,
             command: None,

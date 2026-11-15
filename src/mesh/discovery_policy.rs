@@ -663,7 +663,7 @@ pub fn evaluate_policy_degradations(
     {
         out.push(PolicyDegradation {
             code: DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             message: format!(
                 "respondMode is {} but this host does not advertise {EE_MESH_SERVICE_TAG}; peers will see decline responses",
                 DiscoveryMode::ServiceTag.as_str(),
@@ -674,7 +674,7 @@ pub fn evaluate_policy_degradations(
     if discovery_mode == DiscoveryMode::Allowlist && discovery_allowlist.is_empty() {
         out.push(PolicyDegradation {
             code: DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             message: format!(
                 "discoveryMode is {} but the allowlist is empty; no peers will be probed",
                 DiscoveryMode::Allowlist.as_str(),
@@ -692,7 +692,7 @@ pub fn evaluate_policy_degradations(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub message: String,
     pub repair: &'static str,
 }

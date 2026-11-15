@@ -31,6 +31,7 @@
 use std::cmp::Reverse;
 #[cfg(test)]
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -362,6 +363,34 @@ pub mod caution_kinds {
     pub const LANE_ALREADY_GRANTED: &str = "lane_already_granted";
 }
 
+/// Severity vocabulary for [`Caution`] entries in [`LaneGrantPreview`].
+///
+/// Restricted to `"info" | "warning"`; an `"error"` severity would imply the
+/// read-only preview itself failed, which is not a path this pure-decision
+/// module takes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CautionSeverity {
+    Info,
+    Warning,
+}
+
+impl CautionSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+impl fmt::Display for CautionSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One UX hazard surfaced by the preview. Severity is one of
 /// `"info" | "warning"`; an `"error"` severity would imply the preview
 /// itself failed, which is not a path this pure-decision module takes.
@@ -369,7 +398,7 @@ pub mod caution_kinds {
 pub struct Caution {
     pub kind: String,
     pub message: String,
-    pub severity: String,
+    pub severity: CautionSeverity,
 }
 
 /// Schema-shaped envelope ready for emission via the renderer or MCP.
@@ -782,7 +811,7 @@ fn collect_cautions(
                 "peer {} is enrolled but is not included in this workspace's peer-group bindings; if that membership is intended, add it, then review and freshly approve the lane because membership alone does not grant a denied lane",
                 input.peer_node_key
             ),
-            severity: "info".to_owned(),
+            severity: CautionSeverity::Info,
         });
     }
 
@@ -793,7 +822,7 @@ fn collect_cautions(
                 "lane '{}' is already granted in the current policy; this preview shows what is currently exposed",
                 input.lane.as_str()
             ),
-            severity: "info".to_owned(),
+            severity: CautionSeverity::Info,
         });
     }
 
@@ -821,7 +850,7 @@ fn collect_cautions(
                 "{high_trust_exposure_count} memor{plural} with trust_class=human_explicit would be exposed; these are the user's directly-authored rules",
                 plural = if high_trust_exposure_count == 1 { "y" } else { "ies" }
             ),
-            severity: "warning".to_owned(),
+            severity: CautionSeverity::Warning,
         });
     }
 
@@ -831,7 +860,7 @@ fn collect_cautions(
             message: format!(
                 "{affected_memory_count} memories would be exposed (>{LANE_GRANT_PREVIEW_LARGE_VOLUME_THRESHOLD}); the workspace may be larger than expected"
             ),
-            severity: "warning".to_owned(),
+            severity: CautionSeverity::Warning,
         });
     }
 
@@ -842,7 +871,7 @@ fn collect_cautions(
                 "{sensitive_tag_exposure_count} memor{plural} tagged secret/private/personal/internal would be exposed; tag-driven scope filtering is the user's main lever to hide things",
                 plural = if sensitive_tag_exposure_count == 1 { "y" } else { "ies" }
             ),
-            severity: "warning".to_owned(),
+            severity: CautionSeverity::Warning,
         });
     }
 
@@ -853,7 +882,7 @@ fn collect_cautions(
                 "{tombstoned_blocked} tombstoned memor{plural} would not be exposed; tombstoned status is honored",
                 plural = if tombstoned_blocked == 1 { "y" } else { "ies" }
             ),
-            severity: "info".to_owned(),
+            severity: CautionSeverity::Info,
         });
     }
 
@@ -881,7 +910,7 @@ fn collect_cautions(
         cautions.push(Caution {
             kind: caution_kinds::REDACTION_ACTIVE.to_owned(),
             message,
-            severity: "info".to_owned(),
+            severity: CautionSeverity::Info,
         });
     }
 
@@ -1676,10 +1705,12 @@ mod tests {
             .cautions[0]
             .message
             .push('x'));
-        assert_field_drift!("cautions.severity", |value: &mut LaneGrantPreview| value
-            .cautions[0]
-            .severity
-            .push('x'));
+        assert_field_drift!("cautions.severity", |value: &mut LaneGrantPreview| {
+            value.cautions[0].severity = match value.cautions[0].severity {
+                CautionSeverity::Info => CautionSeverity::Warning,
+                CautionSeverity::Warning => CautionSeverity::Info,
+            };
+        });
 
         let mut projected = base.clone();
         projected.approval_token = Some(ApprovalTokenProjection {
@@ -2036,7 +2067,7 @@ mod tests {
             .iter()
             .find(|c| c.kind == caution_kinds::PEER_NOT_IN_GROUP)
             .expect("peer_not_in_group caution present");
-        assert_eq!(caution.severity, "info");
+        assert_eq!(caution.severity, CautionSeverity::Info);
         assert!(caution.message.contains("nodekey:stranger"));
         assert!(caution.message.contains("peer-group bindings"));
     }
@@ -2076,7 +2107,7 @@ mod tests {
             .iter()
             .find(|c| c.kind == caution_kinds::LANE_ALREADY_GRANTED)
             .expect("lane_already_granted caution present");
-        assert_eq!(caution.severity, "info");
+        assert_eq!(caution.severity, CautionSeverity::Info);
     }
 
     // ---- Sample strategy: HighestTrust orders human_explicit first ---------

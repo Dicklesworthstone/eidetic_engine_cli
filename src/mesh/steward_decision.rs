@@ -254,7 +254,7 @@ pub struct StewardStatus {
 #[serde(rename_all = "camelCase")]
 pub struct StewardDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub repair: &'static str,
 }
 
@@ -284,21 +284,21 @@ fn steward_status_degradations(
     if !config.enabled {
         degraded.push(StewardDegradation {
             code: STEWARD_AUTO_ENROLL_DISABLED_CODE,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             repair: "Set EE_MESH_AUTO_ENROLL_ON_DEMAND=1 to enable opt-in steward reconciliation.",
         });
     }
     if config.enabled && state.reconciliations_today >= config.max_daily {
         degraded.push(StewardDegradation {
             code: STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             repair: "Raise EE_MESH_STEWARD_RECONCILIATION_MAX_DAILY or investigate flapping drift.",
         });
     }
     if state.consecutive_failures_24h >= STEWARD_CONSECUTIVE_FAILURE_WARNING_THRESHOLD {
         degraded.push(StewardDegradation {
             code: STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             repair: "Review `ee audit timeline --event-type mesh.steward_reconciliation_failed`.",
         });
     }
@@ -743,7 +743,10 @@ mod tests {
         );
         assert_eq!(status.degraded.len(), 1);
         assert_eq!(status.degraded[0].code, STEWARD_AUTO_ENROLL_DISABLED_CODE);
-        assert_eq!(status.degraded[0].severity, "info");
+        assert_eq!(
+            status.degraded[0].severity,
+            crate::models::DegradationSeverity::Info
+        );
     }
 
     #[test]

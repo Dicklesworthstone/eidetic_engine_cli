@@ -92,7 +92,7 @@ impl HelloResponderRuntimeInput {
 #[serde(rename_all = "camelCase")]
 pub struct HelloResponderDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub message: String,
     pub repair: String,
 }
@@ -102,7 +102,7 @@ impl HelloResponderDegradation {
     pub fn not_running() -> Self {
         Self {
             code: HELLO_RESPONDER_NOT_RUNNING_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message: "Mesh is enabled but the hello responder lifecycle job is not running."
                 .to_owned(),
             repair: "Run `ee mesh hello-responder run --help` and start the user-scoped foreground owner, or disable the responder with EE_MESH_HELLO_RESPONDER_DISABLED=1."
@@ -114,7 +114,7 @@ impl HelloResponderDegradation {
     pub fn port_in_use(port: u16) -> Self {
         Self {
             code: HELLO_RESPONDER_PORT_IN_USE_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message: format!("The hello responder could not bind port {port}."),
             repair: "Free the port or set EE_MESH_HELLO_PORT to an unused port.".to_owned(),
         }
@@ -124,7 +124,7 @@ impl HelloResponderDegradation {
     pub fn no_tailscale_ip() -> Self {
         Self {
             code: HELLO_RESPONDER_NO_TAILSCALE_IP_CODE,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             message:
                 "Mesh is enabled but no self Tailscale IP is available for the hello responder."
                     .to_owned(),
@@ -137,7 +137,7 @@ impl HelloResponderDegradation {
     pub fn crash_loop(crash_count_24h: u32) -> Self {
         Self {
             code: HELLO_RESPONDER_CRASH_LOOP_CODE,
-            severity: "high",
+            severity: crate::models::DegradationSeverity::High,
             message: format!(
                 "The hello responder restarted {crash_count_24h} times in the last 24 hours."
             ),
@@ -150,7 +150,7 @@ impl HelloResponderDegradation {
     pub fn rate_limited_storm(rate_limited_requests_1h: u64) -> Self {
         Self {
             code: HELLO_RESPONDER_RATE_LIMITED_STORM_CODE,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             message: format!(
                 "The hello responder rate-limited {rate_limited_requests_1h} requests in the last hour."
             ),

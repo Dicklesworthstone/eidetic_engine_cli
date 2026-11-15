@@ -291,7 +291,7 @@ impl MeshAdmissionDoctorPosture {
 #[serde(rename_all = "camelCase")]
 pub struct MeshAdmissionDoctorSignal {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub peer_count: usize,
     pub message: &'static str,
     pub repair: &'static str,
@@ -600,7 +600,7 @@ pub fn admission_doctor_report(status: &MeshAdmissionStatus) -> MeshAdmissionDoc
     if throttled > 0 {
         signals.push(MeshAdmissionDoctorSignal {
             code: degraded_codes::PEER_THROTTLED,
-            severity: "warning",
+            severity: crate::models::DegradationSeverity::Warning,
             peer_count: throttled,
             message: "mesh admission throttled one or more peers before local work was affected",
             repair: "Inspect mesh admission status and wait for peer backoff windows before accepting more peer work.",
@@ -611,7 +611,7 @@ pub fn admission_doctor_report(status: &MeshAdmissionStatus) -> MeshAdmissionDoc
     if payload_rejected > 0 {
         signals.push(MeshAdmissionDoctorSignal {
             code: degraded_codes::PAYLOAD_REJECTED,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             peer_count: payload_rejected,
             message: "mesh admission rejected oversized peer payloads",
             repair: "Reduce event batch or body fetch size for the affected peer.",
@@ -622,7 +622,7 @@ pub fn admission_doctor_report(status: &MeshAdmissionStatus) -> MeshAdmissionDoc
     if budget_exhausted > 0 {
         signals.push(MeshAdmissionDoctorSignal {
             code: degraded_codes::BUDGET_EXHAUSTED,
-            severity: "medium",
+            severity: crate::models::DegradationSeverity::Medium,
             peer_count: budget_exhausted,
             message: "mesh admission rejected peer work that would exceed local resource budgets",
             repair: "Drain queued peer index work or lower requested index jobs before retrying.",
@@ -632,7 +632,7 @@ pub fn admission_doctor_report(status: &MeshAdmissionStatus) -> MeshAdmissionDoc
     if status.local_tier1_unaffected {
         signals.push(MeshAdmissionDoctorSignal {
             code: degraded_codes::LOCAL_TIER1_UNAFFECTED,
-            severity: "info",
+            severity: crate::models::DegradationSeverity::Info,
             peer_count: status.peer_count,
             message: "local Tier-1 memory capacity remained reserved despite peer pressure",
             repair: "No repair needed; this signal confirms peer isolation worked.",

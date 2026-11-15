@@ -200,7 +200,7 @@ impl AutoEnrollmentResult {
     pub fn record_sync_once_failure(&mut self, message: impl Into<String>) {
         let degradation = AutoEnrollmentDegradation::new(
             AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE,
-            "warning",
+            crate::models::DegradationSeverity::Warning,
             message.into(),
             "Retry with `ee mesh sync --once --json`; auto-enrollment materialization already completed.",
         );
@@ -291,7 +291,7 @@ pub struct AutoEnrollmentExplanation {
 #[serde(rename_all = "camelCase")]
 pub struct AutoEnrollmentDegradation {
     pub code: &'static str,
-    pub severity: &'static str,
+    pub severity: crate::models::DegradationSeverity,
     pub message: String,
     pub repair: &'static str,
 }
@@ -300,7 +300,7 @@ impl AutoEnrollmentDegradation {
     #[must_use]
     pub fn new(
         code: &'static str,
-        severity: &'static str,
+        severity: crate::models::DegradationSeverity,
         message: impl Into<String>,
         repair: &'static str,
     ) -> Self {
@@ -498,7 +498,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE,
-                "warning",
+                crate::models::DegradationSeverity::Warning,
                 "auto-enrollment did not receive evidence of a fresh Tailscale probe",
                 "Re-run `ee mesh auto-enroll`; materialization requires a fresh local Tailscale probe.",
             ),
@@ -509,7 +509,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
-                "medium",
+                crate::models::DegradationSeverity::Medium,
                 "existing mesh materialization belongs to a different tailnet",
                 "Run `ee mesh disable --workspace <path>` before auto-enrolling on the new tailnet.",
             ),
@@ -520,7 +520,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE,
-                "medium",
+                crate::models::DegradationSeverity::Medium,
                 "existing mesh materialization was created on a different Tailscale node key",
                 "Run `ee mesh disable --workspace <path> --reason \"restored from different machine\"` before auto-enrolling on this machine.",
             ),
@@ -531,7 +531,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_MANUAL_CONFIG_PRESENT_CODE,
-                "medium",
+                crate::models::DegradationSeverity::Medium,
                 "manual peer configuration is present",
                 "Pass `--replace-manual-with-auto` only when the workspace should move to the auto-managed lifecycle.",
             ),
@@ -542,7 +542,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_NO_ELIGIBLE_PEERS_CODE,
-                "info",
+                crate::models::DegradationSeverity::Info,
                 "no eligible ee-capable Tailscale peers were discovered",
                 "Run ee with mesh enabled on another Tailscale machine, or use `--include <node-key>` for a known peer.",
             ),
@@ -555,7 +555,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
             &mut degraded,
             AutoEnrollmentDegradation::new(
                 AUTO_ENROLLMENT_MANUAL_MIGRATION_UNMATCHED_PEER_SET_CODE,
-                "info",
+                crate::models::DegradationSeverity::Info,
                 "manual-to-auto migration selected a peer set that differs from the existing manual peer set",
                 "Review the result before relying on the auto-managed peer group.",
             ),
@@ -897,7 +897,7 @@ fn push_invalid_override(degraded: &mut Vec<AutoEnrollmentDegradation>, node_key
         degraded,
         AutoEnrollmentDegradation::new(
             AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE,
-            "warning",
+            crate::models::DegradationSeverity::Warning,
             format!("override node key `{node_key}` is not a valid Tailscale node key"),
             "Use node keys formatted as `nodekey:` plus 64 lowercase hex characters; invalid overrides are ignored.",
         ),
@@ -1073,7 +1073,8 @@ mod tests {
         assert_eq!(result.outcome, "blocked");
         assert!(!result.materialization.writes_peer_rows);
         assert!(result.degraded.iter().any(|item| {
-            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE && item.severity == "medium"
+            item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE
+                && item.severity == crate::models::DegradationSeverity::Medium
         }));
     }
 
@@ -1325,7 +1326,7 @@ mod tests {
         assert!(result.materialization.peers_to_revoke.is_empty());
         assert!(result.degraded.iter().any(|item| {
             item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE
-                && item.severity == "warning"
+                && item.severity == crate::models::DegradationSeverity::Warning
         }));
     }
 
@@ -1392,7 +1393,8 @@ mod tests {
         let result = plan_auto_enrollment(input);
         assert_eq!(result.outcome, "materialized");
         assert!(result.degraded.iter().any(|item| {
-            item.code == AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE && item.severity == "warning"
+            item.code == AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE
+                && item.severity == crate::models::DegradationSeverity::Warning
         }));
     }
 
