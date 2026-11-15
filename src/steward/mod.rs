@@ -4991,11 +4991,26 @@ impl ManualRunner {
             }
         };
 
+        let selection_started = Instant::now();
         let selection = plan_consolidation_candidates(
             &opened.workspace_id,
             &memories,
             &metadata,
             self.options.item_limit,
+        );
+        let selection_elapsed_ms = millis_to_u64(selection_started.elapsed());
+        tracing::info!(
+            workspace_id = %opened.workspace_id,
+            request_id = "consolidation_pass",
+            bead_id = "bd-3usjw.45",
+            surface = "sieve_streaming_consolidator",
+            phase = "response",
+            elapsed_ms = selection_elapsed_ms,
+            degraded_codes = ?Vec::<&'static str>::new(),
+            considered_candidates = selection.considered_candidates,
+            selected_candidates = selection.candidates.len(),
+            objective_value = selection.objective_value,
+            "sieve streaming consolidation candidate selection completed"
         );
         budget.record(ResourceType::Items, usize_to_u64(memories.len()));
         budget.record(ResourceType::TimeMs, 0);

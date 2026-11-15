@@ -923,6 +923,8 @@ def declared_file_surfaces(bead):
             continue
         rest = line.split(":", 1)[1]
         for raw in rest.split(","):
+            if re.search(r"\(\s*read-only\s*\)", raw, flags=re.IGNORECASE):
+                continue
             token = raw.strip().strip("`")
             token = re.split(r"\s+", token)[0].strip("`")
             if token:
@@ -932,6 +934,40 @@ def declared_file_surfaces(bead):
 def tracing_decl(text):
     match = re.search(r"(?im)^TRACING:\s*(.+(?:\n(?![A-Z][A-Z _-]*:).+)*)", text)
     return match.group(0) if match else ""
+
+def tracing_exemption(text):
+    match = re.search(
+        r"(?im)^TRACING EXEMPTION:\s*([A-Za-z0-9_.-]+)\s*\(([^)\n]+)\)",
+        text,
+    )
+    if not match:
+        return None
+    kind = match.group(1).strip().lower()
+    reason = match.group(2).strip()
+    if not reason:
+        return None
+    return kind, reason
+
+def pure_leaf_contract_error(path):
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return "unreadable source file"
+    doc_lines = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//!"):
+            doc_lines.append(stripped[3:].strip())
+        elif not stripped or stripped.startswith("//"):
+            continue
+        else:
+            break
+    doc_header = " ".join(doc_lines)
+    if not re.search(r"\bpure\b", doc_header, flags=re.IGNORECASE):
+        return "module doc header (`//!`) does not advertise a pure contract"
+    if emitted_events(path):
+        return "file emits tracing events despite pure_leaf exemption"
+    return None
 
 def missing_decl_fields(decl):
     return [field for field in required_fields if field not in decl]
@@ -1202,27 +1238,49 @@ for bead in beads:
         runtime_candidates.append((declared, path))
 
     if runtime_candidates:
-        evidence = [
-            (name, source_has_tracing_evidence(path, impl_surfaces[0]))
-            for name, path in runtime_candidates
-        ]
-        if not any(ok for _, (ok, _) in evidence):
-            # Report the file that came CLOSEST, not the union of every miss.
-            # A bead declaring both src/cli/mod.rs (0 convention keys) and
-            # src/db/mod.rs (carries `phase`) should point at db/mod.rs and
-            # name the six fields actually outstanding there, otherwise the
-            # report sends the reader to the wrong file with a wrong list.
-            closest_name, (_, closest_missing) = min(
-                evidence, key=lambda item: len(item[1][1])
-            )
-            violations.append({
-                "bead": bead_id,
-                "surface": impl_surfaces[0],
-                "path": closest_name,
-                "declaredRuntimeFiles": [name for name, _ in runtime_candidates],
-                "reason": "no declared production FILE SURFACE carries structured tracing evidence",
-                "missingFields": closest_missing,
-            })
+        exemption = tracing_exemption(text)
+        if exemption is not None:
+            exemption_kind, _exemption_reason = exemption
+            if exemption_kind != "pure_leaf":
+                violations.append({
+                    "bead": bead_id,
+                    "surface": impl_surfaces[0],
+                    "declaredRuntimeFiles": [name for name, _ in runtime_candidates],
+                    "reason": f"invalid TRACING EXEMPTION kind '{exemption_kind}' (expected pure_leaf)",
+                })
+            else:
+                for name, path in runtime_candidates:
+                    err = pure_leaf_contract_error(path)
+                    if err is not None:
+                        violations.append({
+                            "bead": bead_id,
+                            "surface": impl_surfaces[0],
+                            "path": name,
+                            "declaredRuntimeFiles": [n for n, _ in runtime_candidates],
+                            "reason": f"invalid TRACING EXEMPTION: {err}",
+                        })
+        else:
+            evidence = [
+                (name, source_has_tracing_evidence(path, impl_surfaces[0]))
+                for name, path in runtime_candidates
+            ]
+            if not any(ok for _, (ok, _) in evidence):
+                # Report the file that came CLOSEST, not the union of every miss.
+                # A bead declaring both src/cli/mod.rs (0 convention keys) and
+                # src/db/mod.rs (carries `phase`) should point at db/mod.rs and
+                # name the six fields actually outstanding there, otherwise the
+                # report sends the reader to the wrong file with a wrong list.
+                closest_name, (_, closest_missing) = min(
+                    evidence, key=lambda item: len(item[1][1])
+                )
+                violations.append({
+                    "bead": bead_id,
+                    "surface": impl_surfaces[0],
+                    "path": closest_name,
+                    "declaredRuntimeFiles": [name for name, _ in runtime_candidates],
+                    "reason": "no declared production FILE SURFACE carries structured tracing evidence",
+                    "missingFields": closest_missing,
+                })
 
 observability_report = validate_observability_manifest(root, manifest_required)
 mesh_redaction_report = validate_mesh_redaction_manifest(root, manifest_required)
@@ -1290,6 +1348,9 @@ if [ "$SELF_TEST" = true ]; then
 {"id":"bd-3usjw.mentions","title":"[implements-surface:mentions_surface] example","labels":["implements-surface:mentions_surface"],"description":"FILE SURFACE: src/mentions.rs\nTRACING: surface=mentions_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.neighbour","title":"[implements-surface:neighbour_surface] example","labels":["implements-surface:neighbour_surface"],"description":"FILE SURFACE: src/shared_host.rs\nTRACING: surface=neighbour_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.parameterised","title":"[implements-surface:parameterised_surface] example","labels":["implements-surface:parameterised_surface"],"description":"FILE SURFACE: src/parameterised.rs\nTRACING: surface=parameterised_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.readonly_input","title":"[implements-surface:readonly_input_surface] example","labels":["implements-surface:readonly_input_surface"],"description":"FILE SURFACE: tests/harness.rs, src/shared_host.rs (read-only)\nTRACING: surface=readonly_input_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.pure_leaf","title":"[implements-surface:pure_leaf_surface] example","labels":["implements-surface:pure_leaf_surface"],"description":"FILE SURFACE: src/pure_leaf.rs\nTRACING: surface=pure_leaf_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes.\nTRACING EXEMPTION: pure_leaf (src/pure_leaf.rs is a pure environment-map helper with no workspace or request context)"}
+{"id":"bd-3usjw.fake_pure_leaf","title":"[implements-surface:fake_pure_leaf_surface] example","labels":["implements-surface:fake_pure_leaf_surface"],"description":"FILE SURFACE: src/untraced.rs\nTRACING: surface=fake_pure_leaf_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes.\nTRACING EXEMPTION: pure_leaf (tries to exempt an ordinary handler whose module header does not declare a pure contract)"}
 JSONL
     mkdir -p "$tmp_dir/src"
     cat > "$tmp_dir/src/good.rs" <<'RS'
@@ -1391,10 +1452,16 @@ pub fn trace_checkpoint(workspace_id: &str, surface: &'static str, phase: &'stat
     );
 }
 RS
+    cat > "$tmp_dir/src/pure_leaf.rs" <<'RS'
+//! Pure path-selection helper with no workspace or request context.
+pub fn select_path(value: Option<&str>) -> &str {
+    value.unwrap_or("default")
+}
+RS
     report=$(run_checker "$tmp_dir/issues.jsonl" "$tmp_dir" "" "false")
     printf '%s\n' "$report" > "$tmp_dir/self-test-report.json"
-    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 5' >/dev/null; then
-        echo "error: self-test expected five violations" >&2
+    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 6' >/dev/null; then
+        echo "error: self-test expected six violations" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi
@@ -1431,6 +1498,24 @@ RS
     # A helper taking the surface as a parameter must still count as evidence.
     if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.parameterised")] | length == 0' >/dev/null; then
         echo "error: a parameterised tracing helper must not be penalised for not naming its surface literally" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # A `(read-only)` reference input in FILE SURFACE must not be treated as an owned runtime boundary.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.readonly_input")] | length == 0' >/dev/null; then
+        echo "error: a (read-only) FILE SURFACE entry must not be treated as an owned runtime boundary" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # A pure_leaf exemption whose module header advertises a pure contract and emits zero events passes.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.pure_leaf")] | length == 0' >/dev/null; then
+        echo "error: a verified pure_leaf exemption must pass" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # A fake pure_leaf exemption on a file whose module header does not declare a pure contract must fail.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.fake_pure_leaf" and (.reason | startswith("invalid TRACING EXEMPTION:")))] | length == 1' >/dev/null; then
+        echo "error: a pure_leaf exemption on a non-pure module must be rejected" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi

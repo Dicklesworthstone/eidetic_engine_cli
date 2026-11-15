@@ -172,7 +172,9 @@ proof_json="$WORK_DIR/smoke-proof.json"
     cd "$REPO_ROOT"
     RCH_BIN="${RCH_BIN:-rch}" \
     RCH_VERIFY_NOW="2026-05-16T07:20:00.000000Z" \
-    bash -lc "$smoke_command" > "$proof_json"
+    RCH_VERIFY_FRANKEN_STACK_PREFLIGHT=0 \
+    RCH_VERIFY_COMMITTED_TREE_BASE="$WORK_DIR/committed-tree" \
+    bash -c "$smoke_command" > "$proof_json"
 )
 assert_dry_run_report "$proof_json"
 emit_event \

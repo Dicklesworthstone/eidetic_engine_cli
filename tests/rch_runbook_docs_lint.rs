@@ -215,9 +215,11 @@ fn shell_e2e_driver_emits_phase_logs_and_final_summary() -> TestResult {
         if event["phase"] == "assert" && event["status"] == "dry_run_proof_validated" {
             saw_dry_run_assert = true;
             ensure(
-                event["normalized_command"]
-                    .as_str()
-                    .is_some_and(|command| command.contains("scripts/rch_verify.sh --dry-run")),
+                event["normalized_command"].as_str().is_some_and(|command| {
+                    command.starts_with("scripts/rch_verify.sh ")
+                        && command.contains(" --dry-run")
+                        && command.contains(" -- cargo ")
+                }),
                 format!("assert event did not record the extracted command: {event}"),
             )?;
         }

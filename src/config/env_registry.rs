@@ -147,6 +147,8 @@ pub enum EnvVar {
     EmbedRemoteUrl,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
+    /// `EE_EXTERNAL_BUILD_ROOT`
+    ExternalBuildRoot,
     /// `EE_FLIGHT_RECORDER`
     FlightRecorder,
     /// `EE_FLIGHT_RECORDER_DIR`
@@ -379,6 +381,7 @@ impl EnvVar {
             Self::EmbedRemoteModel,
             Self::EmbedRemoteUrl,
             Self::ExperimentalTriad,
+            Self::ExternalBuildRoot,
             Self::FlightRecorder,
             Self::FlightRecorderDir,
             Self::FlightRecorderRetentionDays,
@@ -519,6 +522,7 @@ impl EnvVar {
             Self::EmbedRemoteModel => "EE_EMBED_REMOTE_MODEL",
             Self::EmbedRemoteUrl => "EE_EMBED_REMOTE_URL",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
+            Self::ExternalBuildRoot => "EE_EXTERNAL_BUILD_ROOT",
             Self::FlightRecorder => "EE_FLIGHT_RECORDER",
             Self::FlightRecorderDir => "EE_FLIGHT_RECORDER_DIR",
             Self::FlightRecorderRetentionDays => "EE_FLIGHT_RECORDER_RETENTION_DAYS",
@@ -741,6 +745,9 @@ impl EnvVar {
             }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
+            }
+            Self::ExternalBuildRoot => {
+                "Override the external build and scratch root enforced by disk-pressure and build-admission diagnostics."
             }
             Self::FlightRecorder => {
                 "Enable the redacted command flight recorder for ee subcommands."
@@ -1053,6 +1060,7 @@ impl EnvVar {
             | Self::DemoEvidenceRoot
             | Self::DoctorBlastRadius
             | Self::E2eRetentionManifest
+            | Self::ExternalBuildRoot
             | Self::FlightRecorderDir
             | Self::IndexDir
             | Self::L2PackCacheDir

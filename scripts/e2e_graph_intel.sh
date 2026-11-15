@@ -112,14 +112,16 @@ else
 fi
 
 # --- corpus: a hub pattern (a-c, b-c linked; a,b share tags) -------------
+# Pass --no-auto-link so remember-time co-tag auto-linking (bd-pp1fk) does not
+# pre-create the (a,b) edge that `ee graph suggest-links` is about to predict.
 run_ee remember "Always run the schema drift gate before altering public JSON contracts." \
-    --workspace "${WS}" --level procedural --kind rule --tags "contracts,gates" --json
+    --workspace "${WS}" --level procedural --kind rule --tags "contracts,gates" --no-auto-link --json
 MEM_A="$(remember_id)"
-run_ee remember "Never alter public JSON contracts without running the schema drift gate first." \
-    --workspace "${WS}" --level procedural --kind rule --tags "contracts,gates" --json
+run_ee remember "Never run the schema drift gate before altering public JSON contracts." \
+    --workspace "${WS}" --level procedural --kind rule --tags "contracts,gates" --no-auto-link --json
 MEM_B="$(remember_id)"
 run_ee remember "The schema drift gate lives in the contracts test harness." \
-    --workspace "${WS}" --level semantic --kind fact --tags "contracts" --json
+    --workspace "${WS}" --level semantic --kind fact --tags "contracts" --no-auto-link --json
 MEM_C="$(remember_id)"
 if [[ -n "${MEM_A}" && -n "${MEM_B}" && -n "${MEM_C}" ]]; then
     event corpus_seeded pass

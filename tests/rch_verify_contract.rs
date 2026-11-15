@@ -7351,6 +7351,266 @@ exit 2
 }
 
 #[test]
+fn retryable_shared_consequence_blocker_does_not_gate_retries_while_persistent_blocker_still_refuses_and_scoped_evict_clears_single_entry()
+-> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-retryable-invocations");
+    let store = unique_tmp_path("rch-known-blocker-retryable-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-retryable.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  case "${FAKE_RCH_MODE:-retryable_fail}" in
+    retryable_fail)
+      cat <<'TRANSCRIPT'
+[RCH] Executing on worker-01: cargo test --test rch_verify_contract retryable_probe -- --nocapture
+Error:
+  × Remote execution failed on worker-01 (exit 130) - retryable
+  help: Will retry on another worker if available
+[RCH] remote required; refusing local fallback
+TRANSCRIPT
+      exit 88
+      ;;
+    pass)
+      cat <<'TRANSCRIPT'
+[RCH] Executing on worker-01: cargo test --test rch_verify_contract retryable_probe -- --nocapture
+running 1 test
+test retryable_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+[RCH] remote worker-01 (0.01s)
+TRANSCRIPT
+      exit 0
+      ;;
+    persistent_fail_a)
+      cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+[RCH] remote worker-06 failed (exit 101)
+TRANSCRIPT
+      exit 101
+      ;;
+    persistent_fail_b)
+      cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+[RCH] remote worker-06 failed (exit 101)
+TRANSCRIPT
+      exit 101
+      ;;
+    *)
+      printf 'unexpected FAKE_RCH_MODE: %s\n' "${FAKE_RCH_MODE:-}" >&2
+      exit 2
+      ;;
+  esac
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+
+    let retryable_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--test",
+        "rch_verify_contract",
+        "retryable_probe",
+        "--",
+        "--nocapture",
+    ];
+    let retryable_fail_envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("FAKE_RCH_MODE", "retryable_fail"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
+    ];
+    let (first_status, first_stdout, first_stderr) =
+        run_script_with_env(&retryable_args, &retryable_fail_envs)?;
+    if first_status.success() {
+        return Err("first retryable local_fallback_refused run should fail".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first retryable run: {error}\nstderr={first_stderr}"))?;
+    if first["status"] != "rch_environment_failure"
+        || first["known_blocker"]["blocker_kind"] != "local_fallback_refused"
+        || first["known_blocker"]["retryable"] != true
+        || first["known_blocker"]["shared_consequence"] != true
+        || first["known_blocker"]["write_suppressed"] != true
+    {
+        return Err(format!(
+            "retryable local_fallback_refused should be marked retryable + write_suppressed: {first}"
+        ));
+    }
+
+    // Second run with the exact same command and store must NOT be refused by known_blockers.jsonl;
+    // when the worker succeeds on the retry, the verification passes.
+    let retryable_pass_envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("FAKE_RCH_MODE", "pass"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
+    ];
+    let (second_status, second_stdout, second_stderr) =
+        run_script_with_env(&retryable_args, &retryable_pass_envs)?;
+    if !second_status.success() {
+        return Err(format!(
+            "retry after transient retryable failure should not be blocked by known_blocker_refused:\nstdout={second_stdout}\nstderr={second_stderr}"
+        ));
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second retryable run: {error}"))?;
+    if second["status"] != "remote_pass" {
+        return Err(format!("expected remote_pass on retry, got: {second}"));
+    }
+
+    // Meanwhile, two distinct persistent workspace-inheritance blockers in the same store
+    // still cache and refuse on repeat, and --evict-known-blocker evicts only the targeted fingerprint.
+    let persistent_args_a = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--test",
+        "rch_verify_contract",
+        "persistent_probe_a",
+        "--",
+        "--nocapture",
+    ];
+    let persistent_envs_a = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("FAKE_RCH_MODE", "persistent_fail_a"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
+    ];
+    let (_pa_status, pa_stdout, _pa_stderr) =
+        run_script_with_env(&persistent_args_a, &persistent_envs_a)?;
+    let pa: Value = serde_json::from_str(&pa_stdout)
+        .map_err(|error| format!("parse persistent_probe_a: {error}"))?;
+    let fp_a = pa["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("missing blocker_fingerprint for persistent_probe_a: {pa}"))?
+        .to_owned();
+
+    let persistent_args_b = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--test",
+        "rch_verify_contract",
+        "persistent_probe_b",
+        "--",
+        "--nocapture",
+    ];
+    let persistent_envs_b = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("FAKE_RCH_MODE", "persistent_fail_b"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
+    ];
+    let (_pb_status, pb_stdout, _pb_stderr) =
+        run_script_with_env(&persistent_args_b, &persistent_envs_b)?;
+    let pb: Value = serde_json::from_str(&pb_stdout)
+        .map_err(|error| format!("parse persistent_probe_b: {error}"))?;
+    let fp_b = pb["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("missing blocker_fingerprint for persistent_probe_b: {pb}"))?
+        .to_owned();
+    if fp_a == fp_b {
+        return Err(
+            "expected distinct fingerprints for persistent_probe_a and persistent_probe_b"
+                .to_owned(),
+        );
+    }
+
+    // Repeat persistent_probe_a without eviction -> refuses via cache.
+    let (_pa2_status, pa2_stdout, _pa2_stderr) =
+        run_script_with_env(&persistent_args_a, &persistent_envs_a)?;
+    let pa2: Value = serde_json::from_str(&pa2_stdout)
+        .map_err(|error| format!("parse persistent_probe_a repeat: {error}"))?;
+    if pa2["status"] != "known_blocker_refused" {
+        return Err(format!(
+            "persistent blocker A should refuse on repeat: {pa2}"
+        ));
+    }
+
+    // Scoped eviction of fp_a allows persistent_probe_a to re-execute while leaving fp_b cached.
+    let evict_args_a = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--evict-known-blocker",
+        fp_a.as_str(),
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--test",
+        "rch_verify_contract",
+        "persistent_probe_a",
+        "--",
+        "--nocapture",
+    ];
+    let (pa_pass_status, pa_pass_stdout, pa_pass_stderr) =
+        run_script_with_env(&evict_args_a, &retryable_pass_envs)?;
+    if !pa_pass_status.success() {
+        return Err(format!(
+            "scoped eviction of fp_a should allow probe_a to run and pass:\nstdout={pa_pass_stdout}\nstderr={pa_pass_stderr}"
+        ));
+    }
+    let (_pb2_status, pb2_stdout, _pb2_stderr) =
+        run_script_with_env(&persistent_args_b, &persistent_envs_b)?;
+    let pb2: Value = serde_json::from_str(&pb2_stdout)
+        .map_err(|error| format!("parse persistent_probe_b repeat: {error}"))?;
+    if pb2["status"] != "known_blocker_refused"
+        || pb2["known_blocker"]["blocker_fingerprint"] != fp_b
+    {
+        return Err(format!(
+            "scoped eviction of fp_a must leave fp_b cached and refusing: {pb2}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn known_blocker_remote_timeout_change_allows_new_remote_attempt() -> TestResult {
     let invocation_log = unique_tmp_path("rch-known-blocker-timeout-invocations");
     let store = unique_tmp_path("rch-known-blocker-timeout-store").join("known_blockers.jsonl");

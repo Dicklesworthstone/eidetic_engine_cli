@@ -9,13 +9,15 @@
 # than fixed because instrumenting seven production surfaces at once is a
 # decision for the orchestrator, not a side effect of finally running the check.
 #
-# STARTED AT SEVEN; FIVE REMAIN, and the ratchet is what moved it:
+# STARTED AT SEVEN; ZERO REMAIN, and the ratchet is what moved it:
 #   7 -> 6  d499bc622  bd-3usjw.2  graph_centrality_read now passes
 #   6 -> 5  f42dfd70a  bd-3usjw.1  db_inspect given a conformant event
-# Four of the five carry no structured tracing evidence on any declared
-# production surface; bd-3usjw.69 is missing its TRACING paragraph entirely.
-# Each remaining line is named by its own bead, so the disposition of this debt
-# is tracked by construction rather than by this file.
+#   5 -> 0  bd-jg4w8   remaining five resolved (bd-3usjw.45 & bd-3usjw.51
+#                      instrumented at dispatch boundaries in src/steward/mod.rs
+#                      and src/db/mod.rs; bd-3usjw.69 given its TRACING
+#                      declaration; bd-3usjw.38 read-only reference input
+#                      excluded from owned runtime surfaces; bd-3usjw.68 given
+#                      a verified pure_leaf exemption)
 #
 # This paragraph is prose over data, so it goes stale silently -- it described
 # the original seven for two days after the list reached five. If you shrink the
@@ -27,9 +29,3 @@
 # permanent ignore-list -- the failure mode this whole bead is about.
 #
 # Format: one bead id per line. Blank lines and # comments are ignored.
-
-bd-3usjw.38
-bd-3usjw.45
-bd-3usjw.51
-bd-3usjw.68
-bd-3usjw.69

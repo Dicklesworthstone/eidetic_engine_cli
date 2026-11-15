@@ -223,9 +223,9 @@ does not rewrite either the V088 history record or already canonical rows.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V134` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V135` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V136` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V134` | `attestation_bundles` | not_stored | `bd-1n0np.22.1` | Retired reservation (`bd-5p62d`): canonical `models::attestation::AttestationBundle` and deterministic BLAKE3 hashing landed without a dedicated SQLite table. |
+| `V135` | `query_miss_ledger` | not_stored | `bd-1n0np.6.3` | Retired reservation (`bd-5p62d`): redacted `search.miss_recorded` audit entries landed on `audit_log` without a separate `query_miss_ledger` table. |
+| `V136` | `source_write_stats` | not_stored | `bd-1n0np.8.5` | Retired reservation (`bd-1n0np.23.2` / `bd-5p62d`): per-source write-stream statistics are computed over the write-owner observation deque without a persisted table. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
@@ -279,9 +279,14 @@ generation so cached context sees anchor changes.
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
 migration constant and stay at or behind the current compiled tail (`V133` at
-the time of this registry). `planned` rows must stay ahead of the compiled tail
-and keep `migrationConstant`, `boundaryMigrationEvidence`, and
-`backupCoverageEvidence` set to `required_before_implemented`.
+the time of this registry). `planned` rows must stay ahead of the compiled tail,
+name a non-closed `ownerBead` in `.beads/issues.jsonl`, and keep
+`migrationConstant`, `boundaryMigrationEvidence`, and
+`backupCoverageEvidence` set to `required_before_implemented`. `not_stored` rows
+record initiative allocations whose owning bead delivered the capability without
+a dedicated SQLite table; they must carry a `scopeRuling` on the allocation and
+set `runtimeRule: delivered_without_table` plus `not_applicable_not_stored` on
+their migration and backup evidence fields.
 
 The implemented constants currently covered by the registry are
 `V066_MEMORY_ANCHORS`, `V067_PACK_CANDIDATE_IMPRESSIONS`,

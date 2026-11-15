@@ -155,12 +155,15 @@ counters on planned-only evidence. The current state:
   `hash_blake3` are uncovered for all three. Only the pack round trip calls
   `verify_backup`, so `backup_verify` is uncovered for the other two. The
   remaining clauses are owned by `bd-vxrcu`.
-- `source_write_stats` is `not_applicable_not_stored`. Its registry allocation
-  (V131_SOURCE_WRITE_STATS) is only `planned`, and bd-1n0np.8.5 closed on
-  computing write-stats from caller-supplied observations, with no table. The
-  bd-1n0np.23.2 orchestrator ruling puts it out of that bead's scope; whether
-  to build V131 or withdraw the reservation is an operator decision.
-- The other seven kinds are `not_conformant_evidence_pending` on
+- `attestation_bundles`, `query_miss_ledger`, and `source_write_stats` are
+  `not_applicable_not_stored`. Their registry allocations (`V134`, `V135`,
+  `V136`) are `not_stored` under `bd-1n0np.23.2` and `bd-5p62d`: `bd-1n0np.22.1`
+  closed on canonical `models::attestation::AttestationBundle` hashing,
+  `bd-1n0np.6.3` closed on `search.miss_recorded` audit rows in `audit_log`, and
+  `bd-1n0np.8.5` closed on `WriteOwner::source_write_stats` /
+  `compute_source_write_stats` over the write-owner observation deque, with no
+  separate SQLite tables to back up.
+- The other five kinds are `not_conformant_evidence_pending` on
   `bd-1n0np.23.2`.
 
 ## Failure Scenarios

@@ -43231,6 +43231,7 @@ impl DbConnection {
         algorithm: &str,
         params_hash: &str,
     ) -> Result<Option<StoredGraphAlgorithmResult>> {
+        let started = std::time::Instant::now();
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT workspace_id, snapshot_id, algorithm, params_hash, result_json, computed_at, ttl_seconds FROM graph_algorithm_results WHERE workspace_id = ?1 AND snapshot_id = ?2 AND algorithm = ?3 AND params_hash = ?4",
@@ -43241,6 +43242,20 @@ impl DbConnection {
                 Value::Text(params_hash.to_string()),
             ],
         )?;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            request_id = %snapshot_id,
+            bead_id = "bd-3usjw.51",
+            surface = "roaring_params_cache",
+            phase = "response",
+            elapsed_ms = elapsed_ms,
+            degraded_codes = ?Vec::<&'static str>::new(),
+            algorithm = %algorithm,
+            params_hash = %params_hash,
+            cache_hit = !rows.is_empty(),
+            "graph algorithm result cache lookup completed"
+        );
 
         if rows.is_empty() {
             return Ok(None);

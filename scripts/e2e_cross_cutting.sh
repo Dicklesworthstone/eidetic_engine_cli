@@ -79,7 +79,7 @@ assert_jq_file() {
         e2e_log_assert_eq "true" "true" "$label"
         _harness_pass "$label"
     else
-        e2e_log_assert_eq "false" "true" "$label"
+        e2e_log_assert_eq "false" "true" "$label" || true
         _harness_fail "$label"
     fi
 }
@@ -94,7 +94,7 @@ assert_jq_file_argjson() {
         e2e_log_assert_eq "true" "true" "$label"
         _harness_pass "$label"
     else
-        e2e_log_assert_eq "false" "true" "$label"
+        e2e_log_assert_eq "false" "true" "$label" || true
         _harness_fail "$label"
     fi
 }
@@ -171,7 +171,7 @@ fi
 
 assert_jq_file_argjson "$MIGRATION_MANIFEST" \
     tail "$migration_compiled_tail" \
-    '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
+    '([.allocations[] | select(.status == "planned") | .version] | (length == 0 or min > $tail)) and ([.allocations[] | select(.status == "not_stored") | .version] | (length == 0 or min > $tail))' \
     "migration registry reservations stay ahead of the compiled tail"
 
 step "the embedding fingerprint field set matches its schema version"
@@ -416,7 +416,25 @@ def strip_test_modules(text):
 # "/private/etc/ssh/") or is a Windows drive root. A JSON pointer
 # ("/rch/commandHash", "/request/query") does not, which is what keeps this off
 # the pointer tables in swarm_brief.rs, why.rs, recorder.rs and output/mod.rs.
+# A private redactor prefix cluster must also include at least one sensitive
+# root (or Windows drive root) so non-redactor system-binary classifiers such
+# as infer_toolchain_source_hint ("/usr/", "/bin/", "/opt/homebrew/",
+# "/nix/store/") in files that also use REDACTED_PATH are not misclassified.
 PATHLIT = re.compile(r'"(/(?:[A-Za-z_][\w.-]*/)+|[A-Za-z]:[\\/][^"\n]*)"')
+SENSITIVE_ROOTS = (
+    "/users/", "/volumes/", "/__w/", "/app/", "/data/", "/dev/", "/dp/",
+    "/etc/", "/github/workspace/", "/home/", "/media/", "/mnt/", "/private/",
+    "/proc/", "/repo/", "/root/", "/run/", "/sys/", "/tmp/", "/var/",
+    "/workspace/", "/workspaces/",
+)
+
+
+def is_sensitive_prefix(lit):
+    unquoted = lit.strip('"').lower()
+    if len(unquoted) >= 3 and unquoted[1] == ":" and unquoted[2] in ("/", "\\"):
+        return True
+    return any(unquoted.startswith(root) for root in SENSITIVE_ROOTS)
+
 
 offenders = []
 for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
@@ -426,10 +444,13 @@ for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
     if "REDACTED_PATH" not in text:
         continue
     production = strip_test_modules(text)
-    lines = [production[:m.start()].count("\n") + 1 for m in PATHLIT.finditer(production)]
-    for start in range(len(lines)):
-        window = [line for line in lines[start:] if line - lines[start] <= 20]
-        if len(window) >= 3:
+    matches = [
+        (production[:m.start()].count("\n") + 1, m.group(0))
+        for m in PATHLIT.finditer(production)
+    ]
+    for start in range(len(matches)):
+        window = [item for item in matches[start:] if item[0] - matches[start][0] <= 20]
+        if len(window) >= 3 and any(is_sensitive_prefix(lit) for _, lit in window):
             offenders.append(f"{path} ({len(window)} clustered path prefixes)")
             break
 sys.stdout.write("\n".join(offenders))
@@ -440,29 +461,32 @@ PYEOF
 # a floor of ten catches a placeholder rename without being brittle.
 redactor_population="$(rg -l 'REDACTED_PATH' src/ 2>/dev/null | wc -l | tr -d ' ')"
 if [ "${redactor_population:-0}" -lt 10 ]; then
-    e2e_log_assert_eq "$redactor_population" ">=10" "path redactors share one prefix set"
+    e2e_log_assert_eq "$redactor_population" ">=10" "path redactors share one prefix set" || true
     _harness_fail "path redactors share one prefix set: only ${redactor_population} files under src/ mention REDACTED_PATH, so this scan has lost its population and cannot fail. The placeholder was probably renamed; repoint the guard."
 elif [ -z "$redactor_private_lists" ]; then
     e2e_log_assert_eq "0" "0" "path redactors share one prefix set"
     _harness_pass "path redactors share one prefix set"
 else
     e2e_log_assert_eq "$(printf '%s\n' "$redactor_private_lists" | wc -l | tr -d ' ')" "0" \
-        "path redactors share one prefix set"
+        "path redactors share one prefix set" || true
     _harness_fail "path redactors share one prefix set: these files define a private path-prefix list instead of using crate::util::SENSITIVE_PATH_PREFIXES -- $(printf '%s' "$redactor_private_lists" | tr '\n' ' ')"
 fi
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '.currentLastCompiledMigration == 125 and .nextPlannedMigration == 126 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS")) and (.policy.nonInitiativeCompiledMigrations.versions.V122 | startswith("V122_TYPED_PACK_ITEM_IDENTITY")) and (.policy.nonInitiativeCompiledMigrations.versions.V123 | startswith("V123_MEMORY_SUPERSEDED_AT")) and (.policy.nonInitiativeCompiledMigrations.versions.V124 | startswith("V124_TIMESTAMP_SPELLING_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V125 | startswith("V125_SUPERSESSION_REDERIVE"))' \
+    '.currentLastCompiledMigration == 133 and .nextPlannedMigration == 134 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS")) and (.policy.nonInitiativeCompiledMigrations.versions.V122 | startswith("V122_TYPED_PACK_ITEM_IDENTITY")) and (.policy.nonInitiativeCompiledMigrations.versions.V123 | startswith("V123_MEMORY_SUPERSEDED_AT")) and (.policy.nonInitiativeCompiledMigrations.versions.V124 | startswith("V124_TIMESTAMP_SPELLING_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V125 | startswith("V125_SUPERSESSION_REDERIVE")) and (.policy.nonInitiativeCompiledMigrations.versions.V133 | startswith("V133_MEMORY_CODE_ANCHOR_SOURCES"))' \
     "migration registry pins compiled tail and next planned migration"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,126,127,128] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
+    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,134,135,136] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length) and ([.transitionMatrix[] | select(.status == "not_stored") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "not_stored")] | length)' \
     "migration transition versions match the implemented/planned layout with unique ids and planned slots"
 assert_jq_file "$MIGRATION_MANIFEST" \
     '([.transitionMatrix[] | {id, version, status}] | sort_by(.id)) == ([.allocations[] | {id, version, status}] | sort_by(.id))' \
     "migration allocations mirror transition ids, versions, and statuses"
 # shellcheck disable=SC2016
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '.currentLastCompiledMigration as $tail | .nextPlannedMigration as $next | all(.transitionMatrix[]; if .status == "implemented" then (.version <= $tail and .runtimeRule == "compiled_migration_present" and (.migrationConstant | test("^V[0-9]{3}_[A-Z0-9_]+$")) and .boundaryMigrationEvidence == "required_and_current" and .backupCoverageEvidence == "required_and_current") elif .status == "planned" then (.version >= $next and .runtimeRule == "planned_allocation_only" and .migrationConstant == "required_before_implemented" and .boundaryMigrationEvidence == "required_before_implemented" and .backupCoverageEvidence == "required_before_implemented") else false end)' \
+    '.currentLastCompiledMigration as $tail | .nextPlannedMigration as $next | all(.transitionMatrix[]; if .status == "implemented" then (.version <= $tail and .runtimeRule == "compiled_migration_present" and (.migrationConstant | test("^V[0-9]{3}_[A-Z0-9_]+$")) and .boundaryMigrationEvidence == "required_and_current" and .backupCoverageEvidence == "required_and_current") elif .status == "planned" then (.version >= $next and .runtimeRule == "planned_allocation_only" and .migrationConstant == "required_before_implemented" and .boundaryMigrationEvidence == "required_before_implemented" and .backupCoverageEvidence == "required_before_implemented") elif .status == "not_stored" then (.version >= $next and .runtimeRule == "delivered_without_table" and .migrationConstant == "not_applicable_not_stored" and .boundaryMigrationEvidence == "not_applicable_not_stored" and .backupCoverageEvidence == "not_applicable_not_stored") else false end)' \
     "migration transition status controls implemented vs planned evidence"
+run_static_command \
+    "migration planned allocations require live owner beads and not_stored require scope rulings" \
+    "$REPO_ROOT/scripts/check-migration-registry.sh"
 assert_jq_file "$MIGRATION_MANIFEST" \
     'all(.allocations[]; (.migrationName | test("^V[0-9]{3}_[A-Z0-9_]+$")) and (.tables | length > 0) and ((.idempotency // "") | length > 0) and ([.reversibleClass] | inside(["reversible_where_safe","forward_only"])))' \
     "migration allocations name tables, migration constants, reversibility, and idempotency"
@@ -565,7 +589,7 @@ assert_jq_file "$DETERMINISM_MANIFEST" \
     "determinism shared assertion vocabularies are complete"
 # shellcheck disable=SC2016
 assert_jq_file "$DETERMINISM_MANIFEST" \
-    '["why_not","harvest","calibration","impact","error_recall","blind_spots","conflict","read_fence_consistency","pack_lod","feedback_roi"] as $surfaces | ([.surfaces[].id] | sort) == ($surfaces | sort) and ([.determinismMatrix[].surface] | sort) == ($surfaces | sort) and ([.surfaceCoverageMatrix[].surface] | sort) == ($surfaces | sort)' \
+    '["why_not","harvest","calibration","impact","error_recall","blind_spots","conflict","attest","docs_bootstrap","read_fence_consistency","pack_lod","feedback_roi"] as $surfaces | ([.surfaces[].id] | sort) == ($surfaces | sort) and ([.determinismMatrix[].surface] | sort) == ($surfaces | sort) and ([.surfaceCoverageMatrix[].surface] | sort) == ($surfaces | sort)' \
     "determinism surfaces, matrix, and coverage rows stay in lockstep"
 # shellcheck disable=SC2016
 assert_jq_file "$DETERMINISM_MANIFEST" \
@@ -720,6 +744,42 @@ bare_validity_bounds="$(
     python3 - <<'PYEOF'
 import io, re, glob, sys
 
+TEST_MOD = re.compile(
+    r'#\[cfg\(test\)\]\s*'
+    r'(?:(?://[^\n]*|#\[[^\]]*\])\s*)*'
+    r'mod\s+\w+\s*\{'
+)
+COMMENTS_STR_CHAR = re.compile(
+    r'//[^\n]*|/\*.*?\*/|b?r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|b?\'(?:\\.|[^\'\\\n])\'',
+    re.S,
+)
+
+
+def strip_test_modules(text):
+    out, i = [], 0
+    scrubbed = COMMENTS_STR_CHAR.sub(
+        lambda m: "\n" * m.group(0).count("\n")
+        + " " * (len(m.group(0)) - m.group(0).count("\n")),
+        text,
+    )
+    while True:
+        m = TEST_MOD.search(scrubbed, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        depth = 0
+        for j in range(m.end() - 1, len(scrubbed)):
+            if scrubbed[j] == '{':
+                depth += 1
+            elif scrubbed[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+        i = j + 1
+    return "".join(out)
+
+
 # readers whose trailing timestamp argument is compared against a validity column
 READERS = (
     "list_recent_current_memories_for_retrieval",
@@ -741,7 +801,10 @@ def has_bare(fragment):
 
 offenders = []
 for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
-    text = io.open(path, encoding="utf-8", errors="replace").read()
+    if path.endswith("_tests.rs"):
+        continue
+    raw_text = io.open(path, encoding="utf-8", errors="replace").read()
+    text = strip_test_modules(raw_text)
     # Strip line comments BEFORE scanning. The fixed call sites carry a comment
     # explaining the old defect, and that prose contains the literal
     # `to_rfc3339()` -- matching it would fail the run on correct code and invite
@@ -786,7 +849,7 @@ if [ -z "$bare_validity_bounds" ]; then
     _harness_pass "validity bounds use normalize_validity_timestamp"
 else
     e2e_log_assert_eq "$(printf '%s\n' "$bare_validity_bounds" | wc -l | tr -d ' ')" "0" \
-        "validity bounds use normalize_validity_timestamp"
+        "validity bounds use normalize_validity_timestamp" || true
     _harness_fail "validity bounds use normalize_validity_timestamp: ${bare_validity_bounds}"
 fi
 
@@ -819,41 +882,63 @@ valid_to_liveness="$(
     python3 - <<'PYEOF'
 import io, re, glob, sys
 
+TEST_MOD = re.compile(
+    r'#\[cfg\(test\)\]\s*'
+    r'(?:(?://[^\n]*|#\[[^\]]*\])\s*)*'
+    r'mod\s+\w+\s*\{'
+)
+COMMENTS_STR_CHAR = re.compile(
+    r'//[^\n]*|/\*.*?\*/|b?r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|b?\'(?:\\.|[^\'\\\n])\'',
+    re.S,
+)
+
+
+def strip_test_modules(text):
+    out, i = [], 0
+    scrubbed = COMMENTS_STR_CHAR.sub(
+        lambda m: "\n" * m.group(0).count("\n")
+        + " " * (len(m.group(0)) - m.group(0).count("\n")),
+        text,
+    )
+    while True:
+        m = TEST_MOD.search(scrubbed, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        depth = 0
+        for j in range(m.end() - 1, len(scrubbed)):
+            if scrubbed[j] == '{':
+                depth += 1
+            elif scrubbed[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+        i = j + 1
+    return "".join(out)
+
+
 LIVENESS = re.compile(r"\bvalid_to\s*(?:\.\s*as_ref\s*\(\s*\)\s*)?\.\s*is_(none|some)\s*\(\s*\)")
 # a writer asking whether the caller supplied a bound, not a liveness test
 ARGFIELD = re.compile(r"\b(?:args|options|opts|input|request|params)\s*\.\s*valid_to\b")
 
 offenders = []
 for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
-    text = io.open(path, encoding="utf-8", errors="replace").read()
+    if path.endswith("_tests.rs"):
+        continue
+    raw_text = io.open(path, encoding="utf-8", errors="replace").read()
+    text = strip_test_modules(raw_text)
     # Strip line comments first: the repaired sites carry comments naming the old
     # defect, and that prose contains the literal `valid_to.is_none()`. Matching
     # it would fail the run on correct code and invite deleting the explanation
     # to get green -- the same trap the validity-bound guard already hit.
     lines = [re.sub(r"//.*$", "", raw) for raw in text.splitlines()]
 
-    # Test modules are excluded by brace depth, not by "first #[cfg(test)]":
-    # these files carry several test modules, and a first-hit rule would silence
-    # every production line after the earliest one.
-    spans, depth, pending, start, sdepth = [], 0, False, None, 0
-    for index, line in enumerate(lines):
-        if "#[cfg(test)]" in line:
-            pending = True
-        if pending and re.search(r"\bmod\s+\w+", line) and "{" in line:
-            pending, start, sdepth = False, index, depth
-        depth += line.count("{") - line.count("}")
-        if start is not None and depth <= sdepth and index > start:
-            spans.append((start, index))
-            start = None
-    if start is not None:
-        spans.append((start, len(lines)))
-
     for index, line in enumerate(lines):
         if not LIVENESS.search(line):
             continue
-        if any(lo <= index <= hi for lo, hi in spans):
-            continue
-        if "valid_from" in " ".join(lines[max(0, index - 2) : index + 3]):
+        win = " ".join(lines[max(0, index - 2) : index + 3])
+        if "valid_from" in win or "expires_at" in win:
             continue
         if ARGFIELD.search(line):
             continue
@@ -868,7 +953,7 @@ if [ -z "$valid_to_liveness" ]; then
     _harness_pass "liveness is keyed on superseded_at"
 else
     e2e_log_assert_eq "$(printf '%s\n' "$valid_to_liveness" | wc -l | tr -d ' ')" "0" \
-        "liveness is keyed on superseded_at"
+        "liveness is keyed on superseded_at" || true
     _harness_fail "liveness is keyed on superseded_at: ${valid_to_liveness}"
 fi
 

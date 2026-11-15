@@ -5,7 +5,7 @@
 //! migrations advance without updating the registry, or when planned allocation
 //! order stops being contiguous.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -16,6 +16,7 @@ type TestResult = Result<(), String>;
 const MANIFEST_REL: &str = "tests/fixtures/contracts/dueling_wizards_migration_registry.json";
 const DOC_REL: &str = "docs/agent-ux/dueling-wizards/migration-sequencing.md";
 const DB_MOD_REL: &str = "src/db/mod.rs";
+const ISSUES_JSONL_REL: &str = ".beads/issues.jsonl";
 
 const REQUIRED_ALLOCATIONS: &[&str] = &[
     "memory_anchors",
@@ -321,16 +322,25 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         owner_beads.insert(owner.to_owned());
 
         let status = string_field(allocation, "/status", &context)?;
-        if !matches!(status, "planned" | "implemented") {
+        if !matches!(status, "planned" | "implemented" | "not_stored") {
             return Err(format!("{id}: unsupported status {status}"));
         }
-        if status == "planned" {
+        if matches!(status, "planned" | "not_stored") {
             planned_versions.push(version);
             if first_planned_version.is_none() {
                 first_planned_version = Some(version);
             }
         } else {
             implemented_versions.push(version);
+        }
+        if status == "not_stored"
+            && string_field(allocation, "/scopeRuling", &context)?
+                .trim()
+                .is_empty()
+        {
+            return Err(format!(
+                "{id}: not_stored allocation must declare non-empty /scopeRuling"
+            ));
         }
 
         for pointer in [
@@ -561,9 +571,131 @@ fn transition_matrix_mirrors_allocations_and_runtime_status() -> TestResult {
                     }
                 }
             }
+            "not_stored" => {
+                if version <= compiled_tail {
+                    return Err(format!(
+                        "{id}: not_stored allocation V{version:03} must stay ahead of compiled tail V{compiled_tail:03}"
+                    ));
+                }
+                if string_field(transition, "/runtimeRule", id)? != "delivered_without_table" {
+                    return Err(format!(
+                        "{id}: not_stored row must set runtimeRule to delivered_without_table"
+                    ));
+                }
+                for pointer in [
+                    "/migrationConstant",
+                    "/boundaryMigrationEvidence",
+                    "/backupCoverageEvidence",
+                ] {
+                    if string_field(transition, pointer, id)? != "not_applicable_not_stored" {
+                        return Err(format!("{id}: {pointer} must be not_applicable_not_stored"));
+                    }
+                }
+            }
             other => return Err(format!("{id}: unsupported status {other}")),
         }
     }
+    Ok(())
+}
+
+fn validate_allocation_owner_liveness(
+    allocations: &[Value],
+    bead_statuses: &BTreeMap<String, String>,
+) -> TestResult {
+    for (index, allocation) in allocations.iter().enumerate() {
+        let context = format!("allocation[{index}]");
+        let id = string_field(allocation, "/id", &context)?;
+        let owner = string_field(allocation, "/ownerBead", &context)?;
+        let status = string_field(allocation, "/status", &context)?;
+        let Some(bead_status) = bead_statuses.get(owner) else {
+            return Err(format!(
+                "{id}: ownerBead {owner} does not exist in {ISSUES_JSONL_REL}"
+            ));
+        };
+        if status == "planned" && bead_status == "closed" {
+            return Err(format!(
+                "{id}: status is planned but ownerBead {owner} is closed; re-own on a live bead or mark not_stored with a scopeRuling"
+            ));
+        }
+        if status == "not_stored"
+            && allocation
+                .pointer("/scopeRuling")
+                .and_then(Value::as_str)
+                .is_none_or(|ruling| ruling.trim().is_empty())
+        {
+            return Err(format!(
+                "{id}: status is not_stored but scopeRuling is missing or empty"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn planned_allocations_require_open_owner_beads_and_not_stored_require_scope_ruling() -> TestResult
+{
+    let manifest = read_json(MANIFEST_REL)?;
+    let allocations = array_field(&manifest, "/allocations", MANIFEST_REL)?;
+    let issues_raw = read_text(ISSUES_JSONL_REL)?;
+    let mut bead_statuses = BTreeMap::new();
+    for (line_no, line) in issues_raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let issue: Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "parse {ISSUES_JSONL_REL}:{}: {error}",
+                line_no.saturating_add(1)
+            )
+        })?;
+        let id = string_field(&issue, "/id", ISSUES_JSONL_REL)?;
+        let status = string_field(&issue, "/status", id)?;
+        bead_statuses.insert(id.to_owned(), status.to_owned());
+    }
+
+    validate_allocation_owner_liveness(allocations, &bead_statuses)?;
+
+    let mut synthetic_statuses = BTreeMap::new();
+    synthetic_statuses.insert("bd-1n0np.open".to_owned(), "open".to_owned());
+    synthetic_statuses.insert("bd-1n0np.closed".to_owned(), "closed".to_owned());
+
+    let valid_allocations = vec![
+        serde_json::json!({
+            "id": "open_planned",
+            "ownerBead": "bd-1n0np.open",
+            "status": "planned",
+        }),
+        serde_json::json!({
+            "id": "closed_not_stored",
+            "ownerBead": "bd-1n0np.closed",
+            "status": "not_stored",
+            "scopeRuling": "delivered without table",
+        }),
+    ];
+    validate_allocation_owner_liveness(&valid_allocations, &synthetic_statuses)?;
+
+    let closed_planned = vec![serde_json::json!({
+        "id": "orphaned_planned",
+        "ownerBead": "bd-1n0np.closed",
+        "status": "planned",
+    })];
+    let err = validate_allocation_owner_liveness(&closed_planned, &synthetic_statuses)
+        .expect_err("planned allocation owned by a closed bead must fail");
+    if !err.contains("status is planned but ownerBead bd-1n0np.closed is closed") {
+        return Err(format!("unexpected closed-owner error message: {err}"));
+    }
+
+    let unruled_not_stored = vec![serde_json::json!({
+        "id": "unruled_not_stored",
+        "ownerBead": "bd-1n0np.closed",
+        "status": "not_stored",
+    })];
+    let err = validate_allocation_owner_liveness(&unruled_not_stored, &synthetic_statuses)
+        .expect_err("not_stored allocation without scopeRuling must fail");
+    if !err.contains("status is not_stored but scopeRuling is missing or empty") {
+        return Err(format!("unexpected missing-ruling error message: {err}"));
+    }
+
     Ok(())
 }
 

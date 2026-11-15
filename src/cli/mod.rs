@@ -114,8 +114,9 @@ use crate::core::decide::{
 };
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::disk_pressure::{
-    ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
-    gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
+    ArtifactRetentionOptions, BuildAdmissionMode, BuildAdmissionOptions, DiskPressureOptions,
+    current_unix_seconds, gather_artifact_retention_report, gather_build_admission_report,
+    gather_disk_pressure_report,
 };
 use crate::core::docs_bootstrap::{
     ApplyDocsBootstrapOptions, BootstrapApplyReport, BootstrapDocGlob, CompileDocsBootstrapOptions,
@@ -4469,9 +4470,35 @@ pub struct DiagArtifactsArgs {
     pub consumer_entry_limit: usize,
 }
 
+/// Workload mode for `ee diag build-admission`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiagBuildAdmissionModeArg {
+    /// Local Cargo build / linker / test execution.
+    LocalBuild,
+    /// Remote compilation dispatch (`rch_verify.sh`, completion audit, support bundle).
+    RemoteDispatch,
+}
+
+impl DiagBuildAdmissionModeArg {
+    const fn to_core_mode(self) -> BuildAdmissionMode {
+        match self {
+            Self::LocalBuild => BuildAdmissionMode::LocalBuild,
+            Self::RemoteDispatch => BuildAdmissionMode::RemoteDispatch,
+        }
+    }
+}
+
 /// Arguments for `ee diag build-admission`.
 #[derive(Clone, Debug, Eq, PartialEq, Parser)]
 pub struct DiagBuildAdmissionArgs {
+    /// Admission evaluation mode (`local-build` vs `remote-dispatch`).
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DiagBuildAdmissionModeArg::LocalBuild
+    )]
+    pub mode: DiagBuildAdmissionModeArg,
+
     /// Minimum free bytes required for required build paths.
     #[arg(long, default_value_t = 5 * 1024 * 1024 * 1024, value_name = "BYTES")]
     pub min_free_bytes: u64,
@@ -32252,6 +32279,7 @@ where
         workspace_source: workspace_source.as_str(),
         min_free_bytes: args.min_free_bytes,
         artifact_destinations: args.artifact_destinations.clone(),
+        mode: args.mode.to_core_mode(),
     });
 
     match cli.renderer() {
@@ -59337,6 +59365,9 @@ impl RememberMemoryReport {
                 escape_json_string(&family_alias)
             )
         });
+        let created_at_json = self.created_at.as_ref().map_or("null".to_string(), |s| {
+            format!("\"{}\"", escape_json_string(s))
+        });
         let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
@@ -59413,6 +59444,8 @@ impl RememberMemoryReport {
             data.field_raw("provenance_uri", &source_json);
         }
         data.field_raw("producer", &producer_json)
+            .field_raw("created_at", &created_at_json)
+            .field_raw("createdAt", &created_at_json)
             .field_raw("valid_from", &valid_from_json)
             .field_raw("valid_to", &valid_to_json)
             .field_str("validity_status", &self.validity_status)
@@ -74798,6 +74831,7 @@ mod tests {
                 None,
                 Some("2026-06-18T00:00:00Z"),
             ),
+            created_at: Some("2030-12-31T23:59:59Z".to_owned()),
             valid_from: Some("2031-01-02T03:04:05Z".to_owned()),
             valid_to: Some("2032-02-03T04:05:06Z".to_owned()),
             validity_status: "sentinel-validity-status".to_owned(),
@@ -74838,6 +74872,8 @@ mod tests {
             ("content", "sentinel-content"),
             ("workflow_id", "sentinel-workflow-id"),
             ("source", "sentinel-source"),
+            ("created_at", "2030-12-31T23:59:59Z"),
+            ("createdAt", "2030-12-31T23:59:59Z"),
             ("valid_from", "2031-01-02T03:04:05Z"),
             ("valid_to", "2032-02-03T04:05:06Z"),
             ("validity_status", "sentinel-validity-status"),
@@ -74984,6 +75020,7 @@ mod tests {
                 None,
                 Some("2026-06-18T00:00:00Z"),
             ),
+            created_at: Some(format!("created {nasty}")),
             valid_from: None,
             valid_to: None,
             validity_status: format!("validity {nasty}"),
@@ -75030,6 +75067,8 @@ mod tests {
             ("workflow_id", format!("workflow {nasty}")),
             ("source", format!("source {nasty}")),
             ("provenance_uri", format!("source {nasty}")),
+            ("created_at", format!("created {nasty}")),
+            ("createdAt", format!("created {nasty}")),
             ("validity_status", format!("validity {nasty}")),
             ("index_status", format!("index {nasty}")),
         ] {
@@ -75105,6 +75144,7 @@ mod tests {
                 None,
                 Some("2026-06-18T00:00:00Z"),
             ),
+            created_at: Some("2030-12-31T23:59:59Z".to_owned()),
             valid_from: Some("2031-01-02T03:04:05Z".to_owned()),
             valid_to: None,
             validity_status: "active".to_owned(),
@@ -75158,6 +75198,8 @@ mod tests {
             "source",
             "provenance_uri",
             "producer",
+            "created_at",
+            "createdAt",
             "valid_from",
             "valid_to",
             "validity_status",
@@ -75230,6 +75272,7 @@ mod tests {
                 None,
                 Some("2026-06-18T00:00:00Z"),
             ),
+            created_at: Some("2026-06-18T00:00:01Z".to_owned()),
             valid_from: None,
             valid_to: None,
             validity_status: "active".to_owned(),
@@ -92640,6 +92683,8 @@ mod tests {
             "ee",
             "diag",
             "build-admission",
+            "--mode",
+            "remote-dispatch",
             "--min-free-bytes",
             "123",
             "--artifact-destination",
@@ -92649,6 +92694,11 @@ mod tests {
 
         match parsed.command {
             Some(Command::Diag(DiagCommand::BuildAdmission(args))) => {
+                ensure_equal(
+                    &args.mode,
+                    &super::DiagBuildAdmissionModeArg::RemoteDispatch,
+                    "mode",
+                )?;
                 ensure_equal(&args.min_free_bytes, &123, "min free bytes")?;
                 ensure_equal(
                     &args.artifact_destinations,
@@ -93325,10 +93375,10 @@ mod tests {
             "build-admission",
             "--workspace",
             ".",
+            "--mode",
+            "remote-dispatch",
             "--min-free-bytes",
             "0",
-            "--artifact-destination",
-            "/Volumes/USBNVME16TB/temp_agent_space/test-sync-down",
             "--json",
         ]);
         ensure_equal(
@@ -93357,7 +93407,7 @@ mod tests {
             "\"mutationPolicy\":\"read_only_report_no_files_modified\"",
             "mutation policy",
         )?;
-        ensure_contains(&stdout, "\"admitted\":true", "admitted")?;
+        ensure_contains(&stdout, "\"mode\":\"remote_dispatch\"", "mode")?;
         ensure_contains(&stdout, "\"checks\":[", "checks present")?;
         ensure_contains(&stdout, "\"recoveryActions\":[", "recovery actions present")
     }

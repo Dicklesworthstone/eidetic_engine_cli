@@ -77,6 +77,16 @@ at least one of them carries the evidence. Two exclusions are deliberate:
   `request_id`, or `elapsed_ms`; instrumenting one would measure the harness.
 - A bead that declares no production Rust path is a docs, CI, or test-harness
   surface with no runtime boundary to instrument, and is satisfied vacuously.
+- `FILE SURFACE:` items annotated `(read-only)` are treated as reference inputs
+  (e.g. a parity test that inspects `src/cli/mod.rs` without owning a runtime
+  subcommand boundary) and are excluded from the bead's owned runtime candidates.
+- A bead whose only production `src/**` file is a pure, storage- and
+  request-independent leaf module may declare an explicit, verified exemption:
+  `TRACING EXEMPTION: pure_leaf (<reason>)`. The checker verifies that every
+  declared runtime file's `//!` module doc header advertises a `pure` contract
+  and that the file emits zero `tracing::` / `#[instrument]` events; claiming
+  `pure_leaf` on a non-pure or event-emitting file is rejected as an invalid
+  exemption violation.
 
 This matches how the crate actually emits tracing: roughly 55 of 338 `src` files
 use `tracing::`/`#[instrument]`, concentrated at dispatch boundaries

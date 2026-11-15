@@ -240,6 +240,8 @@ pub struct RememberMemoryReport {
     pub source: Option<String>,
     /// Producer identity metadata for this memory write.
     pub producer: ProducerMetadata,
+    /// RFC3339 timestamp when this memory row was persisted (`None` under `--dry-run`).
+    pub created_at: Option<String>,
     /// RFC3339 timestamp when this memory becomes applicable.
     pub valid_from: Option<String>,
     /// RFC3339 timestamp when this memory stops being applicable.
@@ -1551,6 +1553,7 @@ fn remember_memory_outcome_inner_with_store(
             tags: prepared.tags,
             source: prepared.provenance_uri,
             producer: remember_producer_metadata(),
+            created_at: None,
             valid_from: prepared.valid_from,
             valid_to: prepared.valid_to,
             validity_status: prepared.validity_status,
@@ -1944,6 +1947,13 @@ fn remember_memory_outcome_inner_with_store(
 
     let typed_fields =
         remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
+    let created_at = connection
+        .get_memory(&memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read persisted memory timestamp: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .map(|memory| memory.created_at);
     let report = RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -1960,6 +1970,7 @@ fn remember_memory_outcome_inner_with_store(
         tags: prepared.tags,
         source: prepared.provenance_uri,
         producer: remember_producer_metadata(),
+        created_at,
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
         validity_status: prepared.validity_status,
@@ -5334,6 +5345,13 @@ fn finish_remember_memory_after_primary_commit(
 
     let typed_fields =
         remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
+    let created_at = connection
+        .get_memory(&memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read persisted memory timestamp: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .map(|memory| memory.created_at);
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -5350,6 +5368,7 @@ fn finish_remember_memory_after_primary_commit(
         tags: prepared.tags,
         source: prepared.provenance_uri,
         producer: remember_producer_metadata(),
+        created_at,
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
         validity_status: prepared.validity_status,
@@ -24061,5 +24080,57 @@ mod tests {
             "confidence unchanged by dry run",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_memory_populates_persisted_row_created_at_and_omits_on_dry_run() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let before = chrono::Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let created = remember_memory(&upgrade_remember_options(
+            temp.path(),
+            "Persisted creation timestamp anchor rule.",
+            0.9,
+            None,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+
+        let report_created_at = created
+            .created_at
+            .as_deref()
+            .ok_or_else(|| "persisted remember report must carry created_at".to_owned())?;
+        let parsed = chrono::DateTime::parse_from_rfc3339(report_created_at)
+            .map_err(|error| format!("parse created_at {report_created_at:?}: {error}"))?
+            .with_timezone(&chrono::Utc);
+        ensure(
+            parsed > before,
+            true,
+            "persisted created_at must be strictly greater than timestamp captured before command ran",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let stored = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "stored memory row missing".to_owned())?;
+        ensure(
+            report_created_at,
+            stored.created_at.as_str(),
+            "report created_at must equal the persisted row value",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Negative control: --dry-run must NOT invent a creation timestamp for a row it did not write.
+        let dry_run_options =
+            upgrade_remember_options(temp.path(), "Unpersisted dry-run rule.", 0.9, None, true);
+        let dry_run = remember_memory(&dry_run_options).map_err(|error| error.message())?;
+        ensure(dry_run.dry_run, true, "dry_run flag")?;
+        ensure(dry_run.persisted, false, "dry_run persisted flag")?;
+        ensure(
+            dry_run.created_at,
+            None,
+            "dry-run must not invent created_at for an unpersisted row",
+        )
     }
 }

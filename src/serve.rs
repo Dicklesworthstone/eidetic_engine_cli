@@ -2300,6 +2300,8 @@ fn remember_report_summary_json(report: &RememberMemoryReport) -> JsonValue {
         "confidence": report.confidence,
         "tags": &report.tags,
         "source": &report.source,
+        "createdAt": &report.created_at,
+        "created_at": &report.created_at,
         "validFrom": &report.valid_from,
         "validTo": &report.valid_to,
         "validityStatus": &report.validity_status,

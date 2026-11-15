@@ -4667,6 +4667,7 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
             workspace_source: "support_bundle",
             min_free_bytes: 1024 * 1024 * 1024,
             artifact_destinations: Vec::new(),
+            mode: super::disk_pressure::BuildAdmissionMode::RemoteDispatch,
         },
     );
     let build_admission_json = serde_json::to_value(&build_admission).unwrap_or_else(|error| {

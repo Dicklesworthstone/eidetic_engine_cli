@@ -52,6 +52,9 @@ Options:
   --known-blocker-store <path>
                             Override the known RCH blocker cache path
   --known-blocker-override  Run through RCH despite a matching active known blocker
+  --evict-known-blocker <selector>
+                            Evict matching known-blocker record(s) by blocker_fingerprint,
+                            blocker_kind, or command_hash without disabling the rest of the store
   --skip-known-blocker      Disable known-blocker cache read/write for this run
   --proof-broker-ledger <path>
                             Override the always-on proof-broker ledger path
@@ -105,6 +108,7 @@ FRANKEN_STACK_PREFLIGHT_ENABLED="${RCH_VERIFY_FRANKEN_STACK_PREFLIGHT:-1}"
 TREEISH="HEAD"
 KNOWN_BLOCKER_ENABLED="${RCH_VERIFY_KNOWN_BLOCKER_ENABLED:-1}"
 KNOWN_BLOCKER_OVERRIDE=0
+KNOWN_BLOCKER_EVICT_SELECTOR="${RCH_VERIFY_EVICT_KNOWN_BLOCKER:-}"
 KNOWN_BLOCKER_STORE="${RCH_VERIFY_KNOWN_BLOCKER_STORE:-}"
 KNOWN_BLOCKER_STORE_EXPLICIT=0
 if [ -n "${RCH_VERIFY_KNOWN_BLOCKER_STORE:-}" ]; then
@@ -267,6 +271,7 @@ while [ "$#" -gt 0 ]; do
         --treeish) TREEISH="${2:?--treeish requires a value}"; shift 2 ;;
         --known-blocker-store) KNOWN_BLOCKER_STORE="${2:?--known-blocker-store requires a value}"; KNOWN_BLOCKER_STORE_EXPLICIT=1; shift 2 ;;
         --known-blocker-override) KNOWN_BLOCKER_OVERRIDE=1; shift ;;
+        --evict-known-blocker) KNOWN_BLOCKER_EVICT_SELECTOR="${2:?--evict-known-blocker requires a selector}"; shift 2 ;;
         --skip-known-blocker) KNOWN_BLOCKER_ENABLED=0; shift ;;
         --proof-broker-ledger) PROOF_BROKER_LEDGER="${2:?--proof-broker-ledger requires a value}"; PROOF_BROKER_ENABLED=1; shift 2 ;;
         --proof-broker-ee-bin) PROOF_BROKER_EE_BIN="${2:?--proof-broker-ee-bin requires a value}"; shift 2 ;;
@@ -917,6 +922,7 @@ PY
 
     local args=(
         "$ee_bin" "--workspace" "$PROJECT_ROOT" "diag" "build-admission" "--json"
+        "--mode" "remote-dispatch"
         "--min-free-bytes" "$BUILD_ADMISSION_MIN_FREE_BYTES"
     )
     local destination
@@ -929,6 +935,19 @@ PY
     output="$(json_text_field "$admission_probe" output)"
     exit_code="$(json_text_field "$admission_probe" status)"
     admission_timed_out="$(json_text_field "$admission_probe" timed_out)"
+    if [ "$exit_code" -eq 2 ] && printf '%s' "$output" | grep -q -- '--mode'; then
+        local legacy_args=(
+            "$ee_bin" "--workspace" "$PROJECT_ROOT" "diag" "build-admission" "--json"
+            "--min-free-bytes" "$BUILD_ADMISSION_MIN_FREE_BYTES"
+        )
+        for destination in "${BUILD_ADMISSION_ARTIFACT_DESTINATIONS[@]}"; do
+            legacy_args+=("--artifact-destination" "$destination")
+        done
+        admission_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "${legacy_args[@]}")"
+        output="$(json_text_field "$admission_probe" output)"
+        exit_code="$(json_text_field "$admission_probe" status)"
+        admission_timed_out="$(json_text_field "$admission_probe" timed_out)"
+    fi
     if [ "$admission_timed_out" = "true" ]; then
         output="${output}
 [RCH_VERIFY] build-admission preflight timed out after ${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS}ms"
@@ -992,6 +1011,8 @@ for check in data.get("checks") or []:
         "admitted": check.get("admitted"),
         "external_required": check.get("externalRequired"),
         "external": check.get("external"),
+        "posix_compatible": check.get("posixCompatible"),
+        "admission_reason": check.get("admissionReason"),
     })
 
 degraded_codes = []
@@ -1002,6 +1023,7 @@ for item in data.get("degraded") or []:
 admitted = data.get("admitted")
 base.update({
     "status": "passed" if admitted is True else "denied",
+    "mode": data.get("mode"),
     "admitted": admitted,
     "checks": checks,
     "degraded_codes": degraded_codes,
@@ -2278,6 +2300,8 @@ known_blocker_lookup_json() {
         return 0
     fi
     KNOWN_BLOCKER_STORE_PATH="$KNOWN_BLOCKER_STORE" \
+    KNOWN_BLOCKER_EVICT_SELECTOR_VALUE="${KNOWN_BLOCKER_EVICT_SELECTOR:-}" \
+    KNOWN_BLOCKER_NO_WRITE_VALUE="${NO_WRITE:-0}" \
     SOURCE_STATE_JSON_INPUT="${1:?source state JSON required}" \
     COMMAND_KIND_VALUE="$COMMAND_KIND" \
     COMMAND_TEXT_VALUE="$(command_string "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")" \
@@ -2322,6 +2346,28 @@ def now_utc():
 def emit(payload):
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
+def is_non_gating_entry(entry):
+    if not isinstance(entry, dict):
+        return True
+    if entry.get("retryable") is True or entry.get("shared_consequence") is True:
+        return True
+    if entry.get("blocker_kind") == "local_fallback_refused":
+        return True
+    reason = str(entry.get("remediation_reason") or "").lower()
+    if "shared consequence" in reason:
+        return True
+    return False
+
+def matches_evict_selector(entry, selector):
+    if not selector or not isinstance(entry, dict):
+        return False
+    return selector in (
+        entry.get("blocker_fingerprint"),
+        entry.get("blocker_kind"),
+        entry.get("command_hash"),
+        entry.get("normalized_argv_hash"),
+    )
+
 store_path = os.environ.get("KNOWN_BLOCKER_STORE_PATH", "")
 if not store_path:
     print("null")
@@ -2331,6 +2377,9 @@ path = Path(store_path)
 if not path.exists():
     print("null")
     raise SystemExit(0)
+
+evict_selector = (os.environ.get("KNOWN_BLOCKER_EVICT_SELECTOR_VALUE") or "").strip()
+no_write = os.environ.get("KNOWN_BLOCKER_NO_WRITE_VALUE") == "1"
 
 try:
     source_state = json.loads(os.environ.get("SOURCE_STATE_JSON_INPUT") or "{}")
@@ -2374,6 +2423,8 @@ current = {
 
 now = now_utc()
 matches = []
+retained_entries = []
+evicted_any = False
 try:
     lines = path.read_text(encoding="utf-8").splitlines()
 except OSError:
@@ -2387,9 +2438,16 @@ for line in lines:
         entry = json.loads(line)
     except Exception:
         continue
+    if evict_selector and matches_evict_selector(entry, evict_selector):
+        evicted_any = True
+        continue
+    if is_non_gating_entry(entry):
+        evicted_any = True
+        continue
     expires_at = parse_time(entry.get("expires_at"))
     if expires_at is None or expires_at <= now:
         continue
+    retained_entries.append(entry)
     if entry.get("command_kind") != current["command_kind"]:
         continue
     if entry.get("command_hash") != current["command_hash"]:
@@ -2407,6 +2465,18 @@ for line in lines:
     if (entry.get("runtime_fingerprint") or {}) != current["runtime_fingerprint"]:
         continue
     matches.append(entry)
+
+if evicted_any and not no_write:
+    try:
+        path.write_text(
+            "".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                for record in retained_entries
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 if not matches:
     print("null")
@@ -6430,7 +6500,25 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         ttl_seconds = 21600
     if ttl_seconds < 60:
         ttl_seconds = 60
-    expires_at = now + dt.timedelta(seconds=ttl_seconds)
+    guidance = remediation_guidance_for(blocker_kind)
+    shared_consequence = bool(
+        blocker_kind == "local_fallback_refused"
+        or "shared consequence" in str(guidance.get("unmapped_reason") or "").lower()
+    )
+    combined_tail_text = "\n".join(
+        str(proof.get(key) or "") for key in ("stderr_tail", "stdout_tail")
+    )
+    retryable = bool(
+        re.search(
+            r"(?i)(?:-\s*retryable\b|will retry on another worker if available)",
+            combined_tail_text,
+        )
+    )
+    expires_at = (
+        now
+        if (retryable or shared_consequence)
+        else now + dt.timedelta(seconds=ttl_seconds)
+    )
     entry = {
         "schema": "ee.rch.known_blocker.v1",
         "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
@@ -6453,6 +6541,8 @@ def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
         "expires_at": format_time(expires_at),
         "retry_after": format_time(expires_at),
         "override_used": False,
+        "retryable": retryable,
+        "shared_consequence": shared_consequence,
     }
     if active_project_details:
         entry["active_project_exclusion"] = active_project_details
@@ -6464,6 +6554,15 @@ def persist_known_blocker(entry):
     if os.environ.get("NO_WRITE") == "1":
         entry = dict(entry)
         entry["write_suppressed"] = True
+        return entry
+    if entry.get("retryable") is True or entry.get("shared_consequence") is True:
+        entry = dict(entry)
+        entry["write_suppressed"] = True
+        entry["non_gating_reason"] = (
+            "retryable_upstream_condition"
+            if entry.get("retryable") is True
+            else "shared_consequence_not_root_cause"
+        )
         return entry
     if os.environ.get("KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT") and not os.environ.get("KNOWN_BLOCKER_STORE_EXPLICIT"):
         return entry
@@ -7324,7 +7423,7 @@ if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
     # observing rch_verify_franken_stack_locked_required. Placed BEFORE
     # compute_committed_tree_state_json and materialize_committed_tree, so a
     # refused run touches no export base and costs no bundle.
-    if [ "$BUILD_ADMISSION_ENABLED" != "1" ]; then
+    if [ "$DRY_RUN" -eq 0 ] && [ "$BUILD_ADMISSION_ENABLED" != "1" ]; then
         RCH_INVOCATION=()
         emit_json false null 0 "" \
             "--pinned-franken-stack refuses skipped build admission; drop --skip-build-admission and RCH_VERIFY_BUILD_ADMISSION=0, or pass --build-admission-ee-bin to run the preflight against an explicit binary" \
@@ -7375,60 +7474,15 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
     assert_committed_tree_base_stores_xattrs
     materialize_committed_tree
     stamp_committed_tree_build_provenance
-    # THE EXPORT BASE IS NOT WIRED INTO BUILD ADMISSION, AND THAT IS NOT AN
-    # OVERSIGHT -- it was tried and measured first (bd-to1fr).
-    #
-    # The gap is real: `ee diag build-admission` checks free space, this script
-    # forwards every `--artifact-destination` it is given, and
-    # BUILD_ADMISSION_ARTIFACT_DESTINATIONS starts EMPTY -- so the committed-tree
-    # export base, the one path this script writes gigabytes to, is checked by
-    # nothing. A pinned proof's `build_admission.checks[]` carries
-    # workspace_root, cargo_build_target and temporary_directory and no entry
-    # for it.
-    #
-    # BUT ADDING IT BRICKS THE LANE TODAY. Measured 2026-10-25 against the
-    # installed binary with the APFS export image as the destination:
-    #
-    #     label  artifact_destination   role  artifact_sync_down_destination
-    #     bytesAvailable 250502467584   minFreeBytes 5368709120
-    #     required false                admitted FALSE
-    #     externalRequired true         external FALSE
-    #
-    # 250 GB free against a 5 GiB minimum and still refused. THE CAUSE IS A
-    # LEXICAL PREFIX, not a property of the device -- read from the source at
-    # HEAD, after a first reading that blamed disk images and was wrong:
-    #
-    #   src/core/disk_pressure.rs:23    EXTERNAL_BUILD_ROOT =
-    #                                     "/Volumes/USBNVME16TB/temp_agent_space"
-    #   src/core/disk_pressure.rs:2021  trusted_external_path = starts_with(root)
-    #                                     && no `..` component
-    #                                     && no symlink component
-    #
-    # The APFS image mounts at /Volumes/EERCHExport, which is outside that one
-    # hardcoded prefix, so `external` is false. Confirmed by probing a directory
-    # that differs ONLY in the prefix: a path under the external root reports
-    # `external: true, admitted: true`.
-    #
-    # `required: false` does not save it, and the reason is specific rather than
-    # a bug: build_admission_check_admitted is
-    # `(!required || has_space) && !untrusted && (!external_required || external)`
-    # -- `required` gates the CAPACITY arm only, and the external arm has no
-    # `required` term at all. On this lane an unadmitted check is
-    # `rch_verify_pinned_build_admission_verdict_required`, exit 1, every
-    # dispatch.
-    #
-    # SO THERE IS A FIX WITH NO CODE CHANGE: attach the sparse image at a
-    # mountpoint UNDER the external root, e.g.
-    #   hdiutil attach -mountpoint \
-    #     /Volumes/USBNVME16TB/temp_agent_space/ee-rch-export <image>
-    # which is both xattr-native (no RCH-E410) and inside the prefix (admission
-    # passes). That is an environment change on a path CLAUDE.md names in
-    # several places, and detaching a volume mid-dispatch would break another
-    # agent's run, so it is written down rather than done unilaterally.
-    #
-    # Tracked on bd-build-admission-external-predicate-rejects-image-5bfb4.
-    # Until the base moves, this is one `+=` here, and one line that must not
-    # be written.
+    # bd-build-admission-external-predicate-rejects-image-5bfb4:
+    # Wire the committed-tree export base into BUILD_ADMISSION_ARTIFACT_DESTINATIONS
+    # now that `ee diag build-admission` recognizes any mounted non-boot volume
+    # under `/Volumes/<mount>` (including APFS sparse images like /Volumes/EERCHExport)
+    # as an external placement and enforces `required: true` on explicit
+    # `--artifact-destination` entries.
+    if [ "$PINNED_FRANKEN_STACK" -eq 1 ] && [ -n "${COMMITTED_TREE_EXPORT_BASE:-}" ]; then
+        BUILD_ADMISSION_ARTIFACT_DESTINATIONS+=("$COMMITTED_TREE_EXPORT_BASE")
+    fi
 fi
 
 FRANKEN_STACK_JSON="$(compute_franken_stack_json)"

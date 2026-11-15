@@ -902,6 +902,63 @@ The implementation must not: fall back to local Cargo, mutate workers, restart
 daemons, perform destructive cleanup, or create worktrees, stashes, resets, or
 checkouts. Evidence is read-only; remediation is routed to owners.
 
+### Support-bundle and Agent Mail / Beads handoff template (bd-1n3x1.14.4)
+
+Implementation and verification agents should treat `bd-1n3x1.14.1` (contract
+and conformance matrix), `bd-1n3x1.14.2`
+(`tests/fixtures/rch_pressure_telemetry/*.json`), and `bd-1n3x1.14.3`
+(`src/shadow.rs`, `src/core/swarm_brief.rs`, `src/core/swarm_next_action.rs`,
+`tests/rch_verify_contract.rs`, and `tests/swarm_schema_lifecycle.rs`) as the
+canonical source of truth for pressure-telemetry evidence.
+
+#### Distinguishing environment-blocker families
+
+| Family | Primary signal | What is actually happening | Next safe action |
+| --- | --- | --- | --- |
+| Pressure-telemetry gap (`bd-1n3x1.14` / `bd-1n3x1.14.1`–`bd-1n3x1.14.3`) | `posture=remote_ready` while `pressure_state=telemetry_gap`, `pressure_reason_code=telemetry_unavailable`, `telemetry_fresh=false`, optional `slot_accounting_inconsistent` (`daemon.slots_available=0`, `used_slots=total_slots`, `active_build_count=0`, `queued_build_count=0`) or `capabilities_refresh_timeout` (`refresh_exit_class=budget_timeout` \| `operator_terminated_refresh`) | Worker probe may be `ok` and selection may appear ready, but pressure telemetry is stale/contradictory or capabilities refresh hung. No Rust source verdict was reached (`source_verdict=no_rust_verdict`). | Follow `next_action` (`refresh_telemetry`, `probe_worker`, or `coordinate_with_owner`) and `owner_routing`; respect `retry_after`. |
+| Active-project exclusion (`bd-1n3x1.13`) | `selector_admission_probe.status=selection_failed`, `known_blocker.blocker_kind=active_project_exclusion`, `active_build_id` present with `worker_posture` (`progress_stale` / active) | Another build for this project already holds worker slots (`active_build_count > 0`). | Wait for the active build or coordinate with its owner before retrying; do not launch duplicate builds. |
+| Worker outage | `worker_probe_status=failed` or `no_workers_passed_health` | Candidate worker is unreachable or failing health probes. | Probe workers read-only or route to a healthy configured worker (`RCH_WORKERS=<worker-id>`). |
+| Topology recurrence (`bd-b1e4v` / `RCH-E327`) | `RCH-E327`, `classify_rch_verify_recurrence`, `unresolvedTopologyEdge` | Path dependency canonicalization escaped the allowed topology root before remote Cargo could start. | Run `scripts/rch_lane_doctor.sh --recurrence-evidence` and apply the read-only lane-doctor env or coordinate with the topology owner. |
+
+#### Support-bundle and handoff summary template
+
+When blocked by `remote_ready` plus `telemetry_gap` (including
+`slot_accounting_inconsistent` or `capabilities_refresh_timeout`), paste this
+redaction-safe summary into Agent Mail or a Beads comment (never use shell
+command substitution and never paste raw worker logs or host-private paths):
+
+```text
+RCH pressure-telemetry blocker handoff (no Rust source verdict reached):
+- blocker_family: pressure_telemetry_gap (bd-1n3x1.14.1..bd-1n3x1.14.3)
+- source_verdict: no_rust_verdict
+- posture: remote_ready
+- worker_id: <worker-01 or null>
+- worker_probe_status: <ok|failed|skipped>
+- active_build_count: <0>
+- queued_build_count: <0>
+- daemon_slots_available: <0..N>
+- worker_slots: <used_slots>/<total_slots>
+- pressure_state: telemetry_gap
+- pressure_reason_code: telemetry_unavailable
+- detail_reason: <slot_accounting_inconsistent|none>
+- pressure_policy_rule: fail_open_telemetry_gap
+- telemetry_fresh: false
+- telemetry_age_secs: <seconds or null>
+- refresh_exit_class: <completed|budget_timeout|operator_terminated_refresh|not_attempted>
+- refresh_elapsed_ms: <ms or null>
+- recent_cancellation_count: <bounded integer or 0>
+- retry_after: <RFC3339 timestamp>
+- next_action: <refresh_telemetry|probe_worker|coordinate_with_owner>
+- owner_routing: <bounded owner escalation hint>
+- redaction: raw_worker_logs=false, host_private_paths=false
+```
+
+**Forbidden actions when blocked by pressure telemetry:** never fall back to
+local Cargo, never mutate workers, never restart the `rch` daemon from an agent
+session (daemon restarts are owner-only), never run destructive cleanup, and
+never run `git worktree`, `git stash`, `git reset`, `git checkout`, or
+`git clean`.
+
 ## Mac Lane Doctor: USB-Detached Dual Blocker (bd-2qpgn)
 
 On the Mac checkout, the external build drive being detached produces a

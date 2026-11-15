@@ -266,7 +266,7 @@ COVER_CREATED="$(jq -r '.data.createdAt // .data.created_at // empty' "${LAST_ST
 COVER_TAGS="$(jq -c '.data.tags // empty' "${LAST_STDOUT}" 2>/dev/null)"
 run_ee learn gaps --workspace "${WS}" --json
 G2="${LAST_STDOUT}"
-if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
+if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 && -n "${COVER_CREATED}" && "${COVER_CREATED}" != "null" ]] \
     && jq -e '[(.gaps // .data.gaps)[]? | select(.status == "likely_covered" and .coveredBy != null)] | length >= 1' \
         "${G2}" >/dev/null 2>&1; then
     # Publish the WITNESS on the pass path, not only a diagnosis on the fail
@@ -279,7 +279,7 @@ if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
     # lands in `first_failure_diagnosis`, a field other suites and
     # tests/advanced_subsystem_logged_e2e.rs read as "why it failed". A success
     # witness there would be a non-empty failure diagnosis on a passing step.
-    echo "[witness] remembered_demand_marks_cluster_covered: $(jq -c '[(.gaps // .data.gaps)[]? | select(.coveredBy != null) | {clusterId, status, coveredBy, coveredByCreatedAt}]' "${G2}" 2>/dev/null) remembered=${COVER_ID:-<none>} coverTags=${COVER_TAGS:-<none>}"
+    echo "[witness] remembered_demand_marks_cluster_covered: $(jq -c '[(.gaps // .data.gaps)[]? | select(.coveredBy != null) | {clusterId, status, coveredBy, coveredByCreatedAt}]' "${G2}" 2>/dev/null) remembered=${COVER_ID:-<none>} coverCreatedAt=${COVER_CREATED:-<none>} coverTags=${COVER_TAGS:-<none>}"
     event remembered_demand_marks_cluster_covered pass
 else
     event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT} remembered=${COVER_ID:-<none>} gapId=${GAP_ID:-<none>} coverCreatedAt=${COVER_CREATED:-<none>} coverTags=${COVER_TAGS:-<none>}; $(jq -c '[(.gaps // .data.gaps)[]? | {clusterId, status, coveredBy, coveredByCreatedAt, lastSeenAt, nearestStatus: .nearestExistingEvidenceStatus, nearest: [(.nearestExistingEvidence // [])[] | {memoryId, reason}]}]' "${G2}" 2>/dev/null)"

@@ -304,7 +304,7 @@
     },
     {
       "assetKind": "attestation_bundles",
-      "storageClass": "durable_and_derived",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "allocationCount": 1,
       "ownerBeadCount": 1,
@@ -320,12 +320,13 @@
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "not_conformant_evidence_pending",
-      "evidencePendingOn": "bd-1n0np.23.2"
+      "complianceStatus": "not_applicable_not_stored",
+      "plannedAllocation": "V134_ATTESTATION_BUNDLES: dueling_wizards_migration_registry.json allocation attestation_bundles, status not_stored",
+      "scopeRuling": "bd-5p62d ruling (2026-11-15): bd-1n0np.22.1 closed on canonical models::attestation::AttestationBundle and deterministic BLAKE3 hashing without a dedicated SQLite table, so there is no stored attestation_bundles table to back up."
     },
     {
       "assetKind": "query_miss_ledger",
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "allocationCount": 1,
       "ownerBeadCount": 1,
@@ -341,8 +342,9 @@
       "missingAssetFailure": "degraded_not_silent_loss",
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
-      "complianceStatus": "not_conformant_evidence_pending",
-      "evidencePendingOn": "bd-1n0np.23.2"
+      "complianceStatus": "not_applicable_not_stored",
+      "plannedAllocation": "V135_QUERY_MISS_LEDGER: dueling_wizards_migration_registry.json allocation query_miss_ledger, status not_stored",
+      "scopeRuling": "bd-5p62d ruling (2026-11-15): bd-1n0np.6.3 closed on redacted search.miss_recorded audit entries in audit_log without a separate query_miss_ledger table, so there is no separate table to back up."
     },
     {
       "assetKind": "workspace_generations",
@@ -384,8 +386,8 @@
       "roundTripEvidenceStatus": "planned_contract_only",
       "privacyStatus": "not_applicable",
       "complianceStatus": "not_applicable_not_stored",
-      "plannedAllocation": "V131_SOURCE_WRITE_STATS: dueling_wizards_migration_registry.json allocation source_write_stats, status planned, not implemented",
-      "scopeRuling": "bd-1n0np.23.2 orchestrator ruling 2 (2026-09-23): no stored asset today; bd-1n0np.8.5 closed on computation only (compute_source_write_stats over caller-supplied observations), so there is nothing to back up. Building V131 or withdrawing the reservation is an operator decision."
+      "plannedAllocation": "V136_SOURCE_WRITE_STATS: dueling_wizards_migration_registry.json allocation source_write_stats, status not_stored",
+      "scopeRuling": "bd-1n0np.23.2 orchestrator ruling 2 (2026-09-23) & bd-5p62d (2026-11-15): no stored asset today; bd-1n0np.8.5 closed on computation over the write-owner observation deque (WriteOwner::source_write_stats / compute_source_write_stats), so there is nothing to back up."
     }
   ],
   "assets": [
@@ -547,7 +549,7 @@
       "assetKind": "attestation_bundles",
       "migrationAllocationIds": ["attestation_bundles"],
       "ownerBeads": ["bd-1n0np.22.1"],
-      "storageClass": "durable_and_derived",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",
@@ -565,7 +567,7 @@
       "assetKind": "query_miss_ledger",
       "migrationAllocationIds": ["query_miss_ledger"],
       "ownerBeads": ["bd-1n0np.6.3"],
-      "storageClass": "durable",
+      "storageClass": "planned_not_stored",
       "manifestMode": "records_jsonl_and_derived_manifest_v2",
       "hashPolicy": "blake3_required",
       "missingAssetFailure": "degraded_not_silent_loss",

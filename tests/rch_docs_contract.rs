@@ -92,6 +92,8 @@ fn shell_block_is_rch_routed(block: &str) -> bool {
         || block.contains("rch exec --")
         || block.contains("rch exec -- ")
         || block.contains("RCH_REQUIRE_REMOTE=1")
+        || block.contains("scripts/check-local-cargo-tripwire.sh --cmd")
+        || block.contains("ee preflight check --cmd")
 }
 
 /// True if the fenced shell block is an explicit anti-pattern
@@ -451,6 +453,53 @@ fn rch_runbook_canonical_command_pin_is_present() -> TestResult {
              dropping any of them silently produces a partial recipe that re-introduces a known \
              failure mode."
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn rch_runbook_and_verification_docs_cover_pressure_telemetry_handoff_contract() -> TestResult {
+    let runbook = read_doc("docs/rch_runbook.md")?;
+    let verification = read_doc("docs/rch_verification.md")?;
+    let required_tokens = [
+        "bd-1n3x1.14.1",
+        "bd-1n3x1.14.2",
+        "bd-1n3x1.14.3",
+        "bd-1n3x1.14.4",
+        "bd-1n3x1.13",
+        "bd-b1e4v",
+        "pressure_state",
+        "pressure_reason_code",
+        "worker_probe_status",
+        "active_build_count",
+        "queued_build_count",
+        "slots_available",
+        "used_slots",
+        "total_slots",
+        "telemetry_fresh",
+        "slot_accounting_inconsistent",
+        "refresh_exit_class",
+        "retry_after",
+        "next_action",
+        "owner_routing",
+        "no_rust_verdict",
+        "raw_worker_logs=false",
+        "host_private_paths=false",
+    ];
+    for (doc_name, body) in [
+        ("docs/rch_runbook.md", &runbook),
+        ("docs/rch_verification.md", &verification),
+    ] {
+        let missing: Vec<&str> = required_tokens
+            .iter()
+            .copied()
+            .filter(|token| !body.contains(token))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{doc_name} is missing bd-1n3x1.14.4 pressure-telemetry handoff token(s): {missing:?}"
+            ));
+        }
     }
     Ok(())
 }

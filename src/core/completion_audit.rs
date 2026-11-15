@@ -459,6 +459,7 @@ fn local_cargo_policy_workspace_evidence(workspace: &Path) -> Vec<EvidenceRecord
             workspace_source: "completion_audit",
             min_free_bytes: 1024 * 1024 * 1024,
             artifact_destinations: Vec::new(),
+            mode: super::disk_pressure::BuildAdmissionMode::RemoteDispatch,
         },
     );
     if !build_admission.admitted {

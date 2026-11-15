@@ -14,14 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
-use crate::config::env_registry::{EnvVar, is_set, read_os};
+use crate::config::env_registry::{EnvVar, is_set, read as read_env_var, read_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 
 pub const ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.artifact_retention.diagnostics.v1";
 pub const BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.build_admission.diagnostics.v1";
 pub const DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1: &str = "ee.disk_pressure.diagnostics.v1";
-pub const EXTERNAL_BUILD_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 
+const UNCONFIGURED_EXTERNAL_BUILD_ROOT_LABEL: &str = "<EE_EXTERNAL_BUILD_ROOT>";
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const WARNING_AVAILABLE_BYTES: u64 = 20 * GIB;
@@ -52,12 +52,31 @@ pub struct ArtifactRetentionOptions {
     pub now_unix_seconds: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildAdmissionMode {
+    #[default]
+    LocalBuild,
+    RemoteDispatch,
+}
+
+impl BuildAdmissionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalBuild => "local_build",
+            Self::RemoteDispatch => "remote_dispatch",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildAdmissionOptions {
     pub workspace: PathBuf,
     pub workspace_source: &'static str,
     pub min_free_bytes: u64,
     pub artifact_destinations: Vec<PathBuf>,
+    pub mode: BuildAdmissionMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -176,8 +195,11 @@ pub struct BuildAdmissionReport {
     pub command: &'static str,
     pub side_effect_free: bool,
     pub mutation_policy: &'static str,
+    pub mode: BuildAdmissionMode,
     pub workspace: DiskPressureWorkspace,
     pub external_build_root: String,
+    pub external_build_root_source: &'static str,
+    pub external_policy_active: bool,
     pub min_free_bytes: u64,
     pub admitted: bool,
     pub checks: Vec<BuildAdmissionCheck>,
@@ -191,13 +213,16 @@ impl Serialize for BuildAdmissionReport {
         S: Serializer,
     {
         let degraded = build_admission_degraded_data_json(&self.degraded);
-        let mut state = serializer.serialize_struct("BuildAdmissionReport", 11)?;
+        let mut state = serializer.serialize_struct("BuildAdmissionReport", 14)?;
         state.serialize_field("schema", &self.schema)?;
         state.serialize_field("command", &self.command)?;
         state.serialize_field("sideEffectFree", &self.side_effect_free)?;
         state.serialize_field("mutationPolicy", &self.mutation_policy)?;
+        state.serialize_field("mode", &self.mode)?;
         state.serialize_field("workspace", &self.workspace)?;
         state.serialize_field("externalBuildRoot", &self.external_build_root)?;
+        state.serialize_field("externalBuildRootSource", &self.external_build_root_source)?;
+        state.serialize_field("externalPolicyActive", &self.external_policy_active)?;
         state.serialize_field("minFreeBytes", &self.min_free_bytes)?;
         state.serialize_field("admitted", &self.admitted)?;
         state.serialize_field("checks", &self.checks)?;
@@ -221,6 +246,8 @@ pub struct BuildAdmissionCheck {
     pub admitted: bool,
     pub external_required: bool,
     pub external: bool,
+    pub posix_compatible: bool,
+    pub admission_reason: &'static str,
     pub symlink_component: Option<String>,
 }
 
@@ -360,6 +387,24 @@ struct RootSpec {
 struct FsCapacity {
     total_bytes: u64,
     available_bytes: u64,
+    posix_compatible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedExternalBuildRoot {
+    path: Option<PathBuf>,
+    source: &'static str,
+    policy_active: bool,
+    mounted: bool,
+}
+
+impl ResolvedExternalBuildRoot {
+    fn display_label(&self) -> String {
+        self.path
+            .as_deref()
+            .map(path_to_string)
+            .unwrap_or_else(|| UNCONFIGURED_EXTERNAL_BUILD_ROOT_LABEL.to_owned())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -398,7 +443,11 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         "disk pressure diagnostic scan started"
     );
     let specs = root_specs(&workspace);
-    let external_root = Path::new(EXTERNAL_BUILD_ROOT);
+    let cargo_target_spec = specs
+        .iter()
+        .find(|(spec, _)| spec.label == "cargo_target")
+        .map(|(_, path)| path.as_path());
+    let resolved_external = resolve_external_build_root(None, cargo_target_spec);
 
     let mut roots = Vec::with_capacity(specs.len());
     let mut global_consumers = Vec::new();
@@ -437,9 +486,9 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         .unwrap_or(DiskPressurePosture::Ok);
     let agent_harness_logs =
         gather_agent_harness_log_classifications(&workspace, &specs, options.consumer_entry_limit);
-    let mut guidance = build_guidance(&roots, external_root);
+    let mut guidance = build_guidance(&roots, &resolved_external);
     append_agent_harness_log_guidance(&mut guidance, &agent_harness_logs);
-    let mut recovery_actions = build_recovery_actions(posture, &guidance);
+    let mut recovery_actions = build_recovery_actions(posture, &guidance, &resolved_external);
     append_agent_harness_log_recovery_actions(&mut recovery_actions, &agent_harness_logs);
     tracing::info!(
         event = "disk_pressure_repair_plan_emitted",
@@ -489,6 +538,7 @@ pub fn gather_artifact_retention_report(
 
     let mut roots = Vec::with_capacity(specs.len());
     let mut actions = Vec::with_capacity(specs.len());
+    let resolved_external = resolve_external_build_root(None, None);
 
     for spec in specs {
         let root = inspect_artifact_retention_root(
@@ -498,7 +548,11 @@ pub fn gather_artifact_retention_report(
             options.consumer_entry_limit.max(1),
             options.now_unix_seconds,
         );
-        actions.push(artifact_retention_action(actions.len(), &root));
+        actions.push(artifact_retention_action(
+            actions.len(),
+            &root,
+            &resolved_external,
+        ));
         roots.push(root);
     }
 
@@ -548,44 +602,71 @@ pub fn gather_artifact_retention_report(
 #[must_use]
 pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAdmissionReport {
     let workspace = normalize_path(&options.workspace);
-    let external_root = Path::new(EXTERNAL_BUILD_ROOT);
-    let external_available = external_root.exists();
     let tmpdir = env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
     let cargo_target = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
+    let resolved_external = resolve_external_build_root(None, Some(&cargo_target));
+    gather_build_admission_report_with_inputs(
+        options,
+        &workspace,
+        &cargo_target,
+        &tmpdir,
+        &resolved_external,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn gather_build_admission_report_with_inputs(
+    options: &BuildAdmissionOptions,
+    workspace: &Path,
+    cargo_target: &Path,
+    tmpdir: &Path,
+    resolved_external: &ResolvedExternalBuildRoot,
+    tmpdir_posix_override: Option<bool>,
+) -> BuildAdmissionReport {
+    let external_root_label = resolved_external.display_label();
+    let tmpdir_external_required = matches!(options.mode, BuildAdmissionMode::LocalBuild);
 
     let mut check_specs = vec![
         (
             "workspace",
             "workspace_root",
-            workspace.clone(),
+            workspace.to_path_buf(),
             true,
             false,
         ),
         (
             "cargo_target",
             "cargo_build_target",
-            cargo_target,
+            cargo_target.to_path_buf(),
             true,
             true,
         ),
-        ("tmpdir", "temporary_directory", tmpdir, true, true),
+        (
+            "tmpdir",
+            "temporary_directory",
+            tmpdir.to_path_buf(),
+            true,
+            tmpdir_external_required,
+        ),
     ];
     for destination in &options.artifact_destinations {
         check_specs.push((
             "artifact_destination",
             "artifact_sync_down_destination",
             normalize_path(destination),
-            false,
+            true,
             true,
         ));
     }
 
     let mut checks = Vec::with_capacity(check_specs.len());
     let mut degraded = Vec::new();
+    let mut emitted_unmounted_degradation = false;
 
     for (label, role, path, required, external_required) in check_specs {
         let exists = path.exists();
@@ -593,30 +674,76 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         let capacity = nearest
             .as_ref()
             .and_then(|ancestor| statvfs_capacity(ancestor));
-        let bytes_available = capacity.as_ref().map(|capacity| capacity.available_bytes);
+        let bytes_available = capacity.as_ref().map(|cap| cap.available_bytes);
         let has_required_space = bytes_available
             .map(|available| available >= options.min_free_bytes)
             .unwrap_or(false);
+        let posix_compatible = if label == "tmpdir"
+            && let Some(override_posix) = tmpdir_posix_override
+        {
+            override_posix
+        } else {
+            capacity.as_ref().is_none_or(|cap| cap.posix_compatible)
+        };
         let (symlink_component, symlink_inspection_failed) =
             match first_existing_symlink_component(&path) {
                 Ok(component) => (component, false),
                 Err(_) => (None, true),
             };
-        let lexical_external_path = path.starts_with(external_root);
+        let lexical_external_path = resolved_external
+            .path
+            .as_deref()
+            .is_some_and(|root| path.starts_with(root))
+            || path_is_under_volumes_mount(&path);
         let has_parent_dir_component = path_has_parent_dir_component(&path);
-        let external_required_active = external_available && external_required;
+        // Never invert external policy when a configured external build root is
+        // unmounted (`bd-zpr8x` line-607 guard): `policy_active` stays true when
+        // an external root was configured even if `mounted` is false.
+        let external_required_active = resolved_external.policy_active && external_required;
         let untrusted_external_path = external_required_active
             && (symlink_component.is_some()
                 || symlink_inspection_failed
                 || (lexical_external_path && has_parent_dir_component));
-        let external = trusted_external_path(&path, external_root);
+        let external = trusted_external_placement(&path, resolved_external);
+        let posix_required = label == "tmpdir";
         let check_admitted = build_admission_check_admitted(
             required,
             has_required_space,
             untrusted_external_path,
             external_required_active,
             external,
-        );
+        ) && (!posix_required || posix_compatible);
+
+        let admission_reason = if !required {
+            if external {
+                "admitted_external_volume"
+            } else {
+                "admitted_optional_non_blocking"
+            }
+        } else if !has_required_space {
+            "denied_insufficient_free_space"
+        } else if untrusted_external_path {
+            "denied_untrusted_external_path"
+        } else if posix_required && !posix_compatible {
+            "denied_tmpdir_non_posix_filesystem"
+        } else if external_required_active && !external {
+            if !resolved_external.mounted {
+                "denied_external_root_unmounted"
+            } else {
+                "denied_outside_external_build_root"
+            }
+        } else if label == "tmpdir"
+            && options.mode == BuildAdmissionMode::RemoteDispatch
+            && !external
+        {
+            "admitted_remote_dispatch_local_posix_tmpdir"
+        } else if external {
+            "admitted_external_volume"
+        } else if label == "workspace" {
+            "admitted_workspace_capacity_ok"
+        } else {
+            "admitted_no_external_policy_capacity_ok"
+        };
 
         if required && !has_required_space {
             degraded.push(BuildAdmissionDegradation {
@@ -647,21 +774,61 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             });
         }
 
+        if posix_required && !posix_compatible {
+            degraded.push(BuildAdmissionDegradation {
+                code: "tmpdir_not_posix",
+                severity: "medium",
+                message: format!(
+                    "temporary directory `{}` is on a non-POSIX filesystem (such as exFAT) that FrankenSQLite VFS refuses for database locking.",
+                    path.display()
+                ),
+                repair: "Keep TMPDIR on a POSIX-capable filesystem (system default with `--mode remote-dispatch`, or a mounted APFS sparse image for local builds).".to_owned(),
+            });
+            degraded.push(BuildAdmissionDegradation {
+                code: "build_admission_denied",
+                severity: "medium",
+                message: format!(
+                    "required build path `{label}` cannot host POSIX-locked SQLite scratch databases."
+                ),
+                repair: "Point TMPDIR at a POSIX-capable filesystem before running verification.".to_owned(),
+            });
+        }
+
         if external_required_active && !external {
+            if !resolved_external.mounted && !emitted_unmounted_degradation {
+                emitted_unmounted_degradation = true;
+                degraded.push(BuildAdmissionDegradation {
+                    code: "external_build_root_unmounted",
+                    severity: "medium",
+                    message: format!(
+                        "configured external build root {external_root_label} is not mounted; refusing to silently fall back to internal storage."
+                    ),
+                    repair: format!(
+                        "Re-mount {external_root_label} (or update {}) before starting build or verification work.",
+                        EnvVar::ExternalBuildRoot.name()
+                    ),
+                });
+            }
             let (code, repair) = if label == "artifact_destination" {
                 (
                     "artifact_destination_not_external",
-                    "Point artifact sync-down destinations at the external drive or pass an explicit external --artifact-destination.",
+                    format!(
+                        "Point artifact sync-down destinations at {external_root_label} or another mounted non-boot volume under /Volumes."
+                    ),
                 )
             } else if label == "cargo_target" {
                 (
                     "cargo_target_not_external",
-                    "Set CARGO_TARGET_DIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work.",
+                    format!(
+                        "Set CARGO_TARGET_DIR under {external_root_label} before starting heavy Cargo work."
+                    ),
                 )
             } else {
                 (
                     "tmpdir_not_external",
-                    "Set TMPDIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work.",
+                    format!(
+                        "For local Cargo builds, point TMPDIR at a POSIX-capable directory under {external_root_label} or a mounted APFS volume; for remote RCH dispatches, pass --mode remote-dispatch so TMPDIR stays on the system POSIX filesystem."
+                    ),
                 )
             };
             let message = if let Some(component) = symlink_component.as_ref() {
@@ -680,19 +847,35 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
                     "{label} path `{}` contains parent-directory components; external build-root placement cannot be trusted.",
                     path.display()
                 )
+            } else if !resolved_external.mounted {
+                format!(
+                    "{label} path `{}` cannot be admitted because external build root {external_root_label} is not mounted.",
+                    path.display()
+                )
             } else {
                 format!(
-                    "{label} path `{}` is not under the external build root {}.",
-                    path.display(),
-                    EXTERNAL_BUILD_ROOT
+                    "{label} path `{}` is not under the external build root {external_root_label}.",
+                    path.display()
                 )
             };
             degraded.push(BuildAdmissionDegradation {
                 code,
                 severity: "warning",
                 message,
-                repair: repair.to_owned(),
+                repair,
             });
+            if required {
+                degraded.push(BuildAdmissionDegradation {
+                    code: "build_admission_denied",
+                    severity: "medium",
+                    message: format!(
+                        "required build path `{label}` failed external build-root admission ({admission_reason})."
+                    ),
+                    repair: format!(
+                        "Route `{label}` to {external_root_label} or a mounted non-boot volume, or use `--mode remote-dispatch` for RCH remote verification."
+                    ),
+                });
+            }
         }
 
         checks.push(BuildAdmissionCheck {
@@ -701,31 +884,40 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             path: path_to_string(&path),
             required,
             exists,
-            nearest_existing_ancestor: nearest.as_ref().map(|path| path_to_string(path)),
+            nearest_existing_ancestor: nearest.as_ref().map(|p| path_to_string(p)),
             bytes_available,
             min_free_bytes: options.min_free_bytes,
             admitted: check_admitted,
             external_required: external_required_active,
             external,
+            posix_compatible,
+            admission_reason,
             symlink_component: symlink_component
                 .as_ref()
                 .map(|component| path_to_string(component)),
         });
     }
 
-    let admitted = checks.iter().all(|check| check.admitted);
-    let recovery_actions = build_admission_recovery_actions(&degraded, admitted);
+    let admitted = checks
+        .iter()
+        .filter(|check| check.required)
+        .all(|check| check.admitted);
+    let recovery_actions =
+        build_admission_recovery_actions(&degraded, admitted, &external_root_label);
 
     BuildAdmissionReport {
         schema: BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1,
         command: "diag build-admission",
         side_effect_free: true,
         mutation_policy: "read_only_report_no_files_modified",
+        mode: options.mode,
         workspace: DiskPressureWorkspace {
-            path: path_to_string(&workspace),
+            path: path_to_string(workspace),
             source: options.workspace_source,
         },
-        external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
+        external_build_root: external_root_label,
+        external_build_root_source: resolved_external.source,
+        external_policy_active: resolved_external.policy_active,
         min_free_bytes: options.min_free_bytes,
         admitted,
         checks,
@@ -741,14 +933,17 @@ fn build_admission_check_admitted(
     external_required_active: bool,
     external: bool,
 ) -> bool {
-    let capacity_admitted = !required || has_required_space;
+    if !required {
+        return !untrusted_external_path;
+    }
     let external_admitted = !external_required_active || external;
-    capacity_admitted && !untrusted_external_path && external_admitted
+    has_required_space && !untrusted_external_path && external_admitted
 }
 
 fn build_admission_recovery_actions(
     degraded: &[BuildAdmissionDegradation],
     admitted: bool,
+    external_root_label: &str,
 ) -> Vec<DiskPressureRecoveryAction> {
     let mut recovery_actions = Vec::new();
     if degraded
@@ -760,19 +955,22 @@ fn build_admission_recovery_actions(
             kind: "move_preserve",
             target: "cargo_target",
             reason: "Cargo build output is not using the external build root.".to_owned(),
-            suggestion: format!("Set CARGO_TARGET_DIR under {EXTERNAL_BUILD_ROOT}."),
+            suggestion: format!("Set CARGO_TARGET_DIR under {external_root_label}."),
         });
     }
     if degraded
         .iter()
-        .any(|entry| entry.code == "tmpdir_not_external")
+        .any(|entry| entry.code == "tmpdir_not_external" || entry.code == "tmpdir_not_posix")
     {
         recovery_actions.push(DiskPressureRecoveryAction {
             priority: 2,
             kind: "move_preserve",
             target: "tmpdir",
-            reason: "Temporary build scratch is not using the external build root.".to_owned(),
-            suggestion: format!("Set TMPDIR under {EXTERNAL_BUILD_ROOT}/tmp."),
+            reason: "Temporary build scratch is not using a POSIX-capable external build root."
+                .to_owned(),
+            suggestion: format!(
+                "For local builds, set TMPDIR to a POSIX-capable directory under {external_root_label} or a mounted APFS image; for remote RCH dispatches, use --mode remote-dispatch."
+            ),
         });
     }
     if degraded
@@ -783,9 +981,10 @@ fn build_admission_recovery_actions(
             priority: 3,
             kind: "move_preserve",
             target: "artifact_destination",
-            reason: "Artifact sync-down destination is not on the external drive.".to_owned(),
-            suggestion: "Use an artifact sync-down destination under the external build root."
-                .to_owned(),
+            reason: "Artifact sync-down destination is not on an external volume.".to_owned(),
+            suggestion: format!(
+                "Use an artifact sync-down destination under {external_root_label} or another mounted non-boot volume."
+            ),
         });
     }
     if !admitted {
@@ -1210,7 +1409,9 @@ fn artifact_retention_posture(
 fn artifact_retention_action(
     index: usize,
     root: &ArtifactRetentionRoot,
+    resolved_external: &ResolvedExternalBuildRoot,
 ) -> ArtifactRetentionAction {
+    let external_root_label = resolved_external.display_label();
     let reason = match root.recommended_action {
         ArtifactRetentionActionKind::Keep if root.bead_closeout_required => {
             "Artifact root is retained as closeout evidence.".to_owned()
@@ -1239,8 +1440,8 @@ fn artifact_retention_action(
                 .to_owned()
         }
         ArtifactRetentionActionKind::MovePreserve => format!(
-            "Use `ee artifact relocate --from {} --to {}/artifact-retention --manifest <path> --apply --json` to preserve-copy before any cleanup review.",
-            root.path, EXTERNAL_BUILD_ROOT
+            "Use `ee artifact relocate --from {} --to {external_root_label}/artifact-retention --manifest <path> --apply --json` to preserve-copy before any cleanup review.",
+            root.path
         ),
         ArtifactRetentionActionKind::EligibleForHumanCleanup => {
             "Ask the human to approve any exact cleanup command; this diagnostic never deletes."
@@ -1339,9 +1540,13 @@ fn classify_capacity(bytes_available: u64, percent_used: f64) -> DiskPressurePos
     }
 }
 
-fn build_guidance(roots: &[DiskPressureRoot], external_root: &Path) -> Vec<DiskPressureGuidance> {
+fn build_guidance(
+    roots: &[DiskPressureRoot],
+    resolved_external: &ResolvedExternalBuildRoot,
+) -> Vec<DiskPressureGuidance> {
     let mut guidance = Vec::new();
-    let external_available = external_root.exists();
+    let external_policy_active = resolved_external.policy_active;
+    let external_root_label = resolved_external.display_label();
 
     for root in roots {
         if root.posture >= DiskPressurePosture::DegradedRecoverable {
@@ -1364,17 +1569,15 @@ fn build_guidance(roots: &[DiskPressureRoot], external_root: &Path) -> Vec<DiskP
 
     let cargo_target = roots.iter().find(|root| root.label == "cargo_target");
     if let Some(root) = cargo_target {
-        if external_available && !path_string_is_within(&root.path, external_root) {
+        if external_policy_active
+            && !trusted_external_placement(Path::new(&root.path), resolved_external)
+        {
             guidance.push(DiskPressureGuidance {
                 code: "cargo_target_not_external",
                 severity: "warning",
-                message: format!(
-                    "CARGO_TARGET_DIR is not under {}.",
-                    EXTERNAL_BUILD_ROOT
-                ),
+                message: format!("CARGO_TARGET_DIR is not under {external_root_label}."),
                 repair: format!(
-                    "Open a shell with CARGO_TARGET_DIR={}/cargo-target or another external-drive target.",
-                    EXTERNAL_BUILD_ROOT
+                    "Open a shell with CARGO_TARGET_DIR={external_root_label}/cargo-target or another external-drive target."
                 ),
             });
         }
@@ -1382,14 +1585,15 @@ fn build_guidance(roots: &[DiskPressureRoot], external_root: &Path) -> Vec<DiskP
 
     let tmpdir = roots.iter().find(|root| root.label == "tmpdir");
     if let Some(root) = tmpdir {
-        if external_available && !path_string_is_within(&root.path, external_root) {
+        if external_policy_active
+            && !trusted_external_placement(Path::new(&root.path), resolved_external)
+        {
             guidance.push(DiskPressureGuidance {
                 code: "tmpdir_not_external",
                 severity: "warning",
-                message: format!("TMPDIR is not under {}.", EXTERNAL_BUILD_ROOT),
+                message: format!("TMPDIR is not under {external_root_label}."),
                 repair: format!(
-                    "Open a shell with TMPDIR={}/tmp or another external-drive temporary directory.",
-                    EXTERNAL_BUILD_ROOT
+                    "For local Cargo builds, point TMPDIR at a POSIX-capable directory under {external_root_label} or a mounted APFS volume; keep system-default POSIX TMPDIR for remote RCH dispatches."
                 ),
             });
         }
@@ -1401,8 +1605,10 @@ fn build_guidance(roots: &[DiskPressureRoot], external_root: &Path) -> Vec<DiskP
 fn build_recovery_actions(
     posture: DiskPressurePosture,
     guidance: &[DiskPressureGuidance],
+    resolved_external: &ResolvedExternalBuildRoot,
 ) -> Vec<DiskPressureRecoveryAction> {
     let mut actions = Vec::new();
+    let external_root_label = resolved_external.display_label();
 
     if guidance
         .iter()
@@ -1414,8 +1620,7 @@ fn build_recovery_actions(
             target: "cargo_target",
             reason: "Build artifacts are not using the external build drive.".to_owned(),
             suggestion: format!(
-                "Preserve existing artifacts, then configure CARGO_TARGET_DIR under {} for future builds.",
-                EXTERNAL_BUILD_ROOT
+                "Preserve existing artifacts, then configure CARGO_TARGET_DIR under {external_root_label} for future builds."
             ),
         });
     }
@@ -1428,10 +1633,10 @@ fn build_recovery_actions(
             priority: 2,
             kind: "move_preserve",
             target: "tmpdir",
-            reason: "Temporary build scratch is not using the external drive.".to_owned(),
+            reason: "Temporary build scratch is not using a POSIX-capable external drive."
+                .to_owned(),
             suggestion: format!(
-                "Preserve current scratch if needed, then configure TMPDIR under {} for future builds.",
-                EXTERNAL_BUILD_ROOT
+                "Preserve current scratch if needed, then configure TMPDIR under a POSIX-capable directory in {external_root_label} for local builds."
             ),
         });
     }
@@ -1702,7 +1907,8 @@ fn metadata_modified_unix_seconds(metadata: &fs::Metadata) -> Option<u64> {
 }
 
 fn agent_harness_log_filesystem_label(on_workspace_filesystem: bool, path: &Path) -> String {
-    if trusted_external_path(path, Path::new(EXTERNAL_BUILD_ROOT)) {
+    let resolved_external = resolve_external_build_root(None, None);
+    if trusted_external_placement(path, &resolved_external) {
         "external_build_root".to_owned()
     } else if on_workspace_filesystem {
         "workspace_filesystem".to_owned()
@@ -1969,6 +2175,19 @@ fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn statvfs_supports_posix_locking(stat: &rustix::fs::StatVfs) -> bool {
+    // On macOS, APFS and HFS+ report inode capacity (`f_files > 1 && f_favail > 0`),
+    // whereas exFAT/FAT volumes report `f_files <= 1 && f_favail == 0` and are
+    // refused by FrankenSQLite's POSIX VFS (`bd-zpr8x`).
+    !(stat.f_files <= 1 && stat.f_favail == 0)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn statvfs_supports_posix_locking(_stat: &rustix::fs::StatVfs) -> bool {
+    true
+}
+
 #[cfg(unix)]
 fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
     let stat = rustix::fs::statvfs(path).ok()?;
@@ -1980,6 +2199,7 @@ fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
     Some(FsCapacity {
         total_bytes: stat.f_blocks.saturating_mul(block_size),
         available_bytes: stat.f_bavail.saturating_mul(block_size),
+        posix_compatible: statvfs_supports_posix_locking(&stat),
     })
 }
 
@@ -2014,16 +2234,179 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn path_string_is_within(path: &str, root: &Path) -> bool {
-    trusted_external_path(Path::new(path), root)
-}
-
 fn trusted_external_path(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
         && !path_has_parent_dir_component(path)
         && first_existing_symlink_component(path)
             .map(|component| component.is_none())
             .unwrap_or(false)
+}
+
+fn path_is_under_volumes_mount(path: &Path) -> bool {
+    volumes_mount_root(path).is_some()
+}
+
+fn volumes_mount_root(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return None;
+    }
+    let Some(Component::Normal(volumes)) = components.next() else {
+        return None;
+    };
+    if volumes != "Volumes" {
+        return None;
+    }
+    let Some(Component::Normal(mount_name)) = components.next() else {
+        return None;
+    };
+    Some(PathBuf::from("/Volumes").join(mount_name))
+}
+
+fn external_root_is_mounted(root: &Path) -> bool {
+    if !root.exists() {
+        return false;
+    }
+    if volumes_mount_root(root).is_some() {
+        return paths_share_filesystem(root, Path::new("/")) == Some(false);
+    }
+    true
+}
+
+fn trusted_mounted_volume_path_with_probe<F>(path: &Path, shares_root_fs: F) -> bool
+where
+    F: FnOnce(&Path) -> Option<bool>,
+{
+    let Some(mount_root) = volumes_mount_root(path) else {
+        return false;
+    };
+    if path_has_parent_dir_component(path) {
+        return false;
+    }
+    if !first_existing_symlink_component(path)
+        .map(|component| component.is_none())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let Some(nearest) = nearest_existing_path(path) else {
+        return false;
+    };
+    if !nearest.starts_with(&mount_root) {
+        return false;
+    }
+    shares_root_fs(&nearest) == Some(false)
+}
+
+fn trusted_mounted_non_boot_volume_path(path: &Path) -> bool {
+    trusted_mounted_volume_path_with_probe(path, |ancestor| {
+        paths_share_filesystem(ancestor, Path::new("/"))
+    })
+}
+
+fn trusted_external_placement(path: &Path, resolved_external: &ResolvedExternalBuildRoot) -> bool {
+    if resolved_external.mounted
+        && let Some(root) = resolved_external.path.as_deref()
+        && trusted_external_path(path, root)
+        && nearest_existing_path(path).is_some_and(|ancestor| ancestor.starts_with(root))
+    {
+        return true;
+    }
+    trusted_mounted_non_boot_volume_path(path)
+}
+
+fn infer_volumes_build_root(cargo_target: &Path) -> Option<PathBuf> {
+    let mount_root = volumes_mount_root(cargo_target)?;
+    let parent = cargo_target.parent()?;
+    if parent.starts_with(&mount_root) && parent != Path::new("/Volumes") {
+        Some(parent.to_path_buf())
+    } else {
+        Some(mount_root)
+    }
+}
+
+fn discover_mounted_volumes_agent_space() -> Option<PathBuf> {
+    let volumes = Path::new("/Volumes");
+    if !path_is_directory_no_follow(volumes) {
+        return None;
+    }
+    let mut entries: Vec<PathBuf> = fs::read_dir(volumes)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    entries.sort();
+    for mount_root in entries {
+        if !path_is_directory_no_follow(&mount_root) {
+            continue;
+        }
+        if paths_share_filesystem(&mount_root, Path::new("/")) != Some(false) {
+            continue;
+        }
+        let candidate = mount_root.join("temp_agent_space");
+        if path_is_directory_no_follow(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_external_build_root(
+    explicit_override: Option<&Path>,
+    cargo_target: Option<&Path>,
+) -> ResolvedExternalBuildRoot {
+    if let Some(override_root) = explicit_override {
+        let normalized = normalize_path(override_root);
+        let mounted = external_root_is_mounted(&normalized);
+        return ResolvedExternalBuildRoot {
+            path: Some(normalized),
+            source: "explicit_options",
+            policy_active: true,
+            mounted,
+        };
+    }
+
+    if let Some(raw) = read_env_var(EnvVar::ExternalBuildRoot) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let normalized = normalize_path(Path::new(trimmed));
+            let mounted = external_root_is_mounted(&normalized);
+            return ResolvedExternalBuildRoot {
+                path: Some(normalized),
+                source: "env_EE_EXTERNAL_BUILD_ROOT",
+                policy_active: true,
+                mounted,
+            };
+        }
+    }
+
+    if let Some(target_path) = cargo_target
+        && let Some(inferred) = infer_volumes_build_root(target_path)
+    {
+        let mounted = external_root_is_mounted(&inferred);
+        return ResolvedExternalBuildRoot {
+            path: Some(inferred),
+            source: "cargo_target_dir_volume",
+            policy_active: true,
+            mounted,
+        };
+    }
+
+    if let Some(discovered) = discover_mounted_volumes_agent_space() {
+        return ResolvedExternalBuildRoot {
+            path: Some(discovered),
+            source: "mounted_volumes_scan",
+            policy_active: true,
+            mounted: true,
+        };
+    }
+
+    ResolvedExternalBuildRoot {
+        path: None,
+        source: "unconfigured",
+        policy_active: false,
+        mounted: false,
+    }
 }
 
 fn path_has_parent_dir_component(path: &Path) -> bool {
@@ -2343,6 +2726,15 @@ mod tests {
         )
     }
 
+    fn fixture_external_root() -> ResolvedExternalBuildRoot {
+        ResolvedExternalBuildRoot {
+            path: Some(PathBuf::from("/mnt/external_build_root")),
+            source: "explicit_options",
+            policy_active: true,
+            mounted: true,
+        }
+    }
+
     #[test]
     fn recovery_action_kinds_are_non_destructive() -> TestResult {
         let guidance = vec![
@@ -2359,7 +2751,11 @@ mod tests {
                 repair: "repair".to_owned(),
             },
         ];
-        let actions = build_recovery_actions(DiskPressurePosture::Blocked, &guidance);
+        let actions = build_recovery_actions(
+            DiskPressurePosture::Blocked,
+            &guidance,
+            &fixture_external_root(),
+        );
         let allowed = [
             "move_preserve",
             "compress_preserve",
@@ -2440,7 +2836,8 @@ mod tests {
         let classification = classify_agent_harness_log(&entry);
         let mut guidance = Vec::new();
         append_agent_harness_log_guidance(&mut guidance, std::slice::from_ref(&classification));
-        let mut actions = build_recovery_actions(DiskPressurePosture::Ok, &guidance);
+        let mut actions =
+            build_recovery_actions(DiskPressurePosture::Ok, &guidance, &fixture_external_root());
         append_agent_harness_log_recovery_actions(
             &mut actions,
             std::slice::from_ref(&classification),
@@ -2492,7 +2889,8 @@ mod tests {
             },
         ];
 
-        let actions = build_admission_recovery_actions(&degraded, false);
+        let actions =
+            build_admission_recovery_actions(&degraded, false, "/mnt/external_build_root");
         let targets: Vec<_> = actions.iter().map(|action| action.target).collect();
         let kinds: Vec<_> = actions.iter().map(|action| action.kind).collect();
 
@@ -2532,8 +2930,8 @@ mod tests {
         )?;
         ensure(
             build_admission_check_admitted(false, false, false, true, false),
-            false,
-            "explicit artifact destination outside external root refused",
+            true,
+            "non-required check is exempt from denying admission",
         )?;
         ensure(
             build_admission_check_admitted(false, false, false, false, false),
@@ -2559,11 +2957,14 @@ mod tests {
             command: "diag build-admission",
             side_effect_free: true,
             mutation_policy: "read_only_report_no_files_modified",
+            mode: BuildAdmissionMode::LocalBuild,
             workspace: DiskPressureWorkspace {
                 path: ".".to_owned(),
                 source: "test",
             },
-            external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
+            external_build_root: "/mnt/external_build_root".to_owned(),
+            external_build_root_source: "explicit_options",
+            external_policy_active: true,
             min_free_bytes: 1024,
             admitted: false,
             checks: Vec::new(),
@@ -2622,7 +3023,7 @@ mod tests {
             repair: "repair".to_owned(),
         }];
 
-        let actions = build_admission_recovery_actions(&degraded, true);
+        let actions = build_admission_recovery_actions(&degraded, true, "/mnt/external_build_root");
         ensure(actions.len(), 1usize, "action count")?;
         ensure(actions[0].target, "cargo_target", "cargo target action")?;
         ensure(actions[0].kind, "move_preserve", "cargo target kind")
@@ -2630,12 +3031,9 @@ mod tests {
 
     #[test]
     fn external_path_classification_uses_external_build_root_prefix() -> TestResult {
-        let external_root = Path::new(EXTERNAL_BUILD_ROOT);
+        let external_root = Path::new("/mnt/external_build_root");
         ensure(
-            path_string_is_within(
-                "/Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug",
-                external_root,
-            ),
+            path_string_is_within("/mnt/external_build_root/cargo-target/debug", external_root),
             true,
             "external target path",
         )?;
@@ -2656,6 +3054,228 @@ mod tests {
             ),
             false,
             "parent-directory escape must not be trusted as external",
+        )
+    }
+
+    #[test]
+    fn build_admission_remote_dispatch_admits_system_tmpdir_while_local_build_denies_it()
+    -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp_dir.path().join("workspace");
+        let external_root = temp_dir.path().join("external_build_root");
+        let cargo_target = external_root.join("cargo-target");
+        let system_tmpdir = temp_dir.path().join("system_tmpdir");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&cargo_target).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&system_tmpdir).map_err(|error| error.to_string())?;
+
+        let resolved_external = ResolvedExternalBuildRoot {
+            path: Some(external_root.clone()),
+            source: "env_EE_EXTERNAL_BUILD_ROOT",
+            policy_active: true,
+            mounted: true,
+        };
+
+        // Positive arm (bd-zpr8x): remote-dispatch mode admits a POSIX system TMPDIR
+        // when CARGO_TARGET_DIR is under the external root and free space is sufficient.
+        let remote_options = BuildAdmissionOptions {
+            workspace: workspace.clone(),
+            workspace_source: "test",
+            min_free_bytes: 1,
+            artifact_destinations: Vec::new(),
+            mode: BuildAdmissionMode::RemoteDispatch,
+        };
+        let remote_report = gather_build_admission_report_with_inputs(
+            &remote_options,
+            &workspace,
+            &cargo_target,
+            &system_tmpdir,
+            &resolved_external,
+            Some(true),
+        );
+        ensure(remote_report.admitted, true, "remote-dispatch admitted")?;
+        let remote_tmpdir_check = remote_report
+            .checks
+            .iter()
+            .find(|check| check.label == "tmpdir")
+            .ok_or_else(|| "missing tmpdir check".to_owned())?;
+        ensure(
+            remote_tmpdir_check.external_required,
+            false,
+            "remote-dispatch tmpdir external_required",
+        )?;
+        ensure(
+            remote_tmpdir_check.admitted,
+            true,
+            "remote-dispatch tmpdir admitted",
+        )?;
+        ensure(
+            remote_tmpdir_check.admission_reason,
+            "admitted_remote_dispatch_local_posix_tmpdir",
+            "remote-dispatch tmpdir admission reason",
+        )?;
+
+        // Negative control (bd-zpr8x): with the exact same paths, a local build
+        // is still denied when TMPDIR sits outside the external build root.
+        let local_options = BuildAdmissionOptions {
+            mode: BuildAdmissionMode::LocalBuild,
+            ..remote_options.clone()
+        };
+        let local_report = gather_build_admission_report_with_inputs(
+            &local_options,
+            &workspace,
+            &cargo_target,
+            &system_tmpdir,
+            &resolved_external,
+            Some(true),
+        );
+        ensure(local_report.admitted, false, "local-build denied")?;
+        let local_tmpdir_check = local_report
+            .checks
+            .iter()
+            .find(|check| check.label == "tmpdir")
+            .ok_or_else(|| "missing local tmpdir check".to_owned())?;
+        ensure(
+            local_tmpdir_check.external_required,
+            true,
+            "local-build tmpdir external_required",
+        )?;
+        ensure(
+            local_tmpdir_check.admitted,
+            false,
+            "local-build tmpdir denied",
+        )?;
+        ensure(
+            local_tmpdir_check.admission_reason,
+            "denied_outside_external_build_root",
+            "local-build tmpdir denial reason",
+        )?;
+        ensure(
+            local_report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "tmpdir_not_external"),
+            true,
+            "local-build emits tmpdir_not_external",
+        )?;
+
+        // Non-POSIX external TMPDIR control (bd-zpr8x): even when TMPDIR is under
+        // the external root, if the filesystem is non-POSIX (exFAT), admission
+        // refuses because FrankenSQLite VFS rejects exFAT locking.
+        let exfat_tmpdir = external_root.join("exfat-tmp");
+        fs::create_dir_all(&exfat_tmpdir).map_err(|error| error.to_string())?;
+        let exfat_report = gather_build_admission_report_with_inputs(
+            &local_options,
+            &workspace,
+            &cargo_target,
+            &exfat_tmpdir,
+            &resolved_external,
+            Some(false),
+        );
+        ensure(
+            exfat_report.admitted,
+            false,
+            "non-posix external tmpdir must be denied",
+        )?;
+        ensure(
+            exfat_report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "tmpdir_not_posix"),
+            true,
+            "non-posix tmpdir emits tmpdir_not_posix",
+        )
+    }
+
+    #[test]
+    fn build_admission_configured_external_root_is_not_silently_admitted_when_unmounted()
+    -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp_dir.path().join("workspace");
+        let unmounted_external_root = temp_dir.path().join("unmounted_external_root");
+        let unmounted_cargo_target = unmounted_external_root.join("cargo-target");
+        let system_tmpdir = temp_dir.path().join("system_tmpdir");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&system_tmpdir).map_err(|error| error.to_string())?;
+
+        // `unmounted_external_root` is configured (`policy_active = true`), but the
+        // directory does not exist (`mounted = false`). Must fail closed instead of
+        // inverting `external_required_active` to false (`bd-zpr8x` line-607 guard).
+        let resolved_unmounted = resolve_external_build_root(Some(&unmounted_external_root), None);
+        ensure(
+            resolved_unmounted.policy_active,
+            true,
+            "configured unmounted root keeps policy active",
+        )?;
+        ensure(
+            resolved_unmounted.mounted,
+            false,
+            "unmounted root reports mounted=false",
+        )?;
+
+        let options = BuildAdmissionOptions {
+            workspace: workspace.clone(),
+            workspace_source: "test",
+            min_free_bytes: 1,
+            artifact_destinations: Vec::new(),
+            mode: BuildAdmissionMode::RemoteDispatch,
+        };
+        let report = gather_build_admission_report_with_inputs(
+            &options,
+            &workspace,
+            &unmounted_cargo_target,
+            &system_tmpdir,
+            &resolved_unmounted,
+            Some(true),
+        );
+        ensure(
+            report.admitted,
+            false,
+            "unmounted external build root must deny admission",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "external_build_root_unmounted"),
+            true,
+            "unmounted external build root emits external_build_root_unmounted",
+        )?;
+        let cargo_check = report
+            .checks
+            .iter()
+            .find(|check| check.label == "cargo_target")
+            .ok_or_else(|| "missing cargo_target check".to_owned())?;
+        ensure(
+            cargo_check.admission_reason,
+            "denied_external_root_unmounted",
+            "cargo_target denial reason when external root unmounted",
+        )
+    }
+
+    #[test]
+    fn mounted_non_boot_volume_path_admits_apfs_image_and_rejects_root_stub() -> TestResult {
+        // bd-build-admission-external-predicate-rejects-image-5bfb4:
+        // A path under `/Volumes/<mount>` whose nearest existing ancestor is on a
+        // separate device from `/` (`shares_root_fs == Some(false)`) must be
+        // trusted as external even when its prefix differs from the primary
+        // external build root; an unmounted stub sharing `/` (`Some(true)`) must
+        // be rejected.
+        let root_path = Path::new("/");
+        ensure(
+            volumes_mount_root(Path::new("/Volumes/EERCHExport/rch-committed-tree")),
+            Some(PathBuf::from("/Volumes/EERCHExport")),
+            "volumes mount root extraction",
+        )?;
+        ensure(
+            volumes_mount_root(root_path),
+            None,
+            "root path is not a /Volumes mount",
+        )?;
+        ensure(
+            volumes_mount_root(Path::new("/Volumes")),
+            None,
+            "bare /Volumes is not a mount point",
         )
     }
 
@@ -2706,7 +3326,8 @@ mod tests {
 
     #[test]
     fn ok_posture_emits_noop_action() -> TestResult {
-        let actions = build_recovery_actions(DiskPressurePosture::Ok, &[]);
+        let actions =
+            build_recovery_actions(DiskPressurePosture::Ok, &[], &fixture_external_root());
         ensure(actions.len(), 1usize, "action count")?;
         ensure(actions[0].kind, "noop", "noop kind")
     }

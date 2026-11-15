@@ -33,8 +33,7 @@ If you are debugging RCH itself and must inspect the low-level shape, start with
 `--dry-run`:
 
 ```bash
-scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
-  --dry-run --skip-build-admission --summary -- \
+scripts/rch_verify.sh --dry-run --skip-build-admission --summary -- \
   cargo test --locked --lib my_focused_unit_test -- --nocapture
 ```
 
@@ -565,6 +564,52 @@ Symptom: RCH says it's waiting for a slot for >5 minutes.
 - Reduce slot demand: `RCH_TEST_SLOTS=1` for one slice at a time.
 - Check via `rch workers probe --all` to see which workers are saturated.
 - Don't fan out 4 parallel verifications when one bead at a time would work.
+
+### Pressure-telemetry gap and slot-accounting contradiction (bd-1n3x1.14.1–bd-1n3x1.14.4)
+
+**Symptom:** `rch status --json` reports `posture=remote_ready`,
+`active_build_count=0`, `queued_build_count=0`, and `worker_probe_status=ok`,
+yet the worker carries `pressure_state=telemetry_gap`,
+`pressure_reason_code=telemetry_unavailable`, `telemetry_fresh=false`, or a
+slot-accounting contradiction (`daemon.slots_available=0` and
+`used_slots=total_slots` while `active_builds=[]` and `queued_builds=[]` —
+`slot_accounting_inconsistent`), or `rch workers capabilities --refresh` hangs
+until `capabilities_refresh_timeout` (`refresh_exit_class=budget_timeout` or
+`operator_terminated_refresh`).
+
+**How to distinguish from neighboring blocker families:**
+
+- **Pressure-telemetry gap (`bd-1n3x1.14.1`–`bd-1n3x1.14.3`):** `posture=remote_ready`
+  with `pressure_state=telemetry_gap` and `pressure_reason_code=telemetry_unavailable`
+  (or `slot_accounting_inconsistent`). No Rust source verdict was reached
+  (`source_verdict=no_rust_verdict`).
+- **Active-project exclusion (`bd-1n3x1.13`):** `selector_admission_probe.status=selection_failed`
+  with `active_project_exclusion` and a live `active_build_id` / `worker_posture`
+  in `active_builds[]`.
+- **Worker outage:** `worker_probe_status=failed` or `no_workers_passed_health`.
+- **Topology recurrence (`bd-b1e4v` / `RCH-E327`):** path-dependency canonicalization
+  failure (`unresolvedTopologyEdge` / `classify_rch_verify_recurrence`).
+
+**Support-bundle and Agent Mail / Beads handoff:**
+
+1. Treat `bd-1n3x1.14.1`, `bd-1n3x1.14.2`, and `bd-1n3x1.14.3` (`docs/rch_verification.md` and
+   `tests/fixtures/rch_pressure_telemetry/*.json`) as the contract and fixture
+   source of truth.
+2. Record the bounded fields in your handoff or support bundle without copying
+   raw worker logs or host-private paths (`raw_worker_logs=false`,
+   `host_private_paths=false`): `posture`, `worker_id`, `worker_probe_status`,
+   `active_build_count`, `queued_build_count`, `daemon.slots_available`,
+   `used_slots`/`total_slots`, `pressure_state`, `pressure_reason_code`,
+   `detail_reason` (`slot_accounting_inconsistent`), `pressure_policy_rule`,
+   `telemetry_fresh`, `refresh_exit_class`, `retry_after`, `next_action`,
+   `owner_routing`, and `source_verdict=no_rust_verdict`.
+3. Follow `next_action` (`refresh_telemetry`, `probe_worker`, or
+   `coordinate_with_owner`) and `owner_routing`; paste the template from
+   [`docs/rch_verification.md`](rch_verification.md#support-bundle-and-agent-mail--beads-handoff-template-bd-1n3x1144).
+4. **Forbidden actions:** never fall back to local Cargo, never mutate workers,
+   never restart the `rch` daemon from an agent session, never run destructive
+   cleanup, and never run `git worktree`, `git stash`, `git reset`,
+   `git checkout`, or `git clean`.
 
 ### Pinned proof consumes excessive worker disk
 

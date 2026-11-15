@@ -944,4 +944,45 @@ mod tests {
             "equal scores fall back to pair-id order"
         );
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn proptest_suggest_links_is_deterministic_under_edge_permutation(
+            edges in prop::collection::vec((0usize..8, 0usize..8), 0..20),
+            tag_edges in prop::collection::vec((0usize..8, 0usize..4), 0..16),
+        ) {
+            let links: Vec<(String, String)> = edges
+                .iter()
+                .map(|(a, b)| (format!("mem_{a}"), format!("mem_{b}")))
+                .collect();
+            let reversed_links: Vec<(String, String)> = links
+                .iter()
+                .rev()
+                .map(|(a, b)| (b.clone(), a.clone()))
+                .collect();
+            let mut tags: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for (node, tag) in &tag_edges {
+                tags.entry(format!("mem_{node}"))
+                    .or_default()
+                    .insert(format!("tag_{tag}"));
+            }
+            let forward = suggest_links(&SuggestLinksInput {
+                links,
+                tags: tags.clone(),
+                limit: 16,
+                ..SuggestLinksInput::default()
+            });
+            let backward = suggest_links(&SuggestLinksInput {
+                links: reversed_links,
+                tags,
+                limit: 16,
+                ..SuggestLinksInput::default()
+            });
+            prop_assert_eq!(forward, backward);
+        }
+    }
 }
