@@ -42472,6 +42472,14 @@ fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -
             message: "Cannot revise tombstoned memory.".to_string(),
             repair: Some("Use ee memory show to inspect it.".to_string()),
         },
+        Some("Cannot revise sealed memory") => DomainError::PolicyDenied {
+            message: "Cannot revise sealed memory before revealing its committed content."
+                .to_owned(),
+            repair: Some(
+                "Use ee memory reveal <sealed-memory-id> --content-file <path> with the original committed bytes, then revise the revealed memory."
+                    .to_owned(),
+            ),
+        },
         Some(message) if message.starts_with("Memory revision writes are unavailable") => {
             DomainError::PolicyDenied {
                 message: message.to_string(),
@@ -99941,6 +99949,27 @@ demos:
                 )
             }
             _ => Err("expected Memory Revise command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_revise_closed_seal_report_maps_to_policy_denied() -> TestResult {
+        let report = crate::core::memory::MemoryReviseReport::error(
+            "mem_01234567890123456789012345".to_owned(),
+            "Cannot revise sealed memory".to_owned(),
+        );
+
+        match super::memory_revise_error_to_domain(&report, "mem_01234567890123456789012345") {
+            DomainError::PolicyDenied { repair, .. } => ensure_equal(
+                &repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("ee memory reveal")),
+                &true,
+                "sealed revision repair requires verified reveal",
+            ),
+            other => Err(format!(
+                "closed seal revision must map to PolicyDenied, got {other:?}"
+            )),
         }
     }
 

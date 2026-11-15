@@ -12173,6 +12173,55 @@ pub(crate) enum UnchangedRevisionPolicy {
     RecordSealTransition,
 }
 
+fn prepare_revision_seal(
+    connection: &DbConnection,
+    original: &StoredMemory,
+    content: Option<&str>,
+    policy: UnchangedRevisionPolicy,
+) -> Result<Option<MemorySeal>, String> {
+    let seal = resolve_memory_seal_lineage(connection, original).map_err(|_| {
+        "Could not verify original memory seal; revision was not written".to_owned()
+    })?;
+    match policy {
+        UnchangedRevisionPolicy::Reject => {
+            if seal.as_ref().is_some_and(MemorySeal::is_sealed) {
+                return Err("Cannot revise sealed memory".to_owned());
+            }
+        }
+        UnchangedRevisionPolicy::RecordSealTransition => {
+            let source = seal
+                .as_ref()
+                .filter(|seal| seal.memory_id == original.id && seal.is_sealed())
+                .ok_or_else(|| {
+                    "Memory reveal requires a closed seal on the original memory".to_owned()
+                })?;
+            if crate::models::memory_seal_commitment(
+                content.unwrap_or(&original.content).as_bytes(),
+            ) != source.content_commitment
+            {
+                return Err(
+                    "Memory reveal content does not match the sealed commitment".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(seal)
+}
+
+fn require_unchanged_revision_seal(
+    connection: &DbConnection,
+    original: &StoredMemory,
+    expected: &Option<MemorySeal>,
+) -> crate::db::Result<()> {
+    if &resolve_memory_seal_lineage(connection, original)? != expected {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "Memory seal changed during revision; revision aborted".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Transaction context exposed only to crate-internal revision extensions.
 ///
 /// The hook runs after the immutable revision, original expiry, and
@@ -12237,6 +12286,24 @@ where
             );
         }
     }
+
+    // A plain edit must not retire the only revealable row or publish an
+    // unsealed successor. The internal reveal path binds the committed bytes
+    // here and must open this same seal inside the revision transaction.
+    let revision_seal = match prepare_revision_seal(
+        &conn,
+        &original,
+        options.content,
+        unchanged_revision_policy,
+    ) {
+        Ok(seal) => seal,
+        Err(message) => {
+            let mut report =
+                MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
+            report.dry_run = options.dry_run;
+            return report;
+        }
+    };
 
     // Typed data belongs to the immutable revision. Prepare before preview
     // and recheck the source inside the transaction before publication.
@@ -12460,6 +12527,7 @@ where
     let result: Result<(), String> = conn
         .with_transaction(|| {
             typed_revision.check_source(&conn, &original)?;
+            require_unchanged_revision_seal(&conn, &original, &revision_seal)?;
             conn.insert_memory_revision_at(&new_id, &logical_id, &memory_input, recorded_at)?;
             typed_revision.apply(&conn, &new_id, recorded_at)?;
             // bd-multiplicity-aware-trust-p0u7g: the live revision inherits
@@ -12503,6 +12571,14 @@ where
                 },
             )?;
             transaction_hook(&conn, &transaction_context)?;
+            if unchanged_revision_policy == UnchangedRevisionPolicy::RecordSealTransition {
+                let revealed = revision_seal.as_ref().map(|seal| MemorySeal {
+                    revealed_at: Some(revised_at.clone()),
+                    reveal_verified: Some(true),
+                    ..seal.clone()
+                });
+                require_unchanged_revision_seal(&conn, &original, &revealed)?;
+            }
             conn.insert_search_index_job(&index_job_id, &index_input)?;
             Ok(())
         })
@@ -18848,6 +18924,332 @@ mod tests {
             true,
             "new live revision is immediately searchable",
         )
+    }
+
+    fn sealed_revision_fixture(
+        committed_content: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf, MemorySeal), String> {
+        let (temp, database_path, workspace_id) = memory_maintenance_fixture()?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let memory_id = "mem_00000000000000000000000003";
+        connection
+            .insert_memory(
+                memory_id,
+                &remember_test_memory_input(
+                    &workspace_id,
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                memory_id,
+                &crate::models::memory_seal_commitment(committed_content.as_bytes()),
+                "2026-08-11T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        let seal = connection
+            .get_memory_seal(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "sealed revision fixture is missing its seal".to_owned())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok((temp, database_path, seal))
+    }
+
+    fn seal_revision_options<'a>(
+        database_path: &'a Path,
+        memory_id: &'a str,
+    ) -> ReviseMemoryOptions<'a> {
+        ReviseMemoryOptions {
+            database_path,
+            original_memory_id: memory_id,
+            content: None,
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Custom("seal_reveal".to_owned()),
+            actor: Some("sealed-revision-regression"),
+            dry_run: false,
+        }
+    }
+
+    type SealRevisionSnapshot = (
+        u32,
+        Option<String>,
+        Option<MemorySeal>,
+        Vec<String>,
+        usize,
+        usize,
+        StoredMemory,
+    );
+
+    fn seal_revision_snapshot(
+        database_path: &Path,
+        memory_id: &str,
+    ) -> Result<SealRevisionSnapshot, String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "sealed revision snapshot memory is missing".to_owned())?;
+        let snapshot = (
+            connection
+                .count_memory_chain(memory_id)
+                .map_err(|error| error.to_string())?,
+            connection
+                .get_memory_superseded_at(memory_id)
+                .map_err(|error| error.to_string())?,
+            connection
+                .get_memory_seal(memory_id)
+                .map_err(|error| error.to_string())?,
+            connection
+                .get_memory_tags(memory_id)
+                .map_err(|error| error.to_string())?,
+            connection
+                .list_audit_entries(Some(&memory.workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            connection
+                .list_search_index_jobs(&memory.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            memory,
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(snapshot)
+    }
+
+    #[test]
+    fn sealed_memory_rejects_plain_content_and_metadata_revisions_before_preview() -> TestResult {
+        let (_temp, database_path, seal) = sealed_revision_fixture("Committed protocol bytes.")?;
+        let before = seal_revision_snapshot(&database_path, &seal.memory_id)?;
+
+        for dry_run in [true, false] {
+            for content in [None, Some("Uncommitted replacement content.")] {
+                let mut options = seal_revision_options(&database_path, &seal.memory_id);
+                options.content = content;
+                options.tags = Some(vec!["edited".to_owned()]);
+                options.dry_run = dry_run;
+                // A user-supplied reason cannot grant the internal reveal exception.
+                let report = revise_memory(&options);
+                ensure(report.success, false, "closed seal denies ordinary revision")?;
+                ensure(report.dry_run, dry_run, "denial preserves preview mode")?;
+                ensure(
+                    report.error.as_deref(),
+                    Some("Cannot revise sealed memory"),
+                    "closed seal policy error",
+                )?;
+                ensure(report.new_id, None, "denial publishes no successor")?;
+                ensure(report.index_job_id, None, "denial schedules no index job")?;
+                ensure(
+                    seal_revision_snapshot(&database_path, &seal.memory_id)?,
+                    before.clone(),
+                    "denial preserves content, seal, lineage, tags, audits and index jobs",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sealed_root_also_blocks_revising_a_legacy_unsealed_successor() -> TestResult {
+        let (_temp, database_path, seal) = sealed_revision_fixture("Committed protocol bytes.")?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let original = connection
+            .get_memory(&seal.memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "sealed root is missing".to_owned())?;
+        let successor_id = "mem_00000000000000000000000004";
+        let recorded_at = Utc::now();
+        connection
+            .insert_memory_revision_at(
+                successor_id,
+                &seal.memory_id,
+                &remember_test_memory_input(&original.workspace_id, "Legacy unsealed successor."),
+                recorded_at,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .mark_memory_superseded(&seal.memory_id, &normalize_validity_timestamp(recorded_at))
+                .map_err(|error| error.to_string())?,
+            true,
+            "legacy fixture supersedes the root",
+        )?;
+        ensure(
+            connection
+                .get_memory_seal(successor_id)
+                .map_err(|error| error.to_string())?,
+            None,
+            "legacy successor has no direct seal",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = seal_revision_snapshot(&database_path, &seal.memory_id)?;
+
+        for dry_run in [true, false] {
+            let mut options = seal_revision_options(&database_path, successor_id);
+            options.content = Some("Another uncommitted successor.");
+            options.dry_run = dry_run;
+            let report = revise_memory(&options);
+            ensure(report.success, false, "closed root blocks successor revision")?;
+            ensure(
+                report.error.as_deref(),
+                Some("Cannot revise sealed memory"),
+                "lineage seal policy error",
+            )?;
+            ensure(
+                seal_revision_snapshot(&database_path, &seal.memory_id)?,
+                before.clone(),
+                "closed lineage remains unchanged",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reveal_revision_requires_committed_bytes_and_an_atomic_seal_transition() -> TestResult {
+        let committed = "The exact pre-registered protocol.";
+        let (_temp, database_path, seal) = sealed_revision_fixture(committed)?;
+        let before = seal_revision_snapshot(&database_path, &seal.memory_id)?;
+        let mut options = seal_revision_options(&database_path, &seal.memory_id);
+        options.content = Some("Different protocol bytes.");
+        let hook_called = std::cell::Cell::new(false);
+        let mismatch = revise_memory_with_transaction_hook(
+            &options,
+            UnchangedRevisionPolicy::RecordSealTransition,
+            |_, _| {
+                hook_called.set(true);
+                Ok(())
+            },
+        );
+        ensure(mismatch.success, false, "mismatched reveal is rejected")?;
+        ensure(
+            mismatch.error.as_deref(),
+            Some("Memory reveal content does not match the sealed commitment"),
+            "mismatched reveal error",
+        )?;
+        ensure(hook_called.get(), false, "mismatch fails before the hook")?;
+        ensure(
+            seal_revision_snapshot(&database_path, &seal.memory_id)?,
+            before.clone(),
+            "mismatch changes no storage",
+        )?;
+
+        options.content = Some(committed);
+        let no_transition = revise_memory_with_transaction_hook(
+            &options,
+            UnchangedRevisionPolicy::RecordSealTransition,
+            |_, _| {
+                hook_called.set(true);
+                Ok(())
+            },
+        );
+        ensure(hook_called.get(), true, "no-transition hook was exercised")?;
+        ensure(no_transition.success, false, "a no-op reveal hook cannot publish")?;
+        ensure(
+            seal_revision_snapshot(&database_path, &seal.memory_id)?,
+            before,
+            "missing seal transition rolls back revision, audit and index job",
+        )?;
+
+        let reveal = revise_memory_with_transaction_hook(
+            &options,
+            UnchangedRevisionPolicy::RecordSealTransition,
+            |connection, context| {
+                if !connection
+                    .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
+                {
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "fixture reveal failed to open its seal".to_owned(),
+                    });
+                }
+                Ok(())
+            },
+        );
+        ensure(reveal.success, true, "valid reveal publishes")?;
+        let revealed_id = reveal
+            .new_id
+            .ok_or_else(|| "valid reveal omitted its successor".to_owned())?;
+        let mut revision = seal_revision_options(&database_path, &revealed_id);
+        revision.content = Some("An ordinary revision after verified reveal.");
+        let revised = revise_memory(&revision);
+        ensure(revised.success, true, "revealed lineage can be revised normally")?;
+        let revised_id = revised
+            .new_id
+            .ok_or_else(|| "post-reveal revision omitted its successor".to_owned())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let current = connection
+            .get_memory(&revised_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "post-reveal revision is missing".to_owned())?;
+        ensure(
+            current.content.as_str(),
+            "An ordinary revision after verified reveal.",
+            "post-reveal revision content",
+        )?;
+        let inherited = resolve_memory_seal_lineage(&connection, &current)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "post-reveal revision lost its seal lineage".to_owned())?;
+        ensure(inherited.is_sealed(), false, "root seal remains revealed")?;
+        ensure(inherited.reveal_verified, Some(true), "reveal stays verified")?;
+        ensure(
+            inherited.content_commitment,
+            seal.content_commitment,
+            "ordinary revision preserves the original commitment",
+        )?;
+        ensure(
+            connection
+                .count_memory_chain(&seal.memory_id)
+                .map_err(|error| error.to_string())?,
+            3,
+            "only verified reveal and later ordinary revision were published",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_rechecks_seal_changes_before_publishing() -> TestResult {
+        let (_temp, database_path, _) = memory_maintenance_fixture()?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let memory_id = "mem_00000000000000000000000001";
+        let original = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "revision source is missing".to_owned())?;
+        let prepared = prepare_revision_seal(
+            &connection,
+            &original,
+            Some("Revised content."),
+            UnchangedRevisionPolicy::Reject,
+        )?;
+        ensure(prepared.is_none(), true, "source was initially unsealed")?;
+        connection
+            .insert_memory_seal(
+                memory_id,
+                &crate::models::memory_seal_commitment(original.content.as_bytes()),
+                "2026-08-11T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        let result = connection.with_transaction(|| {
+            require_unchanged_revision_seal(&connection, &original, &prepared)
+        });
+        ensure(result.is_err(), true, "newly attached seal invalidates prepared revision")?;
+        ensure(
+            connection
+                .get_memory_superseded_at(memory_id)
+                .map_err(|error| error.to_string())?,
+            None,
+            "changed source remains live",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
