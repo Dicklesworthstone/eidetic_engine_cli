@@ -1290,7 +1290,7 @@ fn global_feedback_receipt_id(stage: &str, workspace: &str, event: &str) -> Stri
     let hash =
         blake3::hash(format!("ee.global_feedback.{stage}.v1:{workspace}:{event}").as_bytes())
             .to_hex();
-    format!("aud_{}", &hash[..26])
+    format!("audit_{}", &hash[..32])
 }
 
 struct OriginAdjustment {
