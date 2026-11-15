@@ -318,7 +318,7 @@ fn evidence_feedback_is_source_specific_before_semantic_admission_and_lexical_fa
     let clean = rows.last().unwrap().memory_id.clone();
     // The semantic table has just one text key. It must not merge the source
     // outcomes or allow hundreds of harmful copies to consume the scan cap.
-    assert_eq!(selected(&request, &rows, 1), [clean.clone()]);
+    assert_eq!(selected(&request, &rows, 1), std::slice::from_ref(&clean));
     for actual in [
         report(&request, &rows),
         evaluate_ask(&request, &rows),

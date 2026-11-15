@@ -5963,7 +5963,7 @@ pub fn render_status_json_with_meta(
         render_rch_verify_ledger_status_json(d, &report.verification_ledger);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
-        render_search_status_json(d, &report.lexical_ram_tier);
+        render_search_status_json(d, &report.lexical_ram_tier, &report.evidence_admission);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_mesh_status_json(
             d,
@@ -16446,7 +16446,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_rch_verify_ledger_status_json(d, &report.verification_ledger);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             if matches!(profile, FieldProfile::Summary) {
-                render_search_status_json(d, &report.lexical_ram_tier);
+                render_search_status_json(d, &report.lexical_ram_tier, &report.evidence_admission);
             }
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
@@ -16479,7 +16479,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_feedback_health_json(d, &report.feedback_health);
             render_graph_compute_json(d, &report.graph_compute);
             render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
-            render_search_status_json(d, &report.lexical_ram_tier);
+            render_search_status_json(d, &report.lexical_ram_tier, &report.evidence_admission);
             render_derived_assets_json(
                 d,
                 &report.derived_assets,

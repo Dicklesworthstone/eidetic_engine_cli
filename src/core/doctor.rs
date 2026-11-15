@@ -6293,6 +6293,13 @@ mod tests {
         flock(&holder, FlockOperation::NonBlockingLockExclusive)
             .map_err(|error| error.to_string())?;
 
+        let _embedder_guard = crate::core::index::install_test_workspace_embedder(
+            &stable_workspace_id(workspace),
+            crate::search::EmbedderStack::from_parts(
+                std::sync::Arc::new(crate::search::HashEmbedder::default_256()),
+                None,
+            ),
+        );
         let started = std::time::Instant::now();
         let _ = check_embedding_posture(Some(workspace));
         let locked = check_database(Some(workspace));
@@ -6527,7 +6534,7 @@ mod tests {
             Some(expected_id)
         );
         connection
-            .execute_raw("UPDATE memory_links SET weight = 0.4")
+            .with_transaction(|| connection.execute_raw("UPDATE memory_links SET weight = 0.4"))
             .map_err(|error| error.to_string())?;
         let stale = check_graph_snapshot(Some(workspace));
         assert_eq!(
@@ -6551,7 +6558,10 @@ mod tests {
         // A failed source read cannot be passed off as either a current graph
         // or an absent snapshot that refreshing would automatically repair.
         connection
-            .execute_raw("ALTER TABLE memory_links RENAME TO unavailable_memory_links")
+            .with_transaction(|| {
+                connection
+                    .execute_raw("ALTER TABLE memory_links RENAME TO unavailable_memory_links")
+            })
             .map_err(|error| error.to_string())?;
         let unavailable = check_graph_snapshot(Some(workspace));
         assert_eq!(

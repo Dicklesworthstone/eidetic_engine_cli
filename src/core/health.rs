@@ -2333,8 +2333,8 @@ mod tests {
     fn health_scorecard_history_is_workspace_scoped_and_rejects_invalid_scores() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let first = "wsp_scorecard_first";
-        let second = "wsp_scorecard_second";
+        let first = "wsp_00000000000000000000000001";
+        let second = "wsp_00000000000000000000000002";
         for (workspace_id, score) in [(first, 86), (second, 1)] {
             connection
                 .insert_workspace(

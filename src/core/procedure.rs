@@ -6604,7 +6604,10 @@ mod tests {
         assert_eq!(preview.status, "blocked");
         assert_eq!(preview.verification.overall_result, "passed");
         assert_eq!(preview.verification.pass_count, 1);
-        assert_eq!(preview.verification.evidence_checked, [evidence_id.clone()]);
+        assert_eq!(
+            preview.verification.evidence_checked,
+            std::slice::from_ref(&evidence_id)
+        );
         assert!(
             preview
                 .planned_effects
@@ -6732,9 +6735,12 @@ mod tests {
                 &source,
             );
             assert_eq!(file.result, "passed", "shadow fixture must be valid");
-            let report =
-                verify_procedure_for_promotion(&workspace, "proc_inspection", &[source.clone()])
-                    .map_err(|error| error.message())?;
+            let report = verify_procedure_for_promotion(
+                &workspace,
+                "proc_inspection",
+                std::slice::from_ref(&source),
+            )
+            .map_err(|error| error.message())?;
             assert_eq!(report.fail_count, 1, "{source}");
             assert_eq!(report.pass_count, 0, "{source}");
             assert_eq!(report.sources_checked[0].source_kind, expected_kind);

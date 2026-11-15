@@ -138,7 +138,7 @@ fn assert_index_tick_journal(
     let rows = load_daemon_job_rows(workspace)?;
     assert_eq!(rows.len(), outcomes.len() * 2);
     assert_eq!(reports.len(), outcomes.len());
-    for ((pair, report), outcome) in rows.chunks_exact(2).zip(reports).zip(outcomes) {
+    for ((pair, report), outcome) in rows.as_chunks::<2>().0.iter().zip(reports).zip(outcomes) {
         assert_eq!(pair[0].job_type, "index_coalesce");
         assert_eq!(pair[0].status, "running");
         assert_eq!(pair[1].status, *outcome);

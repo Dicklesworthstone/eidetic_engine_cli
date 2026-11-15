@@ -459,7 +459,10 @@ fn complete_multi_turn_repairs_survive_public_review_and_validation() -> TestRes
         .db
         .get_curation_candidate(&workspace.id, &proposed[0].candidate_id)?
         .ok_or("stored")?;
-    assert_eq!(stored.proposed_content, proposed[0].proposed_content);
+    assert_eq!(
+        stored.proposed_content.as_deref(),
+        Some(proposed[0].proposed_content.as_str())
+    );
     validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
     assert!(!workspace.review(&episode, 0.6, true)?.durable_mutation);
     assert_eq!(
