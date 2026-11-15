@@ -197,6 +197,10 @@ pub struct OrientFastContentReport {
     pub schema: &'static str,
     pub posture: &'static str,
     pub strategy: OrientFastContentStrategy,
+    pub recent_status: &'static str,
+    pub relevant_status: &'static str,
+    pub recent_count: Option<usize>,
+    pub relevant_count: Option<usize>,
     pub recent: Vec<OrientFastContentItem>,
     pub relevant: Vec<OrientFastContentItem>,
     pub issues: Vec<OrientFastContentIssue>,
@@ -433,42 +437,50 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
     let pack_options = orient_fast_pack_options(options);
     let mut issues = Vec::new();
 
-    let recent = match admit_recent_context_memories(&pack_options, ORIENT_FAST_CONTENT_LIMIT) {
-        Ok(items) => items
-            .into_iter()
-            .map(|admitted| OrientFastContentItem {
-                id: admitted.item.memory_id.to_string(),
-                snippet: orient_fast_snippet(&admitted.item.content),
-                created_at: admitted.created_at,
-                tags: orient_fast_public_tags(admitted.tags),
-                provenance: admitted.item.rendered_provenance(),
-                why: admitted.item.why.clone(),
-            })
-            .collect(),
-        Err(error) => {
-            issues.push(OrientFastContentIssue {
-                component: "recent",
-                status: "unavailable",
-                code: ORIENT_FAST_RECENT_UNAVAILABLE_CODE.to_owned(),
-                severity: "warning".to_owned(),
-                message: format!("Recent context admission was unavailable: {error}"),
-                repair: Some(
-                    "Run `ee doctor --workspace . --json` and inspect the local memory store."
-                        .to_owned(),
-                ),
-            });
-            Vec::new()
-        }
-    };
+    let (recent, recent_status, recent_count) =
+        match admit_recent_context_memories(&pack_options, ORIENT_FAST_CONTENT_LIMIT) {
+            Ok(items) => {
+                let items: Vec<OrientFastContentItem> = items
+                    .into_iter()
+                    .map(|admitted| OrientFastContentItem {
+                        id: admitted.item.memory_id.to_string(),
+                        snippet: orient_fast_snippet(&admitted.item.content),
+                        created_at: admitted.created_at,
+                        tags: orient_fast_public_tags(admitted.tags),
+                        provenance: admitted.item.rendered_provenance(),
+                        why: admitted.item.why.clone(),
+                    })
+                    .collect();
+                let count = items.len();
+                let status = if count == 0 { "empty" } else { "populated" };
+                (items, status, Some(count))
+            }
+            Err(error) => {
+                issues.push(OrientFastContentIssue {
+                    component: "recent",
+                    status: "unavailable",
+                    code: ORIENT_FAST_RECENT_UNAVAILABLE_CODE.to_owned(),
+                    severity: "warning".to_owned(),
+                    message: format!("Recent context admission was unavailable: {error}"),
+                    repair: Some(
+                        "Run `ee doctor --workspace . --json` and inspect the local memory store."
+                            .to_owned(),
+                    ),
+                });
+                (Vec::new(), "unavailable", None)
+            }
+        };
 
-    let relevant = match orient_fast_relevant_content(options) {
+    let (relevant, relevant_status, relevant_count) = match orient_fast_relevant_content(options) {
         Ok((items, provider_issues)) => {
             issues.extend(provider_issues);
-            items
+            let count = items.len();
+            let status = if count == 0 { "empty" } else { "populated" };
+            (items, status, Some(count))
         }
         Err(issue) => {
             issues.push(issue);
-            Vec::new()
+            (Vec::new(), "unavailable", None)
         }
     };
 
@@ -484,6 +496,10 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
             recent_limit: ORIENT_FAST_CONTENT_LIMIT,
             relevant_limit: ORIENT_FAST_CONTENT_LIMIT,
         },
+        recent_status,
+        relevant_status,
+        recent_count,
+        relevant_count,
         recent,
         relevant,
         issues,
@@ -2799,6 +2815,26 @@ mod tests {
         });
 
         ensure_equal(&report.posture, &"unavailable", "missing-store posture")?;
+        ensure_equal(
+            &report.recent_status,
+            &"unavailable",
+            "missing-store recent_status",
+        )?;
+        ensure_equal(
+            &report.relevant_status,
+            &"unavailable",
+            "missing-store relevant_status",
+        )?;
+        ensure_equal(
+            &report.recent_count,
+            &None,
+            "missing-store recent_count must be None (not consulted/failed, not 0)",
+        )?;
+        ensure_equal(
+            &report.relevant_count,
+            &None,
+            "missing-store relevant_count must be None (not consulted/failed, not 0)",
+        )?;
         ensure(
             report.recent.is_empty() && report.relevant.is_empty(),
             format!("missing providers must emit no content: {report:?}"),
@@ -3088,6 +3124,57 @@ mod tests {
         ensure(
             !report.recent.iter().any(|item| item.id == global_id),
             format!("global item leaked into workspace-recency section: {report:?}"),
+        )?;
+        ensure_equal(&report.recent_status, &"populated", "recent_status")?;
+        ensure_equal(&report.relevant_status, &"populated", "relevant_status")?;
+        ensure_equal(
+            &report.recent_count,
+            &Some(report.recent.len()),
+            "recent_count",
+        )?;
+        ensure_equal(
+            &report.relevant_count,
+            &Some(report.relevant.len()),
+            "relevant_count",
+        )?;
+
+        let starved = orient_fast_content(&OrientFastContentOptions {
+            workspace_path: &workspace,
+            database_path: None,
+            index_dir: None,
+            task: "quasar checksum sentinel",
+            max_tokens: 1,
+            candidate_pool: 1,
+        });
+        ensure_equal(&starved.posture, &"ready", "starved coalesced posture")?;
+        ensure(
+            starved.issues.is_empty(),
+            format!(
+                "starved coalesced store must have no issues: {:?}",
+                starved.issues
+            ),
+        )?;
+        ensure_equal(
+            &starved.recent_status,
+            &"empty",
+            "starved recent_status must report empty without reading item array",
+        )?;
+        ensure_equal(
+            &starved.recent_count,
+            &Some(0),
+            "starved recent_count must be Some(0), distinct from None (unavailable)",
+        )?;
+        ensure_equal(
+            &starved.relevant_status,
+            &"populated",
+            "starved relevant_status must report populated",
+        )?;
+        ensure(
+            starved.relevant_count.is_some_and(|count| count > 0),
+            format!(
+                "starved relevant_count must be positive: {:?}",
+                starved.relevant_count
+            ),
         )
     }
 

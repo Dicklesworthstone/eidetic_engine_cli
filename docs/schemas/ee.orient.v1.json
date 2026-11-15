@@ -191,6 +191,24 @@
             "relevantLimit": { "type": "integer", "const": 5 }
           }
         },
+        "recentStatus": {
+          "type": "string",
+          "enum": ["populated", "empty", "unavailable"]
+        },
+        "relevantStatus": {
+          "type": "string",
+          "enum": ["populated", "empty", "unavailable"]
+        },
+        "recentCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5
+        },
+        "relevantCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5
+        },
         "recent": {
           "type": "array",
           "maxItems": 5,

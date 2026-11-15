@@ -141,6 +141,10 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
                 "recentLimit": 5,
                 "relevantLimit": 5
             },
+            "recentStatus": "populated",
+            "relevantStatus": "populated",
+            "recentCount": 1,
+            "relevantCount": 1,
             "recent": [{
                 "id": "mem_01",
                 "snippet": "Use the adjacent populated store.",
