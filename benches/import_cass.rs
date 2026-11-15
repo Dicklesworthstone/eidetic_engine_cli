@@ -67,12 +67,34 @@ if [ "$command" = "sessions" ]; then
 fi
 
 if [ "$command" = "view" ]; then
-  source_path="${1:-}"
+  source_path=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -n|-C)
+        shift 2 || break
+        ;;
+      --json|--robot)
+        shift
+        ;;
+      --)
+        shift
+        source_path="${1:-}"
+        break
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        source_path="$1"
+        shift
+        ;;
+    esac
+  done
   if [ -z "$source_path" ]; then
     printf '%s\n' '{"error":"missing source_path"}' >&2
     exit 2
   fi
-  workspace_dir=$(dirname "$source_path")
+  workspace_dir=$(dirname -- "$source_path")
   cat "$workspace_dir/.ee/fake_cass/view.json"
   exit 0
 fi

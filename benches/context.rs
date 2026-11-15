@@ -599,7 +599,10 @@ fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, P
             metadata_json: None,
         };
         connection
-            .insert_memory_link(&format!("link_pack_dna_{link_index:03}"), &input)
+            .insert_memory_link(
+                &format!("link_01J00000000000000000000{link_index:03}"),
+                &input,
+            )
             .expect("insert Pack DNA benchmark link");
     }
     connection.close().expect("close Pack DNA benchmark db");

@@ -279,6 +279,11 @@ mod tests {
     #[test]
     fn quick_regression_check_stays_under_hard_ceiling() {
         let stats = super::gather_latency_stats(100, super::QUICK_ITERATIONS);
+        let ceiling_ms = if cfg!(debug_assertions) {
+            super::HARD_CEILING_MS * 10.0
+        } else {
+            super::HARD_CEILING_MS
+        };
         eprintln!(
             "why quick latency: p50={:.3}ms, p99={:.3}ms, samples={}",
             stats.p50_ms,
@@ -286,16 +291,16 @@ mod tests {
             super::QUICK_ITERATIONS
         );
         assert!(
-            stats.p50_ms <= super::HARD_CEILING_MS,
+            stats.p50_ms <= ceiling_ms,
             "quick mode p50 {:.3}ms exceeded hard ceiling {:.3}ms",
             stats.p50_ms,
-            super::HARD_CEILING_MS
+            ceiling_ms
         );
         assert!(
-            stats.p99_ms <= super::HARD_CEILING_MS * 2.0,
+            stats.p99_ms <= ceiling_ms * 2.0,
             "quick mode p99 {:.3}ms exceeded sanity ceiling {:.3}ms",
             stats.p99_ms,
-            super::HARD_CEILING_MS * 2.0
+            ceiling_ms * 2.0
         );
     }
 }

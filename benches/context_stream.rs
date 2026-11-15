@@ -140,17 +140,20 @@ fn compare_only_mode_enabled() -> bool {
 }
 
 fn assert_latency_budget(stats: QuickStats) {
+    let scale = if cfg!(debug_assertions) { 15.0 } else { 1.0 };
+    let first_frame_budget = TIME_TO_FIRST_FRAME_P50_MS_BUDGET * scale;
+    let first_item_budget = TIME_TO_FIRST_ITEM_P50_MS_BUDGET * scale;
     assert!(
-        stats.first_frame_p50_ms <= TIME_TO_FIRST_FRAME_P50_MS_BUDGET,
+        stats.first_frame_p50_ms <= first_frame_budget,
         "context stream first-frame p50 above budget: {:.3}ms > {:.3}ms",
         stats.first_frame_p50_ms,
-        TIME_TO_FIRST_FRAME_P50_MS_BUDGET
+        first_frame_budget
     );
     assert!(
-        stats.first_item_p50_ms <= TIME_TO_FIRST_ITEM_P50_MS_BUDGET,
+        stats.first_item_p50_ms <= first_item_budget,
         "context stream first-item p50 above budget: {:.3}ms > {:.3}ms",
         stats.first_item_p50_ms,
-        TIME_TO_FIRST_ITEM_P50_MS_BUDGET
+        first_item_budget
     );
     assert!(
         stats.full_stream_p50_ms.is_finite(),
