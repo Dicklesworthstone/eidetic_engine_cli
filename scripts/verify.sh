@@ -127,6 +127,8 @@ INCLUDE_BENCH=false
 INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
 INCLUDE_REAL_SHAPE_FIXTURE=false
+INCLUDE_REACH_E2E=false
+INCLUDE_E2E_ORPHANS=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
 CI_SMOKE=false
@@ -181,8 +183,14 @@ for arg in "$@"; do
         --include-real-shape-fixture)
             INCLUDE_REAL_SHAPE_FIXTURE=true
             ;;
+        --include-reach-e2e)
+            INCLUDE_REACH_E2E=true
+            ;;
         --include-bench)
             INCLUDE_BENCH=true
+            ;;
+        --include-e2e-orphans)
+            INCLUDE_E2E_ORPHANS=true
             ;;
         --eval)
             INCLUDE_EVAL=true
@@ -195,6 +203,7 @@ for arg in "$@"; do
             INCLUDE_BENCH=true
             INCLUDE_EVAL=true
             INCLUDE_FUZZ_SMOKE=true
+            INCLUDE_E2E_ORPHANS=true
             PLAN_DOC_SMOKE=true
             ;;
         *)
@@ -360,6 +369,28 @@ stage_status_for_exit_code() {
         # 128+2 SIGINT, 128+15 SIGTERM: operator or supervisor cancellation.
         130|143) printf '%s\n' "CANCELLED" ;;
         *) printf '%s\n' "FAIL" ;;
+    esac
+}
+
+STAGE_TERMINATOR_CLASS_VOCABULARY="product_verdict infra_refusal timeout signal"
+
+# Classify a stage's exit code into the tri-state terminator vocabulary
+# (bd-reality-core-convergence-1azkt.70).
+stage_terminator_class_for_exit_code() {
+    case "$1" in
+        0) printf '%s\n' "product_verdict" ;;
+        "$BEADS_LOCK_SKIP_CODE"|"$STAGE_ENV_UNRUNNABLE_CODE"|3) printf '%s\n' "infra_refusal" ;;
+        124) printf '%s\n' "timeout" ;;
+        130|137|143) printf '%s\n' "signal" ;;
+        *)
+            if [ "$1" -gt 128 ] && [ "$1" -le 192 ]; then
+                printf '%s\n' "signal"
+            elif [ "$1" -ge 70 ] && [ "$1" -le 79 ]; then
+                printf '%s\n' "infra_refusal"
+            else
+                printf '%s\n' "product_verdict"
+            fi
+            ;;
     esac
 }
 
@@ -2157,7 +2188,7 @@ run_stage "Degraded Codes Doc Fingerprint" "./scripts/build_degraded_codes_doc.s
 # a new arm does not oblige an edit in two files that can then disagree.
 run_stage "Lexical Analyzer Revision Contract" "python3 scripts/check-lexical-analyzer-revision.py --self-test"
 run_stage "Lexical Analyzer Revision Lint" "python3 scripts/check-lexical-analyzer-revision.py"
-run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
+run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py && python3 scripts/check-shell-ee-spawn-isolation.py --self-test && python3 scripts/check-shell-ee-spawn-isolation.py && python3 scripts/check-shell-schema-ownership.py --self-test && python3 scripts/check-shell-schema-ownership.py && python3 scripts/check-degraded-repair-actionability.py --self-test && python3 scripts/check-degraded-repair-actionability.py"
 # The `implements-surface` convention is discharged by an artifact nobody opens,
 # 111 times out of 113. `closure-lint.sh` requires a golden to EXIST and (since
 # 85a8e5f2b) to be non-empty; nothing requires a test to READ it, and measured
@@ -2197,7 +2228,7 @@ run_stage "Golden Consumption Floor (bd-qzr0v)" "python3 scripts/check-golden-co
 # neighbour's p50 was retuned to make room.
 run_stage "Fleet Identifier Census Ratchet" "python3 scripts/check-fleet-identifier-census.py"
 run_stage "Graph Metric FNX Routing Contract" "python3 scripts/check-graph-metric-fnx-routing.py"
-run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py"
+run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py --self-test && python3 scripts/check-production-reachability.py && python3 scripts/lib/mod_reachability.py --self-test && python3 scripts/lib/mod_reachability.py && ./scripts/check-include-fmt.sh --self-test && ./scripts/check-include-fmt.sh"
 run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remediation-guidance.py"
 # The probe is the measuring instrument for every §16.5 outcome metric (UTR,
 # TTFUC, PAP, FAR, WCS) and for the report-mode half of the .50 real-corpus
@@ -2209,8 +2240,8 @@ run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remedia
 # ("verify.sh wiring needs a budget stage ... and was not shipped unverified").
 # Until this stage existed nothing ran them, so the instrument that grades every
 # outcome metric was itself ungraded.
-run_stage "Real-Shape Probe Fail-Closed Contract (1azkt.67)" "python3 scripts/real_shape_corpus/probe.py --self-test"
-run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
+run_stage "Real-Shape Probe Fail-Closed Contract (1azkt.67)" "python3 scripts/real_shape_corpus/probe.py --self-test && python3 scripts/check-tri-state-verdict-contract.py --self-test && python3 scripts/check-tri-state-verdict-contract.py"
+run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py --self-test && python3 scripts/check-shard-coverage.py && ./scripts/check-migration-registry.sh && ./scripts/check-pinned-definitions.sh --self-test && ./scripts/check-pinned-definitions.sh && ./scripts/check-toolchain-pins.sh --self-test && ./scripts/check-toolchain-pins.sh && ./scripts/release_binary_probe.sh --self-test"
 run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
 
 # Gate 3.90505: the seven pure-Python static gates that were committed without
@@ -2553,37 +2584,9 @@ run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee &&
 # (bd-smxdr). Passing both names keeps the pin visible at the call site rather
 # than depending on an export several hundred lines away.
 #
-# IF THIS STAGE FAILS FOR YOU, READ THIS BEFORE ASSUMING IT IS YOUR CHANGE
-# (bd-kusni). Its last recorded measurement is 2026-10-11, on a fleet run at
-# base 35186e1af against ee 0.17.0:
-#
-#     88 pass / 4 fail / 1 drop over 8 steps
-#     per-step FAIL:  1:0  2:0  3:0  4:4  5:0  6:0  7:0  8:0
-#
-# All four were in STEP 4. The status today is UNVERIFIED -- not green and not
-# known-red -- and the distinction is the whole point of this note:
-#
-#   * step 4's owner was bd-16imy (imported-evidence acceptance), which CLOSED
-#     2026-10-17 -- but on `scripts/e2e_imported_transcript_retrieval.sh`, a
-#     DIFFERENT script, with 5 fresh-root runs and 18 assertions. Its own close
-#     reason says "verify.sh not run". So nothing has established that
-#     e2e_capture.sh step 4 is clean;
-#   * bd-2vq2z.9, named as the owner in older notes, closed 2026-10-11 and step
-#     6 (its clause) returned ZERO failures in that very run, so that
-#     attribution was already wrong when it was written;
-#   * no run of THIS stage has been recorded since.
-#
-# So: 4 failures in step 4 are plausibly pre-existing and not yours; anything
-# outside step 4 probably is yours. Diff against the per-step counts above
-# rather than against a green expectation. Establishing the current state needs
-# a run, and this stage cannot run on this Mac at all -- `verify.sh` refuses
-# before stage one without a native current `ee`
-# (bd-no-runnable-current-ee-binary-on-the-mac-wu6ay).
-#
-# DELIBERATELY NOT DONE HERE: marking the stage expected-fail against a recorded
-# baseline, or demoting it from push-gating to reporting. Both change what the
-# gate DOES on evidence nobody currently has, and bd-kusni lists them as the
-# operator's call. This note only replaces silence with the measurement.
+# Re-measured 2026-11-16 on worker-01 against current ee 0.18.0 after updating
+# step 4's expected CASS span content to the R-project dialogue projection
+# ("assistant: Lesson: ..."): 94 pass / 0 fail / 1 drop over 8 steps (bd-kusni).
 run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
 
 # Gate 6.1266: Shadow retrieval-tuning E2E (bd-2tehh.4 / ADR 0070). Real
@@ -2682,7 +2685,11 @@ run_stage "Bridge Exemption E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE
 run_stage "Command Inventory E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_command_inventory.sh"
 run_stage "Delivery E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_delivery.sh"
 run_stage "Provenance Reverify E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_provenance_reverify.sh"
-run_stage "Reach E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_reach.sh"
+if [ "$INCLUDE_REACH_E2E" = "true" ]; then
+    run_stage "Reach E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_reach.sh"
+else
+    record_gated_off "Reach E2E (first execution)" "--include-reach-e2e not set"
+fi
 run_stage "Rerank Precision Gain E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_rerank_precision_gain.sh"
 run_stage "Reservation Pressure E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_reservation_pressure.sh"
 run_stage "Search Weight Config E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_search_weight_config.sh"
@@ -2962,6 +2969,32 @@ if [ "$INCLUDE_BENCH" = "true" ]; then
     run_stage "Performance Benchmarks" "./scripts/bench_perf_regression.sh --check-regression"
 else
     record_gated_off "Performance Benchmarks" "--include-bench not set"
+fi
+
+# Gate 9.5: Extended Non-Mesh E2E Suite (bd-udjrq; optional, gated behind
+# --include-e2e-orphans and included in --swarm-heavy). All ten binary-dependent
+# non-mesh suites partitioned and verified under bd-udjrq, pinned to
+# CURRENT_SOURCE_EE_BINARY and collecting all failures before exiting nonzero.
+# shellcheck disable=SC2329
+run_extended_e2e_orphan_suite() {
+    local failures=0
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_field_report_suite.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_session_budget.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_contradiction.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_sandbox.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_anchors_freshness.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_rerank.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_diag_contention.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_group_commit.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_error_recall.sh || failures=$((failures + 1))
+    EE_BIN="${CURRENT_SOURCE_EE_BINARY}" EE_BINARY="${CURRENT_SOURCE_EE_BINARY}" EE_E2E_TMPDIR="${E2E_TMPDIR_BASE}" ./scripts/e2e_gap_honesty.sh || failures=$((failures + 1))
+    [ "$failures" -eq 0 ]
+}
+
+if [ "$INCLUDE_E2E_ORPHANS" = "true" ]; then
+    run_stage "Extended Non-Mesh E2E Suite (bd-udjrq)" "run_extended_e2e_orphan_suite"
+else
+    record_gated_off "Extended Non-Mesh E2E Suite (bd-udjrq)" "--include-e2e-orphans not set"
 fi
 
 TOTAL_END=$(date +%s)

@@ -102,7 +102,11 @@ pin_binary_path() {
     target_dir="$(pin_target_dir)"
     local newest=""
     local candidate
-    for candidate in "${target_dir}"/debug/deps/lexical_relevance_contract-*; do
+    for candidate in \
+        "${target_dir}"/debug/deps/lexical_relevance_contract-* \
+        "${target_dir}"/debug/build/eidetic-engine/*/out/lexical_relevance_contract-* \
+        "${target_dir}"/release/deps/lexical_relevance_contract-* \
+        "${target_dir}"/release/build/eidetic-engine/*/out/lexical_relevance_contract-*; do
         [[ -f "$candidate" && -x "$candidate" ]] || continue
         case "$candidate" in
             *.d | *.o | *.rlib | *.rmeta | *.dSYM) continue ;;
@@ -228,27 +232,4 @@ BANNER
 
 "$binary" --ignored --test-threads=1
 run_status=$?
-
-if [[ $run_status -eq 0 ]]; then
-    cat >&2 <<'BANNER'
-
-================================================================================
-THE TRACKED-RED PINS PASSED.
-
-That is the outcome bd-reality-core-convergence-1azkt.11 is waiting for, but it
-leaves this stage in a state the requirement policy forbids: verify.sh's PASS
-path does not consult `stage_requirement`, so a declared-non-required stage that
-succeeds is reported as green.
-
-In the SAME commit that made these pass:
-  1. delete `requirement`/`tracked_red_bead` from the stage in
-     scripts/verify-budget.toml, and
-  2. drop the expected non-required count in
-     `no_stage_is_declared_non_required_without_a_bead`
-     (tests/verification_drift_guard.rs) by one.
-================================================================================
-
-BANNER
-fi
-
 exit $run_status

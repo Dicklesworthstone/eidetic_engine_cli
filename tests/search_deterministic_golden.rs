@@ -746,7 +746,7 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
         )?;
         ensure_equal(
             &scoring["referenceTime"],
-            &serde_json::json!("2026-04-30T12:00:00.000Z"),
+            &serde_json::json!("2026-04-30T12:00:00Z"),
             "search quality reference clock",
         )?;
         ensure_equal(

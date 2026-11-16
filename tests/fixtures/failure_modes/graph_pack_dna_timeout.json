@@ -24,6 +24,7 @@
       "ordinary context pack items remain usable"
     ],
     "repair_contains": "--no-pack-dna",
-    "repair_string": "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA."
+    "repair_string": "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA.",
+    "repairCommand": "ee context --workspace . --no-pack-dna --json"
   }
 }

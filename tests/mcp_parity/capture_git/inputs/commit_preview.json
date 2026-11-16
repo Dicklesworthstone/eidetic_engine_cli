@@ -1,0 +1,24 @@
+{
+  "name": "commit_preview",
+  "surface": "capture_git",
+  "mcpTool": "ee_capture_git",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "remember",
+    "--from-commit",
+    "HEAD",
+    "--dry-run",
+    "--no-auto-link",
+    "--no-propose-candidates"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "mode": "commit",
+    "noAutoLink": true,
+    "noProposeCandidates": true,
+    "allowWrite": true
+  }
+}

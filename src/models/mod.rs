@@ -504,14 +504,32 @@ impl RequestServingMetadata {
 
     pub fn apply_to_data(&self, data: &mut serde_json::Value) {
         if let Some(data) = data.as_object_mut() {
-            data.insert("servingPath".to_owned(), self.path.as_str().into());
-            data.insert("retrievalPath".to_owned(), self.retrieval_path().into());
-            data.insert(
-                "fallbackReason".to_owned(),
-                self.fallback_reason
-                    .as_deref()
-                    .map_or(serde_json::Value::Null, serde_json::Value::from),
-            );
+            if data.contains_key("servingPath") || !data.contains_key("command") {
+                data.insert("servingPath".to_owned(), self.path.as_str().into());
+                data.insert("retrievalPath".to_owned(), self.retrieval_path().into());
+                data.insert(
+                    "fallbackReason".to_owned(),
+                    self.fallback_reason
+                        .as_deref()
+                        .map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+                return;
+            }
+            let existing = std::mem::take(data);
+            for (key, value) in existing {
+                let is_command = key == "command";
+                data.insert(key, value);
+                if is_command {
+                    data.insert("servingPath".to_owned(), self.path.as_str().into());
+                    data.insert("retrievalPath".to_owned(), self.retrieval_path().into());
+                    data.insert(
+                        "fallbackReason".to_owned(),
+                        self.fallback_reason
+                            .as_deref()
+                            .map_or(serde_json::Value::Null, serde_json::Value::from),
+                    );
+                }
+            }
         }
     }
 }
@@ -2294,6 +2312,30 @@ impl DomainError {
                         results_in: None,
                         example: None,
                     },
+                ]
+            }
+            Self::NotFound { resource, .. } if resource == "audit row" => {
+                vec![
+                    RecoveryAction {
+                        priority: 1,
+                        kind: RecoveryKind::Broaden,
+                        rationale: "List recent audit operations in the active workspace to discover valid audit row IDs."
+                            .to_owned(),
+                        env_name: None,
+                        value_hint: None,
+                        config_path: None,
+                        config_key: None,
+                        flag_name: None,
+                        command: Some("ee audit timeline --workspace . --json".to_owned()),
+                        results_in: None,
+                        example: None,
+                    },
+                    RecoveryAction::flag(
+                        2,
+                        "--workspace",
+                        "<path>",
+                        "Point at the workspace that owns the audit row ID.",
+                    ),
                 ]
             }
             // A missing addressed store is not evidence that the caller

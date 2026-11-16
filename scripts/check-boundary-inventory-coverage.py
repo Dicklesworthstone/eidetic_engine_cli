@@ -100,6 +100,16 @@ def first_cells(inventory: str) -> list[str]:
     return cells
 
 
+def matrix_section(inventory: str) -> str | None:
+    """The `## Command Boundary Matrix` section, if present."""
+    if "## Command Boundary Matrix" not in inventory:
+        return None
+    after = inventory.split("## Command Boundary Matrix", 1)[1]
+    if "### Matrix Maintenance Rules" not in after:
+        return None
+    return after.split("### Matrix Maintenance Rules", 1)[0]
+
+
 def audit(
     cli_source: str,
     inventory: str,
@@ -128,6 +138,14 @@ def audit(
         problems.append(
             f"the inventory must record {UNMAPPED_DECLARATION!r}; that line is absent"
         )
+    matrix = matrix_section(inventory)
+    if matrix is not None:
+        families = sorted({p.split()[0] for p in paths if p.split()})
+        missing_families = [f for f in families if f"`{f}`" not in matrix]
+        if missing_families:
+            problems.append(
+                f"command boundary matrix missing public command families: {missing_families}"
+            )
     return missing, problems
 
 
@@ -198,6 +216,21 @@ def self_test() -> int:
         arm("MUTANT a renamed marker raises", False)
     except LookupError:
         arm("MUTANT a renamed marker raises", True)
+
+    # MUTANT 6: a public command family missing from ## Command Boundary Matrix is caught.
+    with_matrix = (
+        f"{UNMAPPED_DECLARATION}\n"
+        "## Command Boundary Matrix\n"
+        "| `alpha` |\n"
+        "### Matrix Maintenance Rules\n"
+        "| `alpha beta` | anchor | shape | keep mechanical |\n"
+        "| `gamma` | anchor | shape | keep mechanical |\n"
+    )
+    _, problems = audit(cli, with_matrix, minimum=0)
+    arm(
+        "MUTANT a missing matrix command family is caught",
+        len(problems) == 1 and "gamma" in problems[0],
+    )
 
     # The real tree must pass, which is what makes this runnable as a gate.
     missing, problems = audit(

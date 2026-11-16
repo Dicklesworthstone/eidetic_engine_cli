@@ -338,7 +338,7 @@ fn baseline_memories(workspace: &Path) -> Result<Vec<(String, String)>, DomainEr
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
     let canonical = workspace
         .canonicalize()
@@ -352,7 +352,7 @@ fn baseline_memories(workspace: &Path) -> Result<Vec<(String, String)>, DomainEr
         .list_memories(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list workspace memories: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
     Ok(memories
         .into_iter()

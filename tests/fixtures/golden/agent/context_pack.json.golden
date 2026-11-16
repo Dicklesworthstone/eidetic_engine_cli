@@ -3,6 +3,9 @@
   "success": true,
   "data": {
     "command": "pack",
+    "servingPath": "in_process",
+    "retrievalPath": "in_process",
+    "fallbackReason": null,
     "embed_backend": "hash_fallback",
     "request": {
       "query": "format before release",

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -169,7 +170,7 @@ def check(module, statuses):
     names = ("remediation_guidance_for", "attach_remediation_guidance",
              "known_blocker_entry", "parse_time", "format_time", "csv_fingerprint")
     require(all(name in functions for name in names), "entry-building function missing")
-    namespace = {"dt": dt, "hashlib": hashlib, "json": json, "os": os,
+    namespace = {"dt": dt, "hashlib": hashlib, "json": json, "os": os, "re": re,
                  "proof": {"generated_at": "2026-09-21T00:00:00Z", "command": []}}
     runtime = ast.Module(body=[functions[name] for name in names], type_ignores=[])
     exec(compile(ast.fix_missing_locations(runtime), "rch_verify.sh:entry-builders", "exec"), namespace)

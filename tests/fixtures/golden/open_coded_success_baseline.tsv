@@ -329,11 +329,6 @@ e2e_outcome_invalid_memory::outcome_empty_memory_id_returns_error [stdout+stderr
 e2e_outcome_invalid_memory::outcome_malformed_memory_id_returns_not_found_error [stdout+stderr]	1
 e2e_outcome_invalid_memory::outcome_nonexistent_memory_id_returns_not_found_error [stdout+stderr]	1
 e2e_outcome_invalid_memory_id::outcome_nonexistent_memory_id_returns_error_envelope [stdout+stderr]	2
-e2e_pack_determinism::low_match_pack_is_deterministic [stdout+stderr]	3
-e2e_pack_determinism::pack_hash_is_deterministic_across_runs [stdout+stderr]	3
-e2e_pack_determinism::pack_item_ordering_is_deterministic [stdout+stderr]	3
-e2e_pack_determinism::pack_query_file_persists_selection_ledger [stdout+stderr]	4
-e2e_pack_determinism::pack_replay_and_diff_work_for_real_pack_records [stdout+stderr]	7
 e2e_perf_compare::perf_compare_malformed_json_returns_error [stdout+stderr]	1
 e2e_perf_compare::perf_compare_missing_baseline_returns_error [stdout+stderr]	1
 e2e_perf_compare::perf_compare_missing_candidate_returns_error [stdout+stderr]	1

@@ -93,7 +93,7 @@ impl ServeSearchAdvisoryState {
             .map_err(|_| DomainError::Configuration {
                 message: "ee serve search advisory state is unavailable after a process panic."
                     .to_owned(),
-                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+                repair: Some("ee serve --foreground".to_owned()),
             })?;
         let mut reservation = session.reserve_delivery(workspace_key);
         let data = report.data_json_with_advisory_delivery_reservation(
@@ -123,7 +123,7 @@ impl ServeSearchAdvisoryState {
             .map_err(|_| DomainError::Configuration {
                 message: "ee serve search advisory state is unavailable after a process panic."
                     .to_owned(),
-                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+                repair: Some("ee serve --foreground".to_owned()),
             })?;
         let mut reservation = session.reserve_delivery(workspace_key);
         attach_context_search_advisories_for_delivery(
@@ -155,7 +155,7 @@ impl ServeSearchAdvisoryState {
             .map_err(|_| DomainError::Configuration {
                 message: "ee serve search advisory state is unavailable after a process panic."
                     .to_owned(),
-                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+                repair: Some("ee serve --foreground".to_owned()),
             })?;
         let mut reservation = session.reserve_delivery(workspace_key);
         attach_context_cached_search_advisories_for_delivery(
@@ -190,7 +190,7 @@ impl ServeSearchAdvisoryState {
                 .map_err(|_| DomainError::Configuration {
                     message: "ee serve search advisory state is unavailable after a process panic."
                         .to_owned(),
-                    repair: Some("Restart `ee serve --foreground`.".to_owned()),
+                    repair: Some("ee serve --foreground".to_owned()),
                 })?
                 .settle_delivery(
                     &delivery.workspace_key,

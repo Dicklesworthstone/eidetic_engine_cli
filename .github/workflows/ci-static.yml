@@ -345,6 +345,24 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.graph_fnx_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-graph-metric-fnx-routing.py
 
+      - name: Tri-state verdict contract guard --self-test
+        id: tri_state_verdict_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-tri-state-verdict-contract.py --self-test
+
+      - name: Tri-state verdict contract guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.tri_state_verdict_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-tri-state-verdict-contract.py
+
+      - name: Degraded repair actionability guard --self-test
+        id: degraded_repair_actionability_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-degraded-repair-actionability.py --self-test
+
+      - name: Degraded repair actionability guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.degraded_repair_actionability_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-degraded-repair-actionability.py
+
       # bd-rvrj2 / bd-gpik0. HOSTED MIRROR of
       # tests/ee_spawn_isolation_contract.rs, which is the authority but is
       # reachable from no hosted lane: scripts/verify.sh runs the whole

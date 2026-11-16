@@ -76,7 +76,7 @@ bd-2dgn0 scorecard, including the optional benches and eval that the
 default profile keeps gated behind explicit flags.
 
 `--swarm-heavy` implies `--include-bench`, `--eval`, `--fuzz-smoke`,
-and `--plan-doc-smoke` on top of every default-profile gate. There is
+`--include-e2e-orphans`, and `--plan-doc-smoke` on top of every default-profile gate. There is
 no separate "swarm heavy" set of new gates; the value of the flag is
 **the bundle**: a single command that produces a complete scorecard
 input artifact set on a large host.

@@ -87,31 +87,43 @@ fn mcp_capture_git_preview_matches_all_cli_modes_without_durable_writes() -> Tes
     .map_err(|e| e.to_string())?;
     let before = counts(root.path())?;
     let index = fs::read(root.path().join(".git/index")).map_err(|e| e.to_string())?;
+    let commit_fixture = load_parity_fixture("capture_git", "commit_preview")?;
     for (mode, flags) in [
         ("commit", vec!["--from-commit", "HEAD"]),
         ("diff", vec!["--from-diff", "HEAD"]),
         ("worktree", vec!["--from-worktree"]),
     ] {
-        let mut cli_args = vec![
-            OsString::from("ee"),
-            OsString::from("--json"),
-            OsString::from("--workspace"),
-            root.path().into(),
-            OsString::from("remember"),
-        ];
-        cli_args.extend(flags.into_iter().map(OsString::from));
-        cli_args
-            .extend(["--dry-run", "--no-auto-link", "--no-propose-candidates"].map(OsString::from));
+        let cli_args = if mode == "commit" {
+            fixture_cli_args(&commit_fixture, root.path(), None, None)?
+        } else {
+            let mut cli_args = vec![
+                OsString::from("ee"),
+                OsString::from("--json"),
+                OsString::from("--workspace"),
+                root.path().into(),
+                OsString::from("remember"),
+            ];
+            cli_args.extend(flags.into_iter().map(OsString::from));
+            cli_args.extend(
+                ["--dry-run", "--no-auto-link", "--no-propose-candidates"].map(OsString::from),
+            );
+            cli_args
+        };
         let (exit, stdout, stderr) = run_cli(cli_args);
         ensure(
             exit == ee::models::ProcessExitCode::Success,
             format!("CLI capture failed: {stderr} {stdout}"),
         )?;
-        let mut input = capture_args(root.path(), mode);
-        input["allowWrite"] = json!(true); // permission alone must not apply
-        if mode == "diff" {
-            input["reference"] = json!("HEAD");
-        }
+        let input = if mode == "commit" {
+            fixture_mcp_arguments(&commit_fixture, root.path(), None, None)?
+        } else {
+            let mut input = capture_args(root.path(), mode);
+            input["allowWrite"] = json!(true); // permission alone must not apply
+            if mode == "diff" {
+                input["reference"] = json!("HEAD");
+            }
+            input
+        };
         let result = capture(input)?;
         ensure(
             result.pointer("/data/dry_run") == Some(&json!(true)),

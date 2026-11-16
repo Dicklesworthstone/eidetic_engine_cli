@@ -4,7 +4,7 @@ Repair specs for the `graph_subsystem` fixtures under `tests/doctor_fixtures/`.
 Labels, fields and the coverage rule are defined in
 [`docs/doctor/README.md`](../README.md).
 
-## Current snapshot inspection and recovery
+**Current snapshot inspection and recovery.**
 
 The advisory `graph_snapshot` check inspects the addressed workspace's latest
 `memory_links` snapshot and source links in one read transaction. It checks the

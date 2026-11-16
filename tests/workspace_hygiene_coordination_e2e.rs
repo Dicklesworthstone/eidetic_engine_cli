@@ -365,12 +365,7 @@ fn workspace_hygiene_empty_snapshot_distinguishes_no_reservations_from_unavailab
     let snapshot_path = workspace.join("agent-mail-empty.json");
     write_file(
         &snapshot_path,
-        r#"{
-          "file_reservations": [],
-          "active_agents": [],
-          "inbox": [],
-          "threads": []
-        }"#,
+        &declared_snapshot_v1(&workspace, "SapphireElk", &[])?,
     )?;
 
     let value = run_hygiene_with_snapshot(&workspace, &snapshot_path)?;

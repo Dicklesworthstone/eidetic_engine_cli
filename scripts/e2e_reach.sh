@@ -430,7 +430,7 @@ if [ "$SCORECARD_MODE" != "none" ]; then
     assert_jq "$score_decision" '.schema == "ee.response.v2" and .success == true' \
         "scorecard baseline decision memory stores"
 
-    score_before="$(run_health_scorecard "$SCORECARD_MODE" --workspace "$SCORE_WS" --json)"
+    score_before="$(run_health_scorecard "$SCORECARD_MODE" --record-snapshot --workspace "$SCORE_WS" --json)"
     log_event "scorecard_before_snapshot" \
         bead "bd-2vq2z.14" \
         mode "$SCORECARD_MODE"
@@ -473,8 +473,8 @@ if [ "$SCORECARD_MODE" != "none" ]; then
         mode "$SCORECARD_MODE"
     assert_jq "$score_after" '.schema == "ee.response.v2" and .success == true' \
         "health scorecard after degradation succeeds"
-    before_score="$(json_number_or_empty "$score_before" '(.data.compositeScore // .data.score.overall // .data.score // empty)')"
-    after_score="$(json_number_or_empty "$score_after" '(.data.compositeScore // .data.score.overall // .data.score // empty)')"
+    before_score="$(json_number_or_empty "$score_before" '(.data.compositeScore // (.data.score | objects | .overall) // .data.score // empty)')"
+    after_score="$(json_number_or_empty "$score_after" '(.data.compositeScore // (.data.score | objects | .overall) // .data.score // empty)')"
     if [ -n "$before_score" ] && [ -n "$after_score" ]; then
         assert_number_lt "$after_score" "$before_score" \
             "health scorecard declines after duplicate and stale-provenance fixture"

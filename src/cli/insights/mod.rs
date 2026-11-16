@@ -1120,7 +1120,7 @@ fn open_insights_database(
         .map(Some)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })
 }
 
@@ -1141,7 +1141,7 @@ fn load_workspace_insights_graph_data(
         .list_memories(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace memories: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
     let memory_ids = memories
         .iter()
@@ -1151,7 +1151,7 @@ fn load_workspace_insights_graph_data(
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query memory links: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?
         .into_iter()
         .filter(|link| {
@@ -1287,7 +1287,7 @@ fn load_comprehensive_rule_inputs(
         .list_procedural_rules(&workspace_id, None, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query procedural rules: {error}"),
-            repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+            repair: Some("ee rule list --workspace . --json".to_owned()),
         })?;
 
     let mut inputs = Vec::with_capacity(rules.len());
@@ -1297,13 +1297,13 @@ fn load_comprehensive_rule_inputs(
                 .get_rule_source_memory_ids(&rule.id)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to query rule source memories: {error}"),
-                    repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+                    repair: Some("ee rule list --workspace . --json".to_owned()),
                 })?;
         let tags = connection
             .get_rule_tags(&rule.id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to query rule tags: {error}"),
-                repair: Some("Run `ee rule list --workspace . --json`.".to_owned()),
+                repair: Some("ee rule list --workspace . --json".to_owned()),
             })?;
         inputs.push(ComprehensiveRuleInsightInput {
             rule,
@@ -1345,7 +1345,7 @@ fn load_house_rules_inputs(
         .list_memories_for_retrieval_with_global(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query global-scope memories: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
     let mut inputs = Vec::new();
     for memory in memories {
@@ -1354,7 +1354,7 @@ fn load_house_rules_inputs(
                 .get_memory_tags(&memory.id)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to query memory tags: {error}"),
-                    repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+                    repair: Some("ee doctor --workspace . --json".to_owned()),
                 })?;
         if !crate::models::query::memory_tags_include_global_scope(&tags) {
             continue;
@@ -1393,7 +1393,7 @@ fn load_knowledge_skyline(
                     "Failed to parse memory created_at for knowledge skyline `{}`: {error}",
                     memory.id
                 ),
-                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
             })?
             .with_timezone(&Utc);
         skyline_memories.push(KnowledgeSkylineMemory {
@@ -1433,7 +1433,7 @@ fn load_proximity_hotspot_reports(
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query memory links: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
 
     proximity_hotspot_reports_from_links(&links)
@@ -1527,7 +1527,7 @@ fn load_bearing_memory_items(
         .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::RuleProvenance)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query rule-provenance graph snapshot: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?
         .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
     let hits =
@@ -1700,7 +1700,7 @@ fn collect_rust_source_paths_inner(
                     "Failed to read Rust source directory `{}`: {error}",
                     dir.display()
                 ),
-                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
             });
         }
     };
@@ -1712,7 +1712,7 @@ fn collect_rust_source_paths_inner(
                     "Failed to enumerate Rust source directory `{}`: {error}",
                     dir.display()
                 ),
-                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
             })?;
     entries.sort_by_key(|entry| entry.path());
 
@@ -1728,7 +1728,7 @@ fn collect_rust_source_paths_inner(
                 "Failed to inspect Rust source path `{}`: {error}",
                 path.display()
             ),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
         if metadata.is_dir() {
             collect_rust_source_paths_inner(workspace, &path, paths)?;
@@ -3744,7 +3744,7 @@ fn load_revision_frontier_inputs(
         .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::RevisionDag)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query revision-DAG graph snapshot: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?
         .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
 
@@ -3904,7 +3904,7 @@ fn load_peer_conflict_items(
         .list_memories(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace memories: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
     Ok(peer_conflict_items_from_memories(&workspace_id, &memories))
 }

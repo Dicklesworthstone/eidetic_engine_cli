@@ -7380,11 +7380,13 @@ fn index_reembed_json_rebuilds_index_and_records_job() -> TestResult {
         &serde_json::json!("all_documents"),
         "reembed embedding scope",
     )?;
-    // ADR 0080 (BUNDLED_EMBEDDING_MODEL_ID). `fnv1a-256` was the pre-0080
-    // deterministic-hash embedder and is no longer runtime-producible.
+    // `run_ee` spawns via `isolated_ee_command` (empty XDG_DATA_HOME,
+    // EE_EMBED_DOWNLOAD=off, no MODEL_SELECTION_ENV), so no semantic model is
+    // present in the isolated cache and the deterministic hash fallback
+    // (`HashEmbedder::default_256()` -> `fnv1a-256`) is selected.
     ensure_equal(
         &reembed_json["data"]["embedding"]["fast_model_id"],
-        &serde_json::json!("potion-multilingual-128M"),
+        &serde_json::json!("fnv1a-256"),
         "reembed fast embedder",
     )?;
     ensure_equal(

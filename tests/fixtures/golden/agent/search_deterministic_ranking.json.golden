@@ -3,6 +3,9 @@
   "success": true,
   "data": {
     "command": "search",
+    "servingPath": "in_process",
+    "retrievalPath": "in_process",
+    "fallbackReason": null,
     "status": "success",
     "embed_backend": "hash_fallback",
     "query": "cargo test before release",
@@ -49,7 +52,7 @@
           }
         ],
         "memoryId": "mem_00000000000000000000010001",
-        "lexicalScore": 1.7022393,
+        "lexicalScore": 1.702239,
         "content": "Before release, run cargo fmt --check and cargo test to verify formatting.",
         "metadata": {
           "calibrated": false,
@@ -61,13 +64,14 @@
           "level": "procedural",
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceChainHashVersion": "ee.memory.provenance_chain.v1",
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
+            "policyHash": "blake3:07819b3348a1f05066b183cff3dc2c7f1176b339f7ff742061ce21ee6d6afa76",
             "entityType": "memory",
             "rankingBound": 1.8000001,
-            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "referenceTime": "2026-04-30T12:00:00Z",
             "components": {
               "base": 1.0,
               "recency": 0.99722606,
@@ -160,7 +164,7 @@
           "factors": [
             {
               "name": "lexical",
-              "value": 1.7022393,
+              "value": 1.702239,
               "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
               "formula": "score = minmax(lexical_score, returned_pool)"
@@ -254,8 +258,8 @@
       },
       {
         "docId": "mem_00000000000000000000010002",
-        "score": 0.6233764,
-        "relevanceScore": 0.623376,
+        "score": 0.6233765,
+        "relevanceScore": 0.623377,
         "scoreKind": "query_relative_pool_minmax",
         "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
@@ -277,7 +281,7 @@
           }
         ],
         "memoryId": "mem_00000000000000000000010002",
-        "lexicalScore": 1.0611359,
+        "lexicalScore": 1.0611358,
         "content": "Before pushing to main, run cargo test and inspect failing integration logs.",
         "metadata": {
           "calibrated": false,
@@ -289,15 +293,16 @@
           "level": "procedural",
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceChainHashVersion": "ee.memory.provenance_chain.v1",
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
+            "policyHash": "blake3:07819b3348a1f05066b183cff3dc2c7f1176b339f7ff742061ce21ee6d6afa76",
             "entityType": "memory",
             "rankingBound": 1.8000001,
-            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "referenceTime": "2026-04-30T12:00:00Z",
             "components": {
-              "base": 0.6233764,
+              "base": 0.6233765,
               "recency": 0.9972492,
               "confidence": 0.88,
               "utility": 0.90999997,
@@ -309,7 +314,7 @@
               "anchorMatch": 0.0,
               "beadAffinity": 0.0,
               "freshnessDrift": 1.0,
-              "finalScore": 0.597392
+              "finalScore": 0.5973921
             },
             "observedSignals": {
               "recency": true,
@@ -388,14 +393,14 @@
           "factors": [
             {
               "name": "lexical",
-              "value": 1.0611359,
+              "value": 1.0611358,
               "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
               "formula": "score = minmax(lexical_score, returned_pool)"
             },
             {
               "name": "base",
-              "value": 0.6233764,
+              "value": 0.6233765,
               "contribution": "source-derived quality ranking component",
               "sourceField": "metadata.qualityScoring.components.base",
               "formula": "ranking_base = relevanceScore"
@@ -472,7 +477,7 @@
             },
             {
               "name": "qualityRanking",
-              "value": 0.597392,
+              "value": 0.5973921,
               "contribution": "final EE quality ranking; engine relevance is unchanged",
               "sourceField": "metadata.qualityScoring.components.finalScore",
               "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral"
@@ -482,7 +487,7 @@
       },
       {
         "docId": "mem_00000000000000000000010003",
-        "score": 0.36304024,
+        "score": 0.3630403,
         "relevanceScore": 0.36304,
         "scoreKind": "query_relative_pool_minmax",
         "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
@@ -517,15 +522,16 @@
           "level": "episodic",
           "memory_scope": "swarm",
           "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceChainHashVersion": "ee.memory.provenance_chain.v1",
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
+            "policyHash": "blake3:07819b3348a1f05066b183cff3dc2c7f1176b339f7ff742061ce21ee6d6afa76",
             "entityType": "memory",
             "rankingBound": 1.8000001,
-            "referenceTime": "2026-04-30T12:00:00.000Z",
+            "referenceTime": "2026-04-30T12:00:00Z",
             "components": {
-              "base": 0.36304024,
+              "base": 0.3630403,
               "recency": 0.99727225,
               "confidence": 0.7,
               "utility": 0.81,
@@ -537,7 +543,7 @@
               "anchorMatch": 0.0,
               "beadAffinity": 0.0,
               "freshnessDrift": 1.0,
-              "finalScore": 0.24633883
+              "finalScore": 0.24633884
             },
             "observedSignals": {
               "recency": true,
@@ -623,7 +629,7 @@
             },
             {
               "name": "base",
-              "value": 0.36304024,
+              "value": 0.3630403,
               "contribution": "source-derived quality ranking component",
               "sourceField": "metadata.qualityScoring.components.base",
               "formula": "ranking_base = relevanceScore"
@@ -700,7 +706,7 @@
             },
             {
               "name": "qualityRanking",
-              "value": 0.24633883,
+              "value": 0.24633884,
               "contribution": "final EE quality ranking; engine relevance is unchanged",
               "sourceField": "metadata.qualityScoring.components.finalScore",
               "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral"

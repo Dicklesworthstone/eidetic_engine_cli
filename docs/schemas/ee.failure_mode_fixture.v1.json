@@ -119,6 +119,11 @@
         "repair_string": {
           "type": "string"
         },
+        "repairCommand": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional explicit runnable command emitted in degraded[].repairCommand (ADR 0088 / bd-9zfku)."
+        },
         "repair_strings": {
           "type": "array",
           "items": {

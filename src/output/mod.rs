@@ -1181,6 +1181,7 @@ pub struct Degradation {
     pub severity: DegradationSeverity,
     pub message: String,
     pub repair: String,
+    pub repair_command: Option<String>,
 }
 
 impl Degradation {
@@ -1196,7 +1197,15 @@ impl Degradation {
             severity,
             message: message.into(),
             repair: repair.into(),
+            repair_command: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_repair_command(mut self, repair_command: impl Into<String>) -> Self {
+        let command = repair_command.into();
+        self.repair_command = (!command.trim().is_empty()).then_some(command);
+        self
     }
 
     #[must_use]
@@ -1206,6 +1215,9 @@ impl Degradation {
         b.field_str("severity", self.severity.as_str());
         b.field_str("message", &self.message);
         b.field_str("repair", &self.repair);
+        if let Some(repair_command) = self.repair_command.as_deref() {
+            b.field_str("repairCommand", repair_command);
+        }
         b.finish()
     }
 }
@@ -2797,6 +2809,16 @@ fn normalize_response_degradation(value: &serde_json::Value) -> Option<serde_jso
         normalized.insert(
             "repair".to_string(),
             serde_json::Value::String(repair.to_string()),
+        );
+    }
+    if let Some(repair_command) = source
+        .get("repairCommand")
+        .and_then(serde_json::Value::as_str)
+        .filter(|repair_command| !repair_command.trim().is_empty())
+    {
+        normalized.insert(
+            "repairCommand".to_string(),
+            serde_json::Value::String(repair_command.to_string()),
         );
     }
     if let Some(repair_kind) = source
@@ -29156,5 +29178,51 @@ mod tests {
     #[test]
     fn card_kind_recommendation_stable() {
         assert_eq!(CardKind::Recommendation.as_str(), "recommendation");
+    }
+
+    #[test]
+    fn degradation_repair_command_is_omitted_when_none_and_emitted_when_some() -> TestResult {
+        let advisory = Degradation::new(
+            "graph_pack_dna_timeout",
+            DegradationSeverity::Low,
+            "Pack DNA graph explanation timed out after 125ms; ordinary context pack items remain usable.",
+            "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA.",
+        );
+        ensure_equal(
+            &advisory.repair_command,
+            &None,
+            "default repair_command is None",
+        )?;
+        let advisory_json = advisory.to_json();
+        ensure(
+            !advisory_json.contains("repairCommand"),
+            "None repair_command must be omitted from JSON output",
+        )?;
+
+        let with_cmd =
+            advisory.with_repair_command("ee context --workspace . --no-pack-dna --json");
+        ensure_equal(
+            &with_cmd.repair_command,
+            &Some("ee context --workspace . --no-pack-dna --json".to_owned()),
+            "populated repair_command",
+        )?;
+        let with_cmd_json: serde_json::Value =
+            serde_json::from_str(&with_cmd.to_json()).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &with_cmd_json
+                .get("repairCommand")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee context --workspace . --no-pack-dna --json"),
+            "serialized repairCommand",
+        )?;
+        let normalized = super::normalize_response_degradation(&with_cmd_json)
+            .ok_or_else(|| "normalize_response_degradation returned None".to_owned())?;
+        ensure_equal(
+            &normalized
+                .get("repairCommand")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee context --workspace . --no-pack-dna --json"),
+            "normalized repairCommand",
+        )
     }
 }

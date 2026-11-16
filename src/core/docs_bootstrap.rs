@@ -503,7 +503,7 @@ pub fn apply_docs_bootstrap(
     if !options.approved_only {
         return Err(DomainError::UsageWithDetails {
             message: "ee bootstrap apply requires --approved-only.".to_owned(),
-            repair: Some("Run `ee bootstrap apply <run-id> --approved-only --json`.".to_owned()),
+            repair: Some("ee bootstrap apply <run-id> --approved-only --json".to_owned()),
             details_json: serde_json::json!({
                 "runId": options.run_id,
                 "durableMutation": false,

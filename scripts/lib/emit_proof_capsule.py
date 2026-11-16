@@ -64,6 +64,27 @@ def host_cfg_label() -> str:
     return f"target_family={family}, target_os={system}"
 
 
+def classify_terminator(run_exit: int, no_verdict_cause: str | None) -> str:
+    """Classify a dispatched verdict's terminator (bd-reality-core-convergence-1azkt.70).
+
+    Every dispatched verdict must name its terminator class rather than only an
+    exit code, so an infrastructure refusal (exit 3 / 70-79 / NOT_RUN), a
+    timeout (exit 124 / TIMEOUT), or an external signal (exit 130 / 137 / 143 /
+    129-192) cannot be confused with a product verdict.
+    """
+    if run_exit == 124 or no_verdict_cause == "TIMEOUT":
+        return "timeout"
+    if run_exit in (130, 137, 143) or (128 < run_exit <= 192) or no_verdict_cause == "CANCELLED":
+        return "signal"
+    if (
+        no_verdict_cause in ("NOT_RUN", "INFRA_ERROR")
+        or run_exit == 3
+        or (70 <= run_exit <= 79)
+    ):
+        return "infra_refusal"
+    return "product_verdict"
+
+
 def build_capsule(
     log: pathlib.Path | None,
     base: str,
@@ -93,7 +114,13 @@ def build_capsule(
             status, cause = "INFRA_ERROR", "NOT_RUN"
         elif not reconciles:
             status, cause = "INFRA_ERROR", "NOT_RUN"
-        elif pair["verdict"] == "ok" and pair["failed"] == 0:
+        elif run_exit == 124:
+            status, cause = "TIMEOUT", "TIMEOUT"
+        elif run_exit in (130, 143):
+            status, cause = "CANCELLED", "CANCELLED"
+        elif run_exit == 137 or (128 < run_exit <= 192):
+            status, cause = "INFRA_ERROR", "INFRA_ERROR"
+        elif pair["verdict"] == "ok" and pair["failed"] == 0 and run_exit == 0:
             status, cause = "PASS", None
         else:
             status, cause = "FAIL", None
@@ -107,6 +134,7 @@ def build_capsule(
                 "executed": pair["counted"],
                 "workerHost": host,
                 "noVerdictCause": cause,
+                "terminatorClass": classify_terminator(run_exit, cause),
             }
         )
     for problem in problems:
@@ -115,6 +143,7 @@ def build_capsule(
                 "stage": "unattributed",
                 "status": "INFRA_ERROR",
                 "noVerdictCause": "NOT_RUN",
+                "terminatorClass": classify_terminator(run_exit, "NOT_RUN"),
                 "reason": problem,
                 "workerHost": host,
             }
@@ -407,6 +436,26 @@ def self_test() -> int:
         check(
             "a ZERO-test run carries a no-verdict cause",
             vacuous["results"][0]["noVerdictCause"] == "NOT_RUN",
+        )
+        check(
+            "a green run classifies terminator as product_verdict",
+            capsule["results"][0]["terminatorClass"] == "product_verdict",
+        )
+        check(
+            "a ZERO-test run classifies terminator as infra_refusal",
+            vacuous["results"][0]["terminatorClass"] == "infra_refusal",
+        )
+        timed_out = build_capsule(green, "abc123", 0, "worker-a", 124, "rch exec ...")
+        check(
+            "exit 124 classifies terminator as timeout",
+            timed_out["results"][0]["terminatorClass"] == "timeout"
+            and timed_out["results"][0]["status"] == "TIMEOUT",
+        )
+        killed = build_capsule(green, "abc123", 0, "worker-a", 137, "rch exec ...")
+        check(
+            "exit 137 classifies terminator as signal",
+            killed["results"][0]["terminatorClass"] == "signal"
+            and killed["results"][0]["status"] == "INFRA_ERROR",
         )
 
         # Identity must not move when only run facts move. This is the design

@@ -72,8 +72,6 @@
 # requires a named covering command which the audit verifies actually exists in
 # ci.yml or verify.sh, so "retired" cannot be used to park an inconvenient
 # orphan. This list still only shrinks.
-e2e_backup_roundtrip.sh
-e2e_field_report_suite.sh
 
 # 2026-09-16 bd-q2nq9: TWELVE ENTRIES ADDED. Read this before objecting that
 # the list grew.
@@ -100,16 +98,12 @@ e2e_field_report_suite.sh
 # True orphan count is 21 of 92 (14 baselined + 7 retired), not 9. The earlier
 # "19 of 92" figure in this file's header was measured with the same blind
 # predicate and should not be treated as a clean prior.
-e2e_diag_contention.sh
-e2e_group_commit.sh
 e2e_mesh_anti_entropy_model.sh
 e2e_mesh_audit_forensics.sh
 e2e_mesh_cache_retention.sh
 e2e_mesh_emergency_disable.sh
 e2e_mesh_remote_evidence.sh
 e2e_mesh_surrogate_audit.sh
-e2e_sandbox.sh
-e2e_session_budget.sh
 
 # --- scripts/e2e_overhaul/ — bd-1cn5o, recorded 2026-09-17 ---
 #
@@ -188,13 +182,7 @@ e2e_overhaul/workspace_git_snapshot_read_only.sh
 # audit's shrink-only arm means this block can only get smaller.
 #
 # Reachable solely via tests/fixtures/*.json:
-e2e_anchors_freshness.sh
-e2e_br_concurrent_race.sh
-e2e_contradiction.sh
-e2e_error_recall.sh
-e2e_gap_honesty.sh
 e2e_overhaul/cusum_maintenance.sh
 e2e_overhaul/swarm_fixture.sh
 # Reachable solely via a '//' comment:
-e2e_rerank.sh
 e2e_overhaul/mesh_tailscale_smoke.sh

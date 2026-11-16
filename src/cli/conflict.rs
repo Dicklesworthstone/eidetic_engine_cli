@@ -153,12 +153,12 @@ fn open_workspace_db(workspace: &Path) -> Result<DbConnection, DomainError> {
     if !database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("No workspace database at {}.", database_path.display()),
-            repair: Some("Run `ee init --workspace . --json` first.".to_owned()),
+            repair: Some("ee init --workspace . --json".to_owned()),
         });
     }
     DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
         message: format!("Failed to open workspace database: {error}"),
-        repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
     })
 }
 

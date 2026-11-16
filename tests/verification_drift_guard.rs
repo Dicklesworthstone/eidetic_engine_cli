@@ -41,7 +41,7 @@ const UNMEASURED_MARKER: &str = "expected_seconds_p50_unmeasured = true";
 /// gains slack and nothing says so. That is why lowering it is a convention
 /// enforced by whoever reads this comment rather than by the test, and it is the
 /// one thing to get right when converting a stage.
-const UNMEASURED_STAGE_ALLOWANCE: usize = 24;
+const UNMEASURED_STAGE_ALLOWANCE: usize = 23;
 
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -674,24 +674,16 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     }
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    // 2 since 2026-09-19, and the two are red for DIFFERENT reasons:
-    //   "Lexical Relevance Contract (tracked red)" -> bd-reality-core-convergence-1azkt.11
-    //       the pins, red on purpose, documenting the lexical relevance defect
-    //   "Lexical Relevance Contract Harness Guard" -> bd-iqg34
-    //       red because the RCH target dir writes the test binary outside
-    //       <target>/debug/deps, so the harness cannot locate it. Measured on
-    //       an RCH worker, job 30025237340881842: GUARD_EXIT=1 in 0s.
-    // The guard was REQUIRED when introduced at e99eb0bbb, which fail-fasted
-    // verify.sh on this fleet. Returns to 1 when bd-iqg34 is fixed and the
-    // guard goes back to required, and to 0 when the pins themselves go green.
-    // 3 since 2026-09-23:
+    // 1 remaining after bd-iqg34 and bd-reality-core-convergence-1azkt.11
+    // restored "Lexical Relevance Contract Harness Guard" and
+    // "Lexical Relevance Contract (tracked red)" to REQUIRED:
     //   "ee doctor Safety Harness (bd-21joy)" -> bd-5l8yh
     //       red because the stage passes no ee binary, and every sub-harness
     //       now exits 3 SKIPPED instead of passing having run nothing
     //       (bd-2oh15 strand 4, option a). Drops back by one when bd-5l8yh
     //       wires the verified binary in and the stage is green for real.
     assert_eq!(
-        non_required, 3,
+        non_required, 1,
         "stages are declared non-required. That may be correct, but it is a \
          deliberate act: update this count in the same commit so the excused \
          population stays visible in review."
@@ -1785,13 +1777,10 @@ fn verify_sh_reports_and_enforces_stage_budgets() {
 
 #[test]
 fn drift_guard_produces_json_report() {
-    let output = Command::new("sh")
-        .args(["-c", "./scripts/verification-drift-guard.sh --json || true"])
-        .current_dir(project_root())
-        .output()
-        .expect("run drift guard");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = run_drift_guard_at(temp.path(), &["--json"]);
 
-    let report_path = project_root().join(".verification-drift-report.json");
+    let report_path = temp.path().join(".verification-drift-report.json");
 
     // The script should always produce a report file
     if report_path.exists() {
@@ -1839,20 +1828,8 @@ fn drift_guard_help_flag_works() {
 
 #[test]
 fn drift_guard_detects_closure_violations_without_bead() {
-    // This test verifies the guard's logic:
-    // If closure-lint reports violations AND no bead tracks them, drift is detected.
-    //
-    // We can't easily mock the beads file in an integration test, but we can verify
-    // the script's JSON output structure is correct when run.
-
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            "./scripts/verification-drift-guard.sh --json 2>&1 || true",
-        ])
-        .current_dir(project_root())
-        .output()
-        .expect("run drift guard");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = run_drift_guard_at(temp.path(), &["--json"]);
 
     let combined = format!(
         "{}{}",
@@ -1869,9 +1846,7 @@ fn drift_guard_detects_closure_violations_without_bead() {
         combined.contains("Report written")
             || combined.contains("No drift detected")
             || combined.contains("drift")
-            || project_root()
-                .join(".verification-drift-report.json")
-                .exists(),
+            || temp.path().join(".verification-drift-report.json").exists(),
         "script should produce meaningful output or report file: {combined}"
     );
 }
@@ -2002,6 +1977,11 @@ fn drift_guard_refuses_an_unknown_gate_name_and_still_admits_the_known_ones() {
         );
     }
 
+    fs::write(
+        temp.path().join(".closure-lint-report.json"),
+        r#"{"violations":[],"count":0,"status":"pass"}"#,
+    )
+    .expect("seed clean closure-lint report for known-gate positive control");
     for known in ["closure-lint", "cargo-test"] {
         let flag = format!("--gate={known}");
         let output = run_drift_guard_at(temp.path(), &[flag.as_str(), "--json"]);
@@ -4513,16 +4493,25 @@ fn declared_evidence_contract_holds_in_verify_sh() {
 /// next one.
 #[test]
 fn bench_test_functions_do_not_accumulate() {
-    const BENCH_TEST_FLOOR: usize = 74;
+    const BENCH_TEST_FLOOR: usize = 97;
 
+    let bench_contracts_body =
+        std::fs::read_to_string("tests/bench_contracts.rs").expect("read tests/bench_contracts.rs");
     let mut total = 0usize;
     let mut files = 0usize;
+    let mut unmounted = Vec::new();
     let dir = std::path::Path::new("benches");
     let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .expect("benches/ must exist")
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "rs")
+                && !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("._"))
+        })
         .collect();
     entries.sort();
 
@@ -4531,9 +4520,22 @@ fn bench_test_functions_do_not_accumulate() {
         let n = body.lines().filter(|l| l.trim() == "#[test]").count();
         if n > 0 {
             files += 1;
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            let mount_attr = format!("#[path = \"../benches/{file_name}\"]");
+            if !bench_contracts_body.contains(&mount_attr) {
+                unmounted.push(format!("{} ({n} #[test])", path.display()));
+            }
         }
         total += n;
     }
+
+    assert!(
+        unmounted.is_empty(),
+        "benches/ files with #[test] must be mounted in tests/bench_contracts.rs so libtest executes them: {unmounted:?}"
+    );
 
     // Empty-world guard: an empty or unreadable benches/ would make the count
     // zero and read as "the problem is solved". It is not; it is the
@@ -4549,10 +4551,8 @@ fn bench_test_functions_do_not_accumulate() {
     assert_eq!(
         total, BENCH_TEST_FLOOR,
         "#[test] functions under benches/ moved: {total} across {files} file(s), \
-         against a floor of {BENCH_TEST_FLOOR}. If you ADDED one, it will never \
-         run -- see the two causes above, and do not add `--benches`. If you \
-         RELOCATED or retired some, lower BENCH_TEST_FLOOR in the same commit \
-         and say where they went (bd-unreachable-bench-tests-k0le8)."
+         against a floor of {BENCH_TEST_FLOOR}. Update BENCH_TEST_FLOOR and ensure \
+         tests/bench_contracts.rs mounts every #[test]-bearing bench file (bd-unreachable-bench-tests-k0le8)."
     );
 }
 
@@ -5056,5 +5056,37 @@ fn the_environment_unrunnable_exit_code_agrees_across_both_scripts() {
         verify.contains("\"$STAGE_ENV_UNRUNNABLE_CODE\") printf '%s\\n' \"ENV_UNRUNNABLE\" ;;"),
         "stage_status_for_exit_code has no arm for STAGE_ENV_UNRUNNABLE_CODE, so the \
          code would classify as FAIL however well the two literals agree."
+    );
+}
+
+#[test]
+fn degradation_repair_command_is_omitted_when_none_and_emitted_when_some() {
+    use ee::output::{Degradation, DegradationSeverity};
+
+    let advisory = Degradation::new(
+        "graph_pack_dna_timeout",
+        DegradationSeverity::Warning,
+        "Pack DNA graph explanation timed out after 125ms; ordinary context pack items remain usable.",
+        "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA.",
+    );
+    assert_eq!(advisory.repair_command, None);
+    let advisory_json = advisory.to_json();
+    assert!(
+        !advisory_json.contains("repairCommand"),
+        "None repair_command must be omitted from JSON output: {advisory_json}"
+    );
+
+    let with_cmd = advisory.with_repair_command("ee context --workspace . --no-pack-dna --json");
+    assert_eq!(
+        with_cmd.repair_command.as_deref(),
+        Some("ee context --workspace . --no-pack-dna --json")
+    );
+    let with_cmd_json: serde_json::Value =
+        serde_json::from_str(&with_cmd.to_json()).expect("parse Degradation JSON");
+    assert_eq!(
+        with_cmd_json
+            .get("repairCommand")
+            .and_then(serde_json::Value::as_str),
+        Some("ee context --workspace . --no-pack-dna --json")
     );
 }

@@ -45,3 +45,5 @@ e2e_mesh_privacy_redaction_authorization.sh | cargo test --workspace --bins --te
 e2e_mesh_replay_convergence.sh | cargo test --workspace --bins --tests --examples | none
 e2e_mesh_selective_sync.sh | cargo test --workspace --bins --tests --examples | none
 e2e_mesh_share_preview.sh | cargo test --workspace --bins --tests --examples | none
+e2e_backup_roundtrip.sh | cargo test --workspace --bins --tests --examples | none
+e2e_br_concurrent_race.sh | cargo test --workspace --bins --tests --examples | none

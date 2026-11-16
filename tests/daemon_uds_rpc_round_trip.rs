@@ -494,7 +494,10 @@ fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult
     // reservation, probes carry structured freshness without warning prose.
     // The first probe after failed-write settlement must receive the full
     // warning pair and becomes the successfully delivered episode winner.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Anchor the 5-second settlement window after the first round-trip
+    // completes so a cold-process Model2Vec load on attempt 1 cannot consume
+    // the settlement budget before a post-warmup retry is attempted (bd-0kpjq).
+    let mut settlement_deadline: Option<Instant> = None;
     let mut attempt = 0_u64;
     let replay = loop {
         attempt = attempt.saturating_add(1);
@@ -520,7 +523,9 @@ fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult
         if codes.contains(&"search_index_stale") && codes.contains(&"search_index_large_gap") {
             break candidate;
         }
-        if Instant::now() >= deadline {
+        let deadline =
+            *settlement_deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(5));
+        if attempt >= 2 && Instant::now() >= deadline {
             return Err(format!(
                 "aborted socket delivery did not release its advisory reservation after {attempt} production round trips; last={candidate}"
             ));
@@ -1780,6 +1785,103 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
         format!("valid-envelope/mismatched context params were not rejected: {mismatched:?}"),
     )?;
 
+    let context_ready_alias = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &hybrid_context_request_for_workspace(
+                "req-context-alias-ready-first",
+                &workspace_a_alias,
+                &workspace_a_alias,
+                &database_a,
+                &index_a,
+                "context alias emits the first process advisory",
+            ),
+        )
+        .map_err(|error| format!("context-ready alias round-trip: {error}"))?,
+        "context-ready alias request",
+    )?;
+    ensure(
+        context_ready_alias
+            .pointer("/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && context_ready_alias
+                .pointer("/data/rerank/advisory/permanent")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && context_ready_alias
+                .pointer("/data/rerank/advisorySummary/scope")
+                .and_then(serde_json::Value::as_str)
+                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
+            && context_ready_alias
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!(
+            "context-ready alias request did not emit the process advisory: {context_ready_alias}"
+        ),
+    )?;
+
+    let search_ready_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-search-canonical-ready-repeat",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("canonical ready search repeat round-trip: {error}"))?,
+        "canonical ready search repeat",
+    )?;
+    ensure(
+        search_ready_repeated
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && search_ready_repeated
+                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            && search_ready_repeated
+                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("canonical search did not share context advisory state: {search_ready_repeated}"),
+    )?;
+
+    let context_ready_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &hybrid_context_request_for_workspace(
+                "req-context-canonical-ready-repeat",
+                &workspace_a,
+                &workspace_a,
+                &database_a,
+                &index_a,
+                "canonical context repeats the process advisory",
+            ),
+        )
+        .map_err(|error| format!("canonical ready context repeat round-trip: {error}"))?,
+        "canonical ready context repeat",
+    )?;
+    ensure(
+        context_ready_repeated
+            .pointer("/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && context_ready_repeated
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(3)
+            && context_ready_repeated
+                .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2),
+        format!(
+            "canonical context did not suppress the repeated advisory: {context_ready_repeated}"
+        ),
+    )?;
+
     plant_large_index_gap(&database_a, 600_000, "workspace-a-context-alias-first")?;
     let context_first = successful_result(
         client_round_trip(
@@ -1790,7 +1892,7 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
                 &workspace_a_alias,
                 &database_a,
                 &index_a,
-                "context alias emits the first process advisory",
+                "context alias emits the first stale episode",
             ),
         )
         .map_err(|error| format!("context-first alias round-trip: {error}"))?,
@@ -1802,25 +1904,6 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
         true,
         true,
         "context_alias_first",
-    )?;
-    ensure(
-        context_first
-            .pointer("/data/rerank/advisory/code")
-            .and_then(serde_json::Value::as_str)
-            == Some("rerank_model_unavailable")
-            && context_first
-                .pointer("/data/rerank/advisory/permanent")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            && context_first
-                .pointer("/data/rerank/advisorySummary/scope")
-                .and_then(serde_json::Value::as_str)
-                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
-            && context_first
-                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(1),
-        format!("context-first request did not emit the process advisory: {context_first}"),
     )?;
 
     let search_repeated = successful_result(
@@ -1843,20 +1926,6 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
         false,
         "search_canonical_repeat",
     )?;
-    ensure(
-        search_repeated
-            .pointer("/response/data/rerank/advisory")
-            .is_some_and(serde_json::Value::is_null)
-            && search_repeated
-                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(2)
-            && search_repeated
-                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(1),
-        format!("canonical search did not share context advisory state: {search_repeated}"),
-    )?;
 
     let context_repeated = successful_result(
         client_round_trip(
@@ -1867,7 +1936,7 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
                 &workspace_a,
                 &database_a,
                 &index_a,
-                "canonical context repeats the process advisory",
+                "canonical context repeats the stale episode",
             ),
         )
         .map_err(|error| format!("canonical context repeat round-trip: {error}"))?,
@@ -1879,20 +1948,6 @@ fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> T
         true,
         false,
         "context_canonical_repeat",
-    )?;
-    ensure(
-        context_repeated
-            .pointer("/data/rerank/advisory")
-            .is_some_and(serde_json::Value::is_null)
-            && context_repeated
-                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(3)
-            && context_repeated
-                .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(2),
-        format!("canonical context did not suppress the repeated advisory: {context_repeated}"),
     )?;
 
     plant_large_index_gap(&database_b, 700_000, "workspace-b-independent")?;
@@ -1980,36 +2035,6 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
     )?;
     assert_search_index_freshness(&search_first, "search_first_freshness")?;
     assert_search_index_freshness(&search_repeated, "search_repeated_freshness")?;
-    ensure(
-        search_first
-            .pointer("/response/data/rerank/advisory/code")
-            .and_then(serde_json::Value::as_str)
-            == Some("rerank_model_unavailable")
-            && search_first
-                .pointer("/response/data/rerank/advisorySummary/scope")
-                .and_then(serde_json::Value::as_str)
-                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
-            && search_first
-                .pointer("/response/data/rerank/advisorySummary/emittedCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(1),
-        format!("first permanent advisory contract drifted: {search_first}"),
-    )?;
-    ensure(
-        search_repeated
-            .pointer("/response/data/rerank/advisory")
-            .is_some_and(serde_json::Value::is_null)
-            && search_repeated
-                .pointer("/response/data/rerank/advisorySummary/emittedCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(0)
-            && search_repeated
-                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(1),
-        format!("repeated permanent advisory was not suppressed: {search_repeated}"),
-    )?;
-
     rebuild_test_index(&workspace_a, &database_a, &index_a)?;
     let search_ready = successful_result(
         client_round_trip(
@@ -2024,12 +2049,54 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
         .map_err(|error| format!("search ready round-trip: {error}"))?,
         "workspace A ready search",
     )?;
+    let search_ready_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-search-ready-repeated",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("search ready repeated round-trip: {error}"))?,
+        "workspace A repeated ready search",
+    )?;
     assert_stale_episode(
         &search_ready,
         "/response/data/degraded",
         false,
         false,
         "search_ready",
+    )?;
+    ensure(
+        search_ready
+            .pointer("/response/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && search_ready
+                .pointer("/response/data/rerank/advisorySummary/scope")
+                .and_then(serde_json::Value::as_str)
+                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
+            && search_ready
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("first permanent advisory contract drifted: {search_ready}"),
+    )?;
+    ensure(
+        search_ready_repeated
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && search_ready_repeated
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            && search_ready_repeated
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("repeated permanent advisory was not suppressed: {search_ready_repeated}"),
     )?;
     plant_large_index_gap(&database_a, 200_000, "workspace-a-search-new")?;
     let search_new_stale = successful_result(

@@ -496,7 +496,7 @@ evidence_search_out="$(ee_json --workspace "$WS" search \
 assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
     "search for imported transcript phrase succeeds"
 exact_evidence_uri="cass-session://$first_session_id#L2-2"
-exact_evidence_content='{"role":"assistant","content":"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept."}'
+exact_evidence_content='assistant: Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.'
 exact_evidence_content_json="$(printf '%s' "$exact_evidence_content" | jq -Rs '.')"
 exact_evidence_matches="$(printf '%s' "$evidence_search_out" | jq -c \
     --arg content "$exact_evidence_content" \

@@ -107,10 +107,12 @@ fn isolated_root_for_socket(socket_path: &Path) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("daemon");
-    socket_path
-        .parent()
-        .unwrap_or(socket_path)
-        .join(format!(".ee-isolated-{stem}"))
+    let base_dir = socket_path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.is_dir())
+        .unwrap_or_else(|| Path::new("/tmp"));
+    base_dir.join(format!(".ee-isolated-{stem}"))
 }
 
 fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {

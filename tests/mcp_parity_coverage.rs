@@ -1,9 +1,9 @@
 //! Static coverage gate for MCP tool parity tests (bd-3usjw.28).
 //!
 //! The runtime parity suite proves selected CLI/MCP outputs match. This file
-//! proves the suite stays complete when a new MCP tool is registered.
-
-#![cfg(feature = "mcp")]
+//! proves the suite stays complete when a new MCP tool is registered. It uses
+//! static source and fixture inspection only, so it must remain unconditionally
+//! compiled even when the optional `mcp` Cargo feature is not enabled.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -15,6 +15,7 @@ type TestResult = Result<(), String>;
 
 const MCP_SOURCE: &str = include_str!("../src/mcp.rs");
 const MCP_PARITY_SOURCE: &str = include_str!("mcp_parity.rs");
+const MCP_CAPTURE_GIT_SOURCE: &str = include_str!("mcp_capture_git.rs");
 
 fn quoted_value(line: &str) -> Option<&str> {
     let start = line.find('"')?;
@@ -88,6 +89,7 @@ fn parity_declared_tools() -> Result<BTreeSet<String>, String> {
 fn parity_invoked_tools() -> Result<BTreeSet<String>, String> {
     let mut tools: BTreeSet<String> = MCP_PARITY_SOURCE
         .lines()
+        .chain(MCP_CAPTURE_GIT_SOURCE.lines())
         .filter(|line| line.contains("run_mcp_tool_call("))
         .filter_map(quoted_value)
         .filter(|tool| tool.starts_with("ee_"))
@@ -96,6 +98,7 @@ fn parity_invoked_tools() -> Result<BTreeSet<String>, String> {
 
     for line in MCP_PARITY_SOURCE
         .lines()
+        .chain(MCP_CAPTURE_GIT_SOURCE.lines())
         .filter(|line| line.contains("load_parity_fixture("))
         .filter(|line| !line.trim_start().starts_with("fn "))
     {
@@ -213,6 +216,13 @@ fn parity_fixture_tools() -> Result<BTreeMap<String, Vec<String>>, String> {
         {
             let fixture_entry = fixture_entry.map_err(|e| e.to_string())?;
             let path = fixture_entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+            {
+                continue;
+            }
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }

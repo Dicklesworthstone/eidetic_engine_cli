@@ -32,6 +32,9 @@ struct InventoryRule {
     function: Option<&'static str>,
     fragment: &'static str,
     disposition: Disposition,
+    /// Audit bead that identified this class of silent fallback (may be closed).
+    provenance: Option<&'static str>,
+    /// Live scheduling bead that owns remediating this site (must be open/in_progress).
     follow_up: Option<&'static str>,
     reason: &'static str,
 }
@@ -60,33 +63,25 @@ struct SourceFinding {
     function: Option<String>,
 }
 
-const FOLLOW_UP_BEADS: &[&str] = &[
+const PROVENANCE_BEADS: &[&str] = &[
     "bd-sos5.2",
     "bd-sos5.3",
     "bd-sos5.4",
     "bd-sos5.7",
     "bd-ogy9",
-    // bd-1jpg7: the no-echo ingest guard is disabled whenever
-    // apply_join_first_sync_events cannot read its own origin node id.
-    //
-    // Before adding another id here, read bd-epvc1: eight must_fix rules
-    // already name a follow-up bead while owning ZERO findings, so they watch
-    // nothing. A must_fix that is shadowed into silence by an earlier fragment
-    // is worse than no rule, because the bead makes it look tracked. The rule
-    // that names this bead was checked against the match-count ledger and owns
-    // its site.
     "bd-1jpg7",
-    // bd-zjcx6: the mesh responder swallows discovery-list LOAD errors, so a
-    // denylist that exists but cannot be read becomes an empty denylist -- and
-    // in auto_admit and service_tag the denylist is the only per-requester
-    // exclusion there is.
     "bd-zjcx6",
-    // bd-xwzeh: the OUTBOUND half of bd-zjcx6. The mesh CLI collapses a
-    // discovery-list load error into an empty denylist, which reaches
-    // autodiscover_tailscale_peers, so peers the operator denied are PROBED.
-    // Found in src/cli/mesh.rs -- mesh code that lives outside src/mesh/, which
-    // is why the bd-zjcx6 sweep did not cover it.
     "bd-xwzeh",
+];
+
+const FOLLOW_UP_BEADS: &[&str] = &[
+    // bd-n950f: active scheduling bead for the 29 live must_fix findings across
+    // the 12 bd-sos5.4 export/builder-default rules (bd-vylt2).
+    "bd-n950f",
+    // bd-lnxfe: active scheduling bead for the 6 live must_fix findings across
+    // the 4 bd-sos5.3 / bd-sos5.7 serialization, freshness, and status rules
+    // (bd-vylt2).
+    "bd-lnxfe",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -302,7 +297,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         // exactly why this row declared 1 against 2 findings. The second site
         // is a genuinely new call path and gets its own rule below.
         "src/core/decide_read.rs",
-        "load",
+        "load_with_connection",
         "if !scope.database_path.exists() {",
         "A workspace with no decision store has recorded no decisions. Existence is checked before opening, and once the file exists every open or query failure propagates through open_decide_database_read_only(..)? -- so an unreadable store is never reported as a workspace with no decisions. The module's own error constructor states the same contract: read_error() reads \"Could not read a coherent decision snapshot; no partial result returned\".",
     ),
@@ -338,9 +333,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-GLOBAL-STORE-NO-DATABASE",
         "src/core/global_store.rs",
         // bd-amhns key repair, BOTH halves of the key. The function gained an
-        // `_at` as-of parameter and `_filtered_at` helper, and the existence
+        // `_at` as-of parameter and `_with_observer_at` helper, and the existence
         // check moved from `.exists()` to `.try_exists().map_err(global_read_error)?`.
-        "read_global_store_memories_filtered_at",
+        "read_global_store_memories_with_observer_at",
         ".try_exists()",
         "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason. The refactor STRENGTHENED this justification rather than weakening it: `.exists()` returned false on an IO error, collapsing \"cannot tell\" into \"absent\", whereas `try_exists` now propagates that error with `?`.",
     ),
@@ -608,6 +603,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/output/mod.rs",
         "incumbent_outcome.clone().unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Shadow decision output should distinguish missing incumbent evidence from an empty incumbent outcome.",
     ),
     // RETIRED (bd-epvc1): NSF-CLI-CERTIFICATE-JSON   bd-sos5.3   closed
@@ -616,6 +612,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/cli/mod.rs",
         "report.error.clone().unwrap_or_default()",
         "bd-sos5.3",
+        "bd-lnxfe",
         "Certificate error reports should not convert a missing error message into an empty machine string.",
     ),
     // RETIRED (bd-epvc1): NSF-CLI-DEMO-AUDIT        bd-sos5.4   closed
@@ -661,6 +658,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/curate/mod.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Curation risk certificate builders default machine-facing IDs/timestamps to empty values. Count corrected 3 -> 2 by bd-amhns: it reads `target_memory_id` and `generated_at` in `build`, and only those two. The two sites it had additionally absorbed are judged on their own terms immediately above; they are not part of bd-sos5.4.",
     ),
     must_fix(
@@ -668,6 +666,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/models/decision.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Decision records should distinguish a missing outcome from an empty outcome string.",
     ),
     must_fix(
@@ -675,6 +674,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/models/mutation.rs",
         "serde_json::to_string",
         "bd-sos5.3",
+        "bd-lnxfe",
         "Mutation reports are machine-facing and must not serialize to empty strings on failure.",
     ),
     must_fix(
@@ -682,6 +682,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/models/progress.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Progress records default required operation/message/timestamp fields to empty values.",
     ),
     must_fix(
@@ -689,6 +690,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/backup.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Backup import/export/verify/restore records should distinguish absent message, next action, audit target, manifest workspace id, and restore degradation fields.",
     ),
     must_fix(
@@ -696,6 +698,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/claims.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Claim parsing defaults optional statement/artifact collections into machine-facing records and needs an explicit contract.",
     ),
     // RETIRED (bd-epvc1): NSF-CORE-HANDOFF-JSON     bd-sos5.3   closed
@@ -711,6 +714,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/outcome.rs",
         "workspace_id.unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Outcome recording should not turn a missing workspace ID into an empty persisted field.",
     ),
     // RETIRED (bd-epvc1): NSF-CORE-PREFLIGHT-JSON   bd-sos5.3   closed
@@ -763,6 +767,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/cli/mod.rs",
         "let old_rank = old_item.rank.unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Pack diff should distinguish a missing ledger rank from rank zero when reporting rank deltas.",
     ),
     allowed(
@@ -884,6 +889,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/handoff.rs",
         "threshold_field: \"memories_added\"",
         "bd-sos5.4",
+        "bd-n950f",
         "Handoff stale-threshold reporting should distinguish unavailable added-memory counts from zero.",
     ),
     must_fix(
@@ -891,6 +897,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/handoff.rs",
         "threshold_field: \"any_expired_in_pack\"",
         "bd-sos5.4",
+        "bd-n950f",
         "Handoff stale-threshold reporting should distinguish unavailable expired-memory counts from zero.",
     ),
     must_fix(
@@ -898,6 +905,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/handoff.rs",
         "content_drift_score.unwrap_or_default()",
         "bd-sos5.4",
+        "bd-n950f",
         "Handoff stale-threshold reporting should distinguish unavailable content drift from zero drift.",
     ),
     must_fix(
@@ -905,6 +913,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/handoff.rs",
         "threshold_field: \"memories_revised\"",
         "bd-sos5.4",
+        "bd-n950f",
         "Handoff stale-threshold reporting should distinguish unavailable revised-memory counts from zero.",
     ),
     allowed(
@@ -1002,6 +1011,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/memory.rs",
         "extract_line_span(&contents, *span).unwrap_or_default()",
         "bd-sos5.7",
+        "bd-lnxfe",
         "Evidence freshness should report an invalid provenance span instead of hashing an empty source excerpt.",
     ),
     allowed(
@@ -1109,6 +1119,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/status.rs",
         "list_audit_entries",
         "bd-sos5.7",
+        "bd-lnxfe",
         "Status memory health should surface audit-log read failures instead of treating all memories as never accessed.",
     ),
     allowed(
@@ -3389,9 +3400,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-RULE-ADMISSION-RELATIONS",
         "src/core/search_rule_admission.rs",
-        "projections",
+        "projections_for_workspace",
         "relations.tags.remove(&canonical).unwrap_or_default();",
-        "Two sites, multiplicity 2 -- the tags map and the sources map, read one line apart. Safe because the authority-read FAILURE is handled ten lines above with an early `return BTreeMap::new();` under the comment \"Never fall back to indexed tags or source IDs\", so by this point relations was read successfully and a missing key means the rule genuinely has no tags or no sources. One fragment covers both sites: the two lines are adjacent, so line 117 falls inside the +/-4 window of each.",
+        "Two sites, multiplicity 2 -- the tags map and the sources map, read one line apart. Safe because the authority-read FAILURE is handled ten lines above with an early `return BTreeMap::new();` under the comment \"Never fall back to indexed tags or source IDs\", so by this point relations was read successfully and a missing key means the rule genuinely has no tags or no sources. One fragment covers both sites: the two lines are adjacent, so line 201 falls inside the +/-4 window of each.",
     ),
     allowed_in(
         "NSF-CORE-SCOPE-RULE-SOURCE-TAGS",
@@ -3454,7 +3465,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-GLOBAL-FALLBACK-ADMISSION",
         "src/core/search.rs",
         "global_store_fallback_memories",
-        ".map(|(_, memories)| memories)",
+        ".map(|(_, memories, feedback)| (memories, Some(feedback)))",
         "EXEMPLARY, and the positive control cited by bd-p42mq. The callee returns Option, not Result, and every None return is immediately preceded by a degraded.push -- scope_metadata_unavailable, global_memory_disabled, global_lane_migration_required, and scope_metadata_unavailable again. The REASON travels out through the degraded channel; only the VALUE falls back, which is exactly what a fail-soft default should look like. The genuinely untrustworthy case is separated and fails hard instead: workspace_memory_policy(..)? propagates one line above, matching the doc comment's promise that an untrustworthy privacy policy fails the request rather than enabling the lane.",
     ),
     allowed_in(
@@ -3520,6 +3531,293 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "and_then(|value| value.get(\"degraded\"))",
         "ACCUMULATOR INITIALIZATION: an empty vector is the correct starting point for a list that `degraded.extend(..)` appends to immediately below, and absence of prior degradations genuinely means there were none. The report's own error path is handled further up, where it pushes a degradation of its own and yields None.",
     ),
+    allowed_in(
+        "NSF-CLI-EVIDENCE-WITHDRAW-XOR-GUARDED",
+        "src/cli/evidence.rs",
+        "handle_withdraw",
+        "evidence_id: args.evidence_id.as_deref().unwrap_or_default(),",
+        "UNREACHABLE: `if args.evidence_id.is_some() == args.session.is_some()` returns DomainError::Usage above, and `if let Some(session_id) = args.session.as_deref()` returns on the session branch before this line, so `args.evidence_id` is guaranteed Some here.",
+    ),
+    allowed_in(
+        "NSF-CLI-CASS-IMPORT-REVIEW-DEGRADATIONS",
+        "src/cli/mod.rs",
+        "cass_import_response_v2",
+        ".map(CassImportReviewReport::degradations)",
+        "An optional `review: Option<&CassImportReviewReport>` contributes no review degradations when corroboration review was not requested; history and import degradations are still chained alongside.",
+    ),
+    allowed_in(
+        "NSF-CLI-INDEX-BACKFILL-NEXT-AFTER",
+        "src/cli/mod.rs",
+        "handle_index_backfill_anchors",
+        "report.next_after.as_deref().unwrap_or_default(),",
+        "In the compact pipe-delimited summary line `INDEX_BACKFILL_ANCHORS|...|next_after`, an absent pagination cursor when the scan finished in one page renders as an empty trailing field while the JSON surface preserves `next_after: null`.",
+    ),
+    allowed_in(
+        "NSF-CLI-OBSERVED-ASSET-GENERATIONS",
+        "src/cli/mod.rs",
+        "observed_store_generations",
+        ".map(|generation| vec![(\"search\".to_owned(), generation)])",
+        "When `status.index_generation` is None, no search-asset generation was observed, so `asset_generations` is empty rather than fabricating a generation equal to the database generation.",
+    ),
+    allowed_in(
+        "NSF-CLI-RESOLVE-GENERATIONS-UNAVAILABLE",
+        "src/cli/mod.rs",
+        "resolve_store_integrity_generations",
+        "supplied_assets.unwrap_or_default(),",
+        "When live store generations cannot be observed, `GenerationSource::Unavailable` is returned explicitly alongside whatever caller-supplied asset generations exist.",
+    ),
+    allowed_in(
+        "NSF-CORE-CONFLICT-PROPOSAL-NO-ADD-TAGS",
+        "src/core/conflict_proposal.rs",
+        "create_in_transaction",
+        "let receipt = ProposalReceipt {",
+        "When the planned conflict-resolution actions include no `AddTags` action for a memory, its proposal receipt records an empty added-tags list.",
+    ),
+    allowed_in(
+        "NSF-CORE-WHY-NOT-ENTITY-REASON-CODES",
+        "src/core/context_why_not.rs",
+        "entity_report",
+        ".map(|cause| vec![cause.code().to_owned()])",
+        "An unselected entity observation with no structured omission cause yields an empty `reason_codes` vector while `message` carries the human explanation.",
+    ),
+    allowed_in(
+        "NSF-CORE-WHY-NOT-ENTITY-PROVENANCE",
+        "src/core/context_why_not.rs",
+        "entity_report",
+        ".map(|details| details.provenance)",
+        "An entity observation without native retrieval details carries no native provenance entries; absence is preserved rather than invented.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-EVIDENCE-NO-TARGETS",
+        "src/core/error_recall_evidence.rs",
+        "read_with",
+        "if repairs.is_empty() && proofs.is_empty() {",
+        "When an error fingerprint has neither helpful repairs nor proof links after filtering harmful repairs, zero evidence cards is the true result before opening a snapshot.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-MEMORY-NO-SELECTED",
+        "src/core/error_recall_memory.rs",
+        "read_observed",
+        "if selected.is_empty() {",
+        "When no target IDs parse as canonical `MemoryId`s, returns empty before building an empty SQL IN-list.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-MEMORY-ALL-WITHHELD",
+        "src/core/error_recall_memory.rs",
+        "read_observed",
+        "if ids.is_empty() {",
+        "After `withheld_ids(connection, workspace, &ids)?` propagates any query error, if all candidate memories were withheld by scope or redaction policy, returns empty before batch hydration.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-RULES-NO-SELECTED",
+        "src/core/error_recall_rules.rs",
+        "read_observed",
+        "if selected.is_empty() {",
+        "When no target IDs parse as canonical `RuleId`s, returns empty before building an empty SQL IN-list.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-RULES-NONE-ADMITTED",
+        "src/core/error_recall_rules.rs",
+        "read_observed",
+        "if ids.is_empty() {",
+        "After the pre-admission rule query succeeded with `?`, if no candidate rules were admitted, returns empty before loading relations.",
+    ),
+    allowed_in(
+        "NSF-CORE-ERROR-RECALL-RULES-RELATIONS",
+        "src/core/error_recall_rules.rs",
+        "read_observed",
+        "relations.tags.remove(id).unwrap_or_default(),",
+        "Two adjacent sites, multiplicity 2: `relations.tags` and `relations.sources` after `load_relations` succeeded with `?`. A map miss means the rule genuinely has no tags or source memory IDs.",
+    ),
+    allowed_in(
+        "NSF-CORE-HANDOFF-RESERVATION-DEGRADED-CODES",
+        "src/core/handoff.rs",
+        "agent_mail_reservation_section",
+        "\"degradedCodes\": source.map(|source| source.degraded.iter().map(|entry| &entry.code).collect::<Vec<_>>()).unwrap_or_default(),",
+        "When no coordination source wrapper was provided, `degradedCodes` is empty while the section's `verified` confidence and unverified-evidence guidance stay explicit.",
+    ),
+    allowed_in(
+        "NSF-CORE-IMPACT-GRAPH-ANCHOR-BUDGET",
+        "src/core/impact_graph.rs",
+        "anchors",
+        "self.phase.truncated = true;",
+        "When the per-phase source row budget (`SOURCE_LIMIT`) is exhausted, `self.phase.truncated = true` records the truncation explicitly before returning no further rows.",
+    ),
+    allowed_in(
+        "NSF-CORE-INDEX-EMPTY-VERIFIED-REVISION",
+        "src/core/index.rs",
+        "build_empty_index",
+        "delta::verified_embedder_identity(",
+        "Two sites, multiplicity 2 (fast and quality vector tiers). As documented in the comment above, an unverified producer may represent an empty vector index header while delta reuse requires a complete verified identity before appending any vectors.",
+    ),
+    allowed_in(
+        "NSF-CORE-INDEX-DELTA-EMPTY-TEXTS",
+        "src/core/index_delta_batch.rs",
+        "infer_inputs",
+        "if texts.is_empty() {",
+        "Guarded after `validate_producer(cx, embedder, expected_identity, tier)?`, so producer validation still runs and an empty input slice yields zero embeddings without invoking the provider.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-REMEMBER-DEFERRED-NEIGHBORS",
+        "src/core/memory.rs",
+        "propose_curation_candidate_for_remember",
+        "let search_neighbors = if allow_search_neighbors {",
+        "When `allow_search_neighbors` is false on a deferred index write, search-neighbor lookup is intentionally skipped while deterministic tag-overlap clustering still runs.",
+    ),
+    allowed_in(
+        "NSF-CORE-RULE-PLAYBOOK-COMMAND-PATTERN",
+        "src/core/rule.rs",
+        "extract_playbook_lessons",
+        "let command_pattern = extract_command_pattern(statement).unwrap_or_default();",
+        "Two sites, multiplicity 2. Playbook sentences without an extracted shell command pattern carry an empty command pattern and must qualify through `is_explicit_playbook_directive(statement)` instead.",
+    ),
+    allowed_in(
+        "NSF-CORE-SEARCH-CALIBRATION-CACHE-HASH",
+        "src/core/search.rs",
+        "search_score_calibration_jsonl_cache_fingerprint",
+        "content_hash: load.jsonl_hash.clone().unwrap_or_default(),",
+        "Reached only in the `Present` branch after `unreadable_reason`, `!load.exists`, and `load.too_large` have all been handled by earlier arms, where `jsonl_hash` is populated from the read bytes.",
+    ),
+    allowed_in(
+        "NSF-CORE-SUBSCRIBE-LINKS-EMPTY-PENDING",
+        "src/core/subscribe_links.rs",
+        "notices",
+        "if pending.is_empty() {",
+        "A poll with no pending memory changes has no link-endpoint invalidations to replay; checking `pending.is_empty()` avoids opening link storage unnecessarily.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-JOURNAL-DRY-RUN-ROWS",
+        "src/daemon/job_journal.rs",
+        "record_daemon_foreground_report",
+        "if report.dry_run || run_id == \"dry-run\" {",
+        "A dry-run foreground daemon report intentionally writes and returns no durable daemon job rows.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-JOURNAL-MISSING-TABLE",
+        "src/daemon/job_journal.rs",
+        "load_daemon_job_rows",
+        "let Some(mut file) = open_existing(&path, false)? else {",
+        "When the daemon job journal file does not exist yet, `open_existing` returns `Ok(None)` while symlink or I/O errors propagate through `?`.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-CONTEXT-STRING-LIST-ABSENT",
+        "src/daemon/server.rs",
+        "context_string_list_any",
+        "let Some(key) = keys.iter().find(|key| object.contains_key(**key)) else {",
+        "When none of the optional alias keys (`taskPaths` / `task_paths`) are present in the request object, returns an empty list; present malformed or blank values return `Err(invalid())` below.",
+    ),
+    allowed_in(
+        "NSF-DB-MEMORY-TEMPORAL-RULE-RELATIONS",
+        "src/db/memory_temporal.rs",
+        "visit_index_rules_in_current_snapshot",
+        "let rule_tags = tags.remove(&rule.id).unwrap_or_default();",
+        "Two adjacent sites, multiplicity 2 (`tags` and `sources`). Both batch queries over the page's rule IDs have already propagated errors via `?`, so a map miss means the rule has no tags or source memory IDs.",
+    ),
+    allowed_in(
+        "NSF-DB-TEST-QUERY-SQL-CAPTURE",
+        "src/db/mod.rs",
+        "capture_query_sql_for_test",
+        "let captured = QUERY_SQL_LOG.with(|log| log.borrow_mut().take().unwrap_or_default());",
+        "Test-only helper (`#[cfg(test)] fn capture_query_sql_for_test`) that initializes `QUERY_SQL_LOG` to `Some(Vec::new())` two lines above before taking the captured vector.",
+    ),
+    allowed_in(
+        "NSF-DB-CASS-RESCREEN-STORED-METADATA",
+        "src/db/mod.rs",
+        "cass_evidence_rescreen_decision",
+        "serde_json::from_str(span.metadata_json.as_deref().unwrap_or_default())",
+        "FAILS CLOSED: the default feeds `serde_json::from_str(\"\")`, which immediately errors and maps to `malformed_evidence_input(\"invalid stored evidence security metadata\")?`.",
+    ),
+    allowed_in(
+        "NSF-DB-CODE-ANCHOR-SOURCES-PRE-V133",
+        "src/db/mod.rs",
+        "list_memory_code_anchor_sources",
+        "if self.schema_version()?.unwrap_or(0) < V133_MEMORY_CODE_ANCHOR_SOURCES.version() {",
+        "After `schema_version()?` succeeds, read-only inspection on a pre-V133 store where `memory_code_anchor_sources` does not exist yet returns no durable code-anchor source rows without mutating the older schema.",
+    ),
+    allowed_in(
+        "NSF-DB-CODE-ANCHOR-SOURCES-MAP-MISS",
+        "src/db/mod.rs",
+        "list_memory_code_anchor_sources",
+        ".unwrap_or_default()",
+        "After `code_anchor_sources_for_memories(&[memory_id])?` succeeds, a map miss means that memory has no durable code-anchor source rows.",
+    ),
+    allowed_in(
+        "NSF-DB-ANCHOR-REFRESH-DURABLE-BINDINGS",
+        "src/db/mod.rs",
+        "refresh_memory_anchor_index_batch",
+        "let durable = bindings.remove(memory_id).unwrap_or_default();",
+        "After `code_anchor_sources_for_memories` succeeded with `?`, a memory absent from `bindings` has no durable code-anchor bindings to merge with text-extracted anchors.",
+    ),
+    allowed_in(
+        "NSF-DB-PREPARE-INDEX-CANONICAL-FRESHNESS",
+        "src/db/mod.rs",
+        "prepare_memory_index_metadata",
+        "let canonical = canonical_freshness.remove(&memory_id).unwrap_or_default();",
+        "After the canonical anchor query succeeded with `?`, a memory absent from `canonical_freshness` has no existing anchor rows.",
+    ),
+    allowed_in(
+        "NSF-DB-CONSOLIDATION-METADATA-UNTAGGED",
+        "src/db/mod.rs",
+        "memory_consolidation_metadata_in_current_snapshot",
+        "tags: tags.remove(id).unwrap_or_default(),",
+        "After the `memory_tags` batch query succeeded with `?` in the current snapshot, a map miss is an untagged memory.",
+    ),
+    allowed_in(
+        "NSF-DB-MEMORIES-BY-TAG-ZERO-LIMIT",
+        "src/db/mod.rs",
+        "list_memories_by_tag_bounded",
+        "if limit == 0 {",
+        "A caller requesting `limit == 0` gets zero rows before any SQL query is issued.",
+    ),
+    allowed_in(
+        "NSF-EVAL-LIST-FIXTURES-MISSING-DEFAULT",
+        "src/eval/runner.rs",
+        "list_fixtures_allowing_missing_default",
+        "if allow_missing_default && !fixture_dir.exists() {",
+        "After symlink validation (`?`), when the caller explicitly opts into `allow_missing_default` for an uninitialized default fixture directory, returns an empty fixture list; existing directories propagate `discover_fixtures(fixture_dir)?`.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-SNAPSHOT-INSPECT-DEFAULT-PROJECTION",
+        "src/graph/mod.rs",
+        "inspect_stored_memory_link_snapshot",
+        "let projection = projection.unwrap_or_default();",
+        "Reached only after `if let Some(snapshot) = snapshot && projection.is_none()` returned early with `source_selection_known: false`, so either `projection` is `Some` or no stored snapshot exists and the default projection thresholds are validated below.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-PACK-DNA-NEIGHBORS-ZERO-LIMIT",
+        "src/graph/pack_dna_neighbors.rs",
+        "select_with_checkpoint",
+        "if limit == 0 {",
+        "After `checkpoint(0)?`, a caller asking for zero PPR neighbors gets an empty vector without allocating a heap.",
+    ),
+    allowed_in(
+        "NSF-OUTPUT-DOCTOR-LENS-SOURCE-MODES",
+        "src/output/mod.rs",
+        "gather_doctor_config_lint_findings",
+        ".map(|mode| (lens.id.clone(), mode.clone()))",
+        "When workspace config has no lens overrides with a `source_mode`, `lens_source_modes` is empty for lint correlation while config load/parse issues are surfaced by dedicated doctor checks.",
+    ),
+    allowed_in(
+        "NSF-SERVE-SEARCH-DEDUPE-DEFAULT",
+        "src/serve.rs",
+        "serve_search_options",
+        "\"/v1/search query parameter `dedupe` must be doc_id or mi.\"",
+        "Omitted `dedupe` query parameter uses `SearchDedupMode::default()` while present malformed values fail closed through `serve_usage_error` and `.transpose()?`.",
+    ),
+    allowed_in(
+        "NSF-SERVE-CONTEXT-TASK-PATHS-ABSENT",
+        "src/serve.rs",
+        "serve_context_options",
+        "let task_paths = request.query.get(\"taskPath\").cloned().unwrap_or_default();",
+        "Omitted `taskPath` query parameter yields no task paths, while present blank values are rejected on the next line by `is_effectively_empty_query_value`.",
+    ),
+    allowed_in(
+        "NSF-SERVE-PARSE-OPTIONAL-QUERY-PARAMS",
+        "src/serve.rs",
+        "parse",
+        ".transpose()?",
+        "Three optional query parameters in `parse` (`speed`, `sourceMode`, `memoryScope`), multiplicity 3: omitted parameters take their documented defaults while malformed present values fail closed through `serve_usage_error` and `.transpose()?`.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];
@@ -3550,6 +3848,7 @@ const fn must_fix(
     id: &'static str,
     file: &'static str,
     fragment: &'static str,
+    provenance: &'static str,
     follow_up: &'static str,
     reason: &'static str,
 ) -> InventoryRule {
@@ -3559,6 +3858,7 @@ const fn must_fix(
         function: None,
         fragment,
         disposition: Disposition::MustFix,
+        provenance: Some(provenance),
         follow_up: Some(follow_up),
         reason,
     }
@@ -3584,6 +3884,7 @@ const fn allowed_in(
         function: Some(function),
         fragment,
         disposition: Disposition::Allowed,
+        provenance: None,
         follow_up: None,
         reason,
     }
@@ -3601,6 +3902,7 @@ const fn allowed(
         function: None,
         fragment,
         disposition: Disposition::Allowed,
+        provenance: None,
         follow_up: None,
         reason,
     }
@@ -4002,12 +4304,78 @@ fn no_silent_fallback_unclassified_findings_only_shrink() -> TestResult {
     Err(format!("{summary}\n{}", problems.join("\n")))
 }
 
+fn check_follow_up_beads_open_in_jsonl(jsonl: &str, rules: &[InventoryRule]) -> Result<(), String> {
+    let mut statuses: BTreeMap<String, String> = BTreeMap::new();
+    for (line_idx, line) in jsonl.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|err| {
+            format!(
+                "failed to parse .beads/issues.jsonl line {}: {err}",
+                line_idx + 1
+            )
+        })?;
+        if let (Some(id), Some(status)) = (
+            value.get("id").and_then(serde_json::Value::as_str),
+            value.get("status").and_then(serde_json::Value::as_str),
+        ) {
+            statuses.insert(id.to_owned(), status.to_owned());
+        }
+    }
+
+    let mut problems = Vec::new();
+    for rule in rules {
+        if rule.disposition != Disposition::MustFix {
+            continue;
+        }
+        let Some(follow_up) = rule.follow_up else {
+            problems.push(format!(
+                "{} is missing a follow_up scheduling bead",
+                rule.id
+            ));
+            continue;
+        };
+        match statuses.get(follow_up).map(String::as_str) {
+            Some("open") | Some("in_progress") => {}
+            Some(other) => problems.push(format!(
+                "{} schedules remediation under `{follow_up}`, whose tracker status is `{other}` \
+                 (must be `open` or `in_progress`, never closed; see bd-vylt2)",
+                rule.id
+            )),
+            None => problems.push(format!(
+                "{} schedules remediation under `{follow_up}`, which does not exist in \
+                 .beads/issues.jsonl (see bd-vylt2)",
+                rule.id
+            )),
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 #[test]
 fn no_silent_fallback_must_fix_entries_have_follow_up_beads() -> TestResult {
     let mut missing = Vec::new();
 
     for rule in INVENTORY_RULES {
         if rule.disposition == Disposition::MustFix {
+            match rule.provenance {
+                Some(bead) if PROVENANCE_BEADS.contains(&bead) => {}
+                Some(bead) => missing.push(format!(
+                    "{} references unknown provenance `{bead}`: {}",
+                    rule.id, rule.reason
+                )),
+                None => missing.push(format!(
+                    "{} has no provenance bead: {}",
+                    rule.id, rule.reason
+                )),
+            }
             match rule.follow_up {
                 Some(bead) if FOLLOW_UP_BEADS.contains(&bead) => {}
                 Some(bead) => missing.push(format!(
@@ -4031,11 +4399,54 @@ fn no_silent_fallback_must_fix_entries_have_follow_up_beads() -> TestResult {
         }
     }
 
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(missing.join("\n"))
+    if !missing.is_empty() {
+        return Err(missing.join("\n"));
     }
+
+    let issues_path = repo_path(".beads/issues.jsonl");
+    if issues_path.is_file() {
+        let jsonl = fs::read_to_string(&issues_path)
+            .map_err(|err| format!("failed to read {}: {err}", issues_path.display()))?;
+        check_follow_up_beads_open_in_jsonl(&jsonl, INVENTORY_RULES)?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn follow_up_liveness_guard_rejects_closed_or_missing_scheduling_beads() -> TestResult {
+    let sample_rules = [InventoryRule {
+        id: "NSF-TEST-SAMPLE",
+        file: "src/core/backup.rs",
+        function: None,
+        fragment: "unwrap_or_default()",
+        disposition: Disposition::MustFix,
+        provenance: Some("bd-sos5.4"),
+        follow_up: Some("bd-n950f"),
+        reason: "Sample must_fix rule for liveness guard test.",
+    }];
+
+    let open_jsonl = r#"{"id":"bd-n950f","status":"open"}"#;
+    check_follow_up_beads_open_in_jsonl(open_jsonl, &sample_rules)?;
+
+    let in_progress_jsonl = r#"{"id":"bd-n950f","status":"in_progress"}"#;
+    check_follow_up_beads_open_in_jsonl(in_progress_jsonl, &sample_rules)?;
+
+    let closed_jsonl = r#"{"id":"bd-n950f","status":"closed"}"#;
+    let closed_err = check_follow_up_beads_open_in_jsonl(closed_jsonl, &sample_rules)
+        .expect_err("closed scheduling bead must be rejected");
+    if !closed_err.contains("status is `closed`") {
+        return Err(format!("unexpected closed error: {closed_err}"));
+    }
+
+    let missing_jsonl = r#"{"id":"bd-other","status":"open"}"#;
+    let missing_err = check_follow_up_beads_open_in_jsonl(missing_jsonl, &sample_rules)
+        .expect_err("missing scheduling bead must be rejected");
+    if !missing_err.contains("does not exist in .beads/issues.jsonl") {
+        return Err(format!("unexpected missing error: {missing_err}"));
+    }
+
+    Ok(())
 }
 
 /// A `must_fix` row asserts an outstanding defect. When its site is repaired

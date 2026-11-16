@@ -107,7 +107,7 @@ impl MeshCliDegradation {
             message: format!(
                 "Mesh foreground storage was not inspected because {workspace_path}/.ee/ee.db does not exist."
             ),
-            repair: format!("Run `ee init --workspace {workspace_arg} --json`."),
+            repair: format!("ee init --workspace {workspace_arg} --json"),
         }
     }
 

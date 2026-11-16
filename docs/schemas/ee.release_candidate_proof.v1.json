@@ -221,6 +221,11 @@
             "type": ["string", "null"],
             "enum": [null, "CANCELLED", "TIMEOUT", "INFRA_ERROR", "NOT_RUN"],
             "description": "Why a stage produced NO verdict, as distinct from failing. Cancellation by a superseding push, a timeout attributable to a layer, an admission refusal, or a stage a degraded fleet never reached are all NOT-FAILURE and NOT-SUCCESS. The absence of this third state is why every gate in this repo has had to lie in one direction or the other."
+          },
+          "terminatorClass": {
+            "type": ["string", "null"],
+            "enum": [null, "product_verdict", "infra_refusal", "timeout", "signal"],
+            "description": "Classified terminator for a dispatched verdict (bd-reality-core-convergence-1azkt.70): distinguishes a real product verdict from an infrastructure refusal, a timeout, or an external signal."
           }
         }
       }

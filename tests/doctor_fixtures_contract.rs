@@ -177,6 +177,13 @@ fn source_text() -> String {
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).expect("read src dir") {
             let path = entry.expect("src entry").path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+            {
+                continue;
+            }
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -379,6 +386,13 @@ fn doctor_fixtures_specs_have_one_complete_section_per_fixture() {
     let mut headings = Vec::new();
     for entry in fs::read_dir(&spec_dir).expect("read spec dir") {
         let path = entry.expect("spec entry").path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
         for line in read(&path).lines() {
             if let Some(id) = line.strip_prefix("## ") {
                 headings.push(id.to_owned());

@@ -422,16 +422,13 @@ fn why_not_is_deterministic_across_runs() -> TestResult {
     let memory_id = MemoryId::from_str(&memory_id_raw).map_err(|error| format!("{error:?}"))?;
     let task = "prepare release verification";
 
-    let first = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, task, 20),
-        memory_id,
-    )
-    .map_err(|error| format!("first run failed: {error:?}"))?;
-    let second = explain_why_not_default(
-        &why_not_options(&workspace_path, &database_path, task, 20),
-        memory_id,
-    )
-    .map_err(|error| format!("second run failed: {error:?}"))?;
+    let mut options = why_not_options(&workspace_path, &database_path, task, 20);
+    options.as_of = Some(chrono::Utc::now());
+
+    let first = explain_why_not_default(&options, memory_id)
+        .map_err(|error| format!("first run failed: {error:?}"))?;
+    let second = explain_why_not_default(&options, memory_id)
+        .map_err(|error| format!("second run failed: {error:?}"))?;
 
     let first_value = serde_json::to_value(&first).map_err(|error| error.to_string())?;
     let second_value = serde_json::to_value(&second).map_err(|error| error.to_string())?;

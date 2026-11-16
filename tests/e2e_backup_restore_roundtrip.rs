@@ -1375,6 +1375,7 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // components entirely would otherwise make this narrowing pass on nothing.
     for pointer in [
         "/data/pack/snapshotIdentity/components/request",
+        "/data/pack/snapshotIdentity/components/storeScopes",
         "/data/pack/snapshotIdentity/digest",
         // DIGESTS OVER A TOLERATED VALUE (bd-64w73). These two hash score-bearing content
         // -- `items` covers the item scores, `renderedText` covers the why text, which
@@ -1550,6 +1551,7 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
             // camelCase bug reach a real run.
             "snapshotIdentity": {"components": {
                 "request": "blake3:aaa",
+                "storeScopes": "blake3:jjj",
                 "referenceTime": "blake3:bbb",
                 "qualityScoring": "blake3:ccc",
                 "items": "blake3:ddd",
@@ -1560,13 +1562,17 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
             }, "digest": "blake3:iii"}
         }}
     });
-    // All eight present: canonicalizes, and exactly TWO pointers are gone.
+    // All nine present: canonicalizes, and the store-local pointers are gone.
     let full = canonical_context_stdout(one_missing.clone())
         .map_err(|error| format!("a complete snapshotIdentity must canonicalize: {error}"))?;
     let rendered = String::from_utf8(full)
         .map_err(|error| format!("canonical bytes must be UTF-8: {error}"))?;
     for (digest, label) in [
         ("blake3:aaa", "request (store-local snapshot generation)"),
+        (
+            "blake3:jjj",
+            "storeScopes (store-local filesystem address digest)",
+        ),
         ("blake3:iii", "digest (composite of the above)"),
     ] {
         assert!(

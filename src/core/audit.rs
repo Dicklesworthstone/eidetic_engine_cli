@@ -417,7 +417,7 @@ pub fn show_operation(options: &AuditShowOptions) -> Result<AuditShowReport, Dom
         .ok_or_else(|| DomainError::NotFound {
             resource: "audit row".to_owned(),
             id: options.audit_id.clone(),
-            repair: Some("Run `ee audit timeline --json` to list audit row IDs.".to_owned()),
+            repair: Some("ee audit timeline --json".to_owned()),
         })?;
     let linked_snapshot = linked_snapshot(&connection, &row)?;
     let hash_chain_valid = verify_entries(

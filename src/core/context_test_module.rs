@@ -1057,10 +1057,13 @@ mod tests {
         assert!(report.success, "{:?}", report.error);
         let revision = report.new_id.ok_or("revision missing")?;
         let db = DbConnection::open_file(database)?;
-        assert!(matches!(
-            super::sentinel_candidate_freshness(&db, &revision, Utc::now())?,
-            super::SentinelCandidateFreshness::Blocked("missing_result")
-        ), "metadata edits must not bypass --require-fresh-sentinels or inherit an old pass");
+        assert!(
+            matches!(
+                super::sentinel_candidate_freshness(&db, &revision, Utc::now())?,
+                super::SentinelCandidateFreshness::Blocked("missing_result")
+            ),
+            "metadata edits must not bypass --require-fresh-sentinels or inherit an old pass"
+        );
         let specs = db.list_memory_sentinel_specs(&revision)?;
         assert_eq!(specs.len(), 1);
         db.insert_memory_sentinel_result(&passing_result(specs[0].spec_hash.clone())?)?;
@@ -4622,8 +4625,7 @@ pub fn unrelated_context() -> u64 {{
                 .iter()
                 .enumerate()
                 .map(|(index, (id, _))| {
-                    let mut hit =
-                        ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
+                    let mut hit = ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
                     hit.doc_id = if present {
                         id.clone()
                     } else {
@@ -4814,8 +4816,7 @@ pub fn unrelated_context() -> u64 {{
                     .map_err(|error| error.to_string())?;
                 assert_eq!(candidates.len(), if count == 0 { 0 } else { count + 2 });
                 assert!(candidates.iter().all(|candidate| {
-                    candidate.memory_id == linked_memory_id
-                        && candidate.content == linked_content
+                    candidate.memory_id == linked_memory_id && candidate.content == linked_content
                 }));
                 assert_eq!(metrics.unique_memory_ids, usize::from(count > 0));
                 let expected_memory_reads = usize::from(count > 0 && !use_preloaded);
@@ -5001,7 +5002,11 @@ pub fn unrelated_context() -> u64 {{
             .rows
             .as_ref()
             .ok_or_else(|| "healthy evidence batch failed".to_owned())?;
-        assert_eq!(rows.len(), 3, "duplicate hits share one hydrated source row");
+        assert_eq!(
+            rows.len(),
+            3,
+            "duplicate hits share one hydrated source row"
+        );
         let no_source_tables = DbConnection::open_memory().map_err(|error| error.to_string())?;
         for hit in search
             .results
@@ -5074,7 +5079,9 @@ pub fn unrelated_context() -> u64 {{
             )
         });
         assert!(
-            absent_candidates.map_err(|error| error.to_string())?.is_empty(),
+            absent_candidates
+                .map_err(|error| error.to_string())?
+                .is_empty(),
             "native selection must preserve the same successful-batch absence"
         );
         assert!(
@@ -5209,16 +5216,20 @@ pub fn unrelated_context() -> u64 {{
             false,
         );
         assert!(unavailable.is_empty());
+        assert!(
+            unavailable_degraded
+                .iter()
+                .any(|entry| { entry.code == "context_candidate_memory_batch_unavailable" })
+        );
         assert!(unavailable_degraded.iter().any(|entry| {
-            entry.code == "context_candidate_memory_batch_unavailable"
-        }));
-        assert!(unavailable_degraded.iter().any(|entry| {
-            entry.message.contains("linked memory could not be revalidated")
+            entry
+                .message
+                .contains("linked memory could not be revalidated")
         }));
         assert!(
-            !unavailable_degraded.iter().any(|entry| {
-                entry.message.contains("memory that is no longer present")
-            }),
+            !unavailable_degraded
+                .iter()
+                .any(|entry| { entry.message.contains("memory that is no longer present") }),
             "a failed memory read must not claim successful source absence"
         );
 
@@ -5323,21 +5334,22 @@ pub fn unrelated_context() -> u64 {{
             );
             if matches!(scenario, "workspace" | "identity") {
                 assert!(rejected_degraded.iter().any(|entry| {
-                    entry.message.contains("live pack admission proof is incomplete")
+                    entry
+                        .message
+                        .contains("live pack admission proof is incomplete")
                 }));
             }
             if scenario == "expired" {
                 assert_eq!(rejected_metrics.temporal_filtered_candidates, 1);
             }
             if scenario == "tombstone" {
-                let (included, _, _) = resolve_linked(
-                    &connection,
-                    &linked_batch,
-                    Some(&preloaded),
-                    &filters,
-                    true,
+                let (included, _, _) =
+                    resolve_linked(&connection, &linked_batch, Some(&preloaded), &filters, true);
+                assert_eq!(
+                    included.len(),
+                    1,
+                    "explicit tombstone inclusion is preserved"
                 );
-                assert_eq!(included.len(), 1, "explicit tombstone inclusion is preserved");
 
                 // Original CASS evidence has independent source admission even
                 // when its derived parent is not selected as a memory.
@@ -5389,9 +5401,11 @@ pub fn unrelated_context() -> u64 {{
             false,
         );
         assert!(aliased.is_empty());
-        assert!(aliased_degraded.iter().any(|entry| {
-            entry.message.contains("malformed memory identifier")
-        }));
+        assert!(
+            aliased_degraded
+                .iter()
+                .any(|entry| { entry.message.contains("malformed memory identifier") })
+        );
 
         // Break only the bulk path's optional cached-verdict read. The real
         // span and session reads remain usable, with admission re-derived
@@ -5434,11 +5448,9 @@ pub fn unrelated_context() -> u64 {{
             1,
             "only a failed batch enables point reads, with one batch diagnostic"
         );
-        assert!(
-            resolution_degraded[0]
-                .message
-                .contains("individual source reads were used during candidate resolution and pack admission")
-        );
+        assert!(resolution_degraded[0].message.contains(
+            "individual source reads were used during candidate resolution and pack admission"
+        ));
         assert!(
             super::resolve_evidence_pack_hit(
                 &connection,
@@ -13584,7 +13596,9 @@ pub fn unrelated_context() -> u64 {{
         let mut unreadable = unbound.clone();
         unreadable.binding_available = false;
         let mut different_team = scope.clone();
-        different_team.team_members.insert("private-peer-c".to_owned());
+        different_team
+            .team_members
+            .insert("private-peer-c".to_owned());
         let mut different_agent = scope.clone();
         different_agent.current_agent = Some("private-other-agent".to_owned());
         let mut failed_roster = scope.clone();
@@ -13653,7 +13667,10 @@ pub fn unrelated_context() -> u64 {{
             )
         };
         request.store_scope_identity = Some(super::hash_context_store_scopes(
-            &workspace, &scope, "store_absent", None,
+            &workspace,
+            &scope,
+            "store_absent",
+            None,
         ));
         let absent = hash(&request);
         let mut global = workspace.clone();
@@ -13704,7 +13721,10 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn pack_store_scope_identity_reads_real_bindings_and_separates_equal_stores() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace = directory.path().canonicalize().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x7101)).to_string();
         let mut options = context_options_with_coordination_snapshot(PathBuf::new());
         options.workspace_path = workspace.clone();

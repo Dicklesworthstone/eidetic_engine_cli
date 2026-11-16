@@ -98,6 +98,15 @@ JSON
         printf 'Usage error: unknown br subcommand\n' >&2
         exit 64
         ;;
+    hang)
+        printf '{"schema":"br.ready.v1","partial":true'
+        printf 'fake br emitted a partial diagnostic before hanging\n' >&2
+        sleep 30
+        ;;
+    malformed)
+        printf 'worker filter output was malformed before JSON could be produced\n' >&2
+        exit 65
+        ;;
     *)
         printf 'unknown fake br mode: %s\n' "$mode" >&2
         exit 65
@@ -122,7 +131,12 @@ fn prepend_path(bin_dir: &Path) -> OsString {
     path
 }
 
-fn run_wrapper_with_args(root: &Path, mode: &str, args: &[&str]) -> Result<(Output, u128), String> {
+fn run_wrapper_with_timeout(
+    root: &Path,
+    mode: &str,
+    args: &[&str],
+    timeout_ms: &str,
+) -> Result<(Output, u128), String> {
     let bin_dir = install_fake_br(root)?;
     let state_file = root.join(format!("fake-br-state-{mode}"));
     let start = Instant::now();
@@ -134,27 +148,17 @@ fn run_wrapper_with_args(root: &Path, mode: &str, args: &[&str]) -> Result<(Outp
         .env("EE_FAKE_BR_STATE", &state_file)
         .env("EE_FAKE_BR_WORKSPACE_ID", WORKSPACE_ID)
         .env("EE_FAKE_BR_REQUEST_ID", REQUEST_ID)
-        // PIN THE ATTEMPT BUDGET: these tests assert LOGIC, never latency.
-        //
-        // br_retry.sh defaults BR_RETRY_ATTEMPT_TIMEOUT_MS to 10000 and exits
-        // 124 when one attempt exceeds it (br_retry.sh:259). Inheriting that
-        // PRODUCTION default makes every test here race the host, because each
-        // attempt forks python plus a bash fake br. The identical omission in
-        // scripts/e2e_br_concurrent_race.sh was measured on 2026-10-19: 8
-        // passes and one exit 124 in 9 consecutive runs, the failing run taking
-        // 10.34s against a 10s budget. That script is an orphan, so its flake
-        // was invisible; this suite is WIRED into tests/contracts.rs, so the
-        // same omission here reds a real gate intermittently.
-        //
-        // Safe to pin generously because no test in this file asserts on
-        // timing: the three modes are transient, permanent and actionable, all
-        // of which check stdout and recovery behaviour. There is no hang arm
-        // here needing a tight bound -- that assertion lives in the shell
-        // script, which keeps its deliberate 150ms budget.
-        .env("BR_RETRY_ATTEMPT_TIMEOUT_MS", "60000")
+        .env("BR_RETRY_ATTEMPT_TIMEOUT_MS", timeout_ms)
+        .env("BR_RETRY_TAIL_BYTES", "256")
+        .env("BR_RETRY_TMPDIR", root)
         .output()
         .map_err(|error| format!("spawn scripts/br_retry.sh: {error}"))?;
     Ok((output, start.elapsed().as_millis()))
+}
+
+fn run_wrapper_with_args(root: &Path, mode: &str, args: &[&str]) -> Result<(Output, u128), String> {
+    // PIN THE ATTEMPT BUDGET: logic tests assert output and recovery, never latency.
+    run_wrapper_with_timeout(root, mode, args, "60000")
 }
 
 fn run_wrapper(root: &Path, mode: &str) -> Result<(Output, u128), String> {
@@ -319,5 +323,88 @@ fn br_retry_actionable_scans_full_ready_queue_before_filtering() -> TestResult {
     )?;
     ensure_json_eq(&body, "/0/id", &json!("bd-actionable"))?;
     ensure_json_eq(&body, "/0/status", &json!("open"))?;
+    Ok(())
+}
+
+#[test]
+fn br_retry_hang_guard_returns_124_and_retains_partial_artifacts() -> TestResult {
+    let root = retained_artifact_root("hang-guard")?;
+    let (output, elapsed_ms) =
+        run_wrapper_with_timeout(&root, "hang", &["ready", "--json"], "150")?;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    ensure(
+        output.status.code() == Some(124),
+        format!(
+            "expected br_retry hang guard exit 124, got {:?}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure(
+        elapsed_ms <= 5000,
+        format!("expected hang guard to return quickly, elapsed_ms={elapsed_ms}"),
+    )?;
+
+    let stderr_events = parse_json_lines(&stderr)?;
+    let last_event = stderr_events
+        .iter()
+        .rev()
+        .find(|event| event.get("schema") == Some(&json!("ee.beads_retry.v1")))
+        .ok_or_else(|| format!("missing ee.beads_retry.v1 diagnostic in {stderr_events:#?}"))?;
+    ensure_json_eq(
+        last_event,
+        "/degraded_codes/0",
+        &json!("beads_command_timeout"),
+    )?;
+    ensure_json_eq(last_event, "/timed_out", &json!(true))?;
+    let stdout_tail = last_event
+        .get("stdout_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr_tail = last_event
+        .get("stderr_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    ensure(
+        stdout_tail.contains("partial"),
+        format!("expected retained stdout_tail to mention partial output: {last_event:#}"),
+    )?;
+    ensure(
+        stderr_tail.contains("hanging"),
+        format!("expected retained stderr_tail to mention hanging diagnostic: {last_event:#}"),
+    )?;
+    let artifacts = last_event
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing artifacts array in {last_event:#}"))?;
+    for kind in ["stdout", "stderr"] {
+        let path = artifacts
+            .iter()
+            .find(|item| item.get("kind").and_then(Value::as_str) == Some(kind))
+            .and_then(|item| item.get("path"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("missing {kind} artifact in {last_event:#}"))?;
+        ensure(
+            Path::new(path).is_file(),
+            format!("expected retained {kind} artifact path to exist: {path}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn br_retry_malformed_output_fails_without_false_success() -> TestResult {
+    let root = retained_artifact_root("malformed-error")?;
+    let (output, _) = run_wrapper(&root, "malformed")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    ensure(
+        !output.status.success(),
+        "malformed fake br output must fail without false success",
+    )?;
+    ensure(stdout.is_empty(), format!("unexpected stdout: {stdout:?}"))?;
+    ensure(
+        stderr.contains("worker filter output was malformed before JSON could be produced"),
+        format!("expected malformed stderr diagnostic, got {stderr:?}"),
+    )?;
     Ok(())
 }

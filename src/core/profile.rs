@@ -1996,7 +1996,7 @@ fn calibration_degradation(freshness: HostCalibrationFreshness) -> HostClassDegr
             code: "host_calibration_unavailable",
             severity: "warning",
             message: "Host calibration evidence is unavailable, so high-resource recommendations are capped conservatively.",
-            repair: Some("Run `ee diag host-profile --workspace . --json`."),
+            repair: Some("ee diag host-profile --workspace . --json"),
         },
     }
 }

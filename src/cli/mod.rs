@@ -24776,7 +24776,7 @@ where
     if !args.dry_run {
         let error = DomainError::UsageWithDetails {
             message: "ee bootstrap docs currently requires --dry-run.".to_owned(),
-            repair: Some("Run `ee bootstrap docs --dry-run --json`.".to_owned()),
+            repair: Some("ee bootstrap docs --dry-run --json".to_owned()),
             details_json: serde_json::json!({
                 "durableMutation": false,
                 "supportedMode": "dry_run",
@@ -35431,7 +35431,7 @@ where
         if let Err(error) = conn.update_graph_snapshot_status(&snapshot_id, snapshot_status) {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to update graph snapshot diagnostic status: {error}"),
-                repair: Some("Retry `ee diag graph-snapshot`.".to_string()),
+                repair: Some("ee diag graph-snapshot".to_string()),
             };
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
@@ -36548,7 +36548,7 @@ where
                         "Curation candidate {} was not found after diagnostic seed.",
                         args.candidate_id
                     ),
-                    repair: Some("Retry `ee diag curation-candidate --json`.".to_string()),
+                    repair: Some("ee diag curation-candidate --json".to_string()),
                 };
                 return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
@@ -36622,7 +36622,7 @@ where
         let error = DomainError::Usage {
             message: "`ee diag search` requires --all-arms for explicit diagnostic output."
                 .to_string(),
-            repair: Some("Run `ee diag search \"<query>\" --all-arms --json`.".to_string()),
+            repair: Some("ee diag search \"<query>\" --all-arms --json".to_string()),
         };
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
@@ -48416,7 +48416,7 @@ fn ensure_inspection_database_current(
         .needs_migration()
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to inspect database migration state for {surface}: {error}"),
-            repair: Some("Run `ee migrate status --workspace . --json`.".to_owned()),
+            repair: Some("ee migrate status --workspace . --json".to_owned()),
         })?;
     if needs_migration {
         return Err(DomainError::MigrationRequired {
@@ -67120,7 +67120,7 @@ where
                         message: format!(
                             "Failed to write serve foreground startup response: {error}"
                         ),
-                        repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                        repair: Some("ee serve --foreground --json".to_owned()),
                     })?;
                 stdout
                     .write_all(b"\n")
@@ -67128,11 +67128,11 @@ where
                         message: format!(
                             "Failed to terminate serve foreground startup response: {error}"
                         ),
-                        repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                        repair: Some("ee serve --foreground --json".to_owned()),
                     })?;
                 stdout.flush().map_err(|error| DomainError::Storage {
                     message: format!("Failed to flush serve foreground startup response: {error}"),
-                    repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                    repair: Some("ee serve --foreground --json".to_owned()),
                 })?;
                 startup_written = true;
                 Ok(())

@@ -2000,7 +2000,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "public family search must resolve the inherited slot through the current revision",
     )?;
 
-    let rejected_revision_content = "Frozen multiplicity ledger rejected evidence carries a deliberately oversized body so the public pack selector records it in the omitted ledger while the short selected sibling still fits. This planted negative is intentionally repetitive: frozen multiplicity ledger rejected evidence must remain visible, preserve its unchanged rejection discount, and stay attached to the same attempt slot across revision, backup, restore, replay, and why inspection even after later siblings change the live family posture.";
+    let rejected_revision_content = "Oversized-multiplicity-rejection-record: frozen multiplicity ledger rejected evidence carries a deliberately oversized body so the public pack selector records it in the omitted ledger while the short selected sibling still fits. This planted negative is intentionally repetitive: frozen multiplicity ledger rejected evidence must remain visible, preserve its unchanged rejection discount, and stay attached to the same attempt slot across revision, backup, restore, replay, and why inspection even after later siblings change the live family posture.";
     ensure(
         ee::pack::estimate_tokens_default(rejected_revision_content) > 60,
         "rejected fixture must exceed even the entire pack budget",
@@ -3009,13 +3009,43 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     )?;
 
     if cfg!(unix) {
-        let final_producer = run_pack(&pack_args, false)?;
+        let rebuild_before_final =
+            run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+        ensure_equal(
+            &rebuild_before_final.status.code(),
+            &Some(EXIT_SUCCESS),
+            "family pack index rebuild before config invalidation producer",
+        )?;
+        let final_as_of = chrono::Utc::now().to_rfc3339();
+        let final_pack_args = [
+            "--workspace",
+            workspace.as_str(),
+            "pack",
+            "frozen multiplicity ledger",
+            "--max-tokens",
+            "60",
+            "--candidate-pool",
+            "2",
+            "--profile",
+            "compact",
+            "--source-mode",
+            "lexical-only",
+            "--as-of",
+            final_as_of.as_str(),
+            "--json",
+        ];
+        let mut final_performance_args = final_pack_args.to_vec();
+        final_performance_args.insert(final_performance_args.len() - 1, "--explain-performance");
+        final_performance_args.insert(final_performance_args.len() - 1, "--read-only");
+        let mut final_readonly_args = final_pack_args.to_vec();
+        final_readonly_args.insert(final_readonly_args.len() - 1, "--read-only");
+        let final_producer = run_pack(&final_pack_args, false)?;
         ensure_equal(
             &final_producer.status.code(),
             &Some(EXIT_SUCCESS),
             "config invalidation producer",
         )?;
-        let final_hit = stdout_json(&run_pack(&performance_args, false)?)?;
+        let final_hit = stdout_json(&run_pack(&final_performance_args, false)?)?;
         ensure_equal(
             &final_hit
                 .pointer("/data/cache/status")
@@ -3032,7 +3062,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         )?;
         fs::write(&config_path, "[search]\nrerank = \"off\"\n")
             .map_err(|error| error.to_string())?;
-        let configured_pack = run_pack(&performance_args, false)?;
+        let configured_pack = run_pack(&final_performance_args, false)?;
         ensure_equal(
             &configured_pack.status.code(),
             &Some(EXIT_SUCCESS),
@@ -3049,7 +3079,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         )?;
         fs::write(&config_path, "[policy.workspace_memory\nenabled = false\n")
             .map_err(|error| error.to_string())?;
-        let malformed_pack = run_pack(&readonly_args, false)?;
+        let malformed_pack = run_pack(&final_readonly_args, false)?;
         ensure_equal(
             &malformed_pack.status.code(),
             &Some(2),

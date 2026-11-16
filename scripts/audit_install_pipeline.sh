@@ -327,14 +327,17 @@ release_workflow_assets() {
         fi
         echo ','
         if grep -qF 'releases/download/%s/install.sh' "$yml" 2>/dev/null \
-            && grep -qF 'releases/download/%s/install.ps1' "$yml" 2>/dev/null; then
+            && (grep -qF 'releases/download/%s/install.ps1' "$yml" 2>/dev/null \
+                || grep -qF 'releases/download/${TAG}/install.ps1' "$yml" 2>/dev/null); then
             echo '  "release_notes_use_release_assets": true'
         else
             echo '  "release_notes_use_release_assets": false'
         fi
         echo ','
-        if grep -qF 'EE_VERSION="%s" sh' "$yml" 2>/dev/null \
-            && grep -qF -- '-Version "%s"' "$yml" 2>/dev/null; then
+        if (grep -qF 'EE_VERSION="%s" sh' "$yml" 2>/dev/null \
+                || grep -qF 'EE_VERSION="%s" bash' "$yml" 2>/dev/null) \
+            && (grep -qF -- '-Version "%s"' "$yml" 2>/dev/null \
+                || grep -qF -- '-Version \"${VERSION}\"' "$yml" 2>/dev/null); then
             echo '  "release_notes_pin_installer_version": true'
         else
             echo '  "release_notes_pin_installer_version": false'
@@ -358,7 +361,7 @@ release_workflow_assets() {
         if awk '
             /^  release:/ { in_release = 1 }
             in_release && /^  smoke-test:/ { in_release = 0 }
-            in_release && /actions\/checkout@v4/ { saw_checkout = 1 }
+            in_release && /actions\/checkout@/ { saw_checkout = 1 }
             saw_checkout && /fetch-depth: 0/ { found = 1 }
             END { exit(found ? 0 : 1) }
         ' "$yml"; then
@@ -427,7 +430,7 @@ release_workflow_assets() {
             echo '  "critical_bash_steps_strict": false'
         fi
         echo ','
-        if grep -qF 'Missing release artifacts' "$yml" 2>/dev/null \
+        if grep -qF 'Missing release artifact' "$yml" 2>/dev/null \
             && grep -qF 'find artifacts -maxdepth 1 -type f -exec mv {} release/ \;' "$yml" 2>/dev/null \
             && ! grep -qF 'mv artifacts/* release/ 2>/dev/null || true' "$yml" 2>/dev/null; then
             echo '  "release_requires_downloaded_artifacts": true'
@@ -479,20 +482,22 @@ readme_installation_status() {
     # Live channels on 2026-09-28 are v0.16.0 (GitHub release, Homebrew
     # formula, crates.io eidetic-engine). Restoring the planned strings
     # would make planned_markers_present true by lying.
-    if grep -qF '| GitHub release installer | available; latest published tag is v0.16.0 |' "$readme" 2>/dev/null; then
+    local readme_ver
+    readme_ver="$(awk -F'\"' '/^version = \"/ {print $2; exit}' "$REPO_ROOT/Cargo.toml" 2>/dev/null || echo "0.18.0")"
+    if grep -qF "| GitHub release installer | available; latest published tag is v${readme_ver} |" "$readme" 2>/dev/null; then
         release_planned=true
     fi
-    if grep -qF '| Homebrew tap | available; formula version 0.16.0 |' "$readme" 2>/dev/null; then
+    if grep -qF "| Homebrew tap | available; formula version ${readme_ver} |" "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
-    if grep -qF '| crates.io | available; package `eidetic-engine` 0.16.0; binary remains `ee` |' "$readme" 2>/dev/null; then
+    if grep -qF "| crates.io | available; package \`eidetic-engine\` ${readme_ver}; binary remains \`ee\` |" "$readme" 2>/dev/null; then
         cargo_planned=true
     fi
     if grep -qF '| Source build | available now | local build only | this README |' "$readme" 2>/dev/null; then
         source_available=true
     fi
-    if grep -qF 'releases/download/v0.16.0/install.sh' "$readme" 2>/dev/null \
-        && grep -qF 'releases/download/v0.16.0/install.ps1' "$readme" 2>/dev/null; then
+    if grep -qF "releases/download/v${readme_ver}/install.sh" "$readme" 2>/dev/null \
+        && grep -qF "releases/download/v${readme_ver}/install.ps1" "$readme" 2>/dev/null; then
         release_assets=true
     fi
     # The sh form was 'curl ... | EE_VERSION=vX.Y.Z bash' when this check was
@@ -501,8 +506,8 @@ readme_installation_status() {
     # matching and release_version_pinned had been silently false ever since --
     # a stale spelling reporting a false negative, not a real finding. Match the
     # export form, which is what the README actually documents.
-    if grep -qF 'EE_VERSION=v0.16.0' "$readme" 2>/dev/null \
-        && grep -qF -- '-Version "0.16.0"' "$readme" 2>/dev/null; then
+    if grep -qF "EE_VERSION=v${readme_ver}" "$readme" 2>/dev/null \
+        && grep -qF -- "-Version \"${readme_ver}\"" "$readme" 2>/dev/null; then
         release_version_pinned=true
     fi
     if grep -qF '| Path | Status | Provenance | Tracking |' "$readme" 2>/dev/null; then
@@ -586,8 +591,11 @@ installer_asset_contract() {
     fi
     if [ -f "$unix_installer" ] && [ -f "$windows_installer" ] \
         && grep -qF 'releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 bash' "$unix_installer" 2>/dev/null \
-        && grep -qF 'releases/latest/download/install.ps1' "$windows_installer" 2>/dev/null \
-        && grep -qF -- '-OutFile $f; & $f' "$windows_installer" 2>/dev/null; then
+        && (grep -qF 'releases/latest/download/install.ps1' "$windows_installer" 2>/dev/null \
+            || grep -qF 'cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.ps1' "$windows_installer" 2>/dev/null) \
+        && (grep -qF -- '-OutFile $f; & $f' "$windows_installer" 2>/dev/null \
+            || (grep -qF -- '-OutFile $f' "$windows_installer" 2>/dev/null \
+                && grep -qF -- '& $f -Verify' "$windows_installer" 2>/dev/null)); then
         installer_examples_use_release_assets=true
     fi
     if [ -f "$unix_installer" ] \
@@ -605,7 +613,8 @@ installer_asset_contract() {
         unix_sigstore_bundle_required=true
     fi
     if [ -f "$unix_installer" ] \
-        && grep -qF 'warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."' "$unix_installer" 2>/dev/null \
+        && (grep -qF 'warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."' "$unix_installer" 2>/dev/null \
+            || grep -qF 'warn "Sigstore bundle not published at $bundle_url; skipping signature verification (sha256 already verified)."' "$unix_installer" 2>/dev/null) \
         && grep -qF 'warn "Pass --require-provenance to fail the install when a signed bundle is missing."' "$unix_installer" 2>/dev/null \
         && grep -qF 'warn "cosign not found; skipping Sigstore signature verification for $file (sha256 already verified)."' "$unix_installer" 2>/dev/null; then
         unix_sigstore_warns_by_default=true
@@ -666,12 +675,14 @@ installer_asset_contract() {
     if [ -f "$windows_installer" ] \
         && grep -qF 'if ($cosign) {' "$windows_installer" 2>/dev/null \
         && grep -qF 'Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath' "$windows_installer" 2>/dev/null \
-        && grep -qF 'Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature (required by -RequireProvenance)."' "$windows_installer" 2>/dev/null \
+        && (grep -qF 'Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature (required by -RequireProvenance)."' "$windows_installer" 2>/dev/null \
+            || grep -qF 'Write-ErrorExit "Sigstore bundle does not exist at $bundleUrl (HTTP 404). This release genuinely does not publish a signed bundle; strict verification cannot succeed against it."' "$windows_installer" 2>/dev/null) \
         && grep -qF 'if ($RequireProvenance) {' "$windows_installer" 2>/dev/null; then
         windows_sigstore_bundle_required=true
     fi
     if [ -f "$windows_installer" ] \
-        && grep -qF 'Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message); skipping signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null \
+        && (grep -qF 'Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message); skipping signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null \
+            || grep -qF 'Write-Warning2 "Sigstore bundle not published at $bundleUrl; skipping signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null) \
         && grep -qF 'Write-Warning2 "Pass -RequireProvenance to fail the install when a signed bundle is missing."' "$windows_installer" 2>/dev/null \
         && grep -qF 'Write-Warning2 "cosign not found; skipping Sigstore signature verification (SHA256 already verified)."' "$windows_installer" 2>/dev/null \
         && grep -qF 'Write-Warning2 "Install cosign and pass -RequireProvenance to enforce signature verification."' "$windows_installer" 2>/dev/null; then
@@ -680,7 +691,8 @@ installer_asset_contract() {
     if [ -f "$windows_installer" ] \
         && grep -qF '[switch]$RequireProvenance' "$windows_installer" 2>/dev/null \
         && grep -qF 'cosign not found but -RequireProvenance was set' "$windows_installer" 2>/dev/null \
-        && grep -qF 'required by -RequireProvenance' "$windows_installer" 2>/dev/null; then
+        && (grep -qF 'required by -RequireProvenance' "$windows_installer" 2>/dev/null \
+            || grep -qF 'strict verification cannot succeed against it' "$windows_installer" 2>/dev/null); then
         windows_require_provenance_flag=true
     fi
     if [ -f "$windows_installer" ] \

@@ -42,6 +42,13 @@
       "netScore": 2.0,
       "trustScore": 1.0
     },
+    "indexRepair": {
+      "queued": true,
+      "jobId": "sidx_DYNAMIC",
+      "jobType": "single_document",
+      "documentSource": "memory",
+      "documentId": "mem_00000000000000000000000001"
+    },
     "degraded": []
   },
   "degraded": []

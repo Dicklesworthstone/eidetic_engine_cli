@@ -1,0 +1,273 @@
+# Shrink-only baseline: product repair literals that name a CLI flag or
+# environment variable without a complete runnable tool invocation.
+#
+# Per ADR 0088 (docs/adr/0088-degraded-repair-actionability.md) and bd-9zfku:
+# - `degraded[].repair` stays human-facing prose; advisory prose with no flag
+#   and no command is explicitly valid and must never be handed a synthetic
+#   command to satisfy this gate.
+# - `degraded[].repairCommand` (`Option<String>`) carries the optional explicit
+#   runnable command when one exists alongside human-facing prose.
+# - A repair literal that names a CLI flag (`--<flag>`) or environment variable
+#   (`EE_*`, `CARGO_*`, `RCH_*`, etc.) without a complete tool invocation in
+#   either `repair` or `repair_command` is a defect class gated by
+#   `scripts/check-degraded-repair-actionability.py`.
+#
+# THIS LIST MAY ONLY SHRINK. `scripts/check-degraded-repair-actionability.py`
+# fails in both directions:
+# - New arm: any flag/env-only repair site absent from this baseline (or whose
+#   multiplicity exceeds the recorded count) fails.
+# - Stale arm: any entry here whose site has acquired a runnable command (in
+#   `repair` or `repair_command`) or been removed fails, instructing the author
+#   to lower or delete the row.
+#
+# Format: <rel_path>\t<count>\t<normalized_repair_literal>
+src/cli/mesh.rs	1	Choose a writable --out path and retry.
+src/cli/mesh.rs	1	Pass exactly one containment scope: `--peer <id>` or `--all-workspaces`.
+src/cli/mesh.rs	1	Re-run with --limit <= {LANE_GRANT_PREVIEW_MAX_LIMIT}
+src/cli/mesh.rs	1	Re-run with --limit {LANE_GRANT_PREVIEW_DEFAULT_LIMIT} --sample-strategy random --seed 0 --issue-approval-token --json.
+src/cli/mesh.rs	1	Retry with --format json and report the serialization failure.
+src/cli/mesh.rs	1	Use --port 41888 --revalidate-ms 2000.
+src/cli/mesh.rs	1	Use --port 41888.
+src/cli/mesh.rs	1	Use EE_MESH_HELLO_PORT=41888 or EE_MESH_HELLO_RESPONDER_DISABLED=true.
+src/cli/mesh.rs	2	Use EE_MESH_HELLO_PORT=41888 or pass --port 41888.
+src/cli/mesh.rs	1	Use `{revoke_command}` for durable per-peer containment, or `{workspace_disable_command}` (without --peer) for workspace-wide containment.
+src/cli/mesh.rs	1	Use ordinary human output for an inline confirmation, or use --json with --preview-token-stdin.
+src/cli/mesh.rs	1	Use ordinary human preview output without a bearer, or add --json for an explicit robot bearer projection.
+src/cli/mod.rs	1	--graph memory_links | causal_evidence | rule_provenance | contradiction_subgraph | retrieval_affinity | ...
+src/cli/mod.rs	1	--verb supersede | reject-one | scope-split | both-valid | merge
+src/cli/mod.rs	1	Check --candidate-type, --status, and workspace database health.
+src/cli/mod.rs	1	Check --memory-id and workspace database health.
+src/cli/mod.rs	1	Check --metrics-json and workspace database health.
+src/cli/mod.rs	1	Check --model-id, --provider, --purpose, --status, and workspace database health.
+src/cli/mod.rs	1	Check --pack-id, --profile, token counts, and workspace database health.
+src/cli/mod.rs	1	Check --review-state, --state-entered-at, --ttl-policy-id, and workspace database health.
+src/cli/mod.rs	1	Check --tripwire-id, --tripwire-type, --action, --state, and workspace database health.
+src/cli/mod.rs	1	Check permissions for the --output-database path and retry.
+src/cli/mod.rs	1	Check the --input path and pass a readable CASS view JSON file.
+src/cli/mod.rs	1	Choose a --output-database path made of real directories and a regular database file.
+src/cli/mod.rs	1	Choose a fresh --output-database path or remove the non-file path manually.
+src/cli/mod.rs	2	Choose a fresh --output-database path.
+src/cli/mod.rs	1	Choose a new --pack-id.
+src/cli/mod.rs	2	Choose a writable --output-database path.
+src/cli/mod.rs	1	Drop MEMORY_ID or use `--mode one-memory`.
+src/cli/mod.rs	1	Ensure the parent directory exists and is writable, or omit --output to write to stdout.
+src/cli/mod.rs	1	Increase --max-bytes or rotate the trace directory manually.
+src/cli/mod.rs	1	Let the lock TTL expire or manually verify before using --force
+src/cli/mod.rs	1	Omit --limit or pass a positive value.
+src/cli/mod.rs	1	Omit --limit to keep all neighbors.
+src/cli/mod.rs	1	Omit --max-features to use the default cap.
+src/cli/mod.rs	1	Omit --max-level or pass a positive value.
+src/cli/mod.rs	1	Pass --item-count 1 or --omitted-count 1.
+src/cli/mod.rs	1	Pass --limit with a positive integer (default: 100), or omit it.
+src/cli/mod.rs	1	Pass --objective text or a readable --objective-file path.
+src/cli/mod.rs	1	Pass --output-database <path> for a copied skew or --in-place for fixture-only mutation.
+src/cli/mod.rs	1	Pass --pack-hash blake3:<64 lowercase hex characters>.
+src/cli/mod.rs	1	Pass --relevance-floor between 0.0 and 1.0.
+src/cli/mod.rs	1	Pass --used-tokens less than or equal to --max-tokens.
+src/cli/mod.rs	1	Pass --valid-to, --valid-from, --clear-valid-to, or --clear-valid-from.
+src/cli/mod.rs	1	Pass `--from-hotset <path>` to a readable ee.cache.hotset.v1 manifest.
+src/cli/mod.rs	1	Pass a readable JSON file shaped like {"records":[...]} or omit --evidence-json.
+src/cli/mod.rs	1	Pass valid JSON to --metadata-json.
+src/cli/mod.rs	2	Re-run the pack without --read-only, or pass the memory id directly.
+src/cli/mod.rs	2	Rerun with --dry-run to preview the revision.
+src/cli/mod.rs	3	Retry without --stream to inspect the batch context response.
+src/cli/mod.rs	1	Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot.
+src/cli/mod.rs	1	Use --candidate-id curate_00000000000000000000000042.
+src/cli/mod.rs	1	Use --command-timeout-ms 500.
+src/cli/mod.rs	1	Use --confidence 0.8
+src/cli/mod.rs	1	Use --confidence 0.82.
+src/cli/mod.rs	1	Use --graph=memory_links, causal, revision, rules, contradictions, or all.
+src/cli/mod.rs	1	Use --interval-ms 1000.
+src/cli/mod.rs	1	Use --limit 10 or omit the flag.
+src/cli/mod.rs	1	Use --min-expected-value 0.0
+src/cli/mod.rs	1	Use --min-uncertainty 0.3
+src/cli/mod.rs	1	Use --model-id mdl_j6000000000000000000000001.
+src/cli/mod.rs	1	Use --objective for inline text or --objective-file for a file.
+src/cli/mod.rs	1	Use --pack-id pack_j6referenceissues000000000.
+src/cli/mod.rs	1	Use --profile quick, --profile full, or --profile privacy
+src/cli/mod.rs	1	Use --redaction none|minimal|standard|strict|paranoid.
+src/cli/mod.rs	1	Use --redaction-level strict or --redaction-level audit.
+src/cli/mod.rs	1	Use --safety-boundary dry_run_only
+src/cli/mod.rs	1	Use --signal positive
+src/cli/mod.rs	1	Use --status confirmed
+src/cli/mod.rs	1	Use --swap memory.<id>.content=TEXT or --swap memory.<id>.removed=true, or omit --swap-revision.
+src/cli/mod.rs	1	Use --swap-revision at-capture, --swap-revision current, or a single revision ID.
+src/cli/mod.rs	1	Use --threshold 0.55
+src/cli/mod.rs	1	Use --tripwire-id tw_j6_unsupported_condition.
+src/cli/mod.rs	1	Use `--surface search` or `--surface context`.
+src/cli/mod.rs	1	Use at least one of --content, --level, --kind, --confidence, --tag, or --provenance-uri.
+src/cli/mod.rs	1	Use lowercase tag names such as --add release,testing.
+src/cli/mod.rs	1	Write the latest ee.cache.hotset.v1 manifest to {}, or pass `--from-hotset <path>`.
+src/cli/mod.rs	1	import retained J1 verification logs or pass --run-id for an existing retained run
+src/cli/mod.rs	1	pass --file <verification-evidence.json> or --stdin
+src/cli/mod.rs	2	pass --records-json <path> with ee.verification.run.v1 records or --runs-jsonl <path>
+src/cli/mod.rs	1	rerun with --proofs-root <path-to-proofs>
+src/cli/mod.rs	1	rerun with --require-rch-cargo
+src/cli/mod.rs	1	use --dependency-contract cass|procedure verification|v1|v2|breaking
+src/cli/mod.rs	1	use --evidence ev_123|2026-05-01T00:00:00Z|recorder_run
+src/cli/mod.rs	1	use --feedback helped|missed|stale-warning|false-alarm|neutral
+src/cli/mod.rs	1	use --requested-surface beads_comment, agent_mail, or support_bundle
+src/cli/mod.rs	1	use --task-outcome success|failure|cancelled|unknown
+src/cli/sandbox.rs	2	Pass --retire <id> (repeatable) to propose retirements.
+src/cli/team.rs	1	Pass an absolute --output path under the workspace.
+src/cli/team.rs	1	Use --since 2026-08-13T00:00:00Z. Relative durations such as 2h are human-only.
+src/cli/team.rs	1	Use a passphrase of at least 12 characters on stdin via --passphrase-stdin.
+src/cli/team.rs	1	verify the pinned discovery jwks_uri and --ca-bundle, then retry
+src/config/workspace.rs	1	Use `--workspace <path>` for writes when working inside nested repositories.
+src/core/artifact.rs	3	Register a smaller log/snippet artifact or raise --max-bytes intentionally.
+src/core/artifact_relocation.rs	1	Use --force-with-explicit-path only after explicit review of the manifest original paths.
+src/core/artifact_relocation.rs	1	Use target/, tests/audit_artifacts/, tests/logs/, .ee/backups/, or pass --force-with-explicit-path after reviewing the path.
+src/core/backup.rs	1	choose --redaction strict to redact secrets and paths while preserving distinct memory IDs
+src/core/backup.rs	1	choose a directory path for --side-path
+src/core/backup.rs	1	choose a directory with --output-dir
+src/core/backup.rs	1	choose a fresh --side-path
+src/core/backup.rs	1	choose a new empty --side-path target
+src/core/backup.rs	3	choose a readable --output-dir
+src/core/backup.rs	1	choose a real, non-symlink directory for --output-dir
+src/core/backup.rs	2	choose a real, non-symlink directory for --side-path
+src/core/backup.rs	1	choose a real, non-symlink directory with --output-dir
+src/core/backup.rs	1	choose a separate --side-path target outside the workspace
+src/core/backup.rs	2	choose a writable --output-dir
+src/core/backup.rs	3	choose a writable --side-path
+src/core/backup.rs	1	choose an absolute --side-path or a readable working directory
+src/core/backup.rs	1	inspect filesystem permissions or choose another --output-dir
+src/core/backup.rs	4	inspect filesystem permissions or choose another --side-path
+src/core/backup.rs	2	inspect restored graph cache assets and retry with a fresh --side-path
+src/core/backup.rs	3	inspect restored records.jsonl and retry with a fresh --side-path
+src/core/backup.rs	1	inspect the backup work-history artifact and restore to a fresh --side-path
+src/core/backup.rs	1	inspect the copied records.jsonl and retry with a fresh --side-path
+src/core/backup.rs	1	inspect the staged records and retry with a fresh --side-path
+src/core/backup.rs	2	inspect the staged restore and retry with a fresh --side-path
+src/core/backup.rs	1	restore to a fresh --side-path and inspect records.jsonl
+src/core/backup.rs	5	restore to a fresh --side-path and retry
+src/core/backup.rs	1	retry backup creation with a writable --output-dir
+src/core/backup.rs	5	retry restore with a fresh --side-path
+src/core/backup.rs	1	select the source workspace with --workspace and recover its authentication keys
+src/core/cass_review.rs	1	Inspect review.sessions[].error and review.sessions[].degraded; retry the affected sessions with review.sessions[].retryCommand or repeat the import with --propose. Candidates require explicit validation and application.
+src/core/cass_review.rs	1	Repeat the same import with --propose to prioritize pending revisions, or run review.sessions[].retryCommand for individual sessions. Additional deferred IDs are in the original import sessions array. During a dry run, repeat the import without --dry-run first.
+src/core/conflict_proposal.rs	1	Choose scope labels that remain distinct after existing tags are preserved, or use --verb both-valid to explicitly retain both memories in the same scope.
+src/core/context_bead_affinity.rs	1	Check the requested ID and the local .beads/issues.jsonl export, or omit --bead-id.
+src/core/contradiction_detect.rs	1	Choose distinct scope labels, or use --verb both-valid when both memories should remain valid in the same scope.
+src/core/contradiction_detect.rs	1	Pass --keep {} or --keep {}.
+src/core/contradiction_detect.rs	1	Provide --merge-content with the reviewed summary and use --propose.
+src/core/contradiction_detect.rs	1	Supply the complete reviewed summary with --merge-content and --propose.
+src/core/contradiction_detect.rs	1	Use --verb merge to propose a combined summary, or omit --merge-content.
+src/core/contradiction_detect.rs	1	Use --verb supersede to record a replacement with provenance and a decision.
+src/core/contradiction_detect.rs	1	Use comma-separated labels such as --scope-a-tags scope:production --scope-b-tags scope:development; labels cannot contain spaces or path delimiters.
+src/core/decide.rs	1	Add --alternative <option> for each rejected option.
+src/core/decide_atomic.rs	1	Keep the topic on one line; put details in --rationale.
+src/core/disk_pressure.rs	1	Keep TMPDIR on a POSIX-capable filesystem (system default with `--mode remote-dispatch`, or a mounted APFS sparse image for local builds).
+src/core/disk_pressure.rs	1	Open a shell with CARGO_TARGET_DIR={external_root_label}/cargo-target or another external-drive target.
+src/core/disk_pressure.rs	1	Route `{label}` to {external_root_label} or a mounted non-boot volume, or use `--mode remote-dispatch` for RCH remote verification.
+src/core/evidence.rs	1	Pass --limit with a bounded batch size.
+src/core/evidence.rs	1	Pass --reason with the reason for withdrawing this source.
+src/core/focus.rs	1	Use --capacity 1 or higher.
+src/core/focus_suggest.rs	1	Attach evidence to the frame or omit --task-frame to consider all recent memories.
+src/core/focus_suggest.rs	1	Increase --recent-hours or import additional screened CASS evidence.
+src/core/focus_suggest.rs	1	Pass a smaller --recent-hours value (e.g. 24, 168, or 720).
+src/core/handoff.rs	1	Check the --capsule path and recreate the capsule if needed.
+src/core/lab.rs	1	Export flag names as redacted long flags such as --json or --max-tokens.
+src/core/lab.rs	1	Pass --agents 1 or a bounded swarm replay size.
+src/core/lab.rs	1	Pass --agents 1 or higher; use --agents 64 for the AFR5 stress profile.
+src/core/learn.rs	1	Increase [search].query_miss_retention_days or EE_QUERY_MISS_RETENTION_DAYS before the ledger is pruned if a longer window is required.
+src/core/learn.rs	1	Set EE_QUERY_MISS_RETENTION_DAYS to a non-negative integer.
+src/core/learn.rs	1	Use --confidence-delta 0.0
+src/core/learn.rs	1	Use --period today, --period week, --period month, or --period all.
+src/core/learn.rs	1	Use --since 2026-01-31T00:00:00Z.
+src/core/memory.rs	1	--source 'file://{file}#L{locator}'
+src/core/memory.rs	1	Re-check --workspace addressing and permissions.
+src/core/memory.rs	1	Replay the original content, typed fields, and creation guards for this key, or supply a new --idempotency-key.
+src/core/memory.rs	1	Use --metadata '{"reason":"explicit"}'.
+src/core/memory_debt.rs	1	use --now 2026-06-15T00:00:00Z
+src/core/memory_drift.rs	1	Use an RFC 3339 --as-of value within Chrono's supported range.
+src/core/memory_drift.rs	1	rerun with --include-tombstoned or list active memories
+src/core/model.rs	1	Check network access, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists.
+src/core/model.rs	4	Pass a readable artifact path to --from-file.
+src/core/model.rs	1	Populate the model cache from a verified offline copy, or explicitly set EE_EMBED_DOWNLOAD=auto and rerun {fetch_command}.
+src/core/model.rs	1	Re-fetch {} from the manifest source and rerun with --from-file.
+src/core/model.rs	1	Retry `{fetch_command}`, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists.
+src/core/outcome.rs	1	Use --workspace with the target's workspace and its bound database.
+src/core/perf_forensics.rs	1	Pass --profile <name> with a non-empty profile.
+src/core/perf_forensics.rs	1	Set EE_TEST_LOG_PATH=<path> or regenerate the artifact with stage timing metrics enabled, then retry.
+src/core/procedure.rs	1	Use --export-format markdown, --export-format playbook, or --export-format skill-capsule.
+src/core/procedure.rs	1	Use --status candidate/provisional, verified/validated, mature, or retired.
+src/core/procedure.rs	1	Use --to validated, --to mature, or --to retired.
+src/core/procedure.rs	1	choose a file path for --output
+src/core/procedure.rs	1	choose a new --output path
+src/core/procedure.rs	1	choose a new --output path or remove the stale temp file
+src/core/procedure.rs	1	choose a new --output path that does not already name a directory or special file
+src/core/procedure.rs	3	choose a readable parent directory for --output
+src/core/procedure.rs	1	pass --workspace with an absolute path
+src/core/procedure.rs	1	retry the export or choose --export-format markdown
+src/core/recall.rs	2	Re-run the command without --cursor to start a fresh page sequence.
+src/core/recall.rs	1	Re-run with --budget-tokens 400 or omit the flag.
+src/core/recall.rs	1	Re-run with a larger --budget-tokens value, or omit the flag.
+src/core/recall.rs	1	Re-run with a larger --budget-tokens value, or resume from details.continuationCursor with --cursor.
+src/core/recall_scan.rs	1	Narrow --path, --symbol, --kind or --level and retry recall.
+src/core/recorder.rs	1	Provide CASS `view --json` output with a top-level lines array.
+src/core/recorder.rs	1	Use a smaller payload, attach evidence by hash, or raise --max-payload-bytes intentionally.
+src/core/rehearse.rs	2	Pass --workspace <existing-directory>
+src/core/rule.rs	1	choose a new regular --out file path
+src/core/rule.rs	2	choose a real, non-symlink --out path
+src/core/rule.rs	2	choose a writable --out path
+src/core/search.rs	1	Broaden the query, lower --relevance-floor, or use --source-mode lexical_only.
+src/core/search.rs	1	Consider --as-of, --include-expired, --include-future, or --include-stale when historic or inactive memories are expected.
+src/core/search.rs	1	Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.
+src/core/search.rs	1	Pass --include-future or --as-of <RFC3339> to inspect them.
+src/core/search.rs	1	Pass --include-stale to inspect stale memories.
+src/core/search.rs	1	Pass --relevance-floor 0 to keep every lexical match.
+src/core/search.rs	1	Rebuild with the requested search features, or pass --strict-source-mode to fail closed.
+src/core/search.rs	1	Rephrase with concrete words present in stored memories, or use --source-mode lexical_only when implemented (B6).
+src/core/search.rs	2	Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.
+src/core/search.rs	1	Retry without --strict-scope or use --memory-scope swarm.
+src/core/search.rs	1	Set EE_AGENT_NAME for self/team scoped retrieval.
+src/core/search.rs	1	Use --memory-scope swarm to inspect all candidate evidence, or pass --strict-scope to fail closed.
+src/core/search_revision_admission.rs	1	Use --as-of <RFC3339> before supersession to inspect historical revisions.
+src/core/status.rs	1	Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.
+src/core/status.rs	1	Enable [cache.pack_l2] or unset EE_L2_PACK_CACHE_DISABLE.
+src/core/status.rs	1	Set EE_MESH_ENABLED=1 to enable optional mesh-memory probes.
+src/core/status.rs	1	Unset `EE_DISABLE_TOON` or use `--format json`.
+src/core/status.rs	1	Use `--format json` or a binary built with TOON output support.
+src/core/tag_backfill.rs	3	Choose a writable --log path.
+src/core/task_frame.rs	1	Use --status completed or --status abandoned.
+src/core/task_frame.rs	1	Use --status open, then close the frame explicitly.
+src/core/verify.rs	1	Pass an existing memory ID or omit --memory-id.
+src/core/verify.rs	1	pass --target-id <memory-or-pack-id>
+src/core/verify.rs	1	pass --target-type memory or --target-type pack
+src/core/workspace.rs	3	Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.
+src/core/workspace.rs	1	Check permissions or set EE_WORKSPACE_REGISTRY to a writable path.
+src/core/workspace.rs	1	Create the directory or pass an existing --workspace path.
+src/core/workspace.rs	2	Run from a readable directory or pass --workspace .
+src/core/workspace.rs	1	Set EE_WORKSPACE_REGISTRY to a non-symlinked path under a trusted directory.
+src/core/workspace.rs	1	Set EE_WORKSPACE_REGISTRY to a regular database file path or move the directory aside.
+src/eval/runner.rs	1	Add evaluation fixtures under {} (<scenario>/scenario.json and source_memory.json) or pass --fixture-dir <path>.
+src/graph/pack_dna.rs	1	Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA.
+src/graph/pack_dna_progress.rs	1	Retry the explanation or use `--no-pack-dna`; no index or graph rebuild is required for this optional signal.
+src/hooks/installer.rs	1	Fix permissions or pass a readable --repository-root.
+src/hooks/installer.rs	1	Fix the settings JSON before running --install.
+src/hooks/installer.rs	1	Pass --fixture with a readable ee.harness_conformance.v1 JSON file.
+src/hooks/installer.rs	1	Pass --repository-root pointing at the canonical Git checkout.
+src/hooks/installer.rs	1	Run --install first, or restore the harness settings file manually.
+src/hooks/installer.rs	2	Set HOME or pass --settings-path explicitly.
+src/hooks/installer.rs	1	Use --print to inspect the Claude Code/Codex snippets, or add a Gemini hook-surface adapter once Gemini exposes a compatible hook contract.
+src/hooks/installer.rs	1	Use only one of --install, --undo, or --print.
+src/mesh/foreground_cli.rs	1	Increase --peer-concurrency only if the current host has enough network and body-fetch budget.
+src/mesh/foreground_cli.rs	1	Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces.
+src/mesh/hello_responder.rs	1	Free the port or set EE_MESH_HELLO_PORT to an unused port.
+src/mesh/steward_decision.rs	1	Raise EE_MESH_STEWARD_RECONCILIATION_MAX_DAILY or investigate flapping drift.
+src/mesh/steward_decision.rs	1	Set EE_MESH_AUTO_ENROLL_ON_DEMAND=1 to enable opt-in steward reconciliation.
+src/models/perf_artifact.rs	1	Re-generate the artifact or use --inspection-only mode.
+src/output/governor.rs	3	Re-run without --max-output-tokens and report the failure.
+src/output/mod.rs	1	Raise --max-output-tokens or narrow the --fields preset
+src/output/mod.rs	2	Re-run without --cursor to start a fresh page sequence
+src/output/mod.rs	1	Resume with --cursor <details.continuationCursor> or raise the ceiling
+src/output/mod.rs	1	Use --fields full and report the serialization failure.
+src/output/mod.rs	1	Use one preset, for example `--fields preset=standard,why`, or use an explicit field list.
+src/pack/mod.rs	1	Re-run to see whether the overrun is repeatable; if it is, use --resource-profile swarm_heavy or reduce --candidate-pool below {}.
+src/pack/mod.rs	1	Use --resource-profile swarm_heavy or reduce --candidate-pool below {}.
+src/pack/mod.rs	1	Use --resource-profile swarm_heavy, reduce --candidate-pool, or narrow the query.
+src/science/mod.rs	8	Pass readable --baseline and --current snapshot paths.
+src/search/simhash.rs	2	Set EE_EMBED_DEDUP_COSINE_FLOOR to a finite number between 0.0 and 1.0.
+src/search/simhash.rs	2	Set EE_EMBED_DEDUP_HAMMING_K to an integer between 0 and 128.
+src/serve.rs	1	Set EE_SERVE_TOKEN and send Authorization: Bearer <token>.
+src/serve.rs	1	Set EE_SERVE_TOKEN to at least 32 random bytes before serving HTTP.

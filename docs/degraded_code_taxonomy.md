@@ -51,6 +51,28 @@ For the typed-field registry and operator surface, see
 refusal and revisit timestamp usage branches, see
 [`docs/agent-ux/decide.md`](agent-ux/decide.md).
 
+## Degraded Repair Actionability (`repair` vs `repairCommand`)
+
+Per [ADR 0088](adr/0088-degraded-repair-actionability.md) (`bd-9zfku`),
+`degraded[].repair` remains human-facing prose and is not required to name a
+runnable command. When a complete, directly runnable invocation exists alongside
+human-facing repair guidance, emitters may populate the optional
+`degraded[].repairCommand` field (`repair_command: Option<String>` on
+`Degradation` and sibling degradation structs, serialized only when `Some`).
+
+- **Runnable**: Either `repair` or `repairCommand` carries a complete tool
+  invocation (`ee`, `br`, `bv`, `cargo`, `rch`, `git`, `sqlite3`, `chmod`,
+  `cass`, `tailscale`, `curl`, `ollama`, or `scripts/*.sh`).
+- **Advisory prose**: A `repair` string that describes an operator decision or
+  multi-step judgment with no flag and no command is valid advisory guidance and
+  must never be given a synthetic command merely to look executable.
+- **Flag/env-only defect class**: A `repair` string that names a CLI flag
+  (`--<flag>`) or environment variable (`EE_*`, `CARGO_*`, `RCH_*`, etc.)
+  without a complete tool invocation in either `repair` or `repairCommand` is
+  gated by `scripts/check-degraded-repair-actionability.py` against the
+  shrink-only baseline at
+  `tests/fixtures/contracts/degraded_repair_flag_only_baseline.txt`.
+
 ## Repair Action Risk Classes
 
 Agent-facing recovery actions can include command strings. Those commands are

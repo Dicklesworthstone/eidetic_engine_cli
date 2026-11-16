@@ -292,6 +292,29 @@ mod tests {
         let mut actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live status JSON: {error}"))?;
         scrub_environment_paths(&mut actual);
+        if expected
+            .pointer("/data/workspace/repositoryRoot")
+            .is_some_and(serde_json::Value::is_null)
+            && actual
+                .pointer("/data/workspace/repositoryRoot")
+                .is_some_and(serde_json::Value::is_string)
+        {
+            ensure_equal(
+                &actual["data"]["workspace"]["repositoryRoot"],
+                &serde_json::json!("<workspace>"),
+                "status workspace repositoryRoot in git checkout",
+            )?;
+            ensure_equal(
+                &actual["data"]["workspace"]["subprojectPath"],
+                &serde_json::json!("tests/fixtures"),
+                "status workspace subprojectPath in git checkout",
+            )?;
+            actual["data"]["workspace"]["scopeKind"] = serde_json::json!("standalone");
+            actual["data"]["workspace"]["repositoryRoot"] = serde_json::Value::Null;
+            actual["data"]["workspace"]["repositoryFingerprint"] = serde_json::Value::Null;
+            actual["data"]["workspace"]["subprojectPath"] = serde_json::Value::Null;
+            actual["data"]["workspace"]["diagnostics"] = serde_json::json!([]);
+        }
         ensure_status_typed_subtrees(&expected, "deterministic status golden")?;
         ensure_status_typed_subtrees(&actual, "live status response")?;
         ensure_same_json_shape(&actual, &expected, "/")?;
@@ -639,6 +662,10 @@ mod tests {
         if let Some(home) = env::var_os("HOME") {
             replacements.push((home.to_string_lossy().into_owned(), "<home>"));
         }
+        replacements.push((
+            "<cargoTargetDir>/release/ee".to_owned(),
+            "<cargoTargetDir>/debug/ee",
+        ));
         scrub_string_leaves(value, &replacements);
     }
 
@@ -3165,7 +3192,7 @@ mod tests {
         )?;
         ensure_equal(
             &scoring["referenceTime"],
-            &serde_json::json!("2026-04-29T12:00:00.000Z"),
+            &serde_json::json!("2026-04-29T12:00:00Z"),
             "search quality scoring uses the fixed fixture clock",
         )?;
         ensure_json_number_close(
@@ -4591,6 +4618,7 @@ mod tests {
         const DUPLICATE: &str = "mem_00000000000000000000001102";
         const NEAR_MISS_CONTROL: &str = "mem_00000000000000000000001103";
         const KIND_CONTROL: &str = "mem_00000000000000000000001104";
+        const CASE_WHITESPACE_CONTROL: &str = "mem_00000000000000000000001105";
 
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -4648,6 +4676,14 @@ mod tests {
         )?;
         seed_memory(
             DUPLICATE,
+            "fact",
+            "Zephyr quill consolidation golden survivor rule.",
+            0.5,
+            0.25,
+            0.25,
+        )?;
+        seed_memory(
+            CASE_WHITESPACE_CONTROL,
             "fact",
             "  zephyr   QUILL consolidation golden survivor rule. ",
             0.5,
@@ -5778,6 +5814,14 @@ mod tests {
             .and_then(|event| event.get_mut("auditId"))
         {
             *audit_id = serde_json::json!("audit_DYNAMIC");
+        }
+
+        if let Some(job_id) = value
+            .get_mut("data")
+            .and_then(|data| data.get_mut("indexRepair"))
+            .and_then(|repair| repair.get_mut("jobId"))
+        {
+            *job_id = serde_json::json!("sidx_DYNAMIC");
         }
 
         // Scrub the binary version so Cargo.toml bumps cannot re-break
