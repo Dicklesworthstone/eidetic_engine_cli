@@ -755,6 +755,141 @@ arm_cross_surface_verdict_vocabulary() {
         duration_ms "$(( $(now_ms) - started ))"
 }
 
+# ---------------------------------------------------------------------------
+# Arm 9: bd-pack-compact-mode-ibksx — compact pack profile drops bulky
+# diagnostic blocks so memory payload exceeds metadata, preserves degraded[]
+# and advisoryBanner honesty, and keeps pack.hash / item selection stable.
+# ---------------------------------------------------------------------------
+arm_pack_compact_mode_ibksx() {
+    local bead="bd-pack-compact-mode-ibksx"
+    local started ws empty_index compact_json lean_json standard_json verbose_json
+    ws="$(arm_workspace "$bead" pack_compact_mode)"
+    started="$(now_ms)"
+    empty_index="$ws/empty-index"
+    mkdir -p "$empty_index"
+
+    step "[$bead] compact pack profile drops diagnostic blocks, preserves honesty, and keeps payload > metadata"
+    ee_in "$ws" init --json >/dev/null
+    printf '[pack]\nadaptive_budget = true\n' >"$ws/.ee/config.toml"
+
+    local i
+    for i in 1 2 3 4 5 6; do
+        ee_in "$ws" remember \
+            "Compact mode field-report memory $i: release verification requires deterministic pack payload bytes, reproducible blake3 pack hashes, and strict provenance checks across all output profiles." \
+            --level procedural --kind rule \
+            --tags compact-suite,verification,release \
+            --json >/dev/null
+    done
+
+    compact_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "compact mode field-report release verification" \
+            --compact --json
+    )"
+    lean_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "compact mode field-report release verification" \
+            --pack-profile lean --json
+    )"
+    standard_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "compact mode field-report release verification" \
+            --pack-profile standard --json
+    )"
+    verbose_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "compact mode field-report release verification" \
+            --pack-profile verbose --json
+    )"
+    printf '%s\n' "$compact_json" >"$ws/pack.compact.json"
+    printf '%s\n' "$lean_json" >"$ws/pack.lean.json"
+    printf '%s\n' "$standard_json" >"$ws/pack.standard.json"
+    printf '%s\n' "$verbose_json" >"$ws/pack.verbose.json"
+
+    log_event arm_act bead_id "$bead" phase act check pack_compact_mode \
+        workspace "$ws" host "$SUITE_HOST"
+
+    # Positive non-vacuity guard on $compact_json (paired with the absence
+    # assertions below for audit-absence-assertion-guards.py --strict).
+    assert_jq "$compact_json" \
+        '.success == true and (.data.pack.hash != null) and ((.data.pack.items | length) >= 4)' \
+        "$bead: compact pack succeeded with non-null hash and selected memories"
+
+    # 1. Bulky diagnostic blocks and rendered text are omitted under --compact,
+    #    while --pack-profile standard retains them on the identical query.
+    assert_jq "$compact_json" \
+        '.data.pack.selectionAudit == null
+         and .data.pack.quality == null
+         and .data.pack.slo == null
+         and .data.pack.text == null
+         and .data.pack.skipped == null
+         and .data.pack.budget.classifierContributions == null' \
+        "$bead: --compact omits selectionAudit, quality, slo, text, skipped, and budget.classifierContributions"
+    assert_jq "$standard_json" \
+        '.data.pack.selectionAudit != null
+         and .data.pack.quality != null
+         and .data.pack.slo != null
+         and .data.pack.text != null
+         and .data.pack.skipped != null
+         and .data.pack.budget.classifierContributions != null' \
+        "$bead: --pack-profile standard retains the diagnostic blocks that --compact drops"
+
+    # 2. Memory payload bytes exceed non-item pack metadata bytes under --compact.
+    local item_bytes metadata_bytes standard_bytes compact_bytes
+    item_bytes="$(printf '%s\n' "$compact_json" | jq -r '(.data.pack.items | tojson | length)')"
+    metadata_bytes="$(printf '%s\n' "$compact_json" | jq -r '(.data.pack | del(.items) | tojson | length)')"
+    compact_bytes="$(printf '%s' "$compact_json" | wc -c | tr -d ' ')"
+    standard_bytes="$(printf '%s' "$standard_json" | wc -c | tr -d ' ')"
+    assert_jq "$compact_json" \
+        '(.data.pack.items | tojson | length) > (.data.pack | del(.items) | tojson | length)' \
+        "$bead: compact pack memory-payload bytes (${item_bytes}B) exceed pack metadata bytes (${metadata_bytes}B)"
+    assert_jq "$(printf '{"compact":%s,"standard":%s}' "$compact_bytes" "$standard_bytes")" \
+        '.compact < .standard' \
+        "$bead: compact envelope (${compact_bytes}B) is smaller than standard envelope (${standard_bytes}B)"
+
+    # 3. Degraded and advisoryBanner honesty are never suppressed by --compact.
+    assert_jq "$compact_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "embed_model_unavailable")] | length >= 1' \
+        "$bead: --compact preserves degraded[] entries (embed_model_unavailable)"
+    assert_jq "$compact_json" \
+        '.data.pack.advisoryBanner != null
+         and .data.pack.advisoryBanner.status == "degraded"
+         and (.data.pack.advisoryBanner.degradationCount >= 1)
+         and ((.data.pack.advisoryBanner.summary // "") | length > 0)' \
+        "$bead: --compact preserves advisoryBanner degraded honesty"
+
+    # 4. Pack hash and selected item ordering are deterministic and invariant.
+    local compact_hash lean_hash compact_ids lean_ids standard_ids verbose_ids
+    compact_hash="$(printf '%s\n' "$compact_json" | jq -r '.data.pack.hash')"
+    lean_hash="$(printf '%s\n' "$lean_json" | jq -r '.data.pack.hash')"
+    compact_ids="$(printf '%s\n' "$compact_json" | jq -c '[.data.pack.items[].memoryId]')"
+    lean_ids="$(printf '%s\n' "$lean_json" | jq -c '[.data.pack.items[].memoryId]')"
+    standard_ids="$(printf '%s\n' "$standard_json" | jq -c '[.data.pack.items[].memoryId]')"
+    verbose_ids="$(printf '%s\n' "$verbose_json" | jq -c '[.data.pack.items[].memoryId]')"
+    assert_eq "$compact_hash" "$lean_hash" \
+        "$bead: --compact and --pack-profile lean emit identical pack.hash"
+    assert_eq "$compact_ids" "$lean_ids" \
+        "$bead: --compact and --pack-profile lean select identical memoryId ordering"
+    assert_eq "$compact_ids" "$standard_ids" \
+        "$bead: --compact and --pack-profile standard select identical memoryId ordering"
+    assert_eq "$compact_ids" "$verbose_ids" \
+        "$bead: --compact and --pack-profile verbose select identical memoryId ordering"
+
+    # Conflicting --compact and --pack-profile verbose is rejected as a usage error.
+    local conflict_rc=0
+    ee_in "$ws" pack "compact mode field-report release verification" \
+        --compact --pack-profile verbose --json >/dev/null 2>&1 || conflict_rc=$?
+    assert_jq "$(printf '{"rc":%s}' "$conflict_rc")" \
+        '.rc != 0' \
+        "$bead: --compact conflicts with --pack-profile verbose (exit $conflict_rc)"
+
+    log_event arm_done bead_id "$bead" phase assert check pack_compact_mode \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        compact_bytes "$compact_bytes" standard_bytes "$standard_bytes" \
+        item_bytes "$item_bytes" metadata_bytes "$metadata_bytes" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
 suite_environment_probe
 suite_environment_line
 
@@ -766,6 +901,7 @@ arm_tag_case_roundtrip
 arm_cik_accession_false_positive
 arm_pack_banner_names_its_scope
 arm_cross_surface_verdict_vocabulary
+arm_pack_compact_mode_ibksx
 
 printf '[suite] artifacts retained under %s\n' "$SUITE_ROOT" >&2
 # Repeated next to the tally so the tally states where it came from.
