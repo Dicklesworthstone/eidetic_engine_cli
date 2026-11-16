@@ -136,11 +136,21 @@ validation. Memory feedback is read from the owning database at the request's
 reference time; a future event cannot penalize a historical request.
 
 New pack responses retain `ee.pack.v2` and identify their hash input as
-`ee.pack.hash_input.v6`, with `snapshotIdentity.version=6`. The
+`ee.pack.hash_input.v7`, with `snapshotIdentity.version=7`. The
 `qualityScoring` component binds the policy actually used by retrieval; a
 direct pack builder without search binds an explicit absence marker. Thus a
 policy change can change identity even when selected items remain equal.
 Historical pack records, ledger bytes and hashes are not rewritten.
+
+V7 adds `snapshotIdentity.components.storeScopes`. It distinguishes concrete
+workspace/global database addresses, their actual workspace bindings, included
+tiers and effective self/team membership even when generations, selected items
+and prompt text match. Resolvable path aliases and unordered team membership
+canonicalize. Only a digest is public; raw paths, workspace IDs and producer
+names are not added to the response. Ordinary writes do not change an address.
+Relocation changes address identity. Global binding metadata is an observation
+before assembly, not proof of its earlier content snapshot or an atomic
+multi-store snapshot; immutable content roots remain separate work.
 
 V6 adds `snapshotIdentity.components.effectiveConfig`. It binds effective
 candidate/result limits, allowed sections, speed/source/scope policy, visibility,
@@ -159,9 +169,9 @@ the declared `ee.pack.hash.self.v1` placeholder while hashing. JSON may omit
 `pack.text`, but Lean Markdown remains bound. Late delivery notices remain in
 the envelope and do not change the finalized prompt or stored hash.
 
-The L2 cache key is now `ee.pack.l2_cache_key.v11`, with payload schema
+The L2 cache key is now `ee.pack.l2_cache_key.v12`, with payload schema
 `ee.pack.l2_context_response.v4`. Cache admission verifies finalized text and
-recomposes its v6 identity; older entries miss. Retrieval and source
+recomposes its v7 identity, including `storeScopes`; older entries miss. Retrieval and source
 admission run before cache lookup; reuse covers assembly/rendering and binds
 the actual quality policy and scored candidate pool. Daemon pack handoffs
 with observed feedback trigger fresh retrieval, avoiding stale top-K reuse.

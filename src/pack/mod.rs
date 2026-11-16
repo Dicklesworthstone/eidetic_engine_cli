@@ -1690,6 +1690,9 @@ pub struct ContextRequest {
     /// Digest of the effective retrieval and selection controls captured by
     /// context execution. Direct pack builders leave this absent.
     pub effective_config_policy: Option<String>,
+    /// Digest of the addressed workspace/global stores and effective scope
+    /// membership. Direct builders without stores bind explicit absence.
+    pub store_scope_identity: Option<String>,
     /// Normalized, captured bead-scoring input. Absent requests retain their
     /// historical pack identity and never read the workspace tracker.
     pub bead_affinity_identity: Option<String>,
@@ -1735,6 +1738,7 @@ impl ContextRequest {
             reference_time: None,
             quality_scoring_policy: None,
             effective_config_policy: None,
+            store_scope_identity: None,
             bead_affinity_identity: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
@@ -3947,13 +3951,13 @@ pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
 
 /// The pack-hash input schema (ADR 0087 §8). Every component and the composite
 /// bind this tag, and the snapshot identity reports its version.
-pub const PACK_HASH_INPUT_SCHEMA_V6: &str = "ee.pack.hash_input.v6";
-pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 6;
+pub const PACK_HASH_INPUT_SCHEMA_V7: &str = "ee.pack.hash_input.v7";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 7;
 /// The only substituted value in the rendered-text digest. This value is
 /// supplied to the typed footer renderer, never replaced in arbitrary content.
 pub const PACK_HASH_TEXT_FOOTER_PLACEHOLDER: &str = "ee.pack.hash.self.v1";
 
-/// The component digests behind a v6 `pack.hash` (ADR 0087 §7). Each is a
+/// The component digests behind a v7 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
 /// carries a raw input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3967,6 +3971,7 @@ pub struct PackHashComponentDigests {
     pub coordination: String,
     pub rendered_text: String,
     pub effective_config: String,
+    pub store_scopes: String,
 }
 
 impl PackHashComponentDigests {
@@ -3989,6 +3994,7 @@ impl PackHashComponentDigests {
                 "effectiveConfig",
                 self.effective_config == other.effective_config,
             ),
+            ("storeScopes", self.store_scopes == other.store_scopes),
         ]
         .into_iter()
         .filter_map(|(name, equal)| (!equal).then_some(name))

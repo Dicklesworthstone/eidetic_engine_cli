@@ -28,6 +28,7 @@ mod tests {
     use crate::core::budget::{BudgetDimension, RequestBudget};
     use crate::core::memory::{ReviseMemoryOptions, ReviseReason, revise_memory};
     use crate::core::memory_drift::{MemoryDriftSelectionHint, MemoryDriftStatus};
+    use crate::core::memory_scope::MemoryScopeContext;
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
@@ -9512,25 +9513,25 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
-    fn l2_v5_rejects_stale_identity_tampered_text_and_forged_composites() -> TestResult {
-        let original = finalized_l2_response_json("v5 cache validation")?;
+    fn l2_v7_rejects_stale_identity_tampered_text_and_forged_composites() -> TestResult {
+        let original = finalized_l2_response_json("v7 cache validation")?;
         let text = original["data"]["pack"]["text"]
             .as_str()
             .ok_or("text")?
             .to_owned();
         let hash = original["data"]["pack"]["hash"].as_str().ok_or("hash")?;
-        for case in 0..5 {
+        for case in 0..6 {
             let mut response = original.clone();
             let mut canonical_text = text.clone();
             match case {
                 0 => {
-                    response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(5);
+                    response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(6);
                     response["data"]["pack"]["snapshotIdentity"]["inputSchema"] =
-                        serde_json::json!("ee.pack.hash_input.v5");
+                        serde_json::json!("ee.pack.hash_input.v6");
                     response["data"]["pack"]["snapshotIdentity"]["components"]
                         .as_object_mut()
                         .ok_or("cached components should be an object")?
-                        .remove("effectiveConfig");
+                        .remove("storeScopes");
                 }
                 1 => {
                     canonical_text = format!("Changed text\n{text}");
@@ -9556,6 +9557,12 @@ pub fn unrelated_context() -> u64 {{
                     response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
                 }
                 3 => response["data"]["pack"]["text"] = serde_json::Value::Null,
+                4 => {
+                    response["data"]["pack"]["snapshotIdentity"]["components"]
+                        .as_object_mut()
+                        .ok_or("cached components should be an object")?
+                        .remove("storeScopes");
+                }
                 _ => {
                     response["data"]["pack"]
                         .as_object_mut()
@@ -13519,6 +13526,307 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn store_scope_test_binding() -> super::ContextStoreScopeBinding {
+        super::ContextStoreScopeBinding {
+            address_digest: super::context_store_address_digest(Path::new("/private/store-a.db")),
+            workspace_address_digest: super::context_store_address_digest(Path::new(
+                "/private/project",
+            )),
+            workspace_id: Some("private-workspace-binding".to_owned()),
+            binding_available: true,
+        }
+    }
+
+    fn store_scope_test_context(scope: MemoryScope) -> MemoryScopeContext {
+        MemoryScopeContext {
+            scope,
+            strict_scope: true,
+            current_agent: Some("private-current-agent".to_owned()),
+            team_members: ["private-peer-a".to_owned(), "private-peer-b".to_owned()]
+                .into_iter()
+                .collect(),
+            team_roster_read_error: None,
+        }
+    }
+
+    #[test]
+    fn pack_hash_v7_names_store_scope_changes_without_changed_items_or_text() -> TestResult {
+        use super::hash_context_store_scopes;
+
+        let workspace = store_scope_test_binding();
+        let scope = store_scope_test_context(MemoryScope::Team);
+        let base_identity = hash_context_store_scopes(&workspace, &scope, "outside_scope", None);
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |request: &ContextRequest| {
+            super::compute_pack_hash_components(
+                request,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                Some(42),
+                None,
+            )
+        };
+        let absent = hash(&request);
+        request.store_scope_identity = Some(base_identity.clone());
+        let original = hash(&request);
+        let mut different_store = workspace.clone();
+        different_store.address_digest =
+            super::context_store_address_digest(Path::new("/private/store-b.db"));
+        let mut different_binding = workspace.clone();
+        different_binding.workspace_id = Some("private-other-binding".to_owned());
+        let mut unbound = workspace.clone();
+        unbound.workspace_id = None;
+        let mut other_unbound_root = unbound.clone();
+        other_unbound_root.workspace_address_digest =
+            super::context_store_address_digest(Path::new("/private/other-project"));
+        let mut unreadable = unbound.clone();
+        unreadable.binding_available = false;
+        let mut different_team = scope.clone();
+        different_team.team_members.insert("private-peer-c".to_owned());
+        let mut different_agent = scope.clone();
+        different_agent.current_agent = Some("private-other-agent".to_owned());
+        let mut failed_roster = scope.clone();
+        failed_roster.team_members.clear();
+        failed_roster.team_roster_read_error = Some("private-read-error".to_owned());
+        let mut empty_roster = failed_roster.clone();
+        empty_roster.team_roster_read_error = None;
+        let changed_scopes = [
+            hash_context_store_scopes(&different_store, &scope, "outside_scope", None),
+            hash_context_store_scopes(&different_binding, &scope, "outside_scope", None),
+            hash_context_store_scopes(&unbound, &scope, "outside_scope", None),
+            hash_context_store_scopes(&other_unbound_root, &scope, "outside_scope", None),
+            hash_context_store_scopes(&unreadable, &scope, "outside_scope", None),
+            hash_context_store_scopes(&workspace, &different_team, "outside_scope", None),
+            hash_context_store_scopes(&workspace, &different_agent, "outside_scope", None),
+            hash_context_store_scopes(&workspace, &failed_roster, "outside_scope", None),
+            hash_context_store_scopes(&workspace, &empty_roster, "outside_scope", None),
+        ];
+        let distinct = changed_scopes.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), changed_scopes.len());
+        for identity in changed_scopes {
+            request.store_scope_identity = Some(identity);
+            let changed = hash(&request);
+            assert_eq!(
+                original.digests.differing_components(&changed.digests),
+                ["storeScopes"],
+            );
+            assert_ne!(original.composite_hash, changed.composite_hash);
+        }
+        assert_eq!(
+            original.digests.differing_components(&absent.digests),
+            ["storeScopes"],
+        );
+
+        request.store_scope_identity = Some(base_identity);
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        super::finalize_context_response(&mut response, Default::default(), Some(42), None);
+        let json = crate::output::render_context_response_json(&response);
+        assert!(json.contains("\"storeScopes\":\"blake3:"));
+        for private in [
+            "/private/",
+            "private-workspace-binding",
+            "private-current-agent",
+            "private-peer-a",
+        ] {
+            assert!(!json.contains(private), "scope preimage leaked: {private}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_v7_names_global_tier_changes_with_equal_selected_items() -> TestResult {
+        let workspace = store_scope_test_binding();
+        let scope = store_scope_test_context(MemoryScope::Swarm);
+        let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |request: &ContextRequest| {
+            super::compute_pack_hash_components(
+                request,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                Some(42),
+                None,
+            )
+        };
+        request.store_scope_identity = Some(super::hash_context_store_scopes(
+            &workspace, &scope, "store_absent", None,
+        ));
+        let absent = hash(&request);
+        let mut global = workspace.clone();
+        global.address_digest =
+            super::context_store_address_digest(Path::new("/private/global/ee.db"));
+        global.workspace_address_digest =
+            super::context_store_address_digest(Path::new("/private/global"));
+        global.workspace_id = Some("private-global-binding".to_owned());
+        for (posture, binding) in [
+            ("included", Some(&global)),
+            ("disabled_by_config", None),
+            ("not_participating", None),
+        ] {
+            request.store_scope_identity = Some(super::hash_context_store_scopes(
+                &workspace, &scope, posture, binding,
+            ));
+            let changed = hash(&request);
+            assert_eq!(
+                absent.digests.differing_components(&changed.digests),
+                ["storeScopes"],
+            );
+            assert_ne!(absent.composite_hash, changed.composite_hash);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_store_scope_identity_canonicalizes_membership_and_ignores_inactive_rosters() {
+        let workspace = store_scope_test_binding();
+        let mut left = store_scope_test_context(MemoryScope::Team);
+        left.team_members = ["b".to_owned(), "a".to_owned(), "a".to_owned()]
+            .into_iter()
+            .collect();
+        let mut right = left.clone();
+        right.team_members = ["a".to_owned(), "b".to_owned()].into_iter().collect();
+        let digest = |scope: &MemoryScopeContext| {
+            super::hash_context_store_scopes(&workspace, scope, "outside_scope", None)
+        };
+        assert_eq!(digest(&left), digest(&right));
+        left.scope = MemoryScope::Verified;
+        right.scope = MemoryScope::Verified;
+        right.current_agent = Some("unrelated-agent".to_owned());
+        right.team_members.clear();
+        right.team_roster_read_error = Some("unrelated roster failure".to_owned());
+        assert_eq!(digest(&left), digest(&right));
+    }
+
+    #[test]
+    fn pack_store_scope_identity_reads_real_bindings_and_separates_equal_stores() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory.path().canonicalize().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x7101)).to_string();
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = workspace.clone();
+        options.memory_scope = MemoryScope::SelfOnly;
+        options.strict_scope = true;
+        let scope = store_scope_test_context(options.memory_scope);
+        let mut identities = Vec::new();
+        for file in ["first.db", "second.db"] {
+            let database = workspace.join(file);
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let captured =
+                super::context_store_scope_identity(&options, &database, &connection, &scope)
+                    .map_err(|error| error.to_string())?;
+            let expected = super::hash_context_store_scopes(
+                &super::ContextStoreScopeBinding {
+                    address_digest: super::context_store_address_digest(&database),
+                    workspace_address_digest: super::context_store_address_digest(&workspace),
+                    workspace_id: Some(workspace_id.clone()),
+                    binding_available: true,
+                },
+                &scope,
+                "outside_scope",
+                None,
+            );
+            assert_eq!(captured, expected, "must use the stored custom ID");
+            identities.push(captured);
+        }
+        assert_ne!(identities[0], identities[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_global_scope_identity_observes_binding_and_withholds_disabled_stores() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = directory.path().join("global");
+        let paths = crate::core::global_store::GlobalStorePaths::from_root(&root);
+        let mut policy = crate::config::MemoryConfig::default();
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        assert_eq!(posture, "store_absent");
+        assert!(binding.is_none());
+
+        std::fs::create_dir(&root).map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&paths.database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        assert_eq!(posture, "included");
+        let empty = binding.ok_or("empty global store should have an observed binding")?;
+        assert!(empty.binding_available);
+        assert!(empty.workspace_id.is_none());
+
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x7102)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let (_, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let bound = binding.ok_or("global store should be included")?;
+        assert!(bound.binding_available);
+        assert_eq!(bound.workspace_id.as_deref(), Some(workspace_id.as_str()));
+        assert_eq!(bound.address_digest, empty.address_digest);
+
+        let corrupt_root = directory.path().join("corrupt-global");
+        std::fs::create_dir(&corrupt_root).map_err(|error| error.to_string())?;
+        let corrupt = crate::core::global_store::GlobalStorePaths::from_root(&corrupt_root);
+        std::fs::write(&corrupt.database_path, b"not a database")
+            .map_err(|error| error.to_string())?;
+        policy.include_global = Some(false);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        assert_eq!(posture, "disabled_by_config");
+        assert!(binding.is_none(), "disabled stores must not be opened");
+        policy.include_global = Some(true);
+        let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        assert!(!binding.ok_or("present global address")?.binding_available);
+        assert_eq!(
+            std::fs::read(&corrupt.database_path).map_err(|error| error.to_string())?,
+            b"not a database".to_vec(),
+            "identity reads must not repair or mutate a global store",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_store_address_identity_survives_aliases_and_ordinary_writes() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = directory.path().join("store.db");
+        let child = directory.path().join("child");
+        std::fs::create_dir(&child).map_err(|error| error.to_string())?;
+        std::fs::write(&path, b"first generation").map_err(|error| error.to_string())?;
+        let original = super::context_store_address_digest(&path);
+        assert_eq!(
+            original,
+            super::context_store_address_digest(&child.join("..").join("store.db")),
+        );
+        std::fs::write(&path, b"another generation with different size")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(original, super::context_store_address_digest(&path));
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("store-alias.db");
+            std::os::unix::fs::symlink(&path, &alias).map_err(|error| error.to_string())?;
+            assert_eq!(original, super::context_store_address_digest(&alias));
+        }
+        Ok(())
+    }
+
     #[test]
     fn pack_quality_fallback_ranks_before_limit_and_tracks_feedback_snapshot() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -13696,8 +14004,8 @@ pub fn unrelated_context() -> u64 {{
             serde_json::from_str(&crate::output::render_context_response_json(&response))
                 .map_err(|error| error.to_string())?;
         let identity = &json["data"]["pack"]["snapshotIdentity"];
-        assert_eq!(identity["version"], 6);
-        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v6");
+        assert_eq!(identity["version"], 7);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v7");
         assert_eq!(
             identity["components"]["referenceTime"],
             first.digests.reference_time
@@ -14198,6 +14506,7 @@ pub fn unrelated_context() -> u64 {{
                 ("coordination", l.coordination == r.coordination),
                 ("rendered_text", l.rendered_text == r.rendered_text),
                 ("effectiveConfig", l.effective_config == r.effective_config),
+                ("storeScopes", l.store_scopes == r.store_scopes),
                 ("composite", left.composite_hash == right.composite_hash),
             ]
             .into_iter()
@@ -14637,7 +14946,7 @@ pub fn unrelated_context() -> u64 {{
             text,
             crate::pack::render_context_response_markdown(response)
         );
-        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 6);
+        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 7);
         Ok(())
     }
 
@@ -14981,6 +15290,10 @@ pub fn unrelated_context() -> u64 {{
         let mut selection = base.clone();
         selection.request.effective_config_policy = Some("blake3:selection-policy".to_owned());
         assert_ne!(key, compute_pack_l2_cache_key(&selection));
+
+        let mut scope = base.clone();
+        scope.request.store_scope_identity = Some("blake3:store-scope".to_owned());
+        assert_ne!(key, compute_pack_l2_cache_key(&scope));
 
         let mut timed = base.clone();
         timed.request.reference_time = Some(query_time("2026-05-01T12:00:00.123456Z"));

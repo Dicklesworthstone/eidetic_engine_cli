@@ -166,9 +166,9 @@ const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(debug_assertions)]
 const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v11: bind the executed quality/selection policies and scored candidates,
-/// and miss responses written before pack-hash input v6 (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V11: &str = "ee.pack.l2_cache_key.v11";
+/// v12: bind concrete store/scope identity in addition to executed selection
+/// policies, and miss responses written before pack-hash input v7 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V12: &str = "ee.pack.l2_cache_key.v12";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4: &str = "ee.pack.l2_context_response.v4";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -3529,6 +3529,22 @@ async fn run_context_pack_attempt(
     control.check()?;
 
     request.task_paths = task_paths::normalize(&options.workspace_path, &options.task_paths)?;
+    // Scope membership is a selection input even when two scopes happen to
+    // return the same items. Capture it before replay and reuse this exact
+    // roster for the admission checks below.
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
+        &options.workspace_path,
+        options.memory_scope,
+        options.strict_scope,
+        Some(read_connection),
+    );
+    request.store_scope_identity = Some(context_store_scope_identity(
+        options,
+        &database_path,
+        read_connection,
+        &scope_context,
+    )?);
     // Quality policy is captured by actual retrieval, including empty results
     // and daemon handoffs. Only now can a cache key bind the executed config.
     // L2 reuses assembly/rendering; retrieval and source admission still run.
@@ -3807,12 +3823,6 @@ async fn run_context_pack_attempt(
     let scope_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let scope_context = MemoryScopeContext::for_workspace_with_connection(
-        &options.workspace_path,
-        options.memory_scope,
-        options.strict_scope,
-        Some(read_connection),
-    );
     let global_store_memory_ids = global_store_search_memory_ids(&search_report);
     if let Some(probe) = control.why_not {
         probe.observe_memories(&candidates, OmissionCause::Filter);
@@ -9244,13 +9254,13 @@ fn validate_cached_context_finalization(
         || identity
             .and_then(|value| value.get("inputSchema"))
             .and_then(serde_json::Value::as_str)
-            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V6)
+            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V7)
         || identity
             .and_then(|value| value.get("digest"))
             .and_then(serde_json::Value::as_str)
             != hash
     {
-        return Err("L2 pack cache responseJson is missing a finalized v6 identity".to_owned());
+        return Err("L2 pack cache responseJson is missing a finalized v7 identity".to_owned());
     }
     match (
         output_options.include_rendered_text,
@@ -9267,7 +9277,7 @@ fn validate_cached_context_finalization(
     }
     let components = identity
         .and_then(|value| value.get("components"))
-        .ok_or_else(|| "L2 pack cache v6 identity is missing component digests".to_owned())?;
+        .ok_or_else(|| "L2 pack cache v7 identity is missing component digests".to_owned())?;
     let read_digest = |name| -> Result<String, String> {
         components
             .get(name)
@@ -9281,7 +9291,7 @@ fn validate_cached_context_finalization(
                 })
             })
             .map(str::to_owned)
-            .ok_or_else(|| "L2 pack cache v6 identity has an invalid component digest".to_owned())
+            .ok_or_else(|| "L2 pack cache v7 identity has an invalid component digest".to_owned())
     };
     let digests = crate::pack::PackHashComponentDigests {
         request: read_digest("request")?,
@@ -9293,10 +9303,11 @@ fn validate_cached_context_finalization(
         coordination: read_digest("coordination")?,
         rendered_text: read_digest("renderedText")?,
         effective_config: read_digest("effectiveConfig")?,
+        store_scopes: read_digest("storeScopes")?,
     };
     let composite = compute_pack_hash_composite(&digests, output_options.include_skipped);
     if Some(composite.as_str()) != hash {
-        return Err("L2 pack cache v6 composite does not match its component digests".to_owned());
+        return Err("L2 pack cache v7 composite does not match its component digests".to_owned());
     }
     // `composite` equals the stored hash here, so it names the footer.
     let footer = crate::pack::context_markdown_identity_footer(
@@ -9319,7 +9330,7 @@ fn validate_cached_context_finalization(
     hash_labeled_bytes(&mut hasher, "text", canonical_text.as_bytes());
     let digest = finalize_blake3(hasher);
     if digests.rendered_text != digest {
-        return Err("L2 pack cache canonical text does not match its v5 text digest".to_owned());
+        return Err("L2 pack cache canonical text does not match its v7 text digest".to_owned());
     }
     Ok(())
 }
@@ -9576,7 +9587,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V11.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V12.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -9615,6 +9626,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         &mut hasher,
         "effective_config",
         compute_pack_effective_config_digest(&input.request).as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "store_scopes",
+        compute_pack_store_scopes_digest(&input.request).as_bytes(),
     );
     hash_labeled_bytes(
         &mut hasher,
@@ -9849,7 +9865,7 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     components.composite_hash
 }
 
-/// Freeze the complete canonical prompt and its v6 identity together. All
+/// Freeze the complete canonical prompt and its v7 identity together. All
 /// canonical attachments must be present before this boundary. Later delivery
 /// notices may extend the envelope but cannot change the persisted prompt.
 fn finalize_context_response(
@@ -9914,7 +9930,7 @@ fn compute_pack_hash_components(
     )
 }
 
-/// The v6 pack hash (ADR 0087 §4, §7, §8).
+/// The v7 pack hash (ADR 0087 §4, §7, §8).
 ///
 /// Each component is its own blake3 hasher, opened with the input schema tag
 /// and the component name, over labeled, length-prefixed fields only
@@ -10108,6 +10124,7 @@ fn compute_context_pack_hash_components(
         coordination: finalize_blake3(coordination_hasher),
         rendered_text: finalize_blake3(rendered_text_hasher),
         effective_config: compute_pack_effective_config_digest(request),
+        store_scopes: compute_pack_store_scopes_digest(request),
     };
 
     PackHashComponents {
@@ -10125,7 +10142,7 @@ fn compute_pack_hash_composite(
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V6.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V7.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
     hash_labeled_bytes(
@@ -10162,6 +10179,11 @@ fn compute_pack_hash_composite(
         "effective_config",
         digests.effective_config.as_bytes(),
     );
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "store_scopes",
+        digests.store_scopes.as_bytes(),
+    );
 
     finalize_blake3(composite_hasher)
 }
@@ -10195,7 +10217,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V6.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V7.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
@@ -10221,6 +10243,192 @@ fn hash_labeled_optional_bytes(hasher: &mut blake3::Hasher, label: &str, value: 
     if let Some(value) = value {
         hash_labeled_bytes(hasher, label, value);
     }
+}
+
+/// S1 binds addressed stores and scope eligibility independently of selected
+/// content. Only digests reach the response; paths and producer names do not.
+fn compute_pack_store_scopes_digest(request: &ContextRequest) -> String {
+    let mut hasher = pack_hash_component_hasher("store_scopes");
+    hash_labeled_optional_bytes(
+        &mut hasher,
+        "runtime_scopes",
+        request.store_scope_identity.as_deref().map(str::as_bytes),
+    );
+    finalize_blake3(hasher)
+}
+
+#[derive(Clone, Debug)]
+struct ContextStoreScopeBinding {
+    address_digest: String,
+    workspace_address_digest: String,
+    workspace_id: Option<String>,
+    binding_available: bool,
+}
+
+fn context_store_address_digest(path: &Path) -> String {
+    // Address identity survives ordinary writes and resolvable path aliases.
+    // Size, mtime and inode are deliberately absent: this is not a content root
+    // or the stronger, process-local L2 replacement guard.
+    let canonical = path.canonicalize().unwrap_or_else(|_| {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    });
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.store_address.v1");
+    hash_labeled_bytes(&mut hasher, "path", canonical.as_os_str().as_encoded_bytes());
+    finalize_blake3(hasher)
+}
+
+fn context_store_scope_identity(
+    options: &ContextPackOptions,
+    database_path: &Path,
+    connection: &DbConnection,
+    scope: &MemoryScopeContext,
+) -> Result<String, ContextPackError> {
+    let workspace = crate::core::workspace::addressed_workspace_row(
+        connection,
+        &options.workspace_path,
+        database_path,
+    )
+    .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+    let workspace = ContextStoreScopeBinding {
+        address_digest: context_store_address_digest(database_path),
+        workspace_address_digest: context_store_address_digest(&options.workspace_path),
+        workspace_id: workspace.map(|row| row.id),
+        binding_available: true,
+    };
+    let (global_posture, global) = context_global_store_scope(options);
+    Ok(hash_context_store_scopes(
+        &workspace,
+        scope,
+        global_posture,
+        global.as_ref(),
+    ))
+}
+
+fn context_global_store_scope(
+    options: &ContextPackOptions,
+) -> (&'static str, Option<ContextStoreScopeBinding>) {
+    if !matches!(
+        options.memory_scope,
+        MemoryScope::Swarm | MemoryScope::Workspace | MemoryScope::Global
+    ) {
+        return ("outside_scope", None);
+    }
+    let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env() else {
+        return ("path_unavailable", None);
+    };
+    let Ok(policy) = crate::config::workspace_memory_policy(&options.workspace_path) else {
+        return ("policy_unavailable", None);
+    };
+    context_global_store_scope_for_paths(&paths, &policy)
+}
+
+fn context_global_store_scope_for_paths(
+    paths: &crate::core::global_store::GlobalStorePaths,
+    policy: &crate::config::MemoryConfig,
+) -> (&'static str, Option<ContextStoreScopeBinding>) {
+    let inclusion = crate::core::global_store::resolve_global_inclusion(
+        &crate::core::global_store::GlobalInclusionInput {
+            store_present: paths.database_path.exists(),
+            participating: policy.participate.unwrap_or(true),
+            config_enabled: policy.include_global.unwrap_or(true),
+            no_global_flag: false,
+        },
+    );
+    if !inclusion.included {
+        // Disabled tiers do not identify or open an unrelated store.
+        return (inclusion.reason.as_str(), None);
+    }
+    // Custom workspace IDs are legal in the global store. Observe its actual
+    // binding rather than guessing an ID from the root. This is a metadata
+    // observation, not an attestation of the earlier global content snapshot.
+    // Read failure remains distinct from a successfully observed empty store.
+    let binding = DbConnection::open_file_read_only(&paths.database_path)
+        .map_err(|_| ())
+        .and_then(|connection| {
+            crate::core::workspace::addressed_workspace_row(
+                &connection,
+                &paths.root,
+                &paths.database_path,
+            )
+            .map(|row| row.map(|row| row.id))
+            .map_err(|_| ())
+        });
+    let binding_available = binding.is_ok();
+    (
+        inclusion.reason.as_str(),
+        Some(ContextStoreScopeBinding {
+            address_digest: context_store_address_digest(&paths.database_path),
+            workspace_address_digest: context_store_address_digest(&paths.root),
+            workspace_id: binding.ok().flatten(),
+            binding_available,
+        }),
+    )
+}
+
+fn hash_context_store_scopes(
+    workspace: &ContextStoreScopeBinding,
+    scope: &MemoryScopeContext,
+    global_posture: &str,
+    global: Option<&ContextStoreScopeBinding>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.store_scopes.v1");
+    hash_context_store_binding(&mut hasher, "workspace", workspace);
+    hash_labeled_bytes(&mut hasher, "scope", scope.scope.as_str().as_bytes());
+    hash_labeled_bool(&mut hasher, "strict_scope", scope.strict_scope);
+    if matches!(scope.scope, MemoryScope::SelfOnly | MemoryScope::Team) {
+        hash_labeled_optional_bytes(
+            &mut hasher,
+            "current_agent",
+            scope.current_agent.as_deref().map(str::as_bytes),
+        );
+    }
+    if scope.scope == MemoryScope::Team {
+        hash_labeled_bool(
+            &mut hasher,
+            "team_roster_available",
+            scope.team_roster_read_error.is_none(),
+        );
+        hash_policy_string_set(
+            &mut hasher,
+            "team_members",
+            scope.team_members.iter().map(String::as_str),
+        );
+    }
+    hash_labeled_bytes(&mut hasher, "global.posture", global_posture.as_bytes());
+    hash_labeled_bool(&mut hasher, "global.present", global.is_some());
+    if let Some(global) = global {
+        hash_context_store_binding(&mut hasher, "global", global);
+    }
+    finalize_blake3(hasher)
+}
+
+fn hash_context_store_binding(
+    hasher: &mut blake3::Hasher,
+    tier: &str,
+    binding: &ContextStoreScopeBinding,
+) {
+    hash_labeled_bytes(
+        hasher,
+        &format!("{tier}.address"),
+        binding.address_digest.as_bytes(),
+    );
+    hash_labeled_bytes(
+        hasher,
+        &format!("{tier}.workspace_address"),
+        binding.workspace_address_digest.as_bytes(),
+    );
+    hash_labeled_bool(
+        hasher,
+        &format!("{tier}.binding_available"),
+        binding.binding_available,
+    );
+    hash_labeled_optional_bytes(
+        hasher,
+        &format!("{tier}.workspace_id"),
+        binding.workspace_id.as_deref().map(str::as_bytes),
+    );
 }
 
 /// S6: bind effective limits even when they happen to select the same items.
@@ -11014,6 +11222,10 @@ fn log_pack_hash_components(components: &PackHashComponents) {
         .with_field(
             "effective_config_hash",
             serde_json::Value::String(components.digests.effective_config.clone()),
+        )
+        .with_field(
+            "store_scopes_hash",
+            serde_json::Value::String(components.digests.store_scopes.clone()),
         )
         .with_field(
             "composite_hash",

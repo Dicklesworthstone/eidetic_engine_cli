@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-24
-Updated: 2026-11-10 (pack-hash input v6, effective selection policy)
+Updated: 2026-11-16 (pack-hash input v7, concrete store and scope identity)
 Bead: bd-reality-core-convergence-1azkt.1
 Depends-on: ADR 0084 (hotset manifest), ADR 0085 (typed pack entity identity)
 
@@ -53,6 +53,13 @@ same selected items and prompt now have distinct `effectiveConfig` digests.
 Equivalent sets/defaults share an identity; telemetry and audit IDs remain out
 of the policy. This is a contract change, not runtime closure evidence for that
 bead or the broader cross-host determinism work.
+
+v7 adds addressed store and scope identity in S1
+(`bd-pack-identity-tiers-vxx8l`). Equal generations and selected content no longer
+make different workspace/global addresses or team memberships hash alike.
+The new `storeScopes` component carries only a digest. It identifies addressed
+scopes and observed bindings; it does not establish immutable content roots or
+an atomic snapshot spanning multiple stores.
 
 ## Decision
 
@@ -131,13 +138,13 @@ The full target identity is S1–S10:
 | S9 | execution domain | target triple class, CPU feature class relevant to declared numeric paths, binary/toolchain digest, enabled features |
 | S10 | serialization versions | `ee.pack.v2`, hash input schema, canonical-hash construction |
 
-#### 2a. What v6 binds, literally
+#### 2a. What v7 binds, literally
 
-`pack.hash` under input schema `ee.pack.hash_input.v6` is a function of
+`pack.hash` under input schema `ee.pack.hash_input.v7` is a function of
 exactly these components and nothing else
 (`compute_context_pack_hash_components`, `src/core/context.rs`):
 
-| v6 component | Binds |
+| v7 component | Binds |
 |---|---|
 | `request` | query bytes (trimmed, no NFC), request profile, `budget.max_tokens`, output profile, resource profile, coverage/text/skipped/meta/verbose-meta output flags, non-affecting-degradation visibility, requested Pack DNA, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
 | `reference_time` | S7: `mode=explicit` and the effective UTC millisecond reference instant, or `mode=wall_clock` when no explicit clock was supplied |
@@ -148,27 +155,27 @@ exactly these components and nothing else
 | `coordination` | the coordination snapshot, when present |
 | `rendered_text` | exact finalized output-renderer markdown, including backend, consensus/conflict analysis and requested DNA, with only the typed terminal hash-footer value replaced by the declared placeholder (§1) |
 | `effective_config` | S6: effective capped candidate pool, optional result limit, section set, and the captured runtime policy described in §3a; direct builders explicitly bind runtime-policy absence |
+| `store_scopes` | S1: concrete database/root addresses and actual workspace bindings; requested scope and strictness; global-tier inclusion posture; current producer for self/team scopes; canonical team membership and roster availability (§3b). Direct builders without stores bind explicit absence. |
 
 The composite is blake3 over the schema tag and the tagged component
 digests, in this order: `request`, `reference_time`, `quality_scoring`, `items`, `omitted` (only when skipped items
 are shown), `degraded`, `coordination`, `rendered_text` (always, including when
-JSON omits text), `effective_config`. Equal composites therefore mean equal bound components, and a
+JSON omits text), `effective_config`, `store_scopes`. Equal composites therefore mean equal bound components, and a
 differing composite is localized by comparing the component digests.
 
-#### 2b. What v6 does not bind, and who owns it
+#### 2b. What v7 does not bind, and who owns it
 
-| Component | Status in v6 | Owning bead |
+| Component | Status in v7 | Owning bead |
 |---|---|---|
-| S1 store tiers / scope identity | not bound | `bd-pack-identity-tiers-vxx8l` |
 | S2 index manifest / entity-revision root | not bound | `bd-reality-core-convergence-1azkt.2` |
 | S3 retrieval subsystem identities (lexical cache, L2 candidate set, PPR/plan caches) | not bound | `bd-reality-core-convergence-1azkt.2` (lexical cache), `bd-reality-core-convergence-1azkt.3` (cache identity under concurrency) |
 | S4 model identity | backend label is bound through text; full model/provider/weight identity is not | `bd-reality-core-convergence-1azkt.2` |
-| S8 authorization / capability / agent | not bound | `bd-pack-identity-authz-ctr51` |
+| S8 authorization / capability / agent | capabilities and authorization epochs not bound; self/team producer eligibility is bound in `store_scopes` | `bd-pack-identity-authz-ctr51` |
 | S8 trust / redaction / security policy epochs | per-item results bound, policy versions not | `bd-pack-identity-trust-epochs-b7cq9` |
 | S9 execution domain | not bound; see §3 | `bd-pack-identity-exec-domain-junoz` |
 | S5 tokenizer identity, Unicode normalization, locale, line endings | query hashed as trimmed bytes; nothing normalized; tokenizer not bound | `bd-pack-identity-unicode-gitmy` |
 | Selection thresholds/ties on Q20.12; one score domain for JSON | not done | `bd-reality-core-convergence-1azkt.11` |
-| Cross-process and cross-host determinism gates | not established by v6 | `bd-reality-core-convergence-1azkt.3` |
+| Cross-process and cross-host determinism gates | not established by v7 | `bd-reality-core-convergence-1azkt.3` |
 
 ### 2c. Executed quality policy
 
@@ -280,15 +287,54 @@ labels; pack ties and equivalent search scores use stable item comparisons,
 not seeded random choice. Consequently audit seed, cache eligibility/hit state,
 elapsed time, record paths, and persistence/baseline requests are excluded.
 Introducing seeded selection requires binding its effective seed and a version
-bump. This slice does not claim store/model/authorization identities owned in
-§2b, nor does it emit raw configuration or filter values.
+bump. This slice does not claim model/authorization identities owned in §2b,
+nor does it emit raw configuration or filter values. Addressed stores are
+bound separately below.
+
+### 3b. Addressed store and scope identity
+
+The `ee.pack.store_scopes.v1` slice records the primary database address, addressed
+workspace root and resolved workspace row ID. It uses the held primary read
+connection, including custom workspace bindings. Distinct roots that have no
+row in a shared database remain distinct. A read failure is never substituted
+for a successfully observed empty binding.
+
+Database and root addresses are domain-separated digests of canonical path
+bytes; inaccessible paths fall back to their absolute spelling. Resolvable
+symlink and dot-segment aliases canonicalize. Size, modification time, inode
+and ordinary writes do not change address identity. Relocating a store to a
+different canonical address changes this component, even if its rows and
+generations match. Replacing contents at the same address with the same binding
+does not establish a new content identity: immutable roots remain S2 work.
+The local L2 key retains its independent file-replacement guard.
+
+Global participation follows the same scope and inclusion gates used by
+retrieval: swarm/workspace/global scope, store presence, participation and
+`include_global` policy. Disabled or out-of-scope tiers are not opened or named.
+An included tier binds its address and actual existing workspace row, including
+a custom ID. Unavailable path/policy/binding states, absence and opt-out reasons
+have separate markers. Global binding metadata is observed before assembly and
+L2 admission; this extra read does not attest the earlier global source snapshot,
+its content generation, or an atomic snapshot spanning both stores.
+
+Current producer identity enters only self/team scopes. Team scope also binds
+the sorted, deduplicated roster and whether it was successfully measured.
+The captured roster is reused by final candidate and native-rule admission.
+Inactive rosters and producer variables do not change unrelated scopes.
+This binds scope eligibility, not the complete capability or authorization
+epoch contract in S8.
+
+Only the resulting `storeScopes` digest is emitted or logged. Canonical paths,
+workspace IDs, producer names and error-message preimages are not added to
+public pack metadata. Direct builders that do not address stores bind absence
+instead of manufacturing a runtime identity.
 
 ### 4. Canonical serialization rules (hash input)
 
 - Every field is fed as `len(label) u64 LE ‖ label ‖ len(value) u64 LE ‖ value`
   (`hash_labeled_bytes`). Optional fields add a labeled presence flag, and
   repeated fields a labeled count.
-- Every component opens with the labeled schema tag `ee.pack.hash_input.v6`
+- Every component opens with the labeled schema tag `ee.pack.hash_input.v7`
   and its component name.
 - The composite is `blake3` over the labeled schema tag and the labeled
   component digests (§2a).
@@ -336,13 +382,13 @@ text; a digest reveals neither.
 
 ### 7. Differing-state diagnostics
 
-`snapshotIdentity.components` names nine components. Comparing two responses
+`snapshotIdentity.components` names ten components. Comparing two responses
 field by field names the component that differs; the typed
 `PackHashComponentDigests::differing_components` comparator uses those public
-field names, including `referenceTime`, `qualityScoring` and `effectiveConfig`. `renderedText` moves when a rendered
+field names, including `referenceTime`, `qualityScoring`, `effectiveConfig` and `storeScopes`. `renderedText` moves when a rendered
 input moves; changing only the clock can move `referenceTime` and the composite
 while leaving the rendered text and selected items identical. No CLI comparator
-is part of v6.
+is part of v7.
 
 ### 8. Versioning and migration
 
@@ -350,8 +396,8 @@ is part of v6.
 
 ```json
 {
-  "version": 6,
-  "inputSchema": "ee.pack.hash_input.v6",
+  "version": 7,
+  "inputSchema": "ee.pack.hash_input.v7",
   "digest": "<pack.hash>",
   "numericDomain": "q20.12",
   "componentDigestsAvailableLocally": true,
@@ -360,7 +406,7 @@ is part of v6.
     "qualityScoring": "blake3:…",
     "items": "blake3:…", "omitted": "blake3:…",
     "degraded": "blake3:…", "coordination": "blake3:…", "renderedText": "blake3:…",
-    "effectiveConfig": "blake3:…"
+    "effectiveConfig": "blake3:…", "storeScopes": "blake3:…"
   }
 }
 ```
@@ -374,22 +420,23 @@ is part of v6.
   `^blake3:[0-9a-f]{64}$`. The version travels beside the hash in every emitted
   pack (`version`, `inputSchema`), and the schema tag is bound into the
   preimage, so versions use separate hash domains.
-- `pack_records.pack_hash` has no version column. Rows written before v6 carry
-  earlier hash domains and are not comparable with v6 hashes; nothing in the
+- `pack_records.pack_hash` has no version column. Rows written before v7 carry
+  earlier hash domains and are not comparable with v7 hashes; nothing in the
   row identifies that domain. Historical ledgers and hashes are not rewritten.
   `context show` and `pack replay` retain their redacted selection-projection
   contract and preserve the original hash; they do not claim to reproduce the
-  original prompt bytes or relabel historical hashes as v6. No raw prompt is
+  original prompt bytes or relabel historical hashes as v7. No raw prompt is
   added to the durable ledger and no SQL migration is required.
-- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v11`, so older
-  responses miss. Lookup now follows retrieval and adaptive budget resolution.
-  Its key binds the captured quality/effective configuration policies and returned candidate IDs, order,
+- The L2 pack cache key schema moved to `ee.pack.l2_cache_key.v12`, so older
+  responses miss. Lookup follows retrieval and adaptive budget resolution.
+  Its key binds store/scope identity, the captured quality/effective configuration
+  policies and returned candidate IDs, order,
   source lanes, and exact ranking/pack-score bits. New harmful feedback can
   therefore invalidate assembly reuse even when no memory row changed.
   Retrieval and authoritative admission still execute on an L2 hit.
 - L2 payload schema `ee.pack.l2_context_response.v4` stores the finalized
   `canonicalText` separately from `responseJson`, including for Lean JSON.
-  Admission validates v6 identity, recomposes all component digests with the
+  Admission validates v7 identity, requires all ten component digests, recomposes them with the
   requested output policy, verifies the typed footer and text digest, and
   checks JSON text presence/type against that policy. Hits hydrate the frozen
   Markdown without adding a text field to Lean JSON. DNA requests bypass L2
@@ -405,17 +452,22 @@ is part of v6.
 | Unit | `src/core/context_test_module.rs` `pack_hash_v2_*` | the flat-feed provenance collision is separated (red first against v1); each differing input moves its own component and the composite only; timing, order and repetition move nothing; evidence scores quantize |
 | Reference time | `context_reference_time_uses_one_precedence_and_millisecond_domain`, `pack_hash_v3_names_reference_time_without_changing_other_components`, `context_pack_validity_window_honors_as_of_and_include_future`, `pack_l2_cache_key_tracks_canonical_inputs` | precedence and actual selection share millisecond precision; wall-clock and explicit modes differ; offsets/sub-millisecond values canonicalize; identical selected items still distinguish different clocks; adaptive budgeting preserves identity; the comparator names `referenceTime`; L2 keys distinguish clocks |
 | Effective configuration | `pack_hash_v6_*`, `pack_l2_cache_key_tracks_canonical_inputs` | equal selected items/text still distinguish controls in `effectiveConfig`; sets, signed zero, proportional ratios and observational changes canonicalize; L2 keys bind the captured policy |
-| Property | `tests/pack_hash_property.rs` (in `integration_property`) | timing stays outside prompt identity but visible in the envelope; order/repetition and sub-quantum noise properties remain; independently derived v6 composite and text-component vectors pin exact renderer bytes with the declared footer exception |
+| Store scopes | `pack_hash_v7_*`, `pack_store_scope_identity_*`, `pack_global_scope_identity_*`, `pack_store_address_identity_*`, `pack_l2_cache_key_tracks_canonical_inputs` | equal content distinguishes concrete stores/bindings, global tier sets and team membership; comparator names `storeScopes`; aliases and unordered memberships canonicalize; disabled stores remain unopened; only digests are public; L2 binds scope changes |
+| Property | `tests/pack_hash_property.rs` (in `integration_property`) | timing stays outside prompt identity but visible in the envelope; order/repetition and sub-quantum noise properties remain; independently derived v7 composite and text-component vectors pin exact renderer bytes with the declared footer exception |
 | Finalization and replay | `src/core/context_test_module.rs` | backend/DNA changes move the text component; literal placeholder text is preserved; late notices do not rewrite finalized text; Lean still binds Markdown; cache tampering and forged composites are rejected; Lean cache hits retain canonical text; real seeded persistence records the finalized DNA hash |
 | Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
 
-Tests compare product output directly. The v6 text-leaf oracle substitutes only
+Tests compare product output directly. The v7 text-leaf oracle substitutes only
 the declared terminal footer value; it does not scrub any other content.
+Its independent encoder reproduced the previous v6 vectors before deriving v7.
+The prior 1,022-byte text oracle escaped the banner's `ee doctor` backticks;
+the current renderer appends that summary verbatim, so the v7 fixture pins its
+actual 1,020 bytes without changing renderer behavior.
 
 ## Consequences
 
-- Every new pack hash changes once (v5 to v6). Effective selection policy now
-  has its own component, even when it does not change the selected items or
+- Every new pack hash changes once (v6 to v7). Addressed stores and scopes now
+  have their own component, even when they do not change selected items or the
   rendered prompt. Historical hashes remain opaque references to their original
   ledger records and remain available through historical inspection/replay.
 - Cross-machine pack equality is a declared, bounded claim (§3), not an

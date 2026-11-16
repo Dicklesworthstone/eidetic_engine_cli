@@ -1,4 +1,4 @@
-//! ADR 0087 v6 pack-hash properties: finalized renderer text and input identity.
+//! ADR 0087 v7 pack-hash properties: finalized renderer text and input identity.
 //!
 //! Every property here reads the product's own output as it is. There is no
 //! test-side normalizer: a comparison that scrubbed timing first could not
@@ -22,15 +22,16 @@ use uuid::Uuid;
 // Keep the original fixture bytes so the version bump changes only hashing.
 const QUERY: &str = "pack hash v2 property";
 
-/// The v6 `pack.hash` of [`pinned_fixture`], identical on every declared
+/// The v7 `pack.hash` of [`pinned_fixture`], identical on every declared
 /// target. A change here is a deliberate `snapshotIdentity.version` bump
 /// (ADR 0087 §8), never a re-pin to make a run green.
-/// Independently derived with a reference encoder that first reproduced the
-/// previous v5 vector, rather than re-pinned from the implementation under test.
-const PINNED_V6_PACK_HASH: &str =
-    "blake3:2fd31bdc37fc8d49367f58a178cd5bc5abbab60359a509eb550555f3b3c041db";
-const PINNED_V6_RENDERED_TEXT: &str =
-    "blake3:534b0a6fcae194137be2c78a22f0227646b766b52b9d30266bd7f2fd9a68cfef";
+/// Independently derived with a reference encoder that reproduced the previous
+/// v6 composite and text vectors. That legacy text oracle escaped the banner's
+/// `ee doctor` backticks; the current renderer appends the summary verbatim.
+const PINNED_V7_PACK_HASH: &str =
+    "blake3:b1d389893df365b56d8b09ff188558d224781bc06e34ced50c82aacd3ceb1f17";
+const PINNED_V7_RENDERED_TEXT: &str =
+    "blake3:57256f47f1df53cb539c4e58be005f738ae7e123134724f82f1ae8634873460b";
 
 fn fixture(relevance: f32) -> Result<(ContextRequest, PackDraft), String> {
     let request = ContextRequest::from_query(QUERY).map_err(|error| error.to_string())?;
@@ -125,16 +126,16 @@ fn resource_profiles() -> impl Strategy<Value = PackResourceProfile> {
     ]
 }
 
-/// The pinned digest vector: one fixed input, one fixed v6 hash. Run on two
+/// The pinned digest vector: one fixed input, one fixed v7 hash. Run on two
 /// RCH workers, this is the cross-host half of ADR 0087 §9.
 #[test]
-fn pinned_v6_pack_hash_digest_vector() -> Result<(), String> {
+fn pinned_v7_pack_hash_digest_vector() -> Result<(), String> {
     let (request, mut draft) = pinned_fixture()?;
     let hash = compute_pack_hash(&request, &draft, &canonical_degraded()?);
-    println!("pack_hash_property pinned_v6_pack_hash={hash}");
-    if hash != PINNED_V6_PACK_HASH {
+    println!("pack_hash_property pinned_v7_pack_hash={hash}");
+    if hash != PINNED_V7_PACK_HASH {
         return Err(format!(
-            "v6 pack hash of the pinned fixture is {hash}, pinned {PINNED_V6_PACK_HASH}"
+            "v7 pack hash of the pinned fixture is {hash}, pinned {PINNED_V7_PACK_HASH}"
         ));
     }
     draft.hash = Some(hash.clone());
@@ -151,10 +152,11 @@ fn pinned_v6_pack_hash_digest_vector() -> Result<(), String> {
         "{body}\n<!-- pack.hash: {} -->\n<!-- pack.schema: ee.response.v2 -->\n",
         ee::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
     );
-    assert_eq!(canonical_text.len(), 1022);
+    assert_eq!(canonical_text.len(), 1020);
+    assert!(canonical_text.contains("and run `ee doctor` for workspace posture."));
     let mut text_hasher = blake3::Hasher::new();
     for (label, value) in [
-        ("schema", ee::pack::PACK_HASH_INPUT_SCHEMA_V6.as_bytes()),
+        ("schema", ee::pack::PACK_HASH_INPUT_SCHEMA_V7.as_bytes()),
         ("component", b"rendered_text".as_slice()),
         ("text", canonical_text.as_bytes()),
     ] {
@@ -165,7 +167,7 @@ fn pinned_v6_pack_hash_digest_vector() -> Result<(), String> {
     }
     assert_eq!(
         format!("blake3:{}", text_hasher.finalize().to_hex()),
-        PINNED_V6_RENDERED_TEXT
+        PINNED_V7_RENDERED_TEXT
     );
     Ok(())
 }

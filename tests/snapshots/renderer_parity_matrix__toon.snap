@@ -20,8 +20,8 @@ data:
     query: renderer parity release
     hash: "blake3:renderer-parity"
     snapshotIdentity:
-      version: 6
-      inputSchema: ee.pack.hash_input.v6
+      version: 7
+      inputSchema: ee.pack.hash_input.v7
       digest: "blake3:renderer-parity"
       numericDomain: q20.12
       componentDigestsAvailableLocally: false
