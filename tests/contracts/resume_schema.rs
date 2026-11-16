@@ -708,9 +708,120 @@ fn real_binary_resume_suppresses_retarget_when_discovery_is_globally_unavailable
     )
 }
 
-#[test]
-#[ignore = "full real-binary resume/orient acceptance; run with cargo test --release as a focused pinned RCH proof"]
-fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
+const REQUIRED_FUNCTIONAL_RESUME_E2E_LABELS: &[&str] = &[
+    "all_six_open_loop_tags_surfaced",
+    "all_three_tagged_sessions_publicly_surfaced",
+    "canonical_next_commands_execute",
+    "canonical_next_commands_preserved",
+    "canonical_typed_revisit_decision_surfaced",
+    "cold_root_starts_uninitialized",
+    "corpus_seeded",
+    "decisions_recorded",
+    "emitted_database_resume_executes_campaign_evidence",
+    "emitted_resume_leaves_cold_root_uninitialized",
+    "empty_store_reports_no_evidence",
+    "human_declared_sections_visible",
+    "human_open_loop_and_staleness_visible",
+    "human_resume_preserves_db_wal_shm",
+    "implicit_human_campaign_resume_preserves_db_wal_shm",
+    "implicit_human_resume_resolves_campaign_store_under_2s",
+    "implicit_resume_resolves_campaign_store",
+    "init_ok",
+    "json_resume_preserves_db_wal_shm",
+    "missing_db_returns_empty_resume_without_initializing",
+    "nearby_store_exact_complete_outcome_surfaced",
+    "nearby_store_human_complete_outcome_is_explicit",
+    "nearby_store_prepends_quoted_database_resume",
+    "nearby_store_seeded",
+    "next_only_overlap_does_not_mark_stale",
+    "open_loop_totals_are_exact",
+    "requested_sessions_plus_every_open_loop_in_one_resume",
+    "requested_two_newest_sessions_only",
+    "resume_human_redacts_planted_secret",
+    "resume_items_carry_public_posture",
+    "resume_json_redacts_planted_secret",
+    "resume_returns_schema",
+    "sessions_above_public_cap_structured_nonzero_no_mutation",
+    "stale_count_deduplicates_open_loop_and_session_projections",
+    "superseded_note_carries_stale_marker",
+    "untagged_four_hour_boundary_and_sessions_one_truncation",
+    "untagged_sessions_two_returns_both_real_groups",
+    "zero_sessions_structured_nonzero_no_mutation",
+];
+
+const REQUIRED_SCALE_RESUME_E2E_LABELS: &[&str] = &[
+    "fast_orient_human_never_leaks_secret_shaped_tag",
+    "fast_orient_json_redacts_secret_shaped_tag",
+    "scale_10k_fast_content_repeat_bytes_identical",
+    "scale_10k_fast_human_orient_preserves_db_wal_shm",
+    "scale_10k_fast_human_orient_under_1s_with_queried_content",
+    "scale_10k_fast_orient_preserves_db_wal_shm",
+    "scale_10k_fast_orient_sampled_p99_under_1s",
+    "scale_10k_fast_orient_under_1s_with_content",
+    "scale_10k_index_ready_for_fast_orient",
+    "scale_10k_seeded",
+];
+
+fn required_resume_e2e_labels_for_scope(scope: &str) -> Result<BTreeSet<String>, String> {
+    let slices: &[&[&str]] = match scope {
+        "all" => &[
+            REQUIRED_FUNCTIONAL_RESUME_E2E_LABELS,
+            REQUIRED_SCALE_RESUME_E2E_LABELS,
+        ],
+        "functional" => &[REQUIRED_FUNCTIONAL_RESUME_E2E_LABELS],
+        "scale" => &[REQUIRED_SCALE_RESUME_E2E_LABELS],
+        other => {
+            return Err(format!(
+                "unsupported EE_RESUME_E2E_SCOPE={other:?}; expected all, functional, or scale"
+            ));
+        }
+    };
+    Ok(slices
+        .iter()
+        .flat_map(|slice| slice.iter().copied())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn ingest_resume_e2e_stdout_line(
+    line: &str,
+    passed_labels: &mut BTreeSet<String>,
+    failed_events: &mut Vec<Value>,
+) {
+    if !line.trim_start().starts_with('{') {
+        return;
+    }
+    let event = match serde_json::from_str::<Value>(line) {
+        Ok(event) => event,
+        Err(error) => {
+            failed_events.push(serde_json::json!({
+                "malformedEventLine": line,
+                "error": error.to_string(),
+            }));
+            return;
+        }
+    };
+    if event.get("schema").and_then(Value::as_str) != Some("ee.test_event.v1")
+        || event.get("kind").and_then(Value::as_str) != Some("assert_result")
+    {
+        failed_events.push(event);
+        return;
+    }
+
+    let label = event.pointer("/fields/label").and_then(Value::as_str);
+    let status = event.pointer("/fields/status").and_then(Value::as_str);
+    if let (Some(label), Some("pass")) = (label, status) {
+        passed_labels.insert(label.to_owned());
+    } else {
+        failed_events.push(event);
+    }
+}
+
+fn run_resume_e2e_script_bridge(scope: &str) -> TestResult {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let required_labels = required_resume_e2e_labels_for_scope(scope)?;
     ensure(
         !cfg!(debug_assertions),
         "the real-binary resume/orient bridge must run under cargo test --release so CARGO_BIN_EXE_ee is the public release binary",
@@ -726,60 +837,72 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
             "the real-binary resume/orient bridge requires the public release binary, got {ee_bin}"
         ),
     )?;
-    let output = Command::new(&script)
+    let mut child = Command::new(&script)
         .env("EE_BIN", ee_bin)
         .env("EE_BINARY", ee_bin)
         .env("EE_E2E_TMPDIR", temp.path())
-        .env("EE_RESUME_E2E_SCOPE", "all")
-        .output()
+        .env("EE_RESUME_E2E_SCOPE", scope)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("launch {}: {error}", script.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "capture e2e_resume.sh stdout pipe".to_owned())?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "capture e2e_resume.sh stderr pipe".to_owned())?;
+
+    let scope_tag = scope.to_owned();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        let mut passed_labels = BTreeSet::new();
+        let mut failed_events = Vec::new();
+        for line in BufReader::new(child_stdout).lines() {
+            let line = line.unwrap_or_else(|error| format!("<stdout read error: {error}>"));
+            eprintln!("[e2e_resume:{scope_tag}:stdout] {line}");
+            ingest_resume_e2e_stdout_line(&line, &mut passed_labels, &mut failed_events);
+            lines.push(line);
+        }
+        (lines.join("\n"), passed_labels, failed_events)
+    });
+
+    let stderr_scope_tag = scope.to_owned();
+    let stderr_handle = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for line in BufReader::new(child_stderr).lines() {
+            let line = line.unwrap_or_else(|error| format!("<stderr read error: {error}>"));
+            eprintln!("[e2e_resume:{stderr_scope_tag}:stderr] {line}");
+            lines.push(line);
+        }
+        lines.join("\n")
+    });
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for {}: {error}", script.display()))?;
+    let (stdout, passed_labels, failed_events) = stdout_handle
+        .join()
+        .map_err(|_| "join e2e_resume stdout reader thread".to_owned())?;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| "join e2e_resume stderr reader thread".to_owned())?;
     let transcript = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
-
-    let mut passed_labels = BTreeSet::new();
-    let mut failed_events = Vec::new();
-    for line in stdout.lines() {
-        if !line.trim_start().starts_with('{') {
-            continue;
-        }
-        let event = match serde_json::from_str::<Value>(line) {
-            Ok(event) => event,
-            Err(error) => {
-                failed_events.push(serde_json::json!({
-                    "malformedEventLine": line,
-                    "error": error.to_string(),
-                }));
-                continue;
-            }
-        };
-        if event.get("schema").and_then(Value::as_str) != Some("ee.test_event.v1")
-            || event.get("kind").and_then(Value::as_str) != Some("assert_result")
-        {
-            failed_events.push(event);
-            continue;
-        }
-
-        let label = event.pointer("/fields/label").and_then(Value::as_str);
-        let status = event.pointer("/fields/status").and_then(Value::as_str);
-        if let (Some(label), Some("pass")) = (label, status) {
-            passed_labels.insert(label.to_owned());
-        } else {
-            failed_events.push(event);
-        }
-    }
 
     ensure(
         failed_events.is_empty(),
         format!(
-            "resume E2E emitted non-pass or malformed assert_result events: {failed_events:?}\n{transcript}"
+            "resume E2E ({scope}) emitted non-pass or malformed assert_result events: {failed_events:?}; observed_pass={passed_labels:?}\n{transcript}"
         ),
     )?;
     ensure(
-        output.status.success(),
+        status.success(),
         format!(
-            "resume E2E exited with {:?}; expected exit 0\n{transcript}",
-            output.status.code()
+            "resume E2E ({scope}) exited with {:?}; expected exit 0; observed_pass={passed_labels:?}\n{transcript}",
+            status.code()
         ),
     )?;
 
@@ -793,77 +916,26 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         roots.len() == 1,
         format!("expected one resume E2E artifact root, found {roots:?}"),
     )?;
-    let schema = load_schema()?;
-    for artifact in ["resume-report.json", "resume-cold-report.json"] {
-        let emitted_path = roots[0].join("logs").join(artifact);
-        let emitted: Value = serde_json::from_slice(
-            &std::fs::read(&emitted_path)
-                .map_err(|error| format!("read {}: {error}", emitted_path.display()))?,
-        )
-        .map_err(|error| format!("parse {}: {error}", emitted_path.display()))?;
-        let emitted_report = emitted
-            .pointer("/data/report")
-            .ok_or_else(|| format!("{} has no data.report: {emitted}", emitted_path.display()))?;
-        validate_json_schema_instance(emitted_report, &schema).map_err(|error| {
-            format!(
-                "real compiled-binary resume report from {artifact} failed ee.resume.v1 validation: {error}; report={emitted_report}"
+    if scope != "scale" {
+        let schema = load_schema()?;
+        for artifact in ["resume-report.json", "resume-cold-report.json"] {
+            let emitted_path = roots[0].join("logs").join(artifact);
+            let emitted: Value = serde_json::from_slice(
+                &std::fs::read(&emitted_path)
+                    .map_err(|error| format!("read {}: {error}", emitted_path.display()))?,
             )
-        })?;
+            .map_err(|error| format!("parse {}: {error}", emitted_path.display()))?;
+            let emitted_report = emitted.pointer("/data/report").ok_or_else(|| {
+                format!("{} has no data.report: {emitted}", emitted_path.display())
+            })?;
+            validate_json_schema_instance(emitted_report, &schema).map_err(|error| {
+                format!(
+                    "real compiled-binary resume report from {artifact} failed ee.resume.v1 validation: {error}; report={emitted_report}"
+                )
+            })?;
+        }
     }
 
-    let required_labels: BTreeSet<String> = [
-        "all_six_open_loop_tags_surfaced",
-        "all_three_tagged_sessions_publicly_surfaced",
-        "canonical_next_commands_execute",
-        "canonical_next_commands_preserved",
-        "canonical_typed_revisit_decision_surfaced",
-        "corpus_seeded",
-        "decisions_recorded",
-        "empty_store_reports_no_evidence",
-        "human_resume_preserves_db_wal_shm",
-        "open_loop_totals_are_exact",
-        "requested_sessions_plus_every_open_loop_in_one_resume",
-        "requested_two_newest_sessions_only",
-        "scale_10k_fast_content_repeat_bytes_identical",
-        "scale_10k_fast_human_orient_preserves_db_wal_shm",
-        "scale_10k_fast_human_orient_under_1s_with_queried_content",
-        "scale_10k_fast_orient_preserves_db_wal_shm",
-        "scale_10k_fast_orient_sampled_p99_under_1s",
-        "scale_10k_fast_orient_under_1s_with_content",
-        "scale_10k_index_ready_for_fast_orient",
-        "scale_10k_seeded",
-        "resume_items_carry_public_posture",
-        "resume_human_redacts_planted_secret",
-        "resume_json_redacts_planted_secret",
-        "resume_returns_schema",
-        "sessions_above_public_cap_structured_nonzero_no_mutation",
-        "next_only_overlap_does_not_mark_stale",
-        "superseded_note_carries_stale_marker",
-        "stale_count_deduplicates_open_loop_and_session_projections",
-        "human_declared_sections_visible",
-        "human_open_loop_and_staleness_visible",
-        "implicit_resume_resolves_campaign_store",
-        "implicit_human_resume_resolves_campaign_store_under_2s",
-        "implicit_human_campaign_resume_preserves_db_wal_shm",
-        "init_ok",
-        "json_resume_preserves_db_wal_shm",
-        "cold_root_starts_uninitialized",
-        "emitted_database_resume_executes_campaign_evidence",
-        "emitted_resume_leaves_cold_root_uninitialized",
-        "missing_db_returns_empty_resume_without_initializing",
-        "nearby_store_prepends_quoted_database_resume",
-        "nearby_store_exact_complete_outcome_surfaced",
-        "nearby_store_human_complete_outcome_is_explicit",
-        "nearby_store_seeded",
-        "untagged_four_hour_boundary_and_sessions_one_truncation",
-        "untagged_sessions_two_returns_both_real_groups",
-        "fast_orient_human_never_leaks_secret_shaped_tag",
-        "fast_orient_json_redacts_secret_shaped_tag",
-        "zero_sessions_structured_nonzero_no_mutation",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
     let missing: Vec<_> = required_labels
         .difference(&passed_labels)
         .cloned()
@@ -871,8 +943,95 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
     ensure(
         missing.is_empty(),
         format!(
-            "resume E2E omitted required passing assert_result labels: {missing:?}; observed={passed_labels:?}\n{transcript}"
+            "resume E2E ({scope}) omitted required passing assert_result labels: {missing:?}; observed={passed_labels:?}\n{transcript}"
         ),
+    )
+}
+
+#[test]
+#[ignore = "full real-binary resume/orient acceptance; run with cargo test --release as a focused pinned RCH proof"]
+fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
+    let scope = std::env::var("EE_RESUME_E2E_SCOPE").unwrap_or_else(|_| "all".to_owned());
+    run_resume_e2e_script_bridge(&scope)
+}
+
+#[test]
+#[ignore = "focused 10k fast-orient <1s scale guard (bd-f4pmz); run with cargo test --release --test contracts resume_schema::resume_e2e_script_scale_10k_fast_orient_guard_bridge -- --ignored --nocapture"]
+fn resume_e2e_script_scale_10k_fast_orient_guard_bridge() -> TestResult {
+    run_resume_e2e_script_bridge("scale")
+}
+
+#[test]
+fn resume_e2e_bridge_event_stream_parser_tracks_progress_for_all_and_scale_scopes() -> TestResult {
+    let scale_labels = required_resume_e2e_labels_for_scope("scale")?;
+    let functional_labels = required_resume_e2e_labels_for_scope("functional")?;
+    let all_labels = required_resume_e2e_labels_for_scope("all")?;
+
+    ensure(
+        scale_labels.contains("scale_10k_fast_orient_under_1s_with_content")
+            && scale_labels.contains("scale_10k_fast_orient_sampled_p99_under_1s")
+            && !scale_labels.contains("init_ok"),
+        "scale scope must require the 10k fast-orient guards without functional setup labels",
+    )?;
+    ensure(
+        functional_labels.contains("init_ok")
+            && !functional_labels.contains("scale_10k_fast_orient_under_1s_with_content"),
+        "functional scope must require functional resume labels without 10k scale labels",
+    )?;
+    ensure(
+        all_labels.len() == scale_labels.len() + functional_labels.len(),
+        "all scope must be the disjoint union of functional and scale label sets",
+    )?;
+    ensure(
+        required_resume_e2e_labels_for_scope("invalid-scope").is_err(),
+        "unknown EE_RESUME_E2E_SCOPE must fail closed",
+    )?;
+
+    let mut passed = BTreeSet::new();
+    let mut failed = Vec::new();
+    for label in &scale_labels {
+        let line = serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "kind": "assert_result",
+            "fields": {
+                "label": label,
+                "status": "pass"
+            }
+        })
+        .to_string();
+        ingest_resume_e2e_stdout_line(&line, &mut passed, &mut failed);
+    }
+    ingest_resume_e2e_stdout_line(
+        "resume e2e (scale): 40 steps, 0 failures",
+        &mut passed,
+        &mut failed,
+    );
+    ensure(
+        failed.is_empty() && passed == scale_labels,
+        "complete scale stream must satisfy all required scale labels with zero failed events",
+    )?;
+
+    let mut partial_passed = BTreeSet::new();
+    let mut partial_failed = Vec::new();
+    ingest_resume_e2e_stdout_line(
+        &serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "kind": "assert_result",
+            "fields": {
+                "label": "scale_10k_seeded",
+                "status": "pass"
+            }
+        })
+        .to_string(),
+        &mut partial_passed,
+        &mut partial_failed,
+    );
+    let missing_on_overrun: Vec<_> = scale_labels.difference(&partial_passed).cloned().collect();
+    ensure(
+        partial_passed.contains("scale_10k_seeded")
+            && missing_on_overrun
+                .contains(&"scale_10k_fast_orient_sampled_p99_under_1s".to_owned()),
+        "an overrun or truncated stream must retain already-completed labels while naming the unreached guard",
     )
 }
 
