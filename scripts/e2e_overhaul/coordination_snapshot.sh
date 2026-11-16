@@ -39,6 +39,9 @@ if [ ! -x "$EE_BINARY" ]; then
 fi
 
 WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ee-e2e-coordination.XXXXXX")"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$WORKSPACE"
 echo "coordination_snapshot: workspace retained at $WORKSPACE" >&2
 
 "$EE_BINARY" init --workspace "$WORKSPACE" --json >/dev/null

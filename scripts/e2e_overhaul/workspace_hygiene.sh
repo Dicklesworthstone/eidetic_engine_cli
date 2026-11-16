@@ -55,6 +55,9 @@ now_ns() {
 STARTED_NS="$(now_ns)"
 
 mkdir -p "$EVENT_ROOT"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$EVENT_ROOT"
 : > "$EVENT_LOG"
 
 redact_synthetic_value() {

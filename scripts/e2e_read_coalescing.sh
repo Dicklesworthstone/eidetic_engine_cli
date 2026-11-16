@@ -77,6 +77,8 @@ HOME_DIR="${ROOT}/home"
 LOG_DIR="${ROOT}/logs"
 EVENT_LOG="${LOG_DIR}/events.jsonl"
 mkdir -p "${WORKSPACE}" "${HOME_DIR}" "${LOG_DIR}"
+ee_isolate_data_dirs "${ROOT}"
+export HOME="${HOME_DIR}"
 : >"${EVENT_LOG}"
 
 TEST_ID="read_coalescing_e2e"

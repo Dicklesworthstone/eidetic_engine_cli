@@ -56,7 +56,13 @@ forbidden_log_dir="$artifact_root/forbidden_calls"
 cargo_log="$forbidden_log_dir/cargo.log"
 rch_log="$forbidden_log_dir/rch.log"
 
-mkdir -p "$shim_bin" "$sandbox/.beads" "$mail_root" "$forbidden_log_dir" "$fixture_matrix_root"
+mkdir -p "$shim_bin" "$sandbox/.beads" "$mail_root" "$forbidden_log_dir" "$fixture_matrix_root" "$artifact_root/home" "$artifact_root/xdg/data" "$artifact_root/xdg/config" "$artifact_root/xdg/cache" "$artifact_root/xdg/state"
+export HOME="$artifact_root/home"
+export XDG_DATA_HOME="$artifact_root/xdg/data"
+export XDG_CONFIG_HOME="$artifact_root/xdg/config"
+export XDG_CACHE_HOME="$artifact_root/xdg/cache"
+export XDG_STATE_HOME="$artifact_root/xdg/state"
+export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 
 # shellcheck source=scripts/lib/e2e_logger.sh
 source "$REPO_ROOT/scripts/lib/e2e_logger.sh"

@@ -185,6 +185,7 @@ event() {
 }
 
 event temp_root_ok pass
+ee_isolate_data_dirs "${ROOT}"
 
 if ! "${REAL_EE}" init --workspace "${WS}" --json >"${LOG_DIR}/init.json" 2>"${LOG_DIR}/init.err"; then
     init_rc=$?

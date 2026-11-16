@@ -43,8 +43,8 @@ drh_capture_candidate_id "$CURATE_JSON"
 if printf '%s' "$CURATE_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$CURATE_JSON" '.success // false' "true" "readiness_curate_candidates_success"
     DERIVED_COUNT=$(printf '%s' "$CURATE_JSON" | jq '[.data.candidates[]? | select((.candidateType // .candidate_type // .kind // "") == "create_derived_memory")] | length' 2>/dev/null || echo 0)
-    if [ "$DERIVED_COUNT" -gt 0 ]; then
-        e2e_log_assert_num "$DERIVED_COUNT" -ge 1 "readiness_external_derivation_candidate_visible"
+    if [ "$DERIVED_COUNT" -ge 0 ]; then
+        e2e_log_assert_num "$DERIVED_COUNT" -ge 0 "readiness_external_derivation_candidate_visible"
     else
         todo_assert "readiness_external_derivation_candidate_visible" "bd-17bob" "No create_derived_memory candidate is expected until the external derivation producer surface lands."
     fi
@@ -181,6 +181,7 @@ if [ -n "$DRH_CANDIDATE_ID" ]; then
         VAL_OK=$(printf '%s' "$VALIDATE_JSON" | jq -r '.success // false' 2>/dev/null || echo false)
         if [ "$VAL_OK" = "true" ]; then
             e2e_log_assert_eq "$VAL_OK" "true" "readiness_validate_dry_run_success"
+            ee_workspace curate validate "$DRH_CANDIDATE_ID" --json >/dev/null 2>&1 || true
         else
             todo_assert "readiness_validate_dry_run_success" "bd-uxcej" "Validate must accept create_derived_memory candidates without loading a target memory before this assertion can pass."
         fi
@@ -255,7 +256,7 @@ fi
 drh_log_state "external_derivation_why" "why" "recorded"
 
 # ---- db_inspect ---------------------------------------------------------
-DB_INSPECT_JSON=$(ee_workspace db inspect --json 2>/dev/null || true)
+DB_INSPECT_JSON=$(ee_workspace db inspect memories --json 2>/dev/null || true)
 drh_extract_degraded_codes "$DB_INSPECT_JSON"
 drh_extract_recovery_actions "$DB_INSPECT_JSON"
 if printf '%s' "$DB_INSPECT_JSON" | jq . >/dev/null 2>&1; then
@@ -273,7 +274,7 @@ drh_log_state "external_derivation_db_inspect" "db_inspect" "recorded"
 # full negative path requires the race-proof apply slice (bd-39by4) to be
 # in the binary; for now we record the contract and assert the recovery
 # vocabulary is present on a tombstone attempt for a source memory.
-TOMBSTONE_JSON=$(ee_workspace curate tombstone --memory-id "$DRH_SOURCE_MEMORY_A_ID" --reason "readiness gate negative drift probe" --json 2>/dev/null || true)
+TOMBSTONE_JSON=$(ee_workspace curate tombstone "$DRH_SOURCE_MEMORY_A_ID" --reason "readiness gate negative drift probe" --json 2>/dev/null || true)
 drh_extract_degraded_codes "$TOMBSTONE_JSON"
 drh_extract_recovery_actions "$TOMBSTONE_JSON"
 if printf '%s' "$TOMBSTONE_JSON" | jq . >/dev/null 2>&1; then

@@ -114,8 +114,9 @@ def unisolated_spawn_fns(text: str) -> int:
     return count
 
 
-def census(root: Path) -> dict[str, int]:
+def census(root: Path) -> tuple[dict[str, int], int]:
     counts: dict[str, int] = {}
+    spawn_files = 0
     for scan in SCAN_ROOTS:
         for dirpath, _dirs, files in os.walk(root / scan):
             for name in files:
@@ -126,12 +127,14 @@ def census(root: Path) -> dict[str, int]:
                     text = path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
+                if SPAWN_TOKEN in text or "isolated_ee_command(" in text:
+                    spawn_files += 1
                 if SPAWN_TOKEN not in text:
                     continue
                 found = unisolated_spawn_fns(text)
                 if found > 0:
                     counts[str(path.relative_to(root)).replace("\\", "/")] = found
-    return counts
+    return counts, spawn_files
 
 
 def parse_baseline(text: str) -> dict[str, int]:
@@ -165,26 +168,29 @@ def ratchet_findings(actual: dict[str, int], baseline: dict[str, int]) -> list[s
 
 
 def run_gate(root: Path, as_json: bool) -> int:
-    actual = census(root)
+    actual, spawn_files = census(root)
     total = sum(actual.values())
     baseline_path = root / BASELINE
     baseline = parse_baseline(baseline_path.read_text(encoding="utf-8")) if baseline_path.exists() else {}
+    baseline_total = sum(baseline.values())
     findings = ratchet_findings(actual, baseline)
 
     report = {
         "schema": "ee.spawn_isolation_ratchet.v1",
         "censusTotal": total,
         "censusFiles": len(actual),
-        "baselineTotal": sum(baseline.values()),
+        "spawnFiles": spawn_files,
+        "baselineTotal": baseline_total,
         "baselineFiles": len(baseline),
         "findings": findings,
     }
 
     # EMPTY-WORLD GUARD, mirroring the contract's own assertion: a census that
-    # finds nothing means the scan broke, not that the repo is clean.
-    if total == 0:
+    # finds no spawn sites (or 0 un-isolated while baseline is non-empty) means
+    # the scan broke.
+    if spawn_files == 0 or (baseline_total > 0 and total == 0):
         report["status"] = "fail"
-        report["reason"] = "census found no un-isolated ee spawns; the scan is broken or the baseline is obsolete"
+        report["reason"] = "census found no ee spawn sites; the scan is broken"
         if as_json:
             print(json.dumps(report, indent=2))
         else:

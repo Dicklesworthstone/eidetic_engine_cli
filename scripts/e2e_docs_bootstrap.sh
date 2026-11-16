@@ -122,7 +122,7 @@ ln -s "$WS/secrets.env" "$sym_ws/AGENTS.md"
 ee_json init --workspace "$sym_ws" --json >/dev/null
 sym_run="$(ee_json bootstrap docs --dry-run --workspace "$sym_ws" --json)"
 if printf '%s' "$sym_run" | jq -e '.success == true' >/dev/null 2>&1; then
-    assert_jq "$sym_run" 'any(.data.degraded[]?; .code == "docs_bootstrap_symlink_rejected")' \
+    assert_jq "$sym_run" '([.data.degraded[]? | select(.code == "docs_bootstrap_symlink_rejected")] | length) >= 1' \
         "a symlinked allowlisted source surfaces docs_bootstrap_symlink_rejected"
     assert_jq "$sym_run" 'all(.data.candidates[]?; (.sourcePath | test("AGENTS.md") | not))' \
         "the symlinked AGENTS.md produces no candidate"

@@ -161,6 +161,8 @@ memories_after="$(ee_json memory list --workspace "$WS" --json \
 assert_eq "$memories_after" "$memories_before" \
     "import writes candidates only, never direct memories"
 import_again="$(ee_json import agentsmd --apply --workspace "$WS" --json)"
+assert_jq "$import_again" '(.data.abstentions | length) >= 1' \
+    "re-apply emits at least one abstention"
 assert_jq "$import_again" \
     '(.data.applied.candidateIds | length == 0) and ([.data.abstentions[].reason] | all(. == "already_imported"))' \
     "re-apply abstains already_imported and double-inserts nothing"

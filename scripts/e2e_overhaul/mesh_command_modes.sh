@@ -136,6 +136,9 @@ case "$TMP_ROOT" in
 esac
 WORKSPACE="${TMP_ROOT%/}/ee-e2e-mesh-command-modes.$$"
 mkdir -p "$WORKSPACE"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$WORKSPACE"
 export EE_TEST_LOG_PATH="${EE_TEST_LOG_PATH:-$WORKSPACE/mesh_command_modes.jsonl}"
 
 json_event "note" \

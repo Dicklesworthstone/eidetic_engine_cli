@@ -155,10 +155,12 @@ fast_orient_10k_json_accepts() {
             and (.createdAt | length) > 0
             and (.tags | type) == "array"
             and (.provenance | length) > 0
-            and (.why | startswith("Score ") and contains("lexical match")))
+            and ((.why | startswith("Score ")) or (.why | startswith("Relevance ")))
+            and (.why | contains("lexical match")))
         and ([.data.fastContent.relevant[]?
               | select(.snippet | contains("Resume scale row 09999."))
-              | select(.why | startswith("Score ") and contains("lexical match"))]
+              | select(((.why | startswith("Score ")) or (.why | startswith("Relevance ")))
+                  and (.why | contains("lexical match")))]
              | length) >= 1
         and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
         and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
@@ -945,7 +947,7 @@ while [[ "${SCALE_BATCH_START}" -le "${SCALE_TOTAL}" ]]; do
         for (i = first; i < first + count; i++) {
             printf "{\"content\":\"Resume scale row %05d.\",\"level\":\"episodic\",\"kind\":\"note\",\"tags\":[\"session-scale-10k\"]}\n", i
         }
-    }' | "${REAL_EE}" --workspace "${SCALE_WS}" remember --batch --stdin --json \
+    }' | "${REAL_EE}" --workspace "${SCALE_WS}" remember --batch --stdin --no-auto-link --no-propose-candidates --json \
         >"${SCALE_SEED_STDOUT}" 2>"${SCALE_SEED_STDERR}"
     SCALE_BATCH_EXIT=${PIPESTATUS[1]}
     if [[ "${SCALE_BATCH_EXIT}" -ne 0 ]]; then
@@ -1149,7 +1151,7 @@ SCALE_FAST_HUMAN_RECENT_WHY_MISMATCHES="$(awk '
     END { print count + 0 }
 ' <<<"${SCALE_FAST_HUMAN_RECENT_WHYS}")"
 SCALE_FAST_HUMAN_RELEVANT_LEXICAL_WHY_COUNT="$(awk '
-    index($0, "Score ") == 1 && index($0, "lexical match") > 0 { count++ }
+    (index($0, "Score ") == 1 || index($0, "Relevance ") == 1) && index($0, "lexical match") > 0 { count++ }
     END { print count + 0 }
 ' <<<"${SCALE_FAST_HUMAN_RELEVANT_WHYS}")"
 SCALE_FAST_HUMAN_TASK_LEXICAL_WHY_COUNT="$(awk '
@@ -1157,7 +1159,7 @@ SCALE_FAST_HUMAN_TASK_LEXICAL_WHY_COUNT="$(awk '
     /^    Why: / {
         why = $0
         sub(/^    Why: /, "", why)
-        if (task_hit && index(why, "Score ") == 1 && index(why, "lexical match") > 0) {
+        if (task_hit && (index(why, "Score ") == 1 || index(why, "Relevance ") == 1) && index(why, "lexical match") > 0) {
             count++
         }
         next

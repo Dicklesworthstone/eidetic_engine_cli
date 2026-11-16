@@ -95,6 +95,8 @@ setup_workspace() {
     TEST_HOME="${TEST_ROOT}/home"
     WORKSPACE="${TEST_ROOT}/workspace"
     mkdir -p "${TEST_HOME}" "${WORKSPACE}"
+    ee_isolate_data_dirs "${TEST_ROOT}"
+    export HOME="${TEST_HOME}"
     log_info "workspace=${WORKSPACE}"
     log_info "artifacts=${ARTIFACT_ROOT}"
 }

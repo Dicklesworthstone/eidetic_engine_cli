@@ -170,7 +170,18 @@ ft_init() {
     FT_SCENARIO_DIR="$scenario_dir"
     export FT_SCENARIO_DIR
     export FAKE_TAILSCALE_SCENARIO_DIR="$FT_SCENARIO_DIR"
-    mkdir -p "$FT_SCENARIO_DIR" "$FT_SCENARIO_DIR/responders" "$FT_SCENARIO_DIR/logs"
+    mkdir -p "$FT_SCENARIO_DIR" "$FT_SCENARIO_DIR/responders" "$FT_SCENARIO_DIR/logs" \
+        "$FT_SCENARIO_DIR/.isolated-xdg/home" \
+        "$FT_SCENARIO_DIR/.isolated-xdg/data" \
+        "$FT_SCENARIO_DIR/.isolated-xdg/config" \
+        "$FT_SCENARIO_DIR/.isolated-xdg/cache" \
+        "$FT_SCENARIO_DIR/.isolated-xdg/state"
+    export HOME="$FT_SCENARIO_DIR/.isolated-xdg/home"
+    export XDG_DATA_HOME="$FT_SCENARIO_DIR/.isolated-xdg/data"
+    export XDG_CONFIG_HOME="$FT_SCENARIO_DIR/.isolated-xdg/config"
+    export XDG_CACHE_HOME="$FT_SCENARIO_DIR/.isolated-xdg/cache"
+    export XDG_STATE_HOME="$FT_SCENARIO_DIR/.isolated-xdg/state"
+    export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
     FT_EVENT_FILE="${EE_TEST_EVENT_DIR:-$FT_SCENARIO_DIR/events}/$(basename "${BASH_SOURCE[1]:-$0}" .sh).jsonl"
     export FT_EVENT_FILE
     local node_key

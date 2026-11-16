@@ -194,6 +194,8 @@ if ee_has_config_explain; then
         "config explain identifies the requested key"
     assert_jq "$explain_out" '.data.status == "active"' \
         "semantic weight is active, not mislabeled as unwired"
+    assert_jq "$explain_out" '.data.key != null and ((.data.caveat // "") | length) >= 1' \
+        "config explain populates key and non-empty caveat"
     assert_jq "$explain_out" '
         ((.data.caveat // "") | contains("vector"))
         and ((.data.caveat // "") | contains("neural"))

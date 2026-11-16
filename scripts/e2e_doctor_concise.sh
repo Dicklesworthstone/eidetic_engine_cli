@@ -17,7 +17,13 @@ STDOUT_DIR="${ARTIFACT_ROOT}/stdout"
 STDERR_DIR="${ARTIFACT_ROOT}/stderr"
 FAILURES=0
 
-mkdir -p "${WORKSPACE}" "${STDOUT_DIR}" "${STDERR_DIR}"
+mkdir -p "${WORKSPACE}" "${STDOUT_DIR}" "${STDERR_DIR}" "${ARTIFACT_ROOT}/home" "${ARTIFACT_ROOT}/xdg/data" "${ARTIFACT_ROOT}/xdg/config" "${ARTIFACT_ROOT}/xdg/cache" "${ARTIFACT_ROOT}/xdg/state"
+export HOME="${ARTIFACT_ROOT}/home"
+export XDG_DATA_HOME="${ARTIFACT_ROOT}/xdg/data"
+export XDG_CONFIG_HOME="${ARTIFACT_ROOT}/xdg/config"
+export XDG_CACHE_HOME="${ARTIFACT_ROOT}/xdg/cache"
+export XDG_STATE_HOME="${ARTIFACT_ROOT}/xdg/state"
+export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 
 if ! command -v jq >/dev/null 2>&1; then
     printf '%s\n' '{"schema":"ee.test_event.v1","test_id":"doctor_concise_e2e","kind":"assert_result","fields":{"label":"jq_available","status":"fail","first_failure_diagnosis":"jq executable missing before harness init","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2

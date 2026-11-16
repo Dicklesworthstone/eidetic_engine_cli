@@ -93,7 +93,7 @@ sweep_surface() {
             out="$(ee_json --workspace "$WS" "$@" --max-output-tokens "$ceiling" --json)"
         fi
         call_ms=$(( $(now_ms) - start ))
-        assert_jq "$out" 'true' "${surface} ceiling=${ceiling}: output is valid JSON"
+        assert_jq "$out" '.data != null and (.data | keys | length) >= 1' "${surface} ceiling=${ceiling}: output is valid JSON with populated data"
         if [ "$ceiling" = "none" ]; then
             assert_jq "$out" '(.meta.tokensEstimated // null) == null' \
                 "${surface} ceiling=none: zero-cost path leaves envelope unstamped"
@@ -129,7 +129,7 @@ step "audit timeline emits the ee.response.v2 envelope and stays unstamped, even
 at_start="$(now_ms)"
 at_out="$(ee_json --workspace "$WS" audit timeline --limit 5 --max-output-tokens 100 --json)"
 at_ms=$(( $(now_ms) - at_start ))
-assert_jq "$at_out" 'true' "audit timeline ceiling=100: output is valid JSON"
+assert_jq "$at_out" '.data.entries != null and ((.data.entries | length) >= 1)' "audit timeline ceiling=100: output is valid JSON with entries"
 assert_jq "$at_out" '.schema == "ee.response.v2" and .data.schema == "ee.audit.timeline.v1"' \
     "audit timeline keeps its report schema under the ee.response.v2 envelope"
 assert_jq "$at_out" '(.meta.tokensEstimated // null) == null' \
@@ -175,7 +175,7 @@ drain_surface() {
             out="$(ee_json --workspace "$WS" "$@" --max-output-tokens "$ceiling" --cursor "$cursor" --json)"
         fi
         page_ms=$(( $(now_ms) - page_start ))
-        assert_jq "$out" 'true' "${surface} drain page ${page}: valid JSON"
+        assert_jq "$out" '.data != null and (.data | keys | length) >= 1' "${surface} drain page ${page}: valid JSON with populated data"
         if printf '%s' "$out" | jq -e '[(.degraded[]?, .data.degraded[]?) | .code] | index("output_budget_unsatisfiable") != null' >/dev/null 2>&1; then
             if [ -z "$cursor" ]; then
                 _harness_fail "${surface} drain: page 0 failed closed (output_budget_unsatisfiable) — ceiling ${ceiling} cannot hold the envelope minimum for this surface; raise the drain ceiling"

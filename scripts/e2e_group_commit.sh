@@ -40,6 +40,7 @@ WRITERS="${EE_GROUP_COMMIT_E2E_WRITERS:-24}"
 SENTINEL="group-commit-e2e-sentinel-$$"
 
 mkdir -p "$WORKSPACE"
+ee_isolate_data_dirs "$ARTIFACT_ROOT"
 : >"$EVENT_LOG"
 : >"$LATENCY_LOG"
 

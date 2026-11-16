@@ -27,6 +27,7 @@ COMMAND_TIMEOUT_MS="${EE_ENV_ATTESTATION_COMMAND_TIMEOUT_MS:-30000}"
 TEST_ID="environment_attestation_e2e"
 
 mkdir -p "$ARTIFACT_DIR"
+ee_isolate_data_dirs "$RUN_ROOT"
 : >"$EVENT_LOG"
 : >"$SETUP_STDOUT"
 : >"$SETUP_STDERR"

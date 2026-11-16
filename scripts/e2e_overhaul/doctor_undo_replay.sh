@@ -64,6 +64,9 @@ BEAD_ID="bd-3boan"
 SURFACE="doctor_undo_replay"
 
 mkdir -p "$WORKSPACE" "$EVENT_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$WORKSPACE"
 : > "$EVENT_LOG"
 
 if ! command -v jq >/dev/null 2>&1; then

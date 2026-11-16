@@ -143,6 +143,8 @@ setup_workspace() {
     LOG_FILE="${ARTIFACTS_DIR}/e2e_advanced.log"
 
     mkdir -p "${TEST_HOME}" "${ARTIFACTS_DIR}"
+    ee_isolate_data_dirs "${TEST_WORKSPACE}"
+    export HOME="${TEST_HOME}"
 
     # Create the workspace root. The initialized store is created explicitly
     # after binary resolution so mutating scenarios exercise the real setup

@@ -22,6 +22,9 @@ fi
 CONSUMER="$REPO_ROOT/scripts/agent_consume_pack.py"
 CORPUS_SEED="$REPO_ROOT/tests/fixtures/corpus/corpus_2026_05_10_seed.sh"
 WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ee-e2e-agent-consumer.XXXXXX")"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$WORKSPACE"
 PACK_JSON="$WORKSPACE/pack.json"
 PROMPT_FRAGMENT="$WORKSPACE/prompt_fragment.md"
 

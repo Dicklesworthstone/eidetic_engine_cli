@@ -183,6 +183,9 @@ RESTORE_MANIFEST="$MANIFEST_DIR/restore.json"
 
 mkdir -p "$WORKSPACE/target/debug" "$WORKSPACE/tests/audit_artifacts" \
     "$DESTINATION" "$MANIFEST_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$SCRATCH_ROOT/$RUN_ID"
 printf 'target artifact bytes\n' > "$WORKSPACE/target/debug/sample.o"
 printf 'audit artifact bytes\n' > "$WORKSPACE/tests/audit_artifacts/evidence.json"
 

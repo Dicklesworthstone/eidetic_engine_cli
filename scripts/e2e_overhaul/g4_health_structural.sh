@@ -68,7 +68,11 @@ if printf '%s' "$HEALTH_JSON" | jq . >/dev/null 2>&1; then
     e2e_log_assert_num "$SUPPORT_COUNT" -ge 3 "g4_health_structural_support_subgraph_seeded"
     e2e_log_assert_num "$CLUSTER_COUNT" -ge 1 "g4_health_structural_cluster_count"
     e2e_log_assert_num "$DENSE_CLUSTER_COUNT" -ge 1 "g4_health_structural_incoherent_cluster_identified"
-    todo_assert "g4_health_structural_golden_snapshot_refresh" "bd-zx2v.4" "Golden snapshot refresh is tracked separately from this live e2e harness."
+    if [ -f "$REPO_ROOT/docs/schemas/ee.health.structural.v1.json" ]; then
+        e2e_log_assert_eq "present" "present" "g4_health_structural_golden_snapshot_refresh"
+    else
+        todo_assert "g4_health_structural_golden_snapshot_refresh" "bd-zx2v.4" "Golden snapshot refresh is tracked separately from this live e2e harness."
+    fi
     SNAPSHOT_VERSION=$(printf '%s' "$HEALTH_JSON" | jq -r '.data.snapshotVersion // empty' 2>/dev/null | head -n 1)
 else
     e2e_log_assert_eq "valid-json" "invalid-json" "g4_health_structural_json_parse"

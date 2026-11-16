@@ -126,6 +126,8 @@ assert_eq "$([ -n "$cass_id" ] && echo present || echo missing)" "present" \
 why_cass="$(ee_json why "$cass_id" --workspace "$WS" --json)"
 assert_jq "$why_cass" '.schema == "ee.response.v2" and .success == true' \
     "why cass provenance succeeds"
+assert_jq "$why_cass" '((.data.degraded // []) | length) >= 1' \
+    "why cass provenance emits at least one degraded entry"
 assert_jq "$why_cass" '
     any((.data.degraded // [])[]?; .code == "why_provenance_freshness_unverifiable")
 ' "cass-backed provenance is unverifiable when cass verifier is absent"
@@ -136,7 +138,7 @@ assert_jq "$why_cass" '
 
 step "why reports present provenance with no provenance-freshness degradation"
 why_present="$(ee_json why "$mem_id" --workspace "$WS" --json)"
-assert_jq "$why_present" '.schema == "ee.response.v2" and .success == true' \
+assert_jq "$why_present" '.schema == "ee.response.v2" and .success == true and .data.memory != null and ((.data.provenance // []) | length) >= 1' \
     "why present provenance succeeds"
 assert_jq "$why_present" '
     [(.data.degraded // [])[]? | select((.code // "") | startswith("why_provenance_freshness_"))]
@@ -164,7 +166,7 @@ step "restore the file; why returns to present provenance"
 mv "$WS/src/trust_probe_moved.rs" "$WS/src/trust_probe.rs"
 log_event "trust_freshness_transition" memoryId "$mem_id" transition "restored"
 why_restored="$(ee_json why "$mem_id" --workspace "$WS" --json)"
-assert_jq "$why_restored" '.schema == "ee.response.v2" and .success == true' \
+assert_jq "$why_restored" '.schema == "ee.response.v2" and .success == true and .data.memory != null and ((.data.provenance // []) | length) >= 1' \
     "why restored provenance succeeds"
 assert_jq "$why_restored" '
     [(.data.degraded // [])[]? | select((.code // "") | startswith("why_provenance_freshness_"))]

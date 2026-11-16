@@ -55,6 +55,7 @@ fi
 RESULTS_JSONL="${ARTIFACTS_DIR}/results.jsonl"
 ASSERTIONS_JSONL="${ARTIFACTS_DIR}/assertions.jsonl"
 SUMMARY_JSON="${ARTIFACTS_DIR}/output_budget_summary.json"
+ee_isolate_data_dirs "${ARTIFACTS_DIR}"
 : >"${RESULTS_JSONL}"
 : >"${ASSERTIONS_JSONL}"
 

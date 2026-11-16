@@ -574,6 +574,26 @@ epic_setup() {
     EPIC_RETENTION_MANIFEST="${EE_E2E_RETENTION_MANIFEST:-$EPIC_WORKSPACE/e2e_retention_manifest.json}"
     export EPIC_RETENTION_MANIFEST
 
+    # bd-xuznt: Isolate HOME and XDG_* inside EPIC_WORKSPACE before any `ee`
+    # invocation (including _epic_init_workspace_with_timeout) so no overhaul
+    # epic reads or mutates the runner host's ~/.local/share/ee store or model
+    # cache.
+    mkdir -p \
+        "$EPIC_WORKSPACE/.home" \
+        "$EPIC_WORKSPACE/.xdg/data" \
+        "$EPIC_WORKSPACE/.xdg/config" \
+        "$EPIC_WORKSPACE/.xdg/cache" \
+        "$EPIC_WORKSPACE/.xdg/state"
+    if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -n "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+        export EE_EMBED_MODEL_DIR="$EE_EMBED_MODEL_FIXTURE_DIR"
+    fi
+    export HOME="$EPIC_WORKSPACE/.home"
+    export XDG_DATA_HOME="$EPIC_WORKSPACE/.xdg/data"
+    export XDG_CONFIG_HOME="$EPIC_WORKSPACE/.xdg/config"
+    export XDG_CACHE_HOME="$EPIC_WORKSPACE/.xdg/cache"
+    export XDG_STATE_HOME="$EPIC_WORKSPACE/.xdg/state"
+    export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
+
     e2e_log_note "epic_setup workspace=$EPIC_WORKSPACE binary=$EE_BINARY"
     e2e_log_note "epic_retention_manifest path=$EPIC_RETENTION_MANIFEST"
 
@@ -749,9 +769,13 @@ assert_jq_nonempty() {
 # the corresponding bead is not yet shipped. The script still completes; the
 # failure is recorded structurally so callers can detect "pre-implementation"
 # vs "fully fixed" without flipping exit codes.
+# bd-3iqac: All 25 beads cited across the 54 todo_assert sites have shipped and
+# closed. Any branch that reaches todo_assert now records a hard assertion
+# failure instead of silently excusing a regression.
 todo_assert() {
     local label="${1:?label required}"
     local bead="${2:?bead id required}"
     local description="${3:?description required}"
     e2e_log_note "todo_assert bead=$bead label=$label description=$description"
+    e2e_log_assert_eq "todo_assert:${bead}:${description}" "shipped" "$label" || true
 }

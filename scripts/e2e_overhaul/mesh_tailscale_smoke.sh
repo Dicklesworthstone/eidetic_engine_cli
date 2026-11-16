@@ -20,6 +20,9 @@ mkdir -p "$EVENT_DIR"
 EVENT_FILE="$EVENT_DIR/events.jsonl"
 ARTIFACT_DIR="${EE_E2E_ARTIFACT_DIR:-$EVENT_DIR/artifacts}"
 mkdir -p "$ARTIFACT_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$EVENT_DIR"
 
 json_hash() {
     printf '%s' "${1:-}" | shasum -a 256 | awk '{print substr($1, 1, 16)}'

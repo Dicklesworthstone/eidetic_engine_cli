@@ -217,6 +217,7 @@ fi
 ISO_RUN_ID="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')"
 LOG_DIR="$REPO_ROOT/tests/logs/overhaul_${ISO_RUN_ID}"
 mkdir -p "$LOG_DIR"
+ee_isolate_data_dirs "$LOG_DIR"
 
 SUMMARY_PATH="$LOG_DIR/summary.json"
 

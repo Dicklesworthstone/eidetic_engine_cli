@@ -59,6 +59,7 @@ HARNESS_FAILURES=()
 export JQ_READ_STATUS=""
 HARNESS_START_NS=0
 HARNESS_TMP_WORKSPACES=()
+_HARNESS_TMP_WORKSPACES_ENV_SAVED=0
 
 # ---------------------------------------------------------------------------
 # EE_BIN resolution: explicit override wins; else the cargo target dir's release
@@ -475,22 +476,57 @@ log_drop() {
 # shellcheck disable=SC1091
 source "$E2E_HARNESS_DIR/e2e_tmproot.sh"
 
-# with_temp_workspace <var> — assign an isolated workspace dir (own DB + index)
-# to <var>. Pair with end_temp_workspace. Cleaned up unless EE_E2E_KEEP=1.
+# with_temp_workspace <var> — assign an isolated workspace dir (own DB + index +
+# hermetic HOME/XDG data dirs, bd-xuznt) to <var>. Pair with end_temp_workspace.
+# Cleaned up unless EE_E2E_KEEP=1.
 with_temp_workspace() {
     local __var="${1:?with_temp_workspace: variable name required}"
     local __root; __root="$(e2e_temp_root)"
     local __ws; __ws="$(mktemp -d "${__root%/}/ee-wiz-${HARNESS_TEST_NAME}-XXXXXX")"
-    mkdir -p "$__ws/db" "$__ws/index"
+    mkdir -p "$__ws/db" "$__ws/index" "$__ws/home" \
+        "$__ws/xdg/data" "$__ws/xdg/config" "$__ws/xdg/cache" "$__ws/xdg/state"
+    if [ "${_HARNESS_TMP_WORKSPACES_ENV_SAVED:-0}" -eq 0 ]; then
+        _HARNESS_TMP_WORKSPACES_ENV_SAVED=1
+        _HARNESS_SAVED_HOME="${HOME-}"
+        _HARNESS_SAVED_HOME_SET="${HOME+1}"
+        _HARNESS_SAVED_XDG_DATA_HOME="${XDG_DATA_HOME-}"
+        _HARNESS_SAVED_XDG_DATA_HOME_SET="${XDG_DATA_HOME+1}"
+        _HARNESS_SAVED_XDG_CONFIG_HOME="${XDG_CONFIG_HOME-}"
+        _HARNESS_SAVED_XDG_CONFIG_HOME_SET="${XDG_CONFIG_HOME+1}"
+        _HARNESS_SAVED_XDG_CACHE_HOME="${XDG_CACHE_HOME-}"
+        _HARNESS_SAVED_XDG_CACHE_HOME_SET="${XDG_CACHE_HOME+1}"
+        _HARNESS_SAVED_XDG_STATE_HOME="${XDG_STATE_HOME-}"
+        _HARNESS_SAVED_XDG_STATE_HOME_SET="${XDG_STATE_HOME+1}"
+        _HARNESS_SAVED_EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD-}"
+        _HARNESS_SAVED_EE_EMBED_DOWNLOAD_SET="${EE_EMBED_DOWNLOAD+1}"
+    fi
+    if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -n "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+        export EE_EMBED_MODEL_DIR="$EE_EMBED_MODEL_FIXTURE_DIR"
+    fi
+    export HOME="$__ws/home"
+    export XDG_DATA_HOME="$__ws/xdg/data"
+    export XDG_CONFIG_HOME="$__ws/xdg/config"
+    export XDG_CACHE_HOME="$__ws/xdg/cache"
+    export XDG_STATE_HOME="$__ws/xdg/state"
+    export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
     export EE_DATABASE_PATH="$__ws/db/ee.db"
     export EE_INDEX_DIR="$__ws/index"
     HARNESS_TMP_WORKSPACES+=("$__ws")
-    e2e_log_note "workspace_open path=$__ws db=$EE_DATABASE_PATH index=$EE_INDEX_DIR"
+    e2e_log_note "workspace_open path=$__ws db=$EE_DATABASE_PATH index=$EE_INDEX_DIR xdg=$XDG_DATA_HOME"
     printf -v "$__var" '%s' "$__ws"
 }
 
 end_temp_workspace() {
     unset EE_DATABASE_PATH EE_INDEX_DIR
+    if [ "${_HARNESS_TMP_WORKSPACES_ENV_SAVED:-0}" -gt 0 ]; then
+        if [ -n "${_HARNESS_SAVED_HOME_SET:-}" ]; then export HOME="$_HARNESS_SAVED_HOME"; else unset HOME; fi
+        if [ -n "${_HARNESS_SAVED_XDG_DATA_HOME_SET:-}" ]; then export XDG_DATA_HOME="$_HARNESS_SAVED_XDG_DATA_HOME"; else unset XDG_DATA_HOME; fi
+        if [ -n "${_HARNESS_SAVED_XDG_CONFIG_HOME_SET:-}" ]; then export XDG_CONFIG_HOME="$_HARNESS_SAVED_XDG_CONFIG_HOME"; else unset XDG_CONFIG_HOME; fi
+        if [ -n "${_HARNESS_SAVED_XDG_CACHE_HOME_SET:-}" ]; then export XDG_CACHE_HOME="$_HARNESS_SAVED_XDG_CACHE_HOME"; else unset XDG_CACHE_HOME; fi
+        if [ -n "${_HARNESS_SAVED_XDG_STATE_HOME_SET:-}" ]; then export XDG_STATE_HOME="$_HARNESS_SAVED_XDG_STATE_HOME"; else unset XDG_STATE_HOME; fi
+        if [ -n "${_HARNESS_SAVED_EE_EMBED_DOWNLOAD_SET:-}" ]; then export EE_EMBED_DOWNLOAD="$_HARNESS_SAVED_EE_EMBED_DOWNLOAD"; else unset EE_EMBED_DOWNLOAD; fi
+        _HARNESS_TMP_WORKSPACES_ENV_SAVED=0
+    fi
     if [ "${EE_E2E_KEEP:-0}" != "1" ]; then
         # Guard patterns come from e2e_temp_root, which cannot return empty, so
         # neither arm can collapse to `/*` the way the inline expansions did.

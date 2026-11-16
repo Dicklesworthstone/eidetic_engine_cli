@@ -135,10 +135,40 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# bd-xuznt: with_temp_workspace isolates HOME, XDG_*, and EE_EMBED_DOWNLOAD=off,
+# and end_temp_workspace restores the caller's environment.
+(
+    source scripts/lib/e2e_harness.sh >/dev/null 2>&1
+    HARNESS_TEST_NAME="xdg_isolation"
+    orig_home="${HOME:-/orig/home}"
+    export HOME="$orig_home"
+    export XDG_DATA_HOME="/orig/xdg-data"
+    unset EE_EMBED_DOWNLOAD
+    with_temp_workspace ws_isolated
+    if [ "$HOME" != "$ws_isolated/home" ] || [ "$XDG_DATA_HOME" != "$ws_isolated/xdg/data" ] \
+        || [ "$XDG_CONFIG_HOME" != "$ws_isolated/xdg/config" ] \
+        || [ "$XDG_CACHE_HOME" != "$ws_isolated/xdg/cache" ] \
+        || [ "$XDG_STATE_HOME" != "$ws_isolated/xdg/state" ] \
+        || [ "${EE_EMBED_DOWNLOAD:-}" != "off" ]; then
+        exit 1
+    fi
+    end_temp_workspace
+    if [ "$HOME" != "$orig_home" ] || [ "$XDG_DATA_HOME" != "/orig/xdg-data" ] \
+        || [ -n "${EE_EMBED_DOWNLOAD+set}" ]; then
+        exit 2
+    fi
+)
+if [ "$?" = "0" ]; then
+    printf '  ok    %-30s with_temp_workspace isolates and restores HOME/XDG_*\n' "xdg_isolation"
+else
+    printf '  FAIL  %-30s with_temp_workspace did not isolate/restore HOME/XDG_*\n' "xdg_isolation"
+    FAILURES=$((FAILURES + 1))
+fi
+
 printf '\n'
 if [ "$FAILURES" -ne 0 ]; then
     printf 'e2e_harness_test: %d arm(s) FAILED (work kept at %s)\n' "$FAILURES" "$WORK"
     exit 1
 fi
-printf 'e2e_harness_test: 9/9 arms passed\n'
+printf 'e2e_harness_test: 10/10 arms passed\n'
 exit 0

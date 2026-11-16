@@ -276,6 +276,8 @@ assert_jq "$baseline_trace_out" '.success == true and .data.bayesUpdatesApplied 
 
 step "process the workflow-emitted index job without a manual rebuild"
 stale_status_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$stale_status_out" '.success == true and .data.dbGeneration != null' \
+    "index status reports a non-null dbGeneration after curate apply"
 assert_jq "$stale_status_out" '.success == true and .data.dbGeneration != null and ((.data.health == "missing" and .data.indexGeneration == null) or (.data.health == "stale" and .data.dbGeneration > .data.indexGeneration))' \
     "curate apply reports the unbuilt or stale index honestly until its emitted job runs"
 coalesce_out="$(ee_json --workspace "$WS" daemon --foreground --once --job index_coalesce --json)"
@@ -326,6 +328,8 @@ assert_jq "$trace_out" '.data.bayesUpdatesApplied >= 1' \
 
 step "re-applying distillation is idempotent for already-distilled entries"
 redistill_out="$(ee_json --workspace "$WS" journal distill --session "$SESSION" --apply --json)"
+assert_jq "$redistill_out" '.data.applied != null and (.data | keys | length) >= 1' \
+    "second distill apply emits a populated applied summary"
 assert_jq "$redistill_out" '.success == true and ((.data.applied.candidateIds // []) | length) == 0' \
     "second distill apply mints no duplicate candidate"
 recount_out="$(ee_json --workspace "$WS" search "linker cache missing object journal capture" --kind failure --json)"

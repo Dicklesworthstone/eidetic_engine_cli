@@ -73,6 +73,7 @@ command -v timeout >/dev/null 2>&1 || { echo "e2e-orphan-partition: timeout(1) r
 
 OUT="${EE_ORPHAN_OUT:-${TMPDIR:-/tmp}/ee-orphan-partition-$$}"
 mkdir -p "$OUT" || { echo "e2e-orphan-partition: cannot create $OUT" >&2; exit 1; }
+ee_isolate_data_dirs "$OUT"
 CENSUS="$OUT/partition.tsv"
 printf 'verdict\tscript\trc\telapsed_s\tpass\tfail\tdrops\tlog\n' > "$CENSUS"
 

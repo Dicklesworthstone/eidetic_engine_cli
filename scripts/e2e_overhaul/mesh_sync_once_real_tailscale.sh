@@ -47,6 +47,9 @@ else
 fi
 mkdir -p "$ARTIFACT_DIR"
 chmod 0700 "$ARTIFACT_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$EVENT_DIR"
 
 # Track workspace + cleanup state so the bash EXIT trap can disable mesh
 # even when an intermediate scenario fails partway through. WORKSPACE stays

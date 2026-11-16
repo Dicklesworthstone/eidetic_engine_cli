@@ -26,6 +26,7 @@ if [[ ! -x "${EE_BINARY}" ]]; then
 fi
 
 WORK_DIR="$(mktemp -d -t ee-command-inventory.XXXXXX)"
+ee_isolate_data_dirs "${WORK_DIR}"
 ARTIFACT="${WORK_DIR}/ee.e2e.command_inventory.v1.json"
 HELP_JSON="${WORK_DIR}/help_json.json"
 INTROSPECT_JSON="${WORK_DIR}/introspect_json.json"

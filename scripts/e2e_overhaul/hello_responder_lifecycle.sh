@@ -41,6 +41,9 @@ done
 
 if [[ -n "${EE_BIN:-}" && -x "${EE_BIN:-}" ]]; then
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ee-hello-responder.XXXXXX")"
+  # shellcheck source=scripts/lib/ee_binary_resolution.sh
+  source "$ROOT/scripts/lib/ee_binary_resolution.sh"
+  ee_isolate_data_dirs "$tmpdir"
   "$EE_BIN" init --workspace "$tmpdir" --json >/dev/null
   output="$(EE_MESH_ENABLED=1 "$EE_BIN" mesh hello-responder status --workspace "$tmpdir" --json)"
   printf '%s\n' "$output" | grep -q '"schema":"ee.response.v2"'

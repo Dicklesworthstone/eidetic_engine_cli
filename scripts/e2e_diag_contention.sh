@@ -57,6 +57,7 @@ READERS="${EE_DIAG_CONTENTION_E2E_READERS:-12}"
 SENTINEL="diag-contention-e2e-sentinel-$$"
 
 mkdir -p "$WORKSPACE"
+ee_isolate_data_dirs "$ARTIFACT_ROOT"
 : >"$EVENT_LOG"
 
 now_iso() {

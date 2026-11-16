@@ -81,6 +81,7 @@ WS="${ROOT}/ws"
 LOG_DIR="${ROOT}/logs"
 EVENT_LOG="${LOG_DIR}/events.jsonl"
 mkdir -p "${WS}" "${LOG_DIR}"
+ee_isolate_data_dirs "${ROOT}"
 : >"${EVENT_LOG}"
 
 # Keep the model download out of a verification run; the assertions below are

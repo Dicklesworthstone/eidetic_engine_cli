@@ -44,7 +44,7 @@ assert_jq "$init_out" '.success == true' "ee init succeeds"
 step "cold-start honesty: no outcomes -> calibration is inert, never falsely confident"
 if ee_lists_outcome_sub calibration; then
     cold="$(ee_json outcome calibration --workspace "$WS" --json)"
-    assert_jq "$cold" '.success == true' "cold-start calibration succeeds"
+    assert_jq "$cold" '.success == true and .data != null and (.data | keys | length) >= 1' "cold-start calibration succeeds"
     # With zero outcomes there must be no reliability buckets — a sparse signal
     # that reads as certainty is worse than no signal (the feedback-gated honesty
     # invariant).
@@ -95,7 +95,7 @@ fi
 step "calibration-honesty: empirical recall + wide CIs + loud abstention (bd-1n0np.13.3)"
 if "$EE_BIN" outcome calibration --help 2>&1 | grep -q -- "--honesty"; then
     honesty="$(ee_json outcome calibration --honesty --workspace "$WS" --json)"
-    assert_jq "$honesty" '.success == true' "calibration --honesty succeeds"
+    assert_jq "$honesty" '.success == true and .data != null and (.data | keys | length) >= 1' "calibration --honesty succeeds"
     assert_jq "$honesty" \
         '((.data.classes // []) | length) == 0 or any(.data.classes[]?; has("abstained"))' \
         "honesty report carries per-class abstention flags (loud abstention on sparse)"

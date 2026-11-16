@@ -40,6 +40,9 @@ BEAD_ID="bd-1zb7k.19.3"
 SURFACE="prompt_budget"
 
 mkdir -p "$EVENT_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$EVENT_DIR"
 : > "$EVENT_LOG"
 
 if ! command -v jq >/dev/null 2>&1; then

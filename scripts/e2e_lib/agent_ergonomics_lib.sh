@@ -32,7 +32,13 @@ FAILURES=()
 LOG_DIR="${LOG_DIR:-${WORKSPACE%/}/agent_ergonomics_logs/${TEST_NAME}.${BASHPID:-$$}}"
 export EE_BIN TEST_NAME STEP PASS FAIL LOG_DIR
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "${WORKSPACE%/}/.home" "${WORKSPACE%/}/.xdg/data" "${WORKSPACE%/}/.xdg/config" "${WORKSPACE%/}/.xdg/cache" "${WORKSPACE%/}/.xdg/state"
+export HOME="${WORKSPACE%/}/.home"
+export XDG_DATA_HOME="${WORKSPACE%/}/.xdg/data"
+export XDG_CONFIG_HOME="${WORKSPACE%/}/.xdg/config"
+export XDG_CACHE_HOME="${WORKSPACE%/}/.xdg/cache"
+export XDG_STATE_HOME="${WORKSPACE%/}/.xdg/state"
+export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 EE_TEST_LOG_PATH="${EE_TEST_LOG_PATH:-$LOG_DIR/events.jsonl}"
 export EE_TEST_LOG_PATH
 

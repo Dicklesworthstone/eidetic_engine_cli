@@ -135,6 +135,8 @@ setup_workspace() {
     EVENT_LOG_FILE="${ARTIFACTS_DIR}/e2e-events.jsonl"
 
     mkdir -p "${TEST_HOME}" "${ARTIFACTS_DIR}"
+    ee_isolate_data_dirs "${TEST_WORKSPACE}"
+    export HOME="${TEST_HOME}"
 
     # Create minimal workspace structure
     mkdir -p "${TEST_WORKSPACE}/ws/.ee"

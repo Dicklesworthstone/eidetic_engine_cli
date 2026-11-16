@@ -89,6 +89,9 @@ CLAIM_GATE_WITH_CLEAN_SNAPSHOT_DEGRADED_CODES="[]"
 FINAL_EXIT=0
 
 mkdir -p "$FAKE_BIN" "$PROJECT"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$TMP_ROOT"
 : > "$COMMAND_LOG"
 
 if ! command -v jq >/dev/null 2>&1; then

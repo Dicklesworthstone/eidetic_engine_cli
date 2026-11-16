@@ -58,6 +58,9 @@ else
 fi
 mkdir -p "$ARTIFACT_DIR"
 chmod 0700 "$ARTIFACT_DIR"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$EVENT_DIR"
 
 # Track workspace + binary so cleanup can run on exit. WORKSPACE empty
 # until setup runs so the EXIT trap can no-op on early precondition

@@ -170,6 +170,8 @@ assert_jq "$after_gaps" '.schema == "ee.response.v2" and .success == true' \
     "after-capture pack explain-gaps returns a success envelope"
 assert_jq "$after_gaps" '.data.schema == "ee.coverage_gap.v1"' \
     "after-capture pack keeps coverage-gap schema"
+assert_jq "$after_gaps" '.data.posture != null and ((.data.presentKinds // []) | length) >= 1' \
+    "after-capture report carries posture and present kinds"
 assert_jq "$after_gaps" '
     [.data.missingKinds[]?.kind] | index("release_rule") == null
 ' "after-capture report clears release rule gap"

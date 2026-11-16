@@ -183,6 +183,9 @@ case "$TMP_ROOT" in
 esac
 WORKSPACE="${TMP_ROOT%/}/ee-e2e-sx5-agent-profile.$$"
 mkdir -p "$WORKSPACE"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/ee_binary_resolution.sh"
+ee_isolate_data_dirs "$WORKSPACE"
 export EE_TEST_LOG_PATH="${EE_TEST_LOG_PATH:-$WORKSPACE/sx5_agent_profile.jsonl}"
 
 AGENT_ALPHA="AgentProfileAlpha"

@@ -26,6 +26,8 @@ SETUP_STDERR="$ARTIFACT_DIR/setup.stderr.txt"
 VALIDATION_STDERR="$ARTIFACT_DIR/validation.stderr.txt"
 
 mkdir -p "$WORKSPACE" "$RUN_HOME" "$ARTIFACT_DIR"
+ee_isolate_data_dirs "$RUN_ROOT"
+export HOME="$RUN_HOME"
 : >"$EVENT_LOG"
 : >"$SETUP_STDOUT"
 : >"$SETUP_STDERR"

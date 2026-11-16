@@ -19,6 +19,7 @@ LOG="$LOG_DIR/e2e_delivery.jsonl"
 HOOK_STATE_DIR="$ROOT/hook-state"
 
 mkdir -p "$WORKSPACE" "$LOG_DIR" "$HOOK_STATE_DIR"
+ee_isolate_data_dirs "$ROOT"
 
 resolve_ee_bin_path() {
   if [[ "$EE_BIN" == */* ]]; then
@@ -31,6 +32,9 @@ resolve_ee_bin_path() {
 }
 
 EE_BIN_PATH="$(resolve_ee_bin_path)"
+if ! ee_require_current_binary "$EE_BIN_PATH" "e2e_delivery"; then
+  exit 3
+fi
 export EE_AMBIENT_CONTEXT=true
 export EE_AMBIENT_CONTEXT_VERBOSITY=standard
 export EE_AMBIENT_CONTEXT_STATE_DIR="$HOOK_STATE_DIR"

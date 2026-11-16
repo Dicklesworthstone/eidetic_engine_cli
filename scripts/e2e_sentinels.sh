@@ -228,6 +228,8 @@ ready_revival="$(ee_json tripwire check --revivals --workspace "$WS" --json)"
 after_ready_hash="$(db_state_hash)"
 assert_eq "$after_ready_hash" "$before_ready_hash" \
     "tripwire revival check leaves database and WAL bytes unchanged"
+assert_jq "$ready_revival" '(.data.revivals | length) >= 1' \
+    "revival happy path returns at least one revival row"
 REVIVE_ID="$revive_mem_id" GATE_ID="$help_mem_id" assert_jq "$ready_revival" \
     '.success == true
      and .data.schema == "ee.memory_sentinel.revivals.v1"
@@ -289,6 +291,8 @@ assert_jq "$sensitive_mem" '.success == true and .data.persisted == true' \
     "secret-shaped path revival memory persists"
 sensitive_mem_id="$(printf '%s' "$sensitive_mem" | jq -r '.data.memory_id // empty')"
 sensitive_json="$(ee_json tripwire check --revivals --workspace "$WS" --json)"
+assert_jq "$sensitive_json" '(.data.revivals | length) >= 1' \
+    "sensitive revival check returns at least one revival row"
 RAW_TARGET="$sensitive_target" SENSITIVE_ID="$sensitive_mem_id" assert_jq "$sensitive_json" \
     '([.. | strings | select(contains(env.RAW_TARGET))] | length) == 0
      and any(.data.revivals[]?;

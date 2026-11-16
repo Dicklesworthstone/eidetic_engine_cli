@@ -417,6 +417,8 @@ coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 13
 coalesce_pending="$(printf '%s' "$coalesce_out" | jq -r '.data.job.details.preflight.pending_jobs // 0' 2>/dev/null || printf '0')"
 assert_nonempty "$coalesce_pending" "coalesce preflight reports a pending-job count"
 if [ "${coalesce_pending:-0}" -gt 0 ]; then
+assert_jq "$coalesce_out" '(.data.job.details.result.jobs | length) >= 1' \
+    "coalesce pending path processes at least one queued job"
 assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
     and .data.requestedJob == \"index_coalesce\"
     and .data.durableMutation == true
@@ -564,6 +566,8 @@ assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true
 # `#L2` (pack/mod.rs:5986 and models/provenance.rs:129, which collapse
 # start==end). Filed as bd-4hr1v. The assertion below is RIGHT to fail and must
 # not be relaxed to accommodate it.
+assert_jq "$evidence_pack_out" '(.data.pack.items | length) >= 1' \
+    "evidence pack selects at least one item"
 assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     and (.data.pack.items | type == \"array\")
     and (.data.pack.items | length) >= 1
@@ -733,6 +737,8 @@ assert_json "$evidence_pack_out" "tostring | contains(\"$LEAK_CANARY\") | not" '
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
 assert_nonempty "$ready_generation" "ready index exposes its published generation"
 repeat_coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 2 --json)"
+assert_jq "$repeat_coalesce_out" '.data.job.details.result != null and (.data.summary.total // 0) >= 1' \
+    "repeating public index_coalesce emits a populated job result envelope"
 assert_jq "$repeat_coalesce_out" '.schema == "ee.response.v2" and .success == true
     and .data.requestedJob == "index_coalesce"
     and .data.durableMutation == false
@@ -964,7 +970,8 @@ if remember_git_capture_available; then
     # the redactor fired naming this pattern's reason code; only then does the
     # negative below distinguish a redacted capture from an empty one.
     assert_jq "$apply_commit" '
-        (.data.content | contains("Redacted diff excerpt:"))
+        ((.data.content // "") | length) >= 1
+        and (.data.content | contains("Redacted diff excerpt:"))
         and (.data.content | test("Redaction:.*openai_api_key"))
     ' "precondition: the capture rendered a diff excerpt and redacted an openai_api_key from it, so the leak assertion below is not vacuous"
     assert_jq "$apply_commit" "tostring | contains(\"$SECRET\") | not" \

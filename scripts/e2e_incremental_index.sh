@@ -19,6 +19,7 @@ CORPUS_SIZE="${EE_INCREMENTAL_E2E_CORPUS_SIZE:-16}"
 SEARCH_QUERY="${EE_INCREMENTAL_E2E_QUERY:-incremental index e2e sentinel}"
 
 mkdir -p "$WORKSPACE"
+ee_isolate_data_dirs "$ARTIFACT_ROOT"
 : >"$EVENT_LOG"
 : >"$LATENCY_LOG"
 

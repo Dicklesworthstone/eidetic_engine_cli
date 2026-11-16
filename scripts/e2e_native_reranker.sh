@@ -109,6 +109,7 @@ if ! mkdir -p "${LOG_DIR}" "${EMPTY_EMBED_MODEL_DIR}" \
         "failed to initialize native-reranker E2E event log"
     exit 3
 fi
+ee_isolate_data_dirs "${ROOT}"
 
 FAILURES=0
 PASSES=0

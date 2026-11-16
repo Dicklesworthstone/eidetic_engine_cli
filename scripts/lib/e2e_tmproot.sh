@@ -47,4 +47,21 @@ e2e_temp_root() {
     printf '%s' "$root"
 }
 
+# ee_isolate_data_dirs <root_dir> — Redirect HOME and XDG_{DATA,CONFIG,CACHE,STATE}_HOME
+# to <root_dir> and default EE_EMBED_DOWNLOAD=off so shell e2e scripts never
+# read or mutate the runner host's ~/.local/share/ee store or model cache (bd-xuznt).
+ee_isolate_data_dirs() {
+    local root="${1:?ee_isolate_data_dirs: root directory required}"
+    mkdir -p "$root/home" "$root/xdg/data" "$root/xdg/config" "$root/xdg/cache" "$root/xdg/state"
+    if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -n "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+        export EE_EMBED_MODEL_DIR="$EE_EMBED_MODEL_FIXTURE_DIR"
+    fi
+    export HOME="$root/home"
+    export XDG_DATA_HOME="$root/xdg/data"
+    export XDG_CONFIG_HOME="$root/xdg/config"
+    export XDG_CACHE_HOME="$root/xdg/cache"
+    export XDG_STATE_HOME="$root/xdg/state"
+    export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
+}
+
 fi
