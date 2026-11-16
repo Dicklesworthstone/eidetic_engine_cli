@@ -26,30 +26,51 @@ pub(crate) fn pending_memory_review_ids(
     use sqlmodel_core::Value;
 
     let candidates = candidate_ids.iter().copied().collect::<BTreeSet<_>>();
-    let ids = candidates.into_iter().collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     let mut held = BTreeSet::new();
-    for page in ids.chunks(256) {
-        let slots = (2..page.len() + 2)
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT DISTINCT target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND status = 'pending' AND target_id IN ({slots}) ORDER BY target_id ASC"
-        );
-        let mut values = vec![Value::Text(workspace_id.to_owned())];
-        values.extend(page.iter().map(|id| Value::Text((*id).to_owned())));
+    if candidates.len() <= 256 {
+        let ids = candidates.into_iter().collect::<Vec<_>>();
+        for page in ids.chunks(256) {
+            let slots = (2..page.len() + 2)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT DISTINCT target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND status = 'pending' AND target_id IN ({slots}) ORDER BY target_id ASC"
+            );
+            let mut values = vec![Value::Text(workspace_id.to_owned())];
+            values.extend(page.iter().map(|id| Value::Text((*id).to_owned())));
+            for row in connection
+                .query(&sql, &values)
+                .map_err(|_| review_admission_error())?
+            {
+                let id = row
+                    .get(0)
+                    .and_then(Value::as_str)
+                    .ok_or_else(review_admission_error)?;
+                if page.binary_search(&id).is_err() {
+                    return Err(review_admission_error());
+                }
+                held.insert(id.to_owned());
+            }
+        }
+    } else {
         for row in connection
-            .query(&sql, &values)
+            .query(
+                "SELECT DISTINCT target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND status = 'pending' ORDER BY target_id ASC",
+                &[Value::Text(workspace_id.to_owned())],
+            )
             .map_err(|_| review_admission_error())?
         {
             let id = row
                 .get(0)
                 .and_then(Value::as_str)
                 .ok_or_else(review_admission_error)?;
-            if page.binary_search(&id).is_err() {
-                return Err(review_admission_error());
+            if candidates.contains(id) {
+                held.insert(id.to_owned());
             }
-            held.insert(id.to_owned());
         }
     }
     Ok(held)

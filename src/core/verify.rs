@@ -2255,13 +2255,12 @@ pub fn verification_closure_guidance_from_ledger(
             repair: Some("ee init --workspace .".to_owned()),
         });
     }
-    let connection =
-        DbConnection::open_file_read_only(options.database_path).map_err(|error| {
-            DomainError::Storage {
-                message: format!("Failed to open database: {error}"),
-                repair: Some("ee init --workspace .".to_owned()),
-            }
-        })?;
+    let connection = DbConnection::open_file_read_only(options.database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee init --workspace .".to_owned()),
+        }
+    })?;
     if connection
         .needs_migration()
         .map_err(|error| DomainError::Storage {

@@ -604,6 +604,12 @@ mod incident_proof_tests {
             proofs
                 .claims
                 .iter()
+                .any(|claim| !claim.card && claim.target == fixture.repair)
+        );
+        assert!(
+            !proofs
+                .claims
+                .iter()
                 .any(|claim| claim.card && claim.target == card.id)
         );
         assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, before);

@@ -143,6 +143,13 @@ pub fn sort_by_ulid_payload_or_lexical<T, F>(items: &mut Vec<T>, key: F)
 where
     F: Fn(&T) -> &str,
 {
+    if items.len() <= 1
+        || items.windows(2).all(|pair| {
+            compare_ulid_payload_or_lexical(key(&pair[0]), key(&pair[1])) != Ordering::Greater
+        })
+    {
+        return;
+    }
     if items
         .iter()
         .enumerate()

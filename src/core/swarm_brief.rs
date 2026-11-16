@@ -3083,10 +3083,38 @@ pub fn collect_swarm_brief(
     collect_swarm_brief_with_agent_mail_binding(options, runner, None)
 }
 
+#[must_use]
+pub fn collect_swarm_brief_with_connection(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    shared_connection: Option<&DbConnection>,
+) -> SwarmBriefReport {
+    collect_swarm_brief_with_agent_mail_binding_and_connection(
+        options,
+        runner,
+        None,
+        shared_connection,
+    )
+}
+
 pub(crate) fn collect_swarm_brief_with_agent_mail_binding(
     options: &SwarmBriefCollectOptions,
     runner: &impl SwarmBriefCommandRunner,
     expected_project_key: Option<&str>,
+) -> SwarmBriefReport {
+    collect_swarm_brief_with_agent_mail_binding_and_connection(
+        options,
+        runner,
+        expected_project_key,
+        None,
+    )
+}
+
+pub(crate) fn collect_swarm_brief_with_agent_mail_binding_and_connection(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    expected_project_key: Option<&str>,
+    shared_connection: Option<&DbConnection>,
 ) -> SwarmBriefReport {
     let mut report = SwarmBriefReport::empty(&options.workspace);
     collect_selected_source(
@@ -3153,7 +3181,7 @@ pub(crate) fn collect_swarm_brief_with_agent_mail_binding(
         || ToolchainSourceAdapter { runner }.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
-    attach_knowledge_gaps(&mut report, &options.workspace);
+    attach_knowledge_gaps(&mut report, &options.workspace, shared_connection);
     // bd-1eq3l.6: embed the compact workspace-hygiene summary so the swarm
     // brief surfaces counts/dirtyPathCount/needsHumanReviewTop/coordination
     // blockers/beadsStateStatus without forcing a separate
@@ -3240,10 +3268,21 @@ fn parse_miss_audit_observation(entry: &StoredAuditEntry) -> Option<MissAuditObs
 /// read recorded misses, cluster by exact query hash, and keep hashes that
 /// crossed the repeat threshold. Read-only and graceful — a missing/unreadable
 /// workspace DB leaves `knowledge_gaps` empty rather than failing the brief.
-fn attach_knowledge_gaps(report: &mut SwarmBriefReport, workspace: &Path) {
+fn attach_knowledge_gaps(
+    report: &mut SwarmBriefReport,
+    workspace: &Path,
+    shared_connection: Option<&DbConnection>,
+) {
     let database_path = workspace.join(".ee").join("ee.db");
-    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
-        return;
+    let owned_connection;
+    let connection = if let Some(conn) = shared_connection {
+        conn
+    } else {
+        let Ok(conn) = DbConnection::open_file_read_only(&database_path) else {
+            return;
+        };
+        owned_connection = conn;
+        &owned_connection
     };
     let Ok(entries) = connection.list_audit_by_action(
         audit_actions::SEARCH_MISS_RECORDED,
@@ -10502,10 +10541,10 @@ mod tests {
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
         let marker = workspace.path().join(".ee");
         let mut report = SwarmBriefReport::empty(workspace.path());
-        attach_knowledge_gaps(&mut report, workspace.path());
+        attach_knowledge_gaps(&mut report, workspace.path(), None);
         ensure_equal(&marker.exists(), &false, "missing marker stays absent")?;
         std::fs::create_dir(&marker).map_err(|error| error.to_string())?;
-        attach_knowledge_gaps(&mut report, workspace.path());
+        attach_knowledge_gaps(&mut report, workspace.path(), None);
         let entries = std::fs::read_dir(&marker)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
@@ -10549,7 +10588,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
         let mut report = SwarmBriefReport::empty(workspace.path());
-        attach_knowledge_gaps(&mut report, workspace.path());
+        attach_knowledge_gaps(&mut report, workspace.path(), None);
         ensure_equal(
             &report.knowledge_gaps.len(),
             &1,

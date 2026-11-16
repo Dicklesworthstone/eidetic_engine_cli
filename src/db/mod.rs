@@ -28653,6 +28653,17 @@ impl DbConnection {
             operation: DbOperation::Query,
             message: "current revival spec limit must fit i64".to_owned(),
         })?;
+        let has_revive_specs = self.query_for(
+            DbOperation::Query,
+            "SELECT 1 FROM memory_sentinel_specs WHERE polarity = 'revive' LIMIT 1",
+            &[],
+        )?;
+        if has_revive_specs.is_empty() {
+            return Ok(BoundedMemoryRevivalSpecs {
+                specs: Vec::new(),
+                total_count: 0,
+            });
+        }
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity, COUNT(*) OVER () AS total_count FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.superseded_at IS NULL OR julianday(m.superseded_at) > julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC LIMIT ?3",
@@ -29763,6 +29774,57 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
+    /// List all `(id, content_simhash)` pairs for live memories in one workspace.
+    pub fn list_workspace_memory_simhashes(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, MemoryContentSimHash)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, content_simhash FROM memories WHERE workspace_id = ?1 AND content_simhash IS NOT NULL AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        rows.iter()
+            .map(|row| {
+                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_string();
+                let content_simhash =
+                    required_content_simhash(row, 1, DbOperation::Query, "content_simhash")?;
+                Ok((memory_id, content_simhash))
+            })
+            .collect()
+    }
+
+    /// Rank `(id, content_simhash)` pairs within `max_hamming_distance` of `query`.
+    #[must_use]
+    pub fn rank_memory_simhash_candidates(
+        entries: &[(String, MemoryContentSimHash)],
+        query: MemoryContentSimHash,
+        max_hamming_distance: u32,
+        limit: usize,
+    ) -> Vec<MemorySimHashCandidate> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut candidates: Vec<MemorySimHashCandidate> = entries
+            .iter()
+            .filter_map(|(memory_id, content_simhash)| {
+                let hamming_distance =
+                    memory_content_simhash_hamming_distance(query, *content_simhash);
+                (hamming_distance <= max_hamming_distance).then(|| MemorySimHashCandidate {
+                    memory_id: memory_id.clone(),
+                    content_simhash: *content_simhash,
+                    hamming_distance,
+                })
+            })
+            .collect();
+        if candidates.len() > limit {
+            candidates.select_nth_unstable_by(limit - 1, compare_memory_simhash_candidates);
+            candidates.truncate(limit);
+        }
+        candidates.sort_by(compare_memory_simhash_candidates);
+        candidates
+    }
+
     /// List live memory rows in one workspace whose persisted SimHash is within a Hamming radius.
     pub fn list_memory_simhash_candidates(
         &self,
@@ -29774,34 +29836,13 @@ impl DbConnection {
         if limit == 0 {
             return Ok(Vec::new());
         }
-
-        let rows = self.query_for(
-            DbOperation::Query,
-            "SELECT id, content_simhash FROM memories WHERE workspace_id = ?1 AND content_simhash IS NOT NULL AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
-            &[Value::Text(workspace_id.to_string())],
-        )?;
-        let mut candidates: Vec<MemorySimHashCandidate> = rows
-            .iter()
-            .map(|row| {
-                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_string();
-                let content_simhash =
-                    required_content_simhash(row, 1, DbOperation::Query, "content_simhash")?;
-                let hamming_distance =
-                    memory_content_simhash_hamming_distance(query, content_simhash);
-                Ok(MemorySimHashCandidate {
-                    memory_id,
-                    content_simhash,
-                    hamming_distance,
-                })
-            })
-            .collect::<Result<_>>()?;
-        candidates.retain(|candidate| candidate.hamming_distance <= max_hamming_distance);
-        if candidates.len() > limit {
-            candidates.select_nth_unstable_by(limit - 1, compare_memory_simhash_candidates);
-            candidates.truncate(limit);
-        }
-        candidates.sort_by(compare_memory_simhash_candidates);
-        Ok(candidates)
+        let entries = self.list_workspace_memory_simhashes(workspace_id)?;
+        Ok(Self::rank_memory_simhash_candidates(
+            &entries,
+            query,
+            max_hamming_distance,
+            limit,
+        ))
     }
 
     /// List recent non-tombstoned memories in the same workflow, excluding one memory.
@@ -30001,24 +30042,19 @@ impl DbConnection {
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
-                "WITH candidates AS (\
-                     SELECT id AS candidate_id, workspace_id, \
-                            COALESCE(logical_id, id) AS logical_id, \
-                            attempt_family_id, attempt_family_size \
-                     FROM memories WHERE id IN ({placeholders})\
-                 ) \
-                 SELECT candidate.candidate_id, candidate.attempt_family_id, \
+                "SELECT candidate.id AS candidate_id, candidate.attempt_family_id, \
                         COALESCE(family.declared_size, candidate.attempt_family_size), \
                         family.origin, member.attempt_index, member.disposition \
-                 FROM candidates AS candidate \
+                 FROM memories AS candidate \
                  LEFT JOIN attempt_families AS family \
                    ON family.workspace_id = candidate.workspace_id \
                   AND family.family_id = candidate.attempt_family_id \
                  LEFT JOIN attempt_family_members AS member \
                    ON member.workspace_id = candidate.workspace_id \
                   AND member.family_id = candidate.attempt_family_id \
-                  AND member.memory_logical_id = candidate.logical_id \
-                 ORDER BY candidate.candidate_id ASC, member.attempt_index ASC"
+                  AND member.memory_logical_id = COALESCE(candidate.logical_id, candidate.id) \
+                 WHERE candidate.id IN ({placeholders}) \
+                 ORDER BY candidate.id ASC, member.attempt_index ASC"
             );
             let params = chunk
                 .iter()
@@ -30676,29 +30712,33 @@ impl DbConnection {
                 .collect::<Vec<_>>()
                 .join(", ");
             let candidate_sql = format!(
-                "WITH candidates AS (\
-                     SELECT id AS candidate_id, workspace_id, COALESCE(logical_id, id) AS logical_id \
-                     FROM memories WHERE id IN ({placeholders})\
-                 ), candidate_families AS (\
-                     SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, member.family_id \
-                     FROM candidates AS candidate \
-                     JOIN attempt_family_members AS member \
-                       ON member.workspace_id = candidate.workspace_id \
-                      AND member.memory_logical_id = candidate.logical_id \
-                     UNION \
-                     SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, memory.attempt_family_id \
-                     FROM candidates AS candidate \
-                     JOIN memories AS memory \
-                       ON memory.workspace_id = candidate.workspace_id \
-                      AND COALESCE(memory.logical_id, memory.id) = candidate.logical_id \
-                     WHERE memory.attempt_family_id IS NOT NULL\
-                 ) \
-                 SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
-                        family_key.family_id \
-                 FROM candidates AS candidate \
-                 LEFT JOIN candidate_families AS family_key \
-                   ON family_key.candidate_id = candidate.candidate_id \
-                 ORDER BY candidate.candidate_id ASC, family_key.family_id ASC"
+                "SELECT candidate.id AS candidate_id, \
+                        candidate.workspace_id, \
+                        COALESCE(candidate.logical_id, candidate.id) AS logical_id, \
+                        member.family_id AS family_id, \
+                        candidate.attempt_family_id AS direct_pointer_family_id, \
+                        (SELECT by_logical.attempt_family_id \
+                         FROM memories AS by_logical \
+                         WHERE by_logical.logical_id = COALESCE(candidate.logical_id, candidate.id) \
+                           AND by_logical.workspace_id = candidate.workspace_id \
+                           AND by_logical.id != candidate.id \
+                           AND by_logical.attempt_family_id IS NOT NULL \
+                         ORDER BY by_logical.attempt_family_id ASC \
+                         LIMIT 1) AS logical_pointer_family_id, \
+                        (SELECT by_root.attempt_family_id \
+                         FROM memories AS by_root \
+                         WHERE candidate.logical_id IS NOT NULL \
+                           AND by_root.id = candidate.logical_id \
+                           AND by_root.workspace_id = candidate.workspace_id \
+                           AND by_root.logical_id IS NULL \
+                           AND by_root.attempt_family_id IS NOT NULL \
+                         LIMIT 1) AS root_pointer_family_id \
+                 FROM memories AS candidate \
+                 LEFT JOIN attempt_family_members AS member \
+                   ON member.workspace_id = candidate.workspace_id \
+                  AND member.memory_logical_id = COALESCE(candidate.logical_id, candidate.id) \
+                 WHERE candidate.id IN ({placeholders}) \
+                 ORDER BY candidate.id ASC, member.family_id ASC"
             );
             let params = chunk
                 .iter()
@@ -30715,12 +30755,23 @@ impl DbConnection {
                 let logical_id =
                     required_text(row, 2, DbOperation::Query, "logical_id")?.to_owned();
                 let family_id = optional_text(row, 3)?.map(str::to_owned);
+                let direct_pointer_family_id = optional_text(row, 4)?.map(str::to_owned);
+                let logical_pointer_family_id = optional_text(row, 5)?.map(str::to_owned);
+                let root_pointer_family_id = optional_text(row, 6)?.map(str::to_owned);
                 let candidate = candidate_family_ids
                     .entry(candidate_id)
                     .or_insert_with(|| (workspace_id.clone(), logical_id, BTreeSet::new()));
-                if let Some(family_id) = family_id {
-                    candidate.2.insert(family_id.clone());
-                    family_keys.insert((workspace_id, family_id));
+                for fid in [
+                    family_id,
+                    direct_pointer_family_id,
+                    logical_pointer_family_id,
+                    root_pointer_family_id,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    candidate.2.insert(fid.clone());
+                    family_keys.insert((workspace_id.clone(), fid));
                 }
             }
         }
@@ -31396,6 +31447,9 @@ impl DbConnection {
         if ids.is_empty() {
             return Ok(std::collections::BTreeMap::new());
         }
+        if ids.len() <= 128 {
+            return self.get_memories_by_id_seeks(ids);
+        }
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id IN ({}) ORDER BY id ASC",
@@ -31411,6 +31465,23 @@ impl DbConnection {
         Ok(result)
     }
 
+    /// Load memories by primary-key point seeks (`WHERE id = ?1`) to avoid
+    /// whole-table `SCAN memories` on large stores when FrankenSQLite's
+    /// planner evaluates multi-bind `IN (...)` predicates.
+    pub fn get_memories_by_id_seeks(
+        &self,
+        ids: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, StoredMemory>> {
+        let mut result = std::collections::BTreeMap::new();
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+        for id in unique {
+            if let Some(memory) = self.get_memory(id)? {
+                result.insert(memory.id.clone(), memory);
+            }
+        }
+        Ok(result)
+    }
+
     /// Batch-load tags for multiple memories, returning a map from memory ID to tags.
     /// Preserves deterministic iteration order via BTreeMap.
     pub fn get_memory_tags_batch(
@@ -31419,6 +31490,26 @@ impl DbConnection {
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
         if memory_ids.is_empty() {
             return Ok(std::collections::BTreeMap::new());
+        }
+        let unique: std::collections::BTreeSet<&str> = memory_ids.iter().copied().collect();
+        if unique.len() <= 64 {
+            let mut result: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for memory_id in unique {
+                let rows = self.query_for(
+                    DbOperation::Query,
+                    "SELECT tag FROM memory_tags WHERE memory_id = ?1 ORDER BY tag ASC",
+                    &[Value::Text(memory_id.to_string())],
+                )?;
+                if !rows.is_empty() {
+                    let mut tags = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        tags.push(required_text(row, 0, DbOperation::Query, "tag")?.to_string());
+                    }
+                    result.insert(memory_id.to_string(), tags);
+                }
+            }
+            return Ok(result);
         }
         let placeholders: Vec<String> = (1..=memory_ids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
@@ -31513,6 +31604,63 @@ impl DbConnection {
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(canonical_tag),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// List up to `limit` memory IDs carrying `tag` in a workspace, ordered by `id ASC`.
+    pub fn list_memories_by_tag_bounded(
+        &self,
+        workspace_id: &str,
+        tag: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let canonical_tag = canonicalize_tag_filter(tag);
+        let probe_limit = limit.saturating_mul(4).max(32);
+        let tag_rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_id FROM memory_tags WHERE tag = ?1 ORDER BY memory_id ASC LIMIT ?2",
+            &[
+                Value::Text(canonical_tag.clone()),
+                Value::BigInt(i64::try_from(probe_limit).unwrap_or(i64::MAX)),
+            ],
+        )?;
+        let mut matched = Vec::with_capacity(limit);
+        for row in &tag_rows {
+            let memory_id = required_text(row, 0, DbOperation::Query, "memory_id")?;
+            let live_match = self.query_for(
+                DbOperation::Query,
+                "SELECT id FROM memories WHERE id = ?1 AND workspace_id = ?2 AND tombstoned_at IS NULL AND superseded_at IS NULL",
+                &[
+                    Value::Text(memory_id.to_string()),
+                    Value::Text(workspace_id.to_string()),
+                ],
+            )?;
+            if !live_match.is_empty() {
+                matched.push(memory_id.to_string());
+                if matched.len() >= limit {
+                    return Ok(matched);
+                }
+            }
+        }
+        if tag_rows.len() < probe_limit {
+            return Ok(matched);
+        }
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL ORDER BY m.id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(canonical_tag),
+                Value::BigInt(i64::try_from(limit).unwrap_or(i64::MAX)),
             ],
         )?;
 
@@ -34480,7 +34628,7 @@ impl DbConnection {
         limit: Option<u32>,
     ) -> Result<Vec<StoredAuditEntry>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE action = ?1 ORDER BY timestamp DESC",
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE action = ?1 ORDER BY +timestamp DESC",
         );
 
         if let Some(lim) = limit {

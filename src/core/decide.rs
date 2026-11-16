@@ -323,6 +323,13 @@ pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, 
 pub fn decide_revisit(
     options: &DecideRevisitOptions<'_>,
 ) -> Result<DecideRevisitReport, DomainError> {
+    decide_revisit_with_connection(options, None)
+}
+
+pub fn decide_revisit_with_connection(
+    options: &DecideRevisitOptions<'_>,
+    shared_connection: Option<&DbConnection>,
+) -> Result<DecideRevisitReport, DomainError> {
     let mut scope = decide_scope(options.workspace_path, options.database_path, false)?;
     let now = options.now.unwrap_or_else(Utc::now);
     let warning_days = options
@@ -330,7 +337,7 @@ pub fn decide_revisit(
         .unwrap_or_else(|| configured_revisit_warning_days(&scope.workspace_path));
     let warning_days_i64 = i64::try_from(warning_days.min(36_500)).unwrap_or(36_500);
     let window_end = now + TimeDelta::days(warning_days_i64);
-    let mut decisions = load_decisions(&mut scope, false, now)?;
+    let mut decisions = read::load_with_connection(&mut scope, false, now, shared_connection)?;
     decisions.retain(|item| {
         item.revisit_by
             .as_deref()

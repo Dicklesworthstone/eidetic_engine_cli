@@ -205,8 +205,9 @@ use crate::core::memory::{
     update_memory_level, update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{
-    OrientDecisionOptions, OrientFastContentOptions, orient_ambient_context, orient_decisions,
-    orient_fast_content, orient_hook_response, orient_primer_value,
+    OrientDecisionOptions, OrientFastContentOptions, orient_ambient_context,
+    orient_decisions_with_connection, orient_fast_content_with_connection, orient_hook_response,
+    orient_primer_value,
 };
 use crate::core::outcome::{
     CliCancelReason, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -283,7 +284,8 @@ use crate::core::subscribe::{
 use crate::core::swarm_brief::{
     DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions, SwarmBriefReport,
     SwarmBriefSourceKind, SwarmBriefSourceStatus, SystemSwarmBriefCommandRunner,
-    all_swarm_brief_sources, collect_swarm_brief, default_swarm_brief_sources,
+    all_swarm_brief_sources, collect_swarm_brief, collect_swarm_brief_with_connection,
+    default_swarm_brief_sources,
 };
 use crate::core::swarm_next_action::{
     SwarmNextActionSnapshot, SwarmRepairPlan, SwarmWorkPacket, SwarmWorkPacketClaimGate,
@@ -43432,6 +43434,18 @@ where
         ));
     }
 
+    let shared_orient_connection = if addressed_database_path.exists() {
+        DbConnection::open_file_read_only(&addressed_database_path).ok()
+    } else {
+        None
+    };
+    let default_database_path = workspace_path.join(".ee").join("ee.db");
+    let default_store_connection = if addressed_database_path == default_database_path {
+        shared_orient_connection.as_ref()
+    } else {
+        None
+    };
+
     let mut swarm_sources = if args.fast {
         [
             SwarmBriefSourceKind::AgentInventory,
@@ -43455,7 +43469,11 @@ where
     } else {
         args.command_timeout_ms
     };
-    let swarm_report = collect_swarm_brief(&swarm_options, &SystemSwarmBriefCommandRunner);
+    let swarm_report = collect_swarm_brief_with_connection(
+        &swarm_options,
+        &SystemSwarmBriefCommandRunner,
+        default_store_connection,
+    );
     let swarm_brief = match render_swarm_brief_json(&swarm_report, output::FieldProfile::Summary) {
         Ok(raw) => orient_component_data_from_envelope(&raw),
         Err(error) => {
@@ -43529,14 +43547,17 @@ where
     };
 
     let fast_content = if args.fast {
-        let report = orient_fast_content(&OrientFastContentOptions {
-            workspace_path: &workspace_path,
-            database_path: Some(&addressed_database_path),
-            index_dir: Some(&addressed_index_dir),
-            task: &args.task,
-            max_tokens: args.max_tokens,
-            candidate_pool,
-        });
+        let report = orient_fast_content_with_connection(
+            &OrientFastContentOptions {
+                workspace_path: &workspace_path,
+                database_path: Some(&addressed_database_path),
+                index_dir: Some(&addressed_index_dir),
+                task: &args.task,
+                max_tokens: args.max_tokens,
+                candidate_pool,
+            },
+            shared_orient_connection.as_ref(),
+        );
         degraded.extend(report.issues.iter().map(|issue| {
             orient_degradation_value(
                 &issue.code,
@@ -43621,13 +43642,16 @@ where
         serde_json::Value::Null
     };
 
-    let decisions = match orient_decisions(&OrientDecisionOptions {
-        workspace_path: &workspace_path,
-        database_path: Some(&addressed_database_path),
-        warning_days: None,
-        limit: 12,
-        now: None,
-    }) {
+    let decisions = match orient_decisions_with_connection(
+        &OrientDecisionOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&addressed_database_path),
+            warning_days: None,
+            limit: 12,
+            now: None,
+        },
+        shared_orient_connection.as_ref(),
+    ) {
         Ok(report) => report.data_json(),
         Err(error) => {
             degraded.push(orient_degradation_value(
@@ -43640,17 +43664,22 @@ where
         }
     };
 
-    let learn_gaps = orient_learn_gaps_value(&workspace_path, &mut degraded);
+    let learn_gaps = orient_learn_gaps_value_with_connection(
+        &workspace_path,
+        &mut degraded,
+        default_store_connection,
+    );
 
     // Revive-polarity sentinels whose predicate now passes: previously dead
     // routes whose recorded blocker has cleared. Surfacing them at session
     // start is the whole point of wake-on-condition sentinels
     // (bd-wake-on-condition-inverse-sentinel-65uci). Read-only; reuses the
     // `ee tripwire check --revivals` provider.
-    let revivals = match revival_sentinel_data(
+    let revivals = match revival_sentinel_data_with_connection(
         cli,
         &TripwireCheckArgs::default(),
         RevivalObservationMode::Implicit,
+        default_store_connection,
     ) {
         Ok(data) => data,
         Err(error) => {
@@ -43677,8 +43706,16 @@ where
     // populated stores (bd-orient-store-discovery-ft1z5): agents get
     // dropped into arbitrary cwds and rationally stop using ee when the
     // first orient reports nothing.
-    let (store_discovery, nearby_best) =
-        orient_store_discovery(&workspace_path, &addressed_database_path);
+    let fast_content_proved_populated = fast_content
+        .as_ref()
+        .and_then(|fc| fc.get("recentCount"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|count| count >= crate::core::orient::NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD);
+    let (store_discovery, nearby_best) = if fast_content_proved_populated {
+        (None, None)
+    } else {
+        orient_store_discovery(&workspace_path, &addressed_database_path)
+    };
     let mut next_commands = orient_next_commands(
         &workspace_path,
         &addressed_database_path,
@@ -43774,16 +43811,25 @@ fn orient_requests_only_ambient_context(cli: &Cli, args: &OrientArgs) -> bool {
             .all(|field| matches!(*field, "command" | "ambientContext"))
 }
 
+#[cfg(test)]
 fn orient_learn_gaps_value(
     workspace_path: &Path,
     degraded: &mut Vec<serde_json::Value>,
+) -> serde_json::Value {
+    orient_learn_gaps_value_with_connection(workspace_path, degraded, None)
+}
+
+fn orient_learn_gaps_value_with_connection(
+    workspace_path: &Path,
+    degraded: &mut Vec<serde_json::Value>,
+    shared_connection: Option<&DbConnection>,
 ) -> serde_json::Value {
     let options = LearnGapsOptions {
         workspace: workspace_path.to_path_buf(),
         since: None,
         limit: 3,
     };
-    match crate::core::learn::show_gaps(&options) {
+    match crate::core::learn::show_gaps_with_connection(&options, shared_connection) {
         Ok(report) => {
             let top_gaps = report
                 .gaps
@@ -53583,11 +53629,9 @@ where
         }
     };
     if args.no_persist {
-        if let Err(error) = ensure_inspection_database_current(
-            &connection,
-            &database_path,
-            "primer --no-persist",
-        ) {
+        if let Err(error) =
+            ensure_inspection_database_current(&connection, &database_path, "primer --no-persist")
+        {
             return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     } else if let Err(error) = connection.migrate() {
@@ -73039,6 +73083,15 @@ fn revival_sentinel_data(
     args: &TripwireCheckArgs,
     observation_mode: RevivalObservationMode,
 ) -> Result<serde_json::Value, DomainError> {
+    revival_sentinel_data_with_connection(cli, args, observation_mode, None)
+}
+
+fn revival_sentinel_data_with_connection(
+    cli: &Cli,
+    args: &TripwireCheckArgs,
+    observation_mode: RevivalObservationMode,
+    shared_connection: Option<&DbConnection>,
+) -> Result<serde_json::Value, DomainError> {
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
@@ -73047,17 +73100,23 @@ fn revival_sentinel_data(
     if !database_path.exists() {
         return Err(crate::core::storeless_workspace_error(&database_path));
     }
-    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
-        DomainError::Storage {
-            message: format!(
-                "Failed to open database {} read-only: {error}",
-                database_path.display()
-            ),
-            repair: Some("ee doctor --workspace . --json".to_owned()),
-        }
-    })?;
-    ensure_inspection_database_current(&connection, &database_path, "revival sentinel check")?;
-    let workspace_id = resolve_database_workspace_id(&connection, &workspace_path)?;
+    let owned_connection;
+    let connection = if let Some(conn) = shared_connection {
+        conn
+    } else {
+        owned_connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!(
+                    "Failed to open database {} read-only: {error}",
+                    database_path.display()
+                ),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            }
+        })?;
+        &owned_connection
+    };
+    ensure_inspection_database_current(connection, &database_path, "revival sentinel check")?;
+    let workspace_id = resolve_database_workspace_id(connection, &workspace_path)?;
     let checked_at = chrono::Utc::now().to_rfc3339();
     let limit = args.limit.unwrap_or(DEFAULT_REVIVAL_SENTINEL_LIMIT);
     if !(1..=MAX_REVIVAL_SENTINEL_LIMIT).contains(&limit) {
@@ -83968,14 +84027,8 @@ mod tests {
             )?;
         }
 
-        let (migration_exit, _, migration_stderr) = invoke(&[
-            "ee",
-            "--workspace",
-            &workspace,
-            "--json",
-            "migrate",
-            "run",
-        ]);
+        let (migration_exit, _, migration_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "--json", "migrate", "run"]);
         ensure_equal(
             &migration_exit,
             &ProcessExitCode::Success,

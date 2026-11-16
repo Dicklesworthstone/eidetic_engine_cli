@@ -712,15 +712,74 @@ impl QueryMissAccumulator {
 
 /// Mine query-miss audit rows into prioritized learning gaps.
 pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainError> {
-    let snapshot = load_learning_snapshot(&options.workspace)?;
+    show_gaps_with_connection(options, None)
+}
+
+/// Mine query-miss audit rows into prioritized learning gaps using an optional shared read connection.
+pub fn show_gaps_with_connection(
+    options: &LearnGapsOptions,
+    shared_connection: Option<&DbConnection>,
+) -> Result<LearnGapsReport, DomainError> {
+    let canonical_workspace = options
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_workspace_path(&options.workspace));
+    let database_path = learning_database_path(None, &canonical_workspace);
+    if !database_path.exists() {
+        return Err(crate::core::storeless_workspace_error(&database_path));
+    }
+
+    let mut owned_connection = if shared_connection.is_none() {
+        Some(
+            DbConnection::open_file_read_only(&database_path).map_err(|error| {
+                DomainError::Storage {
+                    message: format!("Failed to open database: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                }
+            })?,
+        )
+    } else {
+        None
+    };
+    let connection = shared_connection
+        .or(owned_connection.as_ref())
+        .expect("learning connection available");
+    let read_snapshot = LearningReadSnapshot::begin(connection)?;
+    if connection
+        .needs_migration()
+        .map_err(|_| learning_snapshot_error("inspect schema"))?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "The addressed workspace database requires migration before learning."
+                .to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    let workspace_id = crate::core::workspace::addressed_workspace_row(
+        connection,
+        &options.workspace,
+        &database_path,
+    )?
+    .map_or_else(
+        || crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        |row| row.id,
+    );
+    let audit_entries = connection
+        .list_audit_by_action(audit_actions::SEARCH_MISS_RECORDED, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list learning audit entries: {error}"),
+            repair: Some("ee audit timeline --json".to_string()),
+        })?
+        .into_iter()
+        .filter(|entry| entry.workspace_id.as_deref() == Some(workspace_id.as_str()))
+        .collect::<Vec<_>>();
     let retention_days = resolve_query_miss_retention_days(&options.workspace)?;
     let requested_since = options
         .since
         .as_deref()
         .map(parse_learn_since)
         .transpose()?;
-    let parsed_misses = snapshot
-        .audit_entries
+    let parsed_misses = audit_entries
         .iter()
         .filter_map(parse_query_miss_audit_entry)
         .collect::<Vec<_>>();
@@ -753,25 +812,68 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
         .values()
         .filter(|cluster| cluster.miss_count >= KNOWLEDGE_GAP_MIN_CLUSTER_MISSES)
         .collect::<Vec<_>>();
-    let newest_cluster_ts = repeated_clusters
-        .iter()
-        .map(|cluster| cluster.last_seen_at)
-        .max()
-        .unwrap_or(newest_miss);
-    let mut gaps = repeated_clusters
-        .into_iter()
-        .map(|cluster| {
-            learn_gap_cluster(
-                cluster,
-                newest_cluster_ts,
-                retention_days,
-                &snapshot.curation_candidates,
-                &snapshot.memories,
-                &snapshot.memory_tags,
-                &options.workspace,
+    let mut gaps = if repeated_clusters.is_empty() {
+        read_snapshot.finish()?;
+        if let Some(owned) = owned_connection.take() {
+            owned.close().map_err(|error| DomainError::Storage {
+                message: format!("Failed to close database: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        }
+        Vec::new()
+    } else {
+        let memory_rows = connection
+            .list_recent_current_memories_for_retrieval(
+                &workspace_id,
+                &crate::core::memory::normalize_row_timestamp(Utc::now()),
+                u32::MAX,
             )
-        })
-        .collect::<Vec<_>>();
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list learning memories: {error}"),
+                repair: Some("ee remember --workspace . --json".to_string()),
+            })?;
+        let memories = admit_learning_memory_rows(connection, &workspace_id, memory_rows)
+            .map_err(|_| learning_snapshot_error("verify current memory admission"))?;
+        let memory_ids = memories.keys().map(String::as_str).collect::<Vec<_>>();
+        let memory_tags = connection
+            .get_memory_tags_batch(&memory_ids)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load memory tags for learning: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        let curation_candidates = connection
+            .list_curation_candidates(&workspace_id, None, None, None)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list curation candidates: {error}"),
+                repair: Some("ee curate candidates --json".to_string()),
+            })?;
+        read_snapshot.finish()?;
+        if let Some(owned) = owned_connection.take() {
+            owned.close().map_err(|error| DomainError::Storage {
+                message: format!("Failed to close database: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        }
+        let newest_cluster_ts = repeated_clusters
+            .iter()
+            .map(|cluster| cluster.last_seen_at)
+            .max()
+            .unwrap_or(newest_miss);
+        repeated_clusters
+            .into_iter()
+            .map(|cluster| {
+                learn_gap_cluster(
+                    cluster,
+                    newest_cluster_ts,
+                    retention_days,
+                    &curation_candidates,
+                    &memories,
+                    &memory_tags,
+                    &options.workspace,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     // Preserve covered history without allowing it to crowd open demand out of
     // a bounded report. Demand score still orders clusters within each status.
     gaps.sort_by(|left, right| {
@@ -787,7 +889,7 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
 
     Ok(LearnGapsReport {
         schema: LEARN_GAPS_SCHEMA_V1.to_string(),
-        workspace_id: snapshot.workspace_id,
+        workspace_id,
         retention_days,
         requested_since: options.since.clone(),
         effective_since: effective_since.to_rfc3339(),

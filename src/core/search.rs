@@ -2965,12 +2965,13 @@ impl SearchCandidateFilter<'_> {
             &mut probe_degraded,
             Some(connection),
         );
+        let mut probe_preloaded = BTreeMap::new();
         let hits = apply_tombstone_visibility_collecting(
             &admission_options,
             hits,
             &mut probe_degraded,
             Some(connection),
-            None,
+            Some(&mut probe_preloaded),
         );
         let (hits, _) = apply_memory_scope_visibility_with_metadata_mode_collecting(
             &admission_options,
@@ -2978,7 +2979,7 @@ impl SearchCandidateFilter<'_> {
             &mut probe_degraded,
             Some(connection),
             false,
-            None,
+            Some(&mut probe_preloaded),
             None,
         );
         let hits = apply_mesh_query_visibility(hits, &mut probe_degraded);
@@ -10977,7 +10978,16 @@ async fn run_search_inner_with_performance(
         .unwrap_or_else(|| runtime_profile_for_workspace(&options.workspace_path));
     trace.record_elapsed("search::runtimeProfile", runtime_profile_start);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
-    let scoring_candidate_limit = quality_scoring_candidate_limit(effective_limit, options.speed);
+    let scoring_candidate_limit = if !include_passthrough_scope_analysis_metadata
+        && retrieval_only
+        && options.source_mode == SearchSourceMode::LexicalOnly
+        && options.strict_source_mode
+        && options.speed == SpeedMode::Instant
+    {
+        effective_limit
+    } else {
+        quality_scoring_candidate_limit(effective_limit, options.speed)
+    };
 
     let global_memory_policy = if global_store_participates_in_scope(options.memory_scope) {
         crate::config::workspace_memory_policy(&options.workspace_path)
@@ -14356,10 +14366,23 @@ pub(crate) fn apply_quality_scoring_with_feedback(
     let memory_refs: Vec<&str> = memory_ids.iter().map(String::as_str).collect();
     let mut unavailable = false;
     // Local source identity wins collisions with separately admitted globals.
+    let preloaded_covers_local_only = admitted_global_ids.is_none_or(BTreeSet::is_empty)
+        && read_connection.is_some()
+        && preloaded_memories
+            .is_some_and(|preloaded| memory_refs.iter().all(|id| preloaded.contains_key(*id)));
     let local_memories = if memory_refs.is_empty() {
         BTreeMap::new()
+    } else if let Some(preloaded) = preloaded_memories.filter(|_| preloaded_covers_local_only) {
+        memory_refs
+            .iter()
+            .filter_map(|id| {
+                preloaded
+                    .get(*id)
+                    .map(|memory| ((*id).to_owned(), memory.clone()))
+            })
+            .collect()
     } else if let Some(connection) = read_connection {
-        match connection.get_memories_batch(&memory_refs) {
+        match connection.get_memories_by_id_seeks(&memory_refs) {
             Ok(rows) => rows,
             Err(_) => {
                 unavailable = true;
@@ -15416,7 +15439,7 @@ fn preload_returned_search_memories(
     let Some(connection) = read_connection else {
         return;
     };
-    match connection.get_memories_batch(&missing) {
+    match connection.get_memories_by_id_seeks(&missing) {
         Ok(memories) => {
             for (memory_id, memory) in memories {
                 preloaded.entry(memory_id).or_insert(memory);
@@ -16832,7 +16855,23 @@ fn apply_tombstone_visibility_with_connection(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let batch_memories = connection.get_memories_batch(&hit_doc_ids).ok();
+    let batch_memories = if let Some(preloaded) = preloaded_memories
+        .as_deref()
+        .filter(|preloaded| hit_doc_ids.iter().all(|id| preloaded.contains_key(*id)))
+    {
+        Some(
+            hit_doc_ids
+                .iter()
+                .filter_map(|id| {
+                    preloaded
+                        .get(*id)
+                        .map(|memory| ((*id).to_owned(), memory.clone()))
+                })
+                .collect(),
+        )
+    } else {
+        connection.get_memories_by_id_seeks(&hit_doc_ids).ok()
+    };
     // Seal authority is hydrated beside source bodies in the caller's pinned
     // snapshot, not once per hit. A failed batch retains the point getter's
     // fail-closed semantics while isolating any single malformed sidecar.
@@ -17337,12 +17376,36 @@ fn apply_memory_scope_visibility_with_connection(
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let hit_doc_ids: BTreeSet<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
     let hit_doc_refs: Vec<&str> = hit_doc_ids.iter().map(String::as_str).collect();
+    let preloaded_covers_local_only = admitted_global_ids.is_none_or(BTreeSet::is_empty)
+        && preloaded_memories.as_deref().is_some_and(|preloaded| {
+            hit_doc_refs
+                .iter()
+                .filter(|id| id.starts_with("mem_"))
+                .all(|id| preloaded.contains_key(*id))
+        });
     let (mut scope_memories, read_error): (
         BTreeMap<String, crate::db::StoredMemory>,
         Option<String>,
-    ) = match connection.get_memories_batch(&hit_doc_refs) {
-        Ok(memories) => (memories, None),
-        Err(error) => (BTreeMap::new(), Some(error.to_string())),
+    ) = if let Some(preloaded) = preloaded_memories
+        .as_deref()
+        .filter(|_| preloaded_covers_local_only)
+    {
+        (
+            hit_doc_refs
+                .iter()
+                .filter_map(|id| {
+                    preloaded
+                        .get(*id)
+                        .map(|memory| ((*id).to_owned(), memory.clone()))
+                })
+                .collect(),
+            None,
+        )
+    } else {
+        match connection.get_memories_by_id_seeks(&hit_doc_refs) {
+            Ok(memories) => (memories, None),
+            Err(error) => (BTreeMap::new(), Some(error.to_string())),
+        }
     };
     // This map still contains only positively read local rows. Normalize
     // ownership before merging any separately admitted global preloads.

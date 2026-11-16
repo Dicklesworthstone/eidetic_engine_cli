@@ -120,9 +120,28 @@ fn load_with_boundary(
         .map(|memory| memory.id.as_str())
         .collect();
     let mut tags = BTreeMap::new();
-    for page in ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
-        let page_tags = connection
-            .get_memory_tags_batch(page)
+    if ids.len() <= RESUME_STORAGE_PAGE_SIZE {
+        for page in ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
+            let page_tags = connection
+                .get_memory_tags_batch(page)
+                .map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
+                    ),
+                    repair: Some(
+                        "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                            .to_owned(),
+                    ),
+                })?;
+            tags.extend(page_tags);
+        }
+    } else {
+        let id_set: BTreeSet<&str> = ids.iter().copied().collect();
+        let rows = connection
+            .query(
+                "SELECT mt.memory_id, mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL ORDER BY mt.memory_id ASC, mt.tag ASC",
+                &[sqlmodel_core::Value::Text(workspace_id.clone())],
+            )
             .map_err(|error| DomainError::Storage {
                 message: format!(
                     "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
@@ -132,7 +151,25 @@ fn load_with_boundary(
                         .to_owned(),
                 ),
             })?;
-        tags.extend(page_tags);
+        for row in &rows {
+            let (Some(memory_id), Some(tag)) = (
+                row.get(0).and_then(sqlmodel_core::Value::as_str),
+                row.get(1).and_then(sqlmodel_core::Value::as_str),
+            ) else {
+                return Err(DomainError::Storage {
+                    message: "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: malformed memory_tags row".to_owned(),
+                    repair: Some(
+                        "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                            .to_owned(),
+                    ),
+                });
+            };
+            if id_set.contains(memory_id) {
+                tags.entry(memory_id.to_owned())
+                    .or_insert_with(Vec::new)
+                    .push(tag.to_owned());
+            }
+        }
     }
 
     // Apply the ordinary workspace-scope and public-content admission rules

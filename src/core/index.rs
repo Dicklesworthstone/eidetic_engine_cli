@@ -7366,6 +7366,10 @@ pub(crate) async fn build_lexical_tier(
         .commit(cx)
         .await
         .map_err(|error| map_index_search_error(cx, "failed to commit lexical tier", error))?;
+    drop(lexical);
+    crate::search::consolidate_lexical_segments(&lexical_path).map_err(|error| {
+        map_index_search_error(cx, "failed to consolidate lexical tier segments", error)
+    })?;
     index_checkpoint(cx)
 }
 

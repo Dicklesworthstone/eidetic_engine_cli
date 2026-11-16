@@ -56,45 +56,10 @@ fn states(
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "SELECT m.id, m.superseded_at, s.memory_id, s.revealed_at FROM memories AS m LEFT JOIN memory_seals AS s ON s.memory_id = m.id WHERE m.id IN ({placeholders}) ORDER BY m.id ASC"
-        );
         let parameters = page
             .iter()
             .map(|id| Value::Text((*id).to_owned()))
             .collect::<Vec<_>>();
-        for row in connection.query(&sql, &parameters)? {
-            let Some(Value::Text(id)) = row.get(0) else {
-                return Err(DbError::MalformedRow {
-                    operation: DbOperation::Query,
-                    message: "Could not read memory revision identity".to_owned(),
-                });
-            };
-            let state = match row.get(1) {
-                Some(Value::Null) => RevisionState::Current,
-                Some(Value::Text(raw)) => DateTime::parse_from_rfc3339(raw)
-                    .map(|at| RevisionState::Superseded(at.with_timezone(&Utc)))
-                    .unwrap_or(RevisionState::Malformed),
-                _ => RevisionState::Malformed,
-            };
-            // Match MemorySeal::is_sealed: a present seal without revealed_at
-            // is closed. The clock, body spelling, indexed reveal flags and
-            // reveal_verified do not override this source authority. Retain
-            // malformed revision failures even while the body is sealed.
-            let state = match (row.get(2), row.get(3)) {
-                (Some(Value::Null), Some(Value::Null)) => state,
-                (Some(Value::Text(seal_id)), Some(Value::Null)) if seal_id == id => {
-                    if state == RevisionState::Malformed {
-                        state
-                    } else {
-                        RevisionState::Sealed
-                    }
-                }
-                (Some(Value::Text(seal_id)), Some(Value::Text(_))) if seal_id == id => state,
-                _ => RevisionState::Malformed,
-            };
-            result.insert(id.clone(), state);
-        }
         // Review holds are current authority even for historical reads. Match
         // both the native target type and its owning workspace: a foreign hold
         // or feedback about a derived rule must not suppress this memory.
@@ -102,25 +67,94 @@ fn states(
         // sources have pending events against the same target. Never read the
         // quarantined feedback body, reason, source identity or event payload.
         let quarantine_sql = format!(
-            "SELECT DISTINCT m.id FROM memories AS m JOIN feedback_quarantine AS q ON q.target_id = m.id AND q.workspace_id = m.workspace_id WHERE q.target_type = 'memory' AND q.status = 'pending' AND m.id IN ({placeholders}) ORDER BY m.id ASC"
+            "SELECT DISTINCT target_id, workspace_id FROM feedback_quarantine WHERE target_type = 'memory' AND status = 'pending' AND target_id IN ({placeholders}) ORDER BY target_id ASC"
         );
+        let mut pending_quarantine = BTreeMap::<String, BTreeSet<String>>::new();
         for row in connection.query(&quarantine_sql, &parameters)? {
-            let Some(Value::Text(id)) = row.get(0) else {
+            let (Some(Value::Text(id)), Some(Value::Text(quarantine_workspace))) =
+                (row.get(0), row.get(1))
+            else {
                 return Err(DbError::MalformedRow {
                     operation: DbOperation::Query,
                     message: "Could not read memory quarantine identity".to_owned(),
                 });
             };
-            let Some(state) = result.get_mut(id) else {
+            pending_quarantine
+                .entry(id.clone())
+                .or_default()
+                .insert(quarantine_workspace.clone());
+        }
+        let seal_sql = format!(
+            "SELECT memory_id, revealed_at FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
+        );
+        let mut seal_states = BTreeMap::<String, Option<bool>>::new();
+        for row in connection.query(&seal_sql, &parameters)? {
+            let Some(Value::Text(seal_id)) = row.get(0) else {
                 return Err(DbError::MalformedRow {
                     operation: DbOperation::Query,
-                    message: "Could not verify memory quarantine authority".to_owned(),
+                    message: "Could not read memory seal identity".to_owned(),
                 });
             };
-            // Do not mask malformed source authority or disclose a quarantine
-            // decision instead of the stronger closed-seal explanation.
-            if !matches!(state, RevisionState::Malformed | RevisionState::Sealed) {
-                *state = RevisionState::Quarantined;
+            let state = match row.get(1) {
+                Some(Value::Null) => Some(true),
+                Some(Value::Text(_)) => Some(false),
+                _ => None,
+            };
+            seal_states.insert(seal_id.clone(), state);
+        }
+        for &candidate_id in page {
+            for row in connection.query(
+                "SELECT id, workspace_id, superseded_at FROM memories WHERE id = ?1",
+                &[Value::Text(candidate_id.to_owned())],
+            )? {
+                let Some(Value::Text(id)) = row.get(0) else {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "Could not read memory revision identity".to_owned(),
+                    });
+                };
+                let workspace_id = match row.get(1) {
+                    Some(Value::Text(ws)) => Some(ws.as_str()),
+                    _ => None,
+                };
+                let revision = if workspace_id.is_none() {
+                    RevisionState::Malformed
+                } else {
+                    match row.get(2) {
+                        Some(Value::Null) => RevisionState::Current,
+                        Some(Value::Text(raw)) => DateTime::parse_from_rfc3339(raw)
+                            .map(|at| RevisionState::Superseded(at.with_timezone(&Utc)))
+                            .unwrap_or(RevisionState::Malformed),
+                        _ => RevisionState::Malformed,
+                    }
+                };
+                // Match MemorySeal::is_sealed: a present seal without revealed_at
+                // is closed. The clock, body spelling, indexed reveal flags and
+                // reveal_verified do not override this source authority. Retain
+                // malformed revision failures even while the body is sealed.
+                let mut state = match seal_states.get(id) {
+                    None => revision,
+                    Some(Some(true)) => {
+                        if revision == RevisionState::Malformed {
+                            revision
+                        } else {
+                            RevisionState::Sealed
+                        }
+                    }
+                    Some(Some(false)) => revision,
+                    Some(None) => RevisionState::Malformed,
+                };
+                // Do not mask malformed source authority or disclose a quarantine
+                // decision instead of the stronger closed-seal explanation.
+                if !matches!(state, RevisionState::Malformed | RevisionState::Sealed)
+                    && let Some(ws) = workspace_id
+                    && pending_quarantine
+                        .get(id)
+                        .is_some_and(|workspaces| workspaces.contains(ws))
+                {
+                    state = RevisionState::Quarantined;
+                }
+                result.insert(id.clone(), state);
             }
         }
     }

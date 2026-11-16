@@ -1510,6 +1510,83 @@ fn remember_memory_inner_with_store(
     }
 }
 
+struct RememberBatchStoreSession {
+    database_path: PathBuf,
+    connection: DbConnection,
+    workspace_id: String,
+    simhash_entries: std::cell::RefCell<Option<Vec<(String, crate::db::MemoryContentSimHash)>>>,
+    simhash_embeddings: std::cell::RefCell<BTreeMap<String, Vec<f32>>>,
+    single_tag_bounded_ids: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
+}
+
+impl RememberBatchStoreSession {
+    fn open_for_prepared(
+        database_path: &Path,
+        workspace_path: &Path,
+        requested_workspace_path: &Path,
+        requested_workspace_id: &str,
+    ) -> Result<Self, DomainError> {
+        crate::core::ensure_addressed_database_exists(database_path)?;
+        let connection = open_remember_database_with_retry(database_path)?;
+        migrate_remember_database_with_retry(&connection)?;
+        let workspace_id = crate::core::workspace::ensure_bound_workspace(
+            &connection,
+            requested_workspace_id,
+            &[workspace_path, requested_workspace_path],
+        )?;
+        Ok(Self {
+            database_path: database_path.to_path_buf(),
+            connection,
+            workspace_id,
+            simhash_entries: std::cell::RefCell::new(None),
+            simhash_embeddings: std::cell::RefCell::new(BTreeMap::new()),
+            single_tag_bounded_ids: std::cell::RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    fn record_stored_memory(
+        &self,
+        memory_id: &str,
+        tags: &[String],
+        probe: &RememberEmbedDedupProbe,
+    ) {
+        if let RememberEmbedDedupProbe::Enabled {
+            content_simhash,
+            query_embedding,
+            ..
+        } = probe
+        {
+            if let Some(entries) = self.simhash_entries.borrow_mut().as_mut() {
+                match entries.binary_search_by(|(id, _)| id.as_str().cmp(memory_id)) {
+                    Ok(idx) => entries[idx].1 = *content_simhash,
+                    Err(idx) => entries.insert(idx, (memory_id.to_owned(), *content_simhash)),
+                }
+            }
+            self.simhash_embeddings
+                .borrow_mut()
+                .insert(memory_id.to_owned(), query_embedding.clone());
+        }
+        if tags.len() == 1
+            && memory_id.len() == 30
+            && memory_id.starts_with("mem_")
+            && let Some(tag) = tags.first()
+        {
+            let canonical_tag = crate::models::canonicalize_tag_filter(tag);
+            if let Some(ids) = self
+                .single_tag_bounded_ids
+                .borrow_mut()
+                .get_mut(&canonical_tag)
+            {
+                let max_cached = REMEMBER_SUGGESTED_LINK_LIMIT.saturating_add(16);
+                if ids.len() < max_cached && !ids.iter().any(|id| id == memory_id) {
+                    ids.push(memory_id.to_owned());
+                    ids.sort();
+                }
+            }
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "explicit store and write identity stay local to this request"
@@ -1525,6 +1602,38 @@ fn remember_memory_outcome_inner_with_store(
     idempotency: Option<RememberIdempotencyRequest<'_>>,
     creation_companions: RememberCreationCompanions<'_>,
     origin: RememberWriteOrigin,
+) -> Result<RememberOutcome, DomainError> {
+    remember_memory_outcome_inner_with_store_and_batch_session(
+        options,
+        id_source,
+        audit_lane,
+        defer_index_processing,
+        store_override,
+        typed_field_assignments,
+        attempt_family,
+        idempotency,
+        creation_companions,
+        origin,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit store and write identity stay local to this request"
+)]
+fn remember_memory_outcome_inner_with_store_and_batch_session(
+    options: &RememberMemoryOptions<'_>,
+    id_source: &mut RememberIdSource<'_>,
+    audit_lane: Option<&AuditLaneHandle>,
+    defer_index_processing: bool,
+    store_override: Option<&RememberStoreOverride>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+    idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
+    origin: RememberWriteOrigin,
+    batch_session: Option<&mut Option<RememberBatchStoreSession>>,
 ) -> Result<RememberOutcome, DomainError> {
     let mut prepared = prepare_remember_memory_with_store(
         options,
@@ -1581,15 +1690,31 @@ fn remember_memory_outcome_inner_with_store(
         })));
     }
 
-    crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
-    let connection = open_remember_database_with_retry(&prepared.database_path)?;
-    migrate_remember_database_with_retry(&connection)?;
-    let workspace_id = crate::core::workspace::ensure_bound_workspace(
-        &connection,
-        &prepared.workspace_id,
-        &[&prepared.workspace_path, options.workspace_path],
-    )?;
-    prepared.workspace_id = workspace_id;
+    let mut owned_session: Option<RememberBatchStoreSession> = None;
+    let session = if let Some(slot) = batch_session {
+        let needs_open = slot
+            .as_ref()
+            .is_none_or(|existing| existing.database_path != prepared.database_path);
+        if needs_open {
+            *slot = Some(RememberBatchStoreSession::open_for_prepared(
+                &prepared.database_path,
+                &prepared.workspace_path,
+                options.workspace_path,
+                &prepared.workspace_id,
+            )?);
+        }
+        slot.as_ref().expect("batch session initialized")
+    } else {
+        owned_session = Some(RememberBatchStoreSession::open_for_prepared(
+            &prepared.database_path,
+            &prepared.workspace_path,
+            options.workspace_path,
+            &prepared.workspace_id,
+        )?);
+        owned_session.as_ref().expect("owned session initialized")
+    };
+    let connection = &session.connection;
+    prepared.workspace_id = session.workspace_id.clone();
 
     let memory_id = prepared.memory_id.to_string();
     let audit_id = id_source.next_audit_id();
@@ -1695,10 +1820,15 @@ fn remember_memory_outcome_inner_with_store(
     // preparation above and derived index publication below have their own
     // consistency boundaries and must not consume another writer's
     // workspace-lock budget.
+    let is_batch_session = owned_session.is_none();
     let workspace_write_lock =
         acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
-    let embed_dedup_decision =
-        remember_embed_dedup_decision_from_probe(&connection, &memory_input, &embed_dedup_probe)?;
+    let embed_dedup_decision = remember_embed_dedup_decision_from_probe_with_batch_session(
+        &connection,
+        &memory_input,
+        &embed_dedup_probe,
+        is_batch_session.then_some(session),
+    )?;
     let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&embed_dedup_decision);
     let embed_dedup_link_id = embed_dedup_decision
         .link
@@ -1742,6 +1872,10 @@ fn remember_memory_outcome_inner_with_store(
             &prepared.database_path,
             options.dry_run,
         );
+    }
+
+    if is_batch_session {
+        session.record_stored_memory(&memory_id, &prepared.tags, &embed_dedup_probe);
     }
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
@@ -1795,11 +1929,12 @@ fn remember_memory_outcome_inner_with_store(
         };
 
     let (mut suggested_links, mut suggested_link_status, suggested_link_degradations) =
-        match suggest_links_for_remember(
+        match suggest_links_for_remember_with_batch_session(
             &connection,
             &prepared.workspace_id,
             &memory_id,
             &prepared.tags,
+            is_batch_session.then_some(session),
         ) {
             Ok(suggested_links) => {
                 let status = if suggested_links.is_empty() {
@@ -1936,14 +2071,18 @@ fn remember_memory_outcome_inner_with_store(
             ),
         };
 
-    let index_status = authoritative_remember_index_status(
-        &prepared.workspace_id,
-        &prepared.workspace_path,
-        &prepared.database_path,
-        &index_dir,
-        std::slice::from_ref(&index_job_id),
-        &provisional_index_status,
-    );
+    let index_status = if defer_index_processing {
+        provisional_index_status
+    } else {
+        authoritative_remember_index_status(
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            &prepared.database_path,
+            &index_dir,
+            std::slice::from_ref(&index_job_id),
+            &provisional_index_status,
+        )
+    };
 
     let typed_fields =
         remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
@@ -1996,7 +2135,9 @@ fn remember_memory_outcome_inner_with_store(
         curation_candidate_degradations,
         near_duplicates,
     };
-    if let Err(error) = connection.close() {
+    if let Some(owned) = owned_session
+        && let Err(error) = owned.connection.close()
+    {
         tracing::warn!(
             target: "ee::memory",
             event = "remember_connection_close_failed",
@@ -5332,14 +5473,18 @@ fn finish_remember_memory_after_primary_commit(
             ),
         };
 
-    let index_status = authoritative_remember_index_status(
-        &prepared.workspace_id,
-        &prepared.workspace_path,
-        &prepared.database_path,
-        &index_dir,
-        std::slice::from_ref(&index_job_id),
-        &provisional_index_status,
-    );
+    let index_status = if defer_index_processing {
+        provisional_index_status
+    } else {
+        authoritative_remember_index_status(
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            &prepared.database_path,
+            &index_dir,
+            std::slice::from_ref(&index_job_id),
+            &provisional_index_status,
+        )
+    };
 
     write_replay_guard.mark_clean()?;
 
@@ -5447,6 +5592,20 @@ fn remember_embed_dedup_decision_from_probe(
     memory_input: &CreateMemoryInput,
     probe: &RememberEmbedDedupProbe,
 ) -> Result<RememberEmbedDedupDecision, DomainError> {
+    remember_embed_dedup_decision_from_probe_with_batch_session(
+        connection,
+        memory_input,
+        probe,
+        None,
+    )
+}
+
+fn remember_embed_dedup_decision_from_probe_with_batch_session(
+    connection: &DbConnection,
+    memory_input: &CreateMemoryInput,
+    probe: &RememberEmbedDedupProbe,
+    batch_session: Option<&RememberBatchStoreSession>,
+) -> Result<RememberEmbedDedupDecision, DomainError> {
     let RememberEmbedDedupProbe::Enabled {
         hamming_k,
         cosine_floor,
@@ -5459,17 +5618,39 @@ fn remember_embed_dedup_decision_from_probe(
     };
 
     let started = Instant::now();
-    let candidates = connection
-        .list_memory_simhash_candidates(
-            &memory_input.workspace_id,
+    let candidates = if let Some(session) = batch_session {
+        if session.simhash_entries.borrow().is_none() {
+            let loaded = connection
+                .list_workspace_memory_simhashes(&memory_input.workspace_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query embed-dedup SimHash candidates: {error}"),
+                    repair: Some(
+                        "Run `ee doctor --json` and inspect the memories table.".to_owned(),
+                    ),
+                })?;
+            *session.simhash_entries.borrow_mut() = Some(loaded);
+        }
+        let entries_guard = session.simhash_entries.borrow();
+        let entries = entries_guard.as_deref().unwrap_or(&[]);
+        DbConnection::rank_memory_simhash_candidates(
+            entries,
             *content_simhash,
             *hamming_k,
             REMEMBER_EMBED_DEDUP_CANDIDATE_LIMIT,
         )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query embed-dedup SimHash candidates: {error}"),
-            repair: Some("Run `ee doctor --json` and inspect the memories table.".to_owned()),
-        })?;
+    } else {
+        connection
+            .list_memory_simhash_candidates(
+                &memory_input.workspace_id,
+                *content_simhash,
+                *hamming_k,
+                REMEMBER_EMBED_DEDUP_CANDIDATE_LIMIT,
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query embed-dedup SimHash candidates: {error}"),
+                repair: Some("Run `ee doctor --json` and inspect the memories table.".to_owned()),
+            })?
+    };
     if candidates.is_empty() {
         trace_remember_embed_dedup_decision(
             &memory_input.workspace_id,
@@ -5486,30 +5667,66 @@ fn remember_embed_dedup_decision_from_probe(
         ));
     }
 
-    let candidate_ids = candidates
-        .iter()
-        .map(|candidate| candidate.memory_id.as_str())
-        .collect::<Vec<_>>();
-    let candidate_memories = connection
-        .get_memories_batch(&candidate_ids)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to load embed-dedup candidate memories: {error}"),
-            repair: Some("Run `ee doctor --json` and inspect memory rows.".to_owned()),
-        })?;
-
     let embedder = HashEmbedder::default_256();
-    let candidate_embeddings = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let memory = candidate_memories.get(&candidate.memory_id)?;
-            Some((
-                candidate.memory_id.clone(),
-                SimHash128::from_be_bytes(candidate.content_simhash),
-                candidate.hamming_distance,
-                embedder.embed_sync(&memory.content),
-            ))
-        })
-        .collect::<Vec<_>>();
+    let candidate_embeddings = if let Some(session) = batch_session {
+        let missing_ids = {
+            let cache = session.simhash_embeddings.borrow();
+            candidates
+                .iter()
+                .filter(|candidate| !cache.contains_key(&candidate.memory_id))
+                .map(|candidate| candidate.memory_id.as_str())
+                .collect::<Vec<_>>()
+        };
+        if !missing_ids.is_empty() {
+            let fetched = connection
+                .get_memories_batch(&missing_ids)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load embed-dedup candidate memories: {error}"),
+                    repair: Some("Run `ee doctor --json` and inspect memory rows.".to_owned()),
+                })?;
+            let mut cache = session.simhash_embeddings.borrow_mut();
+            for (memory_id, memory) in fetched {
+                cache.insert(memory_id, embedder.embed_sync(&memory.content));
+            }
+        }
+        let cache = session.simhash_embeddings.borrow();
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let embedding = cache.get(&candidate.memory_id)?.clone();
+                Some((
+                    candidate.memory_id.clone(),
+                    SimHash128::from_be_bytes(candidate.content_simhash),
+                    candidate.hamming_distance,
+                    embedding,
+                ))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let candidate_ids = candidates
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect::<Vec<_>>();
+        let candidate_memories =
+            connection
+                .get_memories_batch(&candidate_ids)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load embed-dedup candidate memories: {error}"),
+                    repair: Some("Run `ee doctor --json` and inspect memory rows.".to_owned()),
+                })?;
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let memory = candidate_memories.get(&candidate.memory_id)?;
+                Some((
+                    candidate.memory_id.clone(),
+                    SimHash128::from_be_bytes(candidate.content_simhash),
+                    candidate.hamming_distance,
+                    embedder.embed_sync(&memory.content),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
     if candidate_embeddings.is_empty() {
         trace_remember_embed_dedup_decision(
             &memory_input.workspace_id,
@@ -6477,44 +6694,50 @@ fn remember_candidate_cluster(
         .filter(|id| seen.insert(id.clone()))
         .collect();
 
-    let batch_ids = candidate_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-    let batch_result =
-        connection
-            .get_memories_batch(&batch_ids)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load curation neighbor memory: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?;
-
-    for candidate_id in candidate_ids {
-        let Some(memory) = batch_result.get(&candidate_id).cloned() else {
-            continue;
-        };
-        if memory.workspace_id != workspace_id
-            || memory.tombstoned_at.is_some()
-            || memory.level != memory_input.level
-            || memory.kind != memory_input.kind
-        {
-            continue;
-        }
-        if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id {
-            continue;
-        }
-        let candidate_tags =
+    for page in candidate_ids.chunks(32) {
+        let batch_ids = page.iter().map(String::as_str).collect::<Vec<_>>();
+        let batch_result =
             connection
-                .get_memory_tags(&memory.id)
+                .get_memories_batch(&batch_ids)
                 .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to load curation neighbor tags: {error}"),
+                    message: format!("Failed to load curation neighbor memory: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 })?;
-        if !required_tags.is_empty()
-            && !candidate_tags
-                .iter()
-                .any(|tag| required_tags.contains(tag.as_str()))
-        {
-            continue;
+
+        for candidate_id in page {
+            let Some(memory) = batch_result.get(candidate_id).cloned() else {
+                continue;
+            };
+            if memory.workspace_id != workspace_id
+                || memory.tombstoned_at.is_some()
+                || memory.level != memory_input.level
+                || memory.kind != memory_input.kind
+            {
+                continue;
+            }
+            if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id
+            {
+                continue;
+            }
+            let candidate_tags =
+                connection
+                    .get_memory_tags(&memory.id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to load curation neighbor tags: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    })?;
+            if !required_tags.is_empty()
+                && !candidate_tags
+                    .iter()
+                    .any(|tag| required_tags.contains(tag.as_str()))
+            {
+                continue;
+            }
+            cluster.push(memory);
+            if cluster.len() > REMEMBER_CURATION_NEIGHBOR_LIMIT {
+                break;
+            }
         }
-        cluster.push(memory);
         if cluster.len() > REMEMBER_CURATION_NEIGHBOR_LIMIT {
             break;
         }
@@ -6885,31 +7108,17 @@ fn suggest_links_for_remember(
     memory_id: &str,
     tags: &[String],
 ) -> Result<Vec<RememberSuggestedLink>, DomainError> {
+    suggest_links_for_remember_with_batch_session(connection, workspace_id, memory_id, tags, None)
+}
+
+fn suggest_links_for_remember_with_batch_session(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    tags: &[String],
+    batch_session: Option<&RememberBatchStoreSession>,
+) -> Result<Vec<RememberSuggestedLink>, DomainError> {
     if tags.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut matches: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for tag in tags {
-        let tagged_memory_ids =
-            connection
-                .list_memories_by_tag(workspace_id, tag)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to query memories by tag for suggestions: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                })?;
-        for target_memory_id in tagged_memory_ids {
-            if target_memory_id == memory_id {
-                continue;
-            }
-            matches
-                .entry(target_memory_id)
-                .or_default()
-                .insert(tag.clone());
-        }
-    }
-
-    if matches.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -6926,6 +7135,96 @@ fn suggest_links_for_remember(
         } else if link.dst_memory_id == memory_id {
             existing_targets.insert(link.src_memory_id);
         }
+    }
+
+    let single_tag_fast_path = tags.len() == 1;
+    let mut matches: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for tag in tags {
+        let fast_limit = REMEMBER_SUGGESTED_LINK_LIMIT
+            .saturating_add(existing_targets.len())
+            .saturating_add(2);
+        let tagged_memory_ids = if single_tag_fast_path {
+            let canonical_tag = crate::models::canonicalize_tag_filter(tag);
+            let cached = batch_session.and_then(|session| {
+                session
+                    .single_tag_bounded_ids
+                    .borrow()
+                    .get(&canonical_tag)
+                    .filter(|ids| {
+                        ids.len() >= fast_limit
+                            && ids
+                                .iter()
+                                .all(|id| id.len() == 30 && id.starts_with("mem_"))
+                    })
+                    .cloned()
+            });
+            let bounded = if let Some(cached) = cached {
+                cached
+            } else {
+                let loaded = connection
+                    .list_memories_by_tag_bounded(workspace_id, tag, fast_limit)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to query memories by tag for suggestions: {error}"
+                        ),
+                        repair: Some("ee doctor --json".to_owned()),
+                    })?;
+                if let Some(session) = batch_session
+                    && loaded
+                        .iter()
+                        .all(|id| id.len() == 30 && id.starts_with("mem_"))
+                {
+                    session
+                        .single_tag_bounded_ids
+                        .borrow_mut()
+                        .insert(canonical_tag, loaded.clone());
+                }
+                loaded
+            };
+            if bounded.len() < fast_limit
+                || bounded
+                    .iter()
+                    .all(|id| id.len() == 30 && id.starts_with("mem_"))
+            {
+                bounded
+            } else {
+                connection
+                    .list_memories_by_tag(workspace_id, tag)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to query memories by tag for suggestions: {error}"
+                        ),
+                        repair: Some("ee doctor --json".to_owned()),
+                    })?
+            }
+        } else {
+            connection
+                .list_memories_by_tag(workspace_id, tag)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query memories by tag for suggestions: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+        };
+        let canonical_mem_ids = single_tag_fast_path
+            && tagged_memory_ids
+                .iter()
+                .all(|id| id.len() == 30 && id.starts_with("mem_"));
+        for target_memory_id in tagged_memory_ids {
+            if target_memory_id == memory_id || existing_targets.contains(&target_memory_id) {
+                continue;
+            }
+            matches
+                .entry(target_memory_id)
+                .or_default()
+                .insert(tag.clone());
+            if canonical_mem_ids && matches.len() >= REMEMBER_SUGGESTED_LINK_LIMIT {
+                break;
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(Vec::new());
     }
 
     Ok(build_suggested_links_from_matches(
@@ -8210,6 +8509,24 @@ pub(crate) fn remember_memory_with_creation_companions(
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     creation_companions: RememberCreationCompanions<'_>,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_memory_with_creation_companions_and_batch_session(
+        options,
+        controls,
+        typed_field_assignments,
+        attempt_family,
+        creation_companions,
+        None,
+    )
+}
+
+fn remember_memory_with_creation_companions_and_batch_session(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
+    mut batch_session: Option<&mut Option<RememberBatchStoreSession>>,
+) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     creation_companions.validate_for_write(options, controls)?;
     if controls.reinforce && !typed_field_assignments.is_empty() {
@@ -8263,21 +8580,41 @@ pub(crate) fn remember_memory_with_creation_companions(
         let content_hash = remember_content_hash(&canonical_content);
 
         if database_path.exists() {
-            let connection = open_remember_database_with_retry(&database_path)?;
-            migrate_remember_database_with_retry(&connection)?;
             let canonical = workspace_path
                 .canonicalize()
                 .unwrap_or_else(|_| workspace_path.clone());
-            let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-                &connection,
-                &stable_workspace_id(&canonical),
-                &[
-                    options.workspace_path,
-                    workspace_path.as_path(),
-                    canonical.as_path(),
-                ],
-            )
-            .unwrap_or_else(|_| stable_workspace_id(&canonical));
+            let owned_connection;
+            let (connection, workspace_id) = if let Some(slot) = batch_session.as_deref_mut()
+                && !options.dry_run
+            {
+                let needs_open = slot
+                    .as_ref()
+                    .is_none_or(|existing| existing.database_path != database_path);
+                if needs_open {
+                    *slot = Some(RememberBatchStoreSession::open_for_prepared(
+                        &database_path,
+                        &workspace_path,
+                        options.workspace_path,
+                        &stable_workspace_id(&canonical),
+                    )?);
+                }
+                let session = slot.as_ref().expect("batch session initialized");
+                (&session.connection, session.workspace_id.clone())
+            } else {
+                owned_connection = open_remember_database_with_retry(&database_path)?;
+                migrate_remember_database_with_retry(&owned_connection)?;
+                let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                    &owned_connection,
+                    &stable_workspace_id(&canonical),
+                    &[
+                        options.workspace_path,
+                        workspace_path.as_path(),
+                        canonical.as_path(),
+                    ],
+                )
+                .unwrap_or_else(|_| stable_workspace_id(&canonical));
+                (&owned_connection, workspace_id)
+            };
 
             if let Some(request) = idempotency {
                 let existing = connection
@@ -8288,7 +8625,7 @@ pub(crate) fn remember_memory_with_creation_companions(
                     })?;
                 if let Some(existing) = existing {
                     return remember_idempotency_replay_outcome(
-                        &connection,
+                        connection,
                         existing,
                         request,
                         &database_path,
@@ -8299,16 +8636,13 @@ pub(crate) fn remember_memory_with_creation_companions(
 
             if controls.reinforce {
                 let threshold = remember_duplicate_similarity_threshold(&workspace_path);
-                let neighbor = remember_reinforce_top_neighbor(
-                    &connection,
-                    &workspace_id,
-                    &canonical_content,
-                )?;
+                let neighbor =
+                    remember_reinforce_top_neighbor(connection, &workspace_id, &canonical_content)?;
                 if let Some(neighbor) = neighbor
                     && remember_reinforce_should_apply(neighbor.similarity, threshold)
                 {
                     return apply_remember_reinforce(
-                        &connection,
+                        connection,
                         &RememberReinforceContext {
                             workspace_id: &workspace_id,
                             workspace_path: &workspace_path,
@@ -8329,7 +8663,7 @@ pub(crate) fn remember_memory_with_creation_companions(
         }
     }
 
-    if idempotency_key.is_none() && creation_companions.is_empty() {
+    if idempotency_key.is_none() && creation_companions.is_empty() && batch_session.is_none() {
         return remember_memory_with_index_mode(
             options,
             controls.defer_index_processing,
@@ -8339,7 +8673,7 @@ pub(crate) fn remember_memory_with_creation_companions(
         .map(|report| RememberOutcome::Created(Box::new(report)));
     }
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_outcome_inner_with_store(
+    remember_memory_outcome_inner_with_store_and_batch_session(
         options,
         &mut id_source,
         None,
@@ -8350,6 +8684,7 @@ pub(crate) fn remember_memory_with_creation_companions(
         idempotency,
         creation_companions,
         RememberWriteOrigin::Manual,
+        batch_session,
     )
 }
 
@@ -9190,6 +9525,7 @@ where
     let mut already_recorded_count = 0_usize;
     let mut failed_count = 0_usize;
     let mut expected_index_job_ids = Vec::new();
+    let mut batch_session: Option<RememberBatchStoreSession> = None;
 
     for (index, line) in lines.iter().enumerate() {
         let line_number = index + 1;
@@ -9239,10 +9575,13 @@ where
         // Per-line independent persistence: each line runs its own full
         // remember flow, so a failure here reports on this line without
         // touching earlier or later lines.
-        match remember_memory_with_controls_and_typed_fields(
+        match remember_memory_with_creation_companions_and_batch_session(
             &line_options,
             &line_controls,
             &draft.typed_field_assignments,
+            None,
+            RememberCreationCompanions::default(),
+            Some(&mut batch_session),
         ) {
             Ok(RememberOutcome::Created(report)) => {
                 stored_count += 1;
@@ -9329,23 +9668,32 @@ where
             Some(&database_path),
             None,
         );
-        let connection = open_remember_database_with_retry(&database_path)?;
-        let canonical = workspace_path
-            .canonicalize()
-            .unwrap_or_else(|_| workspace_path.clone());
-        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-            &connection,
-            &stable_workspace_id(&canonical),
-            &[
-                options.workspace_path,
-                workspace_path.as_path(),
-                canonical.as_path(),
-            ],
-        )
-        .unwrap_or_else(|_| stable_workspace_id(&canonical));
-        before_reconcile(&connection, &workspace_id)?;
+        let owned_connection;
+        let (connection, workspace_id) = if let Some(session) = batch_session
+            .as_ref()
+            .filter(|existing| existing.database_path == database_path)
+        {
+            (&session.connection, session.workspace_id.clone())
+        } else {
+            owned_connection = open_remember_database_with_retry(&database_path)?;
+            let canonical = workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_path.clone());
+            let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                &owned_connection,
+                &stable_workspace_id(&canonical),
+                &[
+                    options.workspace_path,
+                    workspace_path.as_path(),
+                    canonical.as_path(),
+                ],
+            )
+            .unwrap_or_else(|_| stable_workspace_id(&canonical));
+            (&owned_connection, workspace_id)
+        };
+        before_reconcile(connection, &workspace_id)?;
         let provisional_index_status = match reconcile_pending_remember_index_jobs(
-            &connection,
+            connection,
             &workspace_id,
             &index_dir,
         ) {
@@ -9368,6 +9716,16 @@ where
             &index_dir,
             &expected_index_job_ids,
             &provisional_index_status,
+        );
+    }
+    if let Some(session) = batch_session
+        && let Err(error) = session.connection.close()
+    {
+        tracing::warn!(
+            target: "ee::memory",
+            event = "remember_batch_connection_close_failed",
+            database_path = %session.database_path.display(),
+            error = %error,
         );
     }
 

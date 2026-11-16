@@ -1671,9 +1671,18 @@ pub(crate) fn run_context_pack_with_embedder(
 /// This deliberately returns pack items rather than stored memory bodies. The
 /// caller only receives content after temporal, workspace-scope, provenance,
 /// secret-screening, tier-admission, and output-redaction checks have run.
+#[cfg(test)]
 pub(crate) fn admit_recent_context_memories(
     options: &ContextPackOptions,
     limit: usize,
+) -> Result<Vec<AdmittedContextMemory>, ContextPackError> {
+    admit_recent_context_memories_with_connection(options, limit, None)
+}
+
+pub(crate) fn admit_recent_context_memories_with_connection(
+    options: &ContextPackOptions,
+    limit: usize,
+    shared_connection: Option<&DbConnection>,
 ) -> Result<Vec<AdmittedContextMemory>, ContextPackError> {
     if limit == 0 {
         return Ok(Vec::new());
@@ -1686,8 +1695,14 @@ pub(crate) fn admit_recent_context_memories(
     if !database_path.exists() {
         return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
-    let connection = DbConnection::open_file_read_only(&database_path)
-        .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+    let owned_connection;
+    let connection = if let Some(conn) = shared_connection {
+        conn
+    } else {
+        owned_connection = DbConnection::open_file_read_only(&database_path)
+            .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+        &owned_connection
+    };
     let mut degraded = Vec::new();
     let reference_time =
         context_validity_reference_time(options, &options.filters).unwrap_or_else(Utc::now);
@@ -1697,7 +1712,7 @@ pub(crate) fn admit_recent_context_memories(
     let reference_time_text = crate::core::memory::normalize_row_timestamp(reference_time);
     let candidate_cap = limit.saturating_mul(4).max(limit);
     let mut memories = BTreeMap::new();
-    for workspace_id in context_workspace_ids(&connection, &options.workspace_path, &mut degraded) {
+    for workspace_id in context_workspace_ids(connection, &options.workspace_path, &mut degraded) {
         let remaining = candidate_cap.saturating_sub(memories.len());
         if remaining == 0 {
             break;
@@ -1714,7 +1729,7 @@ pub(crate) fn admit_recent_context_memories(
         }
     }
 
-    let mut ordered = memories.into_values().collect::<Vec<_>>();
+    let mut ordered = memories.values().cloned().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         parse_stored_memory_timestamp(&right.created_at)
             .cmp(&parse_stored_memory_timestamp(&left.created_at))
@@ -1736,7 +1751,7 @@ pub(crate) fn admit_recent_context_memories(
         }
         if !matches!(
             context_memory_seal_admission(
-                &connection,
+                connection,
                 &memory,
                 &mut degraded,
                 "context_candidate_memory_batch_unavailable",
@@ -1808,20 +1823,19 @@ pub(crate) fn admit_recent_context_memories(
         &options.workspace_path,
         options.memory_scope,
         options.strict_scope,
-        Some(&connection),
+        Some(connection),
     );
     filter_candidates_by_memory_scope(
-        &connection,
+        connection,
         &mut candidates,
         &scope_context,
         &mut degraded,
-        None,
+        Some(&memories),
         &BTreeSet::new(),
     );
     if context_memory_tier_admission_enabled(&options.workspace_path).unwrap_or(false) {
-        apply_memory_tier_candidate_admission(&connection, &mut candidates, &mut degraded);
+        apply_memory_tier_candidate_admission(connection, &mut candidates, &mut degraded);
     }
-    annotate_attempt_family_multiplicity(&connection, &mut candidates)?;
     candidates.sort_by(|left, right| {
         let left_created_at = metadata
             .get(&left.memory_id.to_string())
@@ -1836,6 +1850,7 @@ pub(crate) fn admit_recent_context_memories(
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     candidates.truncate(limit);
+    annotate_attempt_family_multiplicity(connection, &mut candidates)?;
 
     let budget = TokenBudget::new(options.max_tokens.unwrap_or(4_000))
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -6481,6 +6496,17 @@ fn annotate_attempt_family_multiplicity(
     connection: &DbConnection,
     candidates: &mut [PackCandidate],
 ) -> Result<(), ContextPackError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    if let (Ok(families), Ok(members)) = (
+        connection.query("SELECT 1 FROM attempt_families LIMIT 1", &[]),
+        connection.query("SELECT 1 FROM attempt_family_members LIMIT 1", &[]),
+    ) && families.is_empty()
+        && members.is_empty()
+    {
+        return Ok(());
+    }
     let memory_ids = candidates
         .iter()
         .map(|candidate| candidate.memory_id.to_string())

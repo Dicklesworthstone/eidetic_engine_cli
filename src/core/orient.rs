@@ -16,9 +16,9 @@ use serde_json::{Value as JsonValue, json};
 
 use super::context::{
     ContextPackOptions, ContextPackOutputOptions, ContextPackOutputProfile,
-    admit_recent_context_memories,
+    admit_recent_context_memories_with_connection,
 };
-use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
+use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit_with_connection};
 use super::search::{
     SearchDedupMode, SearchDegradation, SearchHit, SearchOptions, SearchSourceMode, SearchStatus,
     run_context_search_with_preloaded_memories,
@@ -37,7 +37,7 @@ use crate::search::SpeedMode;
 pub const ORIENT_DECISIONS_SCHEMA_V1: &str = "ee.orient.decisions.v1";
 pub const ORIENT_FAST_CONTENT_SCHEMA_V1: &str = "ee.orient.fast_content.v1";
 pub const ORIENT_FAST_CONTENT_LIMIT: usize = 5;
-pub const ORIENT_FAST_CANDIDATE_POOL_LIMIT: u32 = 100;
+pub const ORIENT_FAST_CANDIDATE_POOL_LIMIT: u32 = 25;
 pub const ORIENT_FAST_RECENT_UNAVAILABLE_CODE: &str = "orient_fast_recent_unavailable";
 pub const ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE: &str = "orient_fast_relevant_unavailable";
 
@@ -434,55 +434,77 @@ pub fn orient_primer_value(
 /// when the same memory is useful in both sections.
 #[must_use]
 pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFastContentReport {
+    orient_fast_content_with_connection(options, None)
+}
+
+#[must_use]
+pub fn orient_fast_content_with_connection(
+    options: &OrientFastContentOptions<'_>,
+    shared_connection: Option<&DbConnection>,
+) -> OrientFastContentReport {
     let pack_options = orient_fast_pack_options(options);
     let mut issues = Vec::new();
+    let database_path = options
+        .database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    let owned_connection = if shared_connection.is_none() && database_path.exists() {
+        DbConnection::open_file_read_only(&database_path).ok()
+    } else {
+        None
+    };
+    let effective_connection = shared_connection.or(owned_connection.as_ref());
 
-    let (recent, recent_status, recent_count) =
-        match admit_recent_context_memories(&pack_options, ORIENT_FAST_CONTENT_LIMIT) {
-            Ok(items) => {
-                let items: Vec<OrientFastContentItem> = items
-                    .into_iter()
-                    .map(|admitted| OrientFastContentItem {
-                        id: admitted.item.memory_id.to_string(),
-                        snippet: orient_fast_snippet(&admitted.item.content),
-                        created_at: admitted.created_at,
-                        tags: orient_fast_public_tags(admitted.tags),
-                        provenance: admitted.item.rendered_provenance(),
-                        why: admitted.item.why.clone(),
-                    })
-                    .collect();
-                let count = items.len();
-                let status = if count == 0 { "empty" } else { "populated" };
-                (items, status, Some(count))
-            }
-            Err(error) => {
-                issues.push(OrientFastContentIssue {
-                    component: "recent",
-                    status: "unavailable",
-                    code: ORIENT_FAST_RECENT_UNAVAILABLE_CODE.to_owned(),
-                    severity: "warning".to_owned(),
-                    message: format!("Recent context admission was unavailable: {error}"),
-                    repair: Some(
-                        "Run `ee doctor --workspace . --json` and inspect the local memory store."
-                            .to_owned(),
-                    ),
-                });
-                (Vec::new(), "unavailable", None)
-            }
-        };
-
-    let (relevant, relevant_status, relevant_count) = match orient_fast_relevant_content(options) {
-        Ok((items, provider_issues)) => {
-            issues.extend(provider_issues);
+    let (recent, recent_status, recent_count) = match admit_recent_context_memories_with_connection(
+        &pack_options,
+        ORIENT_FAST_CONTENT_LIMIT,
+        effective_connection,
+    ) {
+        Ok(items) => {
+            let items: Vec<OrientFastContentItem> = items
+                .into_iter()
+                .map(|admitted| OrientFastContentItem {
+                    id: admitted.item.memory_id.to_string(),
+                    snippet: orient_fast_snippet(&admitted.item.content),
+                    created_at: admitted.created_at,
+                    tags: orient_fast_public_tags(admitted.tags),
+                    provenance: admitted.item.rendered_provenance(),
+                    why: admitted.item.why.clone(),
+                })
+                .collect();
             let count = items.len();
             let status = if count == 0 { "empty" } else { "populated" };
             (items, status, Some(count))
         }
-        Err(issue) => {
-            issues.push(issue);
+        Err(error) => {
+            issues.push(OrientFastContentIssue {
+                component: "recent",
+                status: "unavailable",
+                code: ORIENT_FAST_RECENT_UNAVAILABLE_CODE.to_owned(),
+                severity: "warning".to_owned(),
+                message: format!("Recent context admission was unavailable: {error}"),
+                repair: Some(
+                    "Run `ee doctor --workspace . --json` and inspect the local memory store."
+                        .to_owned(),
+                ),
+            });
             (Vec::new(), "unavailable", None)
         }
     };
+
+    let (relevant, relevant_status, relevant_count) =
+        match orient_fast_relevant_content(options, effective_connection) {
+            Ok((items, provider_issues)) => {
+                issues.extend(provider_issues);
+                let count = items.len();
+                let status = if count == 0 { "empty" } else { "populated" };
+                (items, status, Some(count))
+            }
+            Err(issue) => {
+                issues.push(issue);
+                (Vec::new(), "unavailable", None)
+            }
+        };
 
     let posture = fast_content_posture(recent.is_empty(), relevant.is_empty(), &issues);
 
@@ -591,16 +613,23 @@ fn orient_fast_pack_options(options: &OrientFastContentOptions<'_>) -> ContextPa
 
 fn orient_fast_relevant_content(
     options: &OrientFastContentOptions<'_>,
+    shared_connection: Option<&DbConnection>,
 ) -> Result<(Vec<OrientFastContentItem>, Vec<OrientFastContentIssue>), OrientFastContentIssue> {
     let database_path = options
         .database_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
-        orient_fast_relevant_unavailable(format!(
-            "Bounded lexical retrieval could not open the read-only memory store: {error}"
-        ))
-    })?;
+    let owned_connection;
+    let connection = if let Some(conn) = shared_connection {
+        conn
+    } else {
+        owned_connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+            orient_fast_relevant_unavailable(format!(
+                "Bounded lexical retrieval could not open the read-only memory store: {error}"
+            ))
+        })?;
+        &owned_connection
+    };
     if connection.needs_migration().map_err(|error| {
         orient_fast_relevant_unavailable(format!(
             "Bounded lexical retrieval could not inspect migration state: {error}"
@@ -637,7 +666,7 @@ fn orient_fast_relevant_content(
             memory_scope: MemoryScope::Workspace,
             strict_scope: false,
         },
-        &connection,
+        connection,
         None,
         &determinism,
         None,
@@ -671,12 +700,24 @@ fn orient_fast_relevant_content(
         )));
     }
 
+    let mut direct_lexical_hits = context_search.report.results;
+    direct_lexical_hits.sort_by(|left, right| {
+        right
+            .relevance_score()
+            .total_cmp(&left.relevance_score())
+            .then_with(|| {
+                right
+                    .lexical_score
+                    .unwrap_or(0.0)
+                    .total_cmp(&left.lexical_score.unwrap_or(0.0))
+            })
+            .then_with(|| left.doc_id.cmp(&right.doc_id))
+    });
+
     // The index is derived state; render tags from the authoritative store so
     // adapter metadata projection changes cannot silently strip them from an
     // otherwise valid fast-orientation result.
-    let hit_doc_ids = context_search
-        .report
-        .results
+    let hit_doc_ids = direct_lexical_hits
         .iter()
         .take(ORIENT_FAST_CONTENT_LIMIT)
         .map(|hit| hit.doc_id.as_str())
@@ -692,7 +733,7 @@ fn orient_fast_relevant_content(
     let mut rendered = Vec::with_capacity(ORIENT_FAST_CONTENT_LIMIT);
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
     let active_workspace_id = crate::core::curate::stable_workspace_id(options.workspace_path);
-    for hit in &context_search.report.results {
+    for hit in &direct_lexical_hits {
         if rendered.len() >= ORIENT_FAST_CONTENT_LIMIT {
             break;
         }
@@ -713,7 +754,14 @@ fn orient_fast_relevant_content(
         let Some(why) = hit
             .explanation
             .as_ref()
-            .map(|explanation| explanation.summary.trim())
+            .map(|explanation| {
+                explanation
+                    .summary
+                    .split(" EE quality ranking ")
+                    .next()
+                    .unwrap_or(explanation.summary.as_str())
+                    .trim()
+            })
             .filter(|summary| !summary.is_empty())
         else {
             issues.push(OrientFastContentIssue {
@@ -973,13 +1021,23 @@ fn orient_fast_public_tags(tags: Vec<String>) -> Vec<String> {
 pub fn orient_decisions(
     options: &OrientDecisionOptions<'_>,
 ) -> Result<OrientDecisionReport, DomainError> {
-    let revisit = decide_revisit(&DecideRevisitOptions {
-        workspace_path: options.workspace_path,
-        database_path: options.database_path,
-        warning_days: options.warning_days,
-        limit: options.limit,
-        now: options.now,
-    })?;
+    orient_decisions_with_connection(options, None)
+}
+
+pub fn orient_decisions_with_connection(
+    options: &OrientDecisionOptions<'_>,
+    shared_connection: Option<&DbConnection>,
+) -> Result<OrientDecisionReport, DomainError> {
+    let revisit = decide_revisit_with_connection(
+        &DecideRevisitOptions {
+            workspace_path: options.workspace_path,
+            database_path: options.database_path,
+            warning_days: options.warning_days,
+            limit: options.limit,
+            now: options.now,
+        },
+        shared_connection,
+    )?;
     Ok(OrientDecisionReport {
         schema: ORIENT_DECISIONS_SCHEMA_V1,
         due_count: revisit.due_count,

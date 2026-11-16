@@ -26,11 +26,26 @@ pub(super) fn load(
     include_superseded: bool,
     now: DateTime<Utc>,
 ) -> Result<Vec<DecideItem>, DomainError> {
+    load_with_connection(scope, include_superseded, now, None)
+}
+
+pub(super) fn load_with_connection(
+    scope: &mut DecideScope,
+    include_superseded: bool,
+    now: DateTime<Utc>,
+    shared_connection: Option<&DbConnection>,
+) -> Result<Vec<DecideItem>, DomainError> {
     if !scope.database_path.exists() {
         return Ok(Vec::new());
     }
-    let connection = open_decide_database_read_only(&scope.database_path)?;
-    read_with_observer(&connection, scope, include_superseded, now, |_| Ok(()))
+    let owned_connection;
+    let connection = if let Some(conn) = shared_connection {
+        conn
+    } else {
+        owned_connection = open_decide_database_read_only(&scope.database_path)?;
+        &owned_connection
+    };
+    read_with_observer(connection, scope, include_superseded, now, |_| Ok(()))
 }
 
 pub(super) fn load_record_heads(

@@ -233,61 +233,82 @@ fn recent_with_boundary(
     let snapshot = ReadScope::begin(db)?;
     let mut selected = BTreeSet::<(Reverse<DateTime<Utc>>, String)>::new();
     let mut cursor: Option<String> = None;
-    loop {
-        // IDs are only a traversal cursor, never a substitute for chronology.
-        // Keeping dates in SQL would both repeat a computed sort per page and
-        // let that parser silently discard instants accepted by our contract.
-        let mut sql = "SELECT id, created_at, updated_at, valid_from, valid_to, superseded_at FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL".to_owned();
-        let mut parameters = vec![
-            Value::Text(workspace.to_owned()),
-            Value::BigInt(PAGE_SIZE as i64),
-        ];
-        if let Some(after) = &cursor {
-            sql.push_str(" AND id > ?3");
-            parameters.push(Value::Text(after.clone()));
+    // IDs are only a traversal cursor, never a substitute for chronology.
+    // Keeping dates in SQL would both repeat a computed sort per page and
+    // let that parser silently discard instants accepted by our contract.
+    let rows = db.query(
+        "SELECT id, created_at, updated_at, valid_from, valid_to, superseded_at FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC",
+        &[Value::Text(workspace.to_owned())],
+    )?;
+    for row in &rows {
+        let id = required_text(row, 0, DbOperation::Query, "id")?;
+        if cursor.as_deref().is_some_and(|previous| id <= previous) {
+            return Err(malformed("Memory recency cursor did not advance"));
         }
-        sql.push_str(" ORDER BY id ASC LIMIT ?2");
-        let rows = db.query(&sql, &parameters)?;
-        for row in &rows {
-            let id = required_text(row, 0, DbOperation::Query, "id")?;
-            if cursor.as_deref().is_some_and(|previous| id <= previous) {
-                return Err(malformed("Memory recency cursor did not advance"));
-            }
-            cursor = Some(id.to_owned());
-            let (Some(created), Some(updated)) = (
-                instant(required_text(row, 1, DbOperation::Query, "created_at")?),
-                instant(required_text(row, 2, DbOperation::Query, "updated_at")?),
-            ) else {
-                continue;
-            };
-            if created > at
-                || updated > at
-                || !admits_bound(optional_text(row, 3)?, at, |start, at| start <= at)
-                || !admits_bound(optional_text(row, 4)?, at, |end, at| end >= at)
-                || !admits_bound(optional_text(row, 5)?, at, |end, at| end > at)
-            {
-                continue;
-            }
-            selected.insert((Reverse(created), id.to_owned()));
-            if selected.len() > limit {
-                selected.pop_last();
-            }
+        cursor = Some(id.to_owned());
+        let (Some(created), Some(updated)) = (
+            instant(required_text(row, 1, DbOperation::Query, "created_at")?),
+            instant(required_text(row, 2, DbOperation::Query, "updated_at")?),
+        ) else {
+            continue;
+        };
+        if created > at
+            || updated > at
+            || !admits_bound(optional_text(row, 3)?, at, |start, at| start <= at)
+            || !admits_bound(optional_text(row, 4)?, at, |end, at| end >= at)
+            || !admits_bound(optional_text(row, 5)?, at, |end, at| end > at)
+        {
+            continue;
         }
-        if rows.len() < PAGE_SIZE {
-            break;
+        selected.insert((Reverse(created), id.to_owned()));
+        if selected.len() > limit {
+            selected.pop_last();
         }
     }
     after_selection()?;
     let ids: Vec<_> = selected.into_iter().map(|(_, id)| id).collect();
     let mut memories = Vec::with_capacity(ids.len());
-    for page in ids.chunks(PAGE_SIZE) {
-        let page_ids: Vec<_> = page.iter().map(String::as_str).collect();
-        let mut loaded = db.get_memories_batch(&page_ids)?;
-        for id in page_ids {
+    if ids.len() <= PAGE_SIZE {
+        for page in ids.chunks(PAGE_SIZE) {
+            let page_ids: Vec<_> = page.iter().map(String::as_str).collect();
+            let mut loaded = db.get_memories_by_id_seeks(&page_ids)?;
+            for id in page_ids {
+                let memory = loaded.remove(id).ok_or_else(|| {
+                    malformed("Selected memory is missing from the read snapshot")
+                })?;
+                if memory.id != id
+                    || memory.workspace_id != workspace
+                    || memory.tombstoned_at.is_some()
+                {
+                    return Err(malformed(
+                        "Selected memory does not belong to the read snapshot",
+                    ));
+                }
+                memories.push(memory);
+            }
+        }
+    } else {
+        let selected_set: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let sql = format!(
+            "SELECT {MEMORY_COLUMNS} FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC"
+        );
+        let rows = db.query(&sql, &[Value::Text(workspace.to_owned())])?;
+        let mut loaded = BTreeMap::new();
+        for row in &rows {
+            let id = required_text(row, 0, DbOperation::Query, "id")?;
+            if !selected_set.contains(id) {
+                continue;
+            }
+            let memory = stored_memory_from_row(row)?;
+            loaded.insert(memory.id.clone(), memory);
+        }
+        for id in &ids {
             let memory = loaded
-                .remove(id)
+                .remove(id.as_str())
                 .ok_or_else(|| malformed("Selected memory is missing from the read snapshot"))?;
-            if memory.id != id || memory.workspace_id != workspace || memory.tombstoned_at.is_some()
+            if memory.id != *id
+                || memory.workspace_id != workspace
+                || memory.tombstoned_at.is_some()
             {
                 return Err(malformed(
                     "Selected memory does not belong to the read snapshot",

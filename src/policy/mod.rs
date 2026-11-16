@@ -1676,6 +1676,14 @@ fn detect_instruction_like_content_with(
 #[must_use]
 pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     let matches = detect_secret_like_matches(content);
+    if matches.is_empty() {
+        return SecretRedactionReport {
+            content: content.to_owned(),
+            redacted: false,
+            redacted_reasons: Vec::new(),
+            matches,
+        };
+    }
     let mut reasons = Vec::new();
     let (without_key_values, key_value_redacted) = redact_secret_key_values(content, &mut reasons);
     let (without_url_passwords, url_password_redacted) =

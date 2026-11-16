@@ -95,6 +95,49 @@ pub fn in_memory_lexical_index() -> frankensearch::SearchResult<TantivyIndex> {
     configure_lexical_analyzer(TantivyIndex::in_memory()?)
 }
 
+/// Consolidate multiple searchable segments produced by a multi-threaded full
+/// rebuild into a single segment so Tantivy's `SearcherGeneration` segment map
+/// has a single deterministic `segment_ord = 0` across processes.
+#[cfg(feature = "lexical-bm25")]
+pub fn consolidate_lexical_segments(path: &Path) -> frankensearch::SearchResult<()> {
+    use frankensearch::lexical_tantivy::tantivy_crate::{Index, IndexWriter, TantivyDocument};
+
+    let index =
+        Index::open_in_dir(path).map_err(|error| frankensearch::SearchError::SubsystemError {
+            subsystem: "tantivy",
+            source: Box::new(error),
+        })?;
+    let mut segment_ids = index.searchable_segment_ids().map_err(|error| {
+        frankensearch::SearchError::SubsystemError {
+            subsystem: "tantivy",
+            source: Box::new(error),
+        }
+    })?;
+    if segment_ids.len() > 1 {
+        segment_ids.sort();
+        let mut writer: IndexWriter<TantivyDocument> = index
+            .writer_with_num_threads(1, 50_000_000)
+            .map_err(|error| frankensearch::SearchError::SubsystemError {
+                subsystem: "tantivy",
+                source: Box::new(error),
+            })?;
+        writer.merge(&segment_ids).wait().map_err(|error| {
+            frankensearch::SearchError::SubsystemError {
+                subsystem: "tantivy",
+                source: Box::new(error),
+            }
+        })?;
+        let _ = writer.garbage_collect_files().wait();
+        writer.wait_merging_threads().map_err(|error| {
+            frankensearch::SearchError::SubsystemError {
+                subsystem: "tantivy",
+                source: Box::new(error),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// Preserve Frankensearch's tokenizer, offsets, positions, Unicode handling,
 /// and long technical tokens while adding Tantivy's built-in English stemmer.
 /// Using the stock `en_stem` analyzer would silently discard tokens over forty
