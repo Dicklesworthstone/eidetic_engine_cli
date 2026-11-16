@@ -1094,7 +1094,16 @@ pub fn search_hit_meets_relevance_floor(hit: &SearchHit, user_floor_override: Op
 }
 
 impl SearchOptions {
-    fn validate(&self) -> Result<(), SearchError> {
+    pub(crate) fn validate(&self) -> Result<(), SearchError> {
+        if !self.speed.uses_embeddings()
+            && (self.source_mode == SearchSourceMode::SemanticOnly
+                || (self.strict_source_mode && self.source_mode == SearchSourceMode::Hybrid))
+        {
+            return Err(SearchError::InvalidOptions(
+                "instant speed is lexical-only; use default or quality speed for semantic-only or strict hybrid search"
+                    .to_owned(),
+            ));
+        }
         if self
             .relevance_floor
             .is_some_and(|floor| !floor.is_finite() || !(0.0..=1.0).contains(&floor))
@@ -1104,6 +1113,16 @@ impl SearchOptions {
             ));
         }
         Ok(())
+    }
+
+    /// The requested source remains in reports and handoff matching, while
+    /// the speed budget determines which retrieval engines may execute.
+    pub(crate) const fn execution_source_mode(&self) -> SearchSourceMode {
+        if self.speed.uses_embeddings() {
+            self.source_mode
+        } else {
+            SearchSourceMode::LexicalOnly
+        }
     }
 
     pub(crate) fn resolve_database_path(&self) -> PathBuf {
@@ -2134,6 +2153,8 @@ impl PackSearchHandoff {
                 )
             && report.requested_limit == options.limit
             && report.source_mode_requested == options.source_mode
+            && (options.execution_source_mode().uses_embeddings()
+                || report.source_mode_applied == SearchSourceMode::LexicalOnly)
             && report.strict_source_mode == options.strict_source_mode
             && report.memory_scope == options.memory_scope
             && report.strict_scope == options.strict_scope
@@ -2365,8 +2386,8 @@ impl SearchPerformanceTrace {
     /// `search::embedderPrepare` already times
     /// `prepare_search_embedder_for_workspace`, the per-request WORKSPACE
     /// embedder, and it is recorded only when
-    /// `options.source_mode.uses_embeddings()` — so a lexical query correctly
-    /// has no such phase. This phase is the other one: the PROCESS-DEFAULT
+    /// `options.execution_source_mode().uses_embeddings()` — so lexical and
+    /// Instant queries correctly have no such phase. This phase is the other one: the PROCESS-DEFAULT
     /// `DEFAULT_SEARCH_EMBEDDER` resolution, paid once per process by whichever
     /// request happens to force the `OnceLock`. That one had no phase at all,
     /// so a cold-start regression was indistinguishable from a query
@@ -8860,7 +8881,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let mut empty_read_snapshot = None;
     let mut empty_generation = None;
     if prepared_fast_embedder.is_none()
-        && options.source_mode.uses_embeddings()
+        && options.execution_source_mode().uses_embeddings()
         && empty_search_generation_hint(&index_dir)
         && let Some(read_pool) = read_pool.as_ref()
     {
@@ -8893,7 +8914,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let embedder_admission_start = Instant::now();
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && empty_generation.is_none()
-        && options.source_mode.uses_embeddings()
+        && options.execution_source_mode().uses_embeddings()
         // Read-only snapshot selection can recover a retained generation even
         // when the live directory is missing or incompatible. Resolve the
         // workspace's cached local model before that selection; leaving it
@@ -9287,7 +9308,7 @@ fn lexical_generation_after_producer_change(
     embedder: &dyn crate::search::Embedder,
 ) -> Result<Option<PathBuf>, SearchError> {
     if !cfg!(feature = "lexical-bm25")
-        || options.source_mode != SearchSourceMode::Hybrid
+        || options.execution_source_mode() != SearchSourceMode::Hybrid
         || options.strict_source_mode
         || !embedder
             .identity()
@@ -10459,13 +10480,13 @@ fn resolve_search_rerank_runtime(
     configured_top_k: usize,
     degraded: &mut Vec<SearchDegradation>,
 ) -> SearchRerankRuntime {
-    // Only an explicitly requested lexical-only mode skips the registry.
+    // Explicit lexical-only and Instant requests skip the registry.
     // A hybrid request that FELL BACK to lexical (semantic embedder
     // unavailable) must still consult it so a present-but-unusable
     // reranker surfaces its permanent capability advisory instead of
     // silently vanishing whenever retrieval degraded (bd-degraded-
     // advisory-noise).
-    if explicit_lexical_only {
+    if explicit_lexical_only || !options.speed.uses_embeddings() {
         return SearchRerankRuntime::disabled();
     }
 
@@ -11003,7 +11024,7 @@ async fn run_search_inner_with_performance(
         }
         #[cfg(unix)]
         let (selected, producer_selection_error) = match source_generation {
-            Some(generation) if !options.source_mode.uses_embeddings() => (
+            Some(generation) if !options.execution_source_mode().uses_embeddings() => (
                 lease
                     .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
                     .map_err(map_index_generation_error)?,
@@ -11046,7 +11067,10 @@ async fn run_search_inner_with_performance(
         let (selected, producer_selection_error) = (index_dir.clone(), None);
         // Snapshot selection already validated the complete generation.
         if (!cfg!(unix) || source_generation.is_none())
-            && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+            && let Err(reason) = match (
+                options.execution_source_mode(),
+                fast_embedder_override.as_deref(),
+            ) {
                 (SearchSourceMode::LexicalOnly, _) => {
                     crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
                         &selected,
@@ -11152,7 +11176,7 @@ async fn run_search_inner_with_performance(
     let source_mode = if live_snapshot_retrieval.is_some() || producer_fallback.is_some() {
         SourceModeResolution {
             applied: SearchSourceMode::LexicalOnly,
-            fallback_applied: options.source_mode != SearchSourceMode::LexicalOnly,
+            fallback_applied: options.execution_source_mode() != SearchSourceMode::LexicalOnly,
             unavailable_no_results: false,
         }
     } else if producer_selection_error.is_some()
@@ -11162,7 +11186,7 @@ async fn run_search_inner_with_performance(
         // query vector or runtime capability probe. A refusal reaches only
         // the error report; a valid empty generation can still merge globals.
         SourceModeResolution {
-            applied: options.source_mode,
+            applied: options.execution_source_mode(),
             fallback_applied: false,
             unavailable_no_results: false,
         }
@@ -11216,7 +11240,8 @@ async fn run_search_inner_with_performance(
     let rerank_resolve_start = Instant::now();
     let (rerank_configured_mode, rerank_configured_top_k) =
         resolve_search_rerank_config(&options.workspace_path);
-    let rerank_runtime = if producer_selection_error.is_some()
+    let rerank_runtime = if !options.speed.uses_embeddings()
+        || producer_selection_error.is_some()
         || producer_fallback.is_some()
         || live_snapshot_retrieval.is_some()
         || empty_generation
@@ -11343,7 +11368,7 @@ async fn run_search_inner_with_performance(
     let result = match search_result {
         Ok(retrieval) => {
             let source_mode = retrieval.resolve_mode(
-                options.source_mode,
+                options.execution_source_mode(),
                 options.strict_source_mode,
                 source_mode,
             )?;
@@ -11821,7 +11846,7 @@ pub async fn run_diag_search_with_cx(
     resolved_search_fusion_weights(&options.workspace_path)?;
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
-    if options.source_mode.uses_embeddings()
+    if options.execution_source_mode().uses_embeddings()
         && database_path.exists()
         && empty_search_generation_hint(&index_dir)
     {
@@ -11854,7 +11879,7 @@ pub async fn run_diag_search_with_cx(
         }
         finish_search_snapshot(snapshot, Ok(()), &database_path)?;
     }
-    let fast_embedder = if options.source_mode.uses_embeddings()
+    let fast_embedder = if options.execution_source_mode().uses_embeddings()
         && index_dir.exists()
         // Producer admission follows workspace model selection. A warmed
         // process default must not prevent selecting the workspace's model.
@@ -12032,9 +12057,11 @@ async fn run_diag_search_in_snapshot(
     #[cfg(unix)]
     let index_dir = match (prepared_empty_path, source_generation) {
         (Some(selected), _) => selected,
-        (None, Some(generation)) if !options.source_mode.uses_embeddings() => generation_lease
-            .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
-            .map_err(map_index_generation_error)?,
+        (None, Some(generation)) if !options.execution_source_mode().uses_embeddings() => {
+            generation_lease
+                .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+                .map_err(map_index_generation_error)?
+        }
         (None, Some(generation)) => match fast_embedder_override.as_deref() {
             Some(embedder) => match generation_lease
                 .index_for_snapshot_with_embedder(cx, &index_dir, generation, embedder)
@@ -12071,7 +12098,10 @@ async fn run_diag_search_in_snapshot(
         (None, None) => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
-        && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+        && let Err(reason) = match (
+            options.execution_source_mode(),
+            fast_embedder_override.as_deref(),
+        ) {
             (SearchSourceMode::LexicalOnly, _) => {
                 crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
                     &index_dir,
@@ -12165,7 +12195,7 @@ async fn run_diag_search_in_snapshot(
         // Synthetic diagnostic tests also bypass discovery when they supply
         // the exact embedder used to build their arm/fusion fixture.
         SourceModeResolution {
-            applied: options.source_mode,
+            applied: options.execution_source_mode(),
             fallback_applied: false,
             unavailable_no_results: false,
         }
@@ -12529,7 +12559,7 @@ fn push_model_lifecycle_search_degradation(
     snapshot_index_status: Option<IndexStatusReport>,
     degraded: &mut Vec<SearchDegradation>,
 ) {
-    if options.source_mode == SearchSourceMode::LexicalOnly {
+    if !options.execution_source_mode().uses_embeddings() {
         return;
     }
     let report = match (connection, snapshot_index_status) {
@@ -12757,7 +12787,7 @@ fn resolve_source_mode(
     fast_embedder_override: Option<&dyn crate::search::Embedder>,
 ) -> Result<SourceModeResolution, SearchError> {
     let lexical_available = lexical_search_available(index_dir);
-    if !options.source_mode.uses_embeddings() {
+    if !options.execution_source_mode().uses_embeddings() {
         return resolve_source_mode_with_tiers(
             options,
             degraded,
@@ -12801,7 +12831,7 @@ fn resolve_source_mode_with_tiers(
     degraded: &mut Vec<SearchDegradation>,
     tiers: SearchTierState<'_>,
 ) -> Result<SourceModeResolution, SearchError> {
-    let requested = options.source_mode;
+    let requested = options.execution_source_mode();
     let lexical_available = tiers.lexical_available;
 
     if let Some(reason) = tiers.semantic_embedder_pending
@@ -13094,7 +13124,7 @@ fn cached_index_status_for_search(
         #[cfg(test)]
         SEARCH_SNAPSHOT_INDEX_STATUS_PROBES
             .set(SEARCH_SNAPSHOT_INDEX_STATUS_PROBES.get().saturating_add(1));
-        let status = match (options.source_mode, fast_embedder) {
+        let status = match (options.execution_source_mode(), fast_embedder) {
             (SearchSourceMode::LexicalOnly, _) => {
                 crate::core::index::get_index_status_for_lexical_search(
                     &status_options,
@@ -13129,7 +13159,7 @@ fn cached_index_status_for_search(
 
     // Lexical health cannot reuse or populate the semantic readiness cache:
     // the same generation may be readable lexically but need a vector rebuild.
-    if !options.source_mode.uses_embeddings() {
+    if !options.execution_source_mode().uses_embeddings() {
         return crate::core::index::get_index_status_for_lexical_search(
             &status_options,
             None,
@@ -13204,7 +13234,9 @@ async fn stale_index_live_snapshot_retrieval(
         ),
         repair: Some("ee index rebuild --workspace .".to_owned()),
     };
-    if options.strict_source_mode && options.source_mode != SearchSourceMode::LexicalOnly {
+    if options.strict_source_mode
+        && options.execution_source_mode() != SearchSourceMode::LexicalOnly
+    {
         degraded.push(unavailable(
             "strict source mode does not permit lexical fallback",
         ));
@@ -13370,6 +13402,12 @@ async fn reconcile_search_index_before_read_with_cx_and_timeout(
     allow_requested_repair: bool,
     stack_override: Option<crate::search::EmbedderStack>,
 ) {
+    // Repair can load an embedding model even when retrieval itself uses
+    // only the lexical tier. Instant reads use the verified index or bounded
+    // live source snapshot and leave queued publication to an indexing task.
+    if !options.speed.uses_embeddings() {
+        return;
+    }
     let child_scope = cx.scope_with_budget(cx.budget_for_timeout(reconcile_timeout));
     let owned_options = options.clone();
     let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
@@ -13444,7 +13482,7 @@ async fn reconcile_search_index_within_budget(
         Ok(None) => return,
         Ok(Some(true)) | Err(_) => {}
     }
-    let status = match (options.source_mode, stack_override.as_ref()) {
+    let status = match (options.execution_source_mode(), stack_override.as_ref()) {
         (SearchSourceMode::LexicalOnly, _) => {
             crate::core::index::get_index_status_for_lexical_search(&status_options, None, false)
         }
@@ -18176,7 +18214,7 @@ mod tests {
                     query: "The copper kestrel release preserves exact producer identity."
                         .to_owned(),
                     limit: 10,
-                    speed: SpeedMode::Instant,
+                    speed: SpeedMode::Default,
                     explain: true,
                     as_of: None,
                     include_tombstoned: false,
@@ -26473,7 +26511,7 @@ mod tests {
             index_dir: Some(index_dir.clone()),
             query: content.to_owned(),
             limit: 10,
-            speed: SpeedMode::Instant,
+            speed: SpeedMode::Default,
             explain: true,
             as_of: None,
             include_tombstoned: false,
@@ -30974,7 +31012,7 @@ mod tests {
             index_dir: None,
             query: "auto-reconcile update".to_owned(),
             limit: 10,
-            speed: SpeedMode::Instant,
+            speed: SpeedMode::Default,
             explain: false,
             as_of: None,
             include_tombstoned: false,

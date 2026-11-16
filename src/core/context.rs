@@ -2994,10 +2994,12 @@ async fn run_context_pack_attempt(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
     };
+    search_options.validate().map_err(ContextPackError::Search)?;
     // A read-only semantic handoff is allowed only through an explicit
     // already-loaded local-model capability. Readiness alone is not proof:
     // the provider must request it and the returned handoff must attest it.
-    let read_only_embeddings = !options.persist_pack && options.source_mode.uses_embeddings();
+    let read_only_embeddings =
+        !options.persist_pack && search_options.execution_source_mode().uses_embeddings();
     let mut remote_search = if let Some(provider) = search_provider {
         let remote_start = Instant::now();
         let result = provider(&search_options, read_only_embeddings);
@@ -3044,7 +3046,7 @@ async fn run_context_pack_attempt(
     let mut empty_generation = None;
     if remote_search.is_none()
         && fast_embedder_override.is_none()
-        && options.source_mode.uses_embeddings()
+        && search_options.execution_source_mode().uses_embeddings()
         && pin_snapshot
         && empty_search_generation_hint(&index_dir)
     {
@@ -3078,7 +3080,7 @@ async fn run_context_pack_attempt(
     let embedder_preparation = if remote_search.is_none()
         && fast_embedder_override.is_none()
         && empty_generation.is_none()
-        && options.source_mode.uses_embeddings()
+        && search_options.execution_source_mode().uses_embeddings()
         // Snapshot recovery can select a retained generation even when the
         // live directory is absent or incompatible. Always provide a safe
         // concrete model for read-only embedding requests on that path too.

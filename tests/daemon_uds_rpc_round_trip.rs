@@ -215,7 +215,7 @@ fn search_request_with_query(
         "databasePath": database.display().to_string(),
         "indexDir": index_dir.display().to_string(),
         "limit": 5,
-        "speed": "instant",
+        "speed": "default",
         "sourceMode": "hybrid",
         "memoryScope": "swarm",
         "explainPerformance": explain_performance
@@ -377,6 +377,7 @@ fn hybrid_context_request_for_workspace(
 ) -> DaemonRequest {
     let mut params = context_pack_params(params_workspace, database, task);
     params["sourceMode"] = serde_json::json!("hybrid");
+    params["speed"] = serde_json::json!("default");
     params["indexDir"] = serde_json::json!(index_dir.display().to_string());
     params["includeNonAffectingDegradations"] = serde_json::json!(true);
     let mut request = DaemonRequest::new(request_id, TEST_AGENT_ID, METHOD_CONTEXT, params);
@@ -1384,6 +1385,7 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         "release provenance daemon context advisory",
     );
     context_params["sourceMode"] = serde_json::json!("hybrid");
+    context_params["speed"] = serde_json::json!("default");
     context_params["indexDir"] = serde_json::json!(index_dir.display().to_string());
     let mut first_context_request = DaemonRequest::new(
         "req-context-warm-001",

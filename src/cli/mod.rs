@@ -51281,16 +51281,16 @@ fn search_daemon_response_before(
     } else {
         validate_daemon_search_capabilities(capabilities)?;
     }
-    // GH #37: a daemon that is still loading its tokenizer and embedding matrix
-    // will not answer inside the bounded attempt window. Falling back straight
-    // away beats spending the whole deadline first and then reporting a bare
-    // "deadline exceeded" the operator cannot act on. A daemon with warm-up
-    // disabled reports `cold` and is still attempted normally, because it may
-    // well already be hot from earlier requests.
-    if capabilities
-        .pointer("/warm/posture")
-        .and_then(serde_json::Value::as_str)
-        == Some("warming")
+    // GH #37: semantic requests cannot wait for a tokenizer and embedding
+    // matrix to finish loading inside the bounded attempt window. Lexical and
+    // Instant searches can proceed while model warm-up is still in progress.
+    // A daemon with warm-up disabled reports `cold` and is attempted normally,
+    // because earlier requests may already have loaded its model.
+    if options.execution_source_mode().uses_embeddings()
+        && capabilities
+            .pointer("/warm/posture")
+            .and_then(serde_json::Value::as_str)
+            == Some("warming")
     {
         return Err(DaemonSearchFallbackReason::DaemonWarming);
     }
@@ -97824,6 +97824,173 @@ mod tests {
             &Err(DaemonSearchFallbackReason::SocketUnavailable),
             "missing daemon socket fallback reason",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_warming_only_blocks_requests_that_need_embeddings() -> TestResult {
+        use crate::daemon::protocol::{DaemonResponse, read_request, write_response};
+        use crate::daemon::server::{
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_CAPABILITIES, METHOD_PACK_SEARCH,
+            METHOD_SEARCH,
+        };
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::{Duration, Instant};
+
+        fn accept_before(listener: &UnixListener, deadline: Instant) -> Result<UnixStream, String> {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .map_err(|error| error.to_string())?;
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err("warm daemon request deadline elapsed".to_owned());
+                        }
+                        stream
+                            .set_read_timeout(Some(remaining))
+                            .and_then(|()| stream.set_write_timeout(Some(remaining)))
+                            .map_err(|error| error.to_string())?;
+                        return Ok(stream);
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => return Err(format!("warm daemon request missing: {error}")),
+                }
+            }
+        }
+
+        for pack_retrieval in [false, true] {
+            for (speed, source_mode, should_dispatch) in [
+                (crate::search::SpeedMode::Instant, SearchSourceMode::Hybrid, true),
+                (
+                    crate::search::SpeedMode::Default,
+                    SearchSourceMode::LexicalOnly,
+                    true,
+                ),
+                (crate::search::SpeedMode::Default, SearchSourceMode::Hybrid, false),
+            ] {
+                let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+                let socket_path = temp.path().join("warming-daemon.sock");
+                let listener =
+                    UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|error| error.to_string())?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let server = std::thread::spawn(move || -> TestResult {
+                    let method = if pack_retrieval {
+                        METHOD_PACK_SEARCH
+                    } else {
+                        METHOD_SEARCH
+                    };
+                    let response_schema = if pack_retrieval {
+                        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
+                    } else {
+                        DAEMON_SEARCH_RESPONSE_SCHEMA_V4
+                    };
+                    let mut capabilities_stream = accept_before(&listener, deadline)?;
+                    let request =
+                        read_request(&mut capabilities_stream).map_err(|error| error.to_string())?;
+                    ensure_equal(
+                        &request.method.as_str(),
+                        &METHOD_CAPABILITIES,
+                        "warming daemon capability method",
+                    )?;
+                    let response = DaemonResponse::ok(
+                        request.request_id,
+                        request.agent_id,
+                        request.workspace_id,
+                        serde_json::json!({
+                            "protocol": "ee.daemon",
+                            "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
+                            "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
+                            "methods": [method],
+                            "authorization": {(method): "same_uid_workspace"},
+                            "method_schemas": {
+                                (method): {
+                                    "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                                    "response": response_schema
+                                }
+                            },
+                            "warm": {"posture": "warming"}
+                        }),
+                    );
+                    write_response(&mut capabilities_stream, &response)
+                        .map_err(|error| error.to_string())?;
+                    if !should_dispatch {
+                        return Ok(());
+                    }
+                    let mut search_stream = accept_before(&listener, deadline)?;
+                    let request =
+                        read_request(&mut search_stream).map_err(|error| error.to_string())?;
+                    ensure_equal(
+                        &request.method.as_str(),
+                        &method,
+                        "warming daemon retrieval method",
+                    )?;
+                    ensure_equal(
+                        &request.params["sourceMode"].as_str(),
+                        &Some(source_mode.as_str()),
+                        "requested source mode remains on the wire",
+                    )?;
+                    let response = DaemonResponse::ok(
+                        request.request_id,
+                        request.agent_id,
+                        request.workspace_id,
+                        serde_json::json!({"served_during_warmup": true}),
+                    );
+                    write_response(&mut search_stream, &response)
+                        .map_err(|error| error.to_string())
+                });
+                let options = SearchOptions {
+                    workspace_path: temp.path().to_path_buf(),
+                    database_path: None,
+                    index_dir: None,
+                    query: "release".to_owned(),
+                    limit: 10,
+                    speed,
+                    explain: false,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: None,
+                    dedup_mode: SearchDedupMode::DocId,
+                    source_mode,
+                    strict_source_mode: false,
+                    memory_scope: MemoryScope::Swarm,
+                    strict_scope: false,
+                };
+                let result = super::search_daemon_response_before(
+                    &socket_path,
+                    &options,
+                    None,
+                    &[],
+                    false,
+                    pack_retrieval,
+                    pack_retrieval,
+                    deadline,
+                );
+                server
+                    .join()
+                    .map_err(|_| "warming daemon thread panicked".to_owned())??;
+                let expected = if should_dispatch {
+                    Ok(serde_json::json!({"served_during_warmup": true}))
+                } else {
+                    Err(DaemonSearchFallbackReason::DaemonWarming)
+                };
+                ensure_equal(&result, &expected, "model warm-up request admission")?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]

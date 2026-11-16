@@ -366,6 +366,138 @@ fn diagnostic_with_identity(
 }
 
 #[test]
+fn instant_hybrid_search_and_diagnostics_never_use_the_semantic_producer() {
+    let (fixture, memory, unrelated) = lexical_identity_fixture();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
+    unrelated.fail_inference.store(true, Ordering::Relaxed);
+    let metadata_path = options.resolve_index_dir().join("meta.json");
+    let metadata = std::fs::read(&metadata_path).unwrap();
+
+    let report = run_search_with_embedder(&options, unrelated.clone()).unwrap();
+    let diagnostic = diagnostic_with_identity(&options, unrelated.clone()).unwrap();
+    for report in [&report, &diagnostic.final_report] {
+        assert_eq!(report.status, SearchStatus::Success);
+        assert_eq!(report.results[0].doc_id, memory);
+        assert_eq!(report.source_mode_requested, SearchSourceMode::Hybrid);
+        assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+        assert!(!report.source_mode_fallback);
+        assert!(
+            report.degraded.iter().all(|entry| !matches!(
+                entry.code.as_str(),
+                "embed_model_unavailable" | "index_incompatible" | "rerank_model_unavailable"
+            ))
+        );
+    }
+    assert!(!diagnostic.pre_fusion.semantic_fast.available);
+    assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(&metadata_path).unwrap(), metadata);
+    let posture = resolve_search_rerank_runtime_posture(&options, false, Some(&fixture.db));
+    assert!(!posture.runtime_available);
+    assert!(posture.degraded.is_empty());
+
+    let instant_options = options.clone();
+    let mut handoff = run_pack_search(&instant_options).unwrap();
+    assert!(handoff.matches_request(&instant_options));
+
+    // The same published corpus must still execute semantic retrieval when
+    // the caller selects an embedding-capable speed and its actual producer.
+    options.speed = SpeedMode::Default;
+    let selected = Arc::new(SemanticIdentityFixture::new(256));
+    let hybrid = run_search_with_embedder(&options, selected.clone()).unwrap();
+    assert_eq!(hybrid.status, SearchStatus::Success);
+    assert_eq!(hybrid.source_mode_applied, SearchSourceMode::Hybrid);
+    assert!(selected.embeds.load(Ordering::Relaxed) > 0);
+
+    // A response produced under the default speed cannot bypass Instant's
+    // lexical contract through a cached/provider handoff.
+    handoff.report = hybrid;
+    assert!(handoff.matches_request(&options));
+    assert!(!handoff.matches_request(&instant_options));
+}
+
+#[test]
+fn instant_search_serves_pending_sources_without_running_embedding_repairs() {
+    let (fixture, original, unrelated) = lexical_identity_fixture();
+    let fresh = fixture.memory(2, 1.0, 1.0, Utc::now() - chrono::Duration::seconds(1));
+    fixture
+        .db
+        .insert_search_index_job(
+            "sidx_00000000000000000000000002",
+            &crate::db::CreateSearchIndexJobInput {
+                workspace_id: fixture.workspace.clone(),
+                job_type: crate::db::SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(fresh.clone()),
+                documents_total: 1,
+            },
+        )
+        .unwrap();
+    let jobs = || {
+        fixture
+            .db
+            .query("SELECT * FROM search_index_jobs ORDER BY id", &[])
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(name, value)| (name.to_owned(), value.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let jobs_before = jobs();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
+    let metadata_path = options.resolve_index_dir().join("meta.json");
+    let metadata = std::fs::read(&metadata_path).unwrap();
+    unrelated.fail_inference.store(true, Ordering::Relaxed);
+    let report = run_search_with_embedder(&options, unrelated.clone()).unwrap();
+
+    assert_eq!(report.status, SearchStatus::Success);
+    assert!(report.results.iter().any(|hit| hit.doc_id == original));
+    assert!(report.results.iter().any(|hit| hit.doc_id == fresh));
+    assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+    assert!(!report.source_mode_fallback);
+    assert!(
+        report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "search_live_snapshot_lexical")
+    );
+    assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
+    assert_eq!(jobs(), jobs_before);
+    assert_eq!(std::fs::read(&metadata_path).unwrap(), metadata);
+}
+
+#[test]
+fn instant_rejects_conflicting_source_contracts_before_creating_a_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("not-created");
+    let fixture = Fixture::new();
+    let mut options = fixture.options();
+    options.workspace_path = root.clone();
+    options.database_path = Some(root.join(".ee/ee.db"));
+    for (mode, strict) in [
+        (SearchSourceMode::SemanticOnly, false),
+        (SearchSourceMode::SemanticOnly, true),
+        (SearchSourceMode::Hybrid, true),
+    ] {
+        options.source_mode = mode;
+        options.strict_source_mode = strict;
+        assert!(matches!(
+            run_search(&options),
+            Err(SearchError::InvalidOptions(_))
+        ));
+        assert!(matches!(
+            run_diag_search(&options),
+            Err(SearchError::InvalidOptions(_))
+        ));
+        assert!(!root.exists());
+    }
+}
+
+#[test]
 fn lexical_search_and_diagnostics_ignore_unrelated_semantic_identity() {
     let (fixture, memory, unrelated) = lexical_identity_fixture();
     let mut options = fixture.options();
@@ -407,6 +539,7 @@ fn lexical_search_and_diagnostics_ignore_unrelated_semantic_identity() {
         );
     }
 
+    options.speed = SpeedMode::Default;
     for mode in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
         options.source_mode = mode;
         assert!(run_search_with_embedder(&options, unrelated.clone()).is_err());

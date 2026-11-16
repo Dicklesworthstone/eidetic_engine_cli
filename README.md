@@ -862,6 +862,7 @@ Common red flags:
 | Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
 | Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
 | Retrieval source | `--source-mode lexical_only\|semantic_only\|hybrid`, `--strict-source-mode` | Force lexical-only, semantic-only, or hybrid retrieval before packing; strict mode fails instead of falling back |
+| Retrieval speed | `--speed instant\|default\|quality` | Instant uses lexical retrieval without loading embedding or reranking models; default and quality allow semantic retrieval |
 | Warm retrieval | `--use-daemon`, `--daemon-socket <path>` | Reuse the workspace daemon's loaded search model, with local pack assembly and persistence; fall back to in-process retrieval when the daemon is unavailable or the request cannot be served there |
 | Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
 | Output format | `--format markdown\|json\|toon`, `--stream --json` | Token-tight prompt text (markdown), parser output (json), stable-field structured output (toon — not smaller than json for packs), or NDJSON frames |
@@ -872,6 +873,15 @@ Common red flags:
 | Time windows | `--as-of <RFC3339>`, `--include-expired`, `--include-future`, `--include-stale`, `--include-tombstoned` | Inspect validity-window behavior |
 | Trust lane | `--memory-scope self\|team\|global\|workspace\|verified\|swarm`, `--strict-scope` | Bound which trust lane can contribute. On `ee pack`/`pack build` an explicit value overrides any task-lens scope overlay; omitted keeps lens-then-`swarm` behavior. `self`/`swarm` are agent scopes; `team` covers explicit local-origin ownership plus receiver-derived member projections (no `trust.team_members` nickname compatibility) |
 | Privacy | `--redaction none\|minimal\|standard\|strict\|paranoid` | Tune output redaction where the command allows it |
+
+`--speed instant` also applies to `ee search` and `ee diag search`. It skips
+interactive index repair, leaving queued indexing work for an indexing task.
+Search can still retrieve fresh content through its bounded, complete source
+snapshot when the published index is behind. Instant with the default hybrid
+source reports the original requested source and `sourceModeApplied` as
+`lexical_only`; this intentional speed choice is not a source-mode fallback.
+Instant combined with `semantic_only`, or with strict hybrid retrieval, is a
+usage error. Choose `default` or `quality` for those source contracts.
 
 Examples:
 
@@ -2653,9 +2663,10 @@ For repeated read-only packs in one session, start the daemon, wait until
 `ee daemon status --workspace . --json` reports `data.warm.posture` as `ready`,
 then add `--use-daemon` to `ee pack`. On one Linux worker the median pack took
 708 ms with a warm daemon and 3155 ms without, with the same pack hash
-(`bd-5oa5m`). Until the daemon is warm, `--use-daemon` gives no speedup: the
-pack falls back to local retrieval and names the fallback in `degraded`
-(`bd-snkcp`).
+(`bd-5oa5m`). While the daemon's semantic model is warming, embedding-based
+requests fall back to local retrieval and name the fallback in `degraded`
+(`bd-snkcp`). Instant and explicit lexical-only requests can use the daemon
+without waiting for that model.
 
 Pack and search JSON also report `data.servingPath`, `data.retrievalPath`, and
 `data.fallbackReason`, so timing is not the test of whether routing succeeded:

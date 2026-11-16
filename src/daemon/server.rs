@@ -4415,7 +4415,7 @@ fn dispatch_pack_search(
         );
     }
     read_pools.retain(&options.resolve_database_path());
-    let loaded = if require_cached_local && options.source_mode.uses_embeddings() {
+    let loaded = if require_cached_local && options.execution_source_mode().uses_embeddings() {
         match crate::core::index::already_loaded_local_embedder_for_workspace(
             &options.workspace_path,
             &options.resolve_database_path(),
@@ -9256,6 +9256,38 @@ mod tests {
             retrievals,
             "feedback history must not bypass cached-only model admission"
         );
+
+        request.params["speed"] = serde_json::json!("instant");
+        request.params["strictSourceMode"] = serde_json::json!(false);
+        let (instant_options, _, _, _) = DaemonSearchParams::from_value(&request.params)
+            .expect("instant search params")
+            .into_search_parts(request.workspace_id.as_deref().expect("workspace authority"))
+            .expect("instant search options");
+        let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
+        assert!(response.error.is_none(), "{response:?}");
+        let result = response.result.expect("instant lexical retrieval");
+        let handoff =
+            crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
+                .expect("instant handoff");
+        assert!(handoff.matches_request(&instant_options));
+        assert!(handoff.snapshot_matches(&instant_options, &connection));
+        assert!(!handoff.has_cached_local_embedder());
+        assert_eq!(handoff.report.source_mode_requested, SearchSourceMode::Hybrid);
+        assert_eq!(
+            handoff.report.source_mode_applied,
+            SearchSourceMode::LexicalOnly
+        );
+        assert!(!handoff.report.source_mode_fallback);
+        assert!(
+            handoff
+                .report
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == memory_id)
+        );
+        assert_eq!(connection.count_table_rows("pack_records").unwrap(), packs);
+        assert_eq!(connection.count_table_rows("audit_log").unwrap(), audits);
+        assert!(!workspace.path().join(".ee/index").exists());
     }
 
     #[test]

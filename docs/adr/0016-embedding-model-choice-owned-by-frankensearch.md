@@ -32,8 +32,12 @@ If `ee` specifies embedding model names, it:
 2. `ee` config exposes `[search]` options for behavior, not model selection:
    - `mode = "hybrid" | "lexical"` — whether to use embeddings at all
    - `default_speed = "instant" | "default" | "quality"` — latency/quality tradeoff
-3. The speed tradeoff maps to Frankensearch's embedder stack, which internally
-   selects the appropriate model.
+3. `instant` speed executes lexical retrieval without preparing an embedding
+   model, loading a reranker, or running interactive index repair. The
+   `default` and `quality` budgets allow Frankensearch's embedder stack to
+   select and execute the appropriate model. Instant with semantic-only or
+   strict hybrid sources is rejected as contradictory; a relaxed hybrid
+   request records lexical execution without claiming degraded fallback.
 4. Documentation may name the pinned default model selected by ADR 0080, but
    alternate model selection remains Frankensearch-owned rather than an `ee`
    configuration surface.

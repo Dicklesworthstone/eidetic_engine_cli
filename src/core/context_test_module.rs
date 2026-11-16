@@ -1981,6 +1981,9 @@ mod tests {
         }
 
         let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        // Instant intentionally skips automatic index repair; this fixture
+        // exercises the ordinary read-only versus writable reconciliation path.
+        options.speed = crate::search::SpeedMode::Default;
         let database = options.database_path.clone().ok_or("fixture database")?;
         let index_dir = options.workspace_path.join(".ee").join("index");
         let job_id = {
@@ -8622,7 +8625,7 @@ pub fn unrelated_context() -> u64 {{
             database_path: None,
             index_dir: None,
             query: request.query.clone(),
-            speed: crate::search::SpeedMode::Instant,
+            speed: crate::search::SpeedMode::Default,
             source_mode: crate::core::search::SearchSourceMode::SemanticOnly,
             strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
