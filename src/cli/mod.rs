@@ -35988,7 +35988,7 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
-    let conn = match crate::db::DbConnection::open_file(&database_path) {
+    let conn = match crate::db::DbConnection::open_file_read_only(&database_path) {
         Ok(conn) => conn,
         Err(error) => {
             let domain_error = DomainError::Storage {
@@ -35998,12 +35998,10 @@ where
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
-    if let Err(error) = conn.migrate() {
-        let domain_error = DomainError::MigrationRequired {
-            message: format!("Failed to migrate pack diagnostic database: {error}"),
-            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
-        };
-        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+    if let Err(error) =
+        ensure_inspection_database_current(&conn, &database_path, "diag pack-latest")
+    {
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let workspace_id =
         match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
@@ -39872,7 +39870,7 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
-    let conn = match crate::db::DbConnection::open_file(&database_path) {
+    let conn = match crate::db::DbConnection::open_file_read_only(&database_path) {
         Ok(conn) => conn,
         Err(error) => {
             let domain_error = DomainError::Storage {
@@ -39882,12 +39880,8 @@ where
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
-    if let Err(error) = conn.migrate() {
-        let domain_error = DomainError::MigrationRequired {
-            message: format!("Failed to migrate graph database: {error}"),
-            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
-        };
-        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+    if let Err(error) = ensure_inspection_database_current(&conn, &database_path, "graph export") {
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = match resolve_graph_export_workspace_id(&conn, &workspace, args) {
@@ -53546,7 +53540,11 @@ where
         let error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
-    let connection = match crate::db::DbConnection::open_file(&database_path) {
+    let connection = match if args.no_persist {
+        crate::db::DbConnection::open_file_read_only(&database_path)
+    } else {
+        crate::db::DbConnection::open_file(&database_path)
+    } {
         Ok(connection) => connection,
         Err(error) => {
             let error = DomainError::Storage {
@@ -53556,7 +53554,15 @@ where
             return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
-    if let Err(error) = connection.migrate() {
+    if args.no_persist {
+        if let Err(error) = ensure_inspection_database_current(
+            &connection,
+            &database_path,
+            "primer --no-persist",
+        ) {
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
+        }
+    } else if let Err(error) = connection.migrate() {
         let error = DomainError::Storage {
             message: format!("Failed to migrate database: {error}"),
             repair: Some("ee migrate run --workspace . --json".to_owned()),
@@ -56882,31 +56888,8 @@ where
         confidence_threshold: args.confidence_threshold,
     };
 
-    let migration_connection = match crate::db::DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            let domain_error = DomainError::Storage {
-                message: format!("Failed to open database before why migration: {error}"),
-                repair: Some("ee status --workspace . --json".to_owned()),
-            };
-            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
-        }
-    };
-    if let Err(error) = migration_connection.migrate() {
-        let domain_error = DomainError::MigrationRequired {
-            message: format!("Failed to migrate database before why: {error}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        };
-        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
-    }
-    if let Err(error) = migration_connection.close() {
-        let domain_error = DomainError::Storage {
-            message: format!("Failed to close migration connection before why: {error}"),
-            repair: Some("ee status --workspace . --json".to_owned()),
-        };
-        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
-    }
-
+    // Inspection must not upgrade durable state. The pinned read snapshot below
+    // reports migration-required before any schema-dependent explanation work.
     let read_pool = crate::db::read_pool::registered_process_read_pool(
         crate::db::DatabaseConfig::file(database_path.clone()),
         crate::db::read_pool::PoolConfig::default_single(),
@@ -83886,36 +83869,11 @@ mod tests {
     }
 
     #[test]
-    fn stale_legacy_v011_database_is_migrated_before_schema_dependent_reads() -> TestResult {
-        let why_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let why_memory_id = seed_legacy_v011_database(why_dir.path())?;
-        let why_workspace = why_dir.path().to_string_lossy().into_owned();
-        let (why_exit, why_stdout, why_stderr) = invoke(&[
-            "ee",
-            "--workspace",
-            &why_workspace,
-            "--json",
-            "why",
-            &why_memory_id,
-        ]);
-        ensure_equal(&why_exit, &ProcessExitCode::Success, "why exit")?;
-        ensure(why_stderr.is_empty(), "why JSON stderr clean")?;
-        let why_json: serde_json::Value =
-            serde_json::from_str(&why_stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &why_json["data"]["found"],
-            &serde_json::json!(true),
-            "why found memory after migration",
-        )?;
-        ensure_equal(
-            &why_json["data"]["storage"]["workflowId"],
-            &serde_json::Value::Null,
-            "why storage reads migrated workflowId column",
-        )?;
-
-        let curate_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        seed_legacy_v011_database(curate_dir.path())?;
-        let database_path = curate_dir.path().join(".ee").join("ee.db");
+    fn stale_legacy_database_requires_explicit_migration_before_inspection() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let memory_id = seed_legacy_v011_database(tempdir.path())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let database_path = tempdir.path().join(".ee").join("ee.db");
         let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
         let shm_path = PathBuf::from(format!("{}-shm", database_path.display()));
         let paths = [&database_path, &wal_path, &shm_path];
@@ -83931,43 +83889,53 @@ mod tests {
                 })
                 .collect::<Result<Vec<_>, String>>()
         };
+        let pack_query = "migration inspection regression";
+        let cases: [(&str, Vec<&str>); 5] = [
+            ("why", vec!["why", memory_id.as_str()]),
+            ("graph export", vec!["graph", "export"]),
+            (
+                "diag pack-latest",
+                vec!["diag", "pack-latest", "--query", pack_query],
+            ),
+            ("primer --no-persist", vec!["primer", "--no-persist"]),
+            ("curate candidates", vec!["curate", "candidates", "--all"]),
+        ];
+
         let before = snapshot()?;
-        let curate_workspace = curate_dir.path().to_string_lossy().into_owned();
-        let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
-            "ee",
-            "--workspace",
-            &curate_workspace,
-            "--json",
-            "curate",
-            "candidates",
-            "--all",
-        ]);
-        ensure_equal(
-            &curate_exit,
-            &ProcessExitCode::MigrationRequired,
-            "read-only curate candidates migration-required exit",
-        )?;
-        ensure(
-            curate_stderr.is_empty(),
-            "curate candidates JSON stderr clean",
-        )?;
-        let curate_json: serde_json::Value =
-            serde_json::from_str(&curate_stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &curate_json["error"]["code"],
-            &serde_json::json!("migration_required"),
-            "curate candidates require explicit migration",
-        )?;
-        ensure_equal(
-            &snapshot()?,
-            &before,
-            "read-only candidates must not alter the database or WAL sidecars",
-        )?;
+        for (surface, command) in &cases {
+            let mut args = vec!["ee", "--workspace", workspace.as_str(), "--json"];
+            args.extend(command.iter().copied());
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::MigrationRequired,
+                &format!("{surface} requires explicit migration"),
+            )?;
+            ensure(stderr.is_empty(), &format!("{surface} JSON stderr clean"))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["error"]["code"],
+                &serde_json::json!("migration_required"),
+                &format!("{surface} migration error code"),
+            )?;
+            ensure(
+                value["error"]["repair"]
+                    .as_str()
+                    .is_some_and(|repair| repair.contains("ee migrate run")),
+                &format!("{surface} names the explicit migration command"),
+            )?;
+            ensure_equal(
+                &snapshot()?,
+                &before,
+                &format!("{surface} must not change the database or WAL sidecars"),
+            )?;
+        }
 
         let (migration_exit, _, migration_stderr) = invoke(&[
             "ee",
             "--workspace",
-            &curate_workspace,
+            &workspace,
             "--json",
             "migrate",
             "run",
@@ -83978,56 +83946,93 @@ mod tests {
             "explicit migration exit",
         )?;
         ensure(migration_stderr.is_empty(), "migration JSON stderr clean")?;
-        let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
-            "ee",
-            "--workspace",
-            &curate_workspace,
-            "--json",
-            "curate",
-            "candidates",
-            "--all",
-        ]);
-        ensure_equal(
-            &curate_exit,
-            &ProcessExitCode::Success,
-            "curate candidates exit after explicit migration",
-        )?;
-        ensure(
-            curate_stderr.is_empty(),
-            "curate candidates JSON stderr clean",
-        )?;
-        let curate_json: serde_json::Value =
-            serde_json::from_str(&curate_stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &curate_json["data"]["command"],
-            &serde_json::json!("curate candidates"),
-            "curate candidates command",
-        )?;
-        ensure(
-            curate_json["data"]["candidates"].is_array(),
-            "curate candidates reads migrated review_state column",
-        )?;
 
-        let graph_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        seed_legacy_v011_database(graph_dir.path())?;
-        let graph_workspace = graph_dir.path().to_string_lossy().into_owned();
-        let (graph_exit, graph_stdout, graph_stderr) = invoke(&[
+        let (seed_exit, _, seed_stderr) = invoke(&[
             "ee",
             "--workspace",
-            &graph_workspace,
+            &workspace,
             "--json",
-            "graph",
-            "export",
+            "diag",
+            "pack-record",
+            "--query",
+            pack_query,
         ]);
-        ensure_equal(&graph_exit, &ProcessExitCode::Success, "graph export exit")?;
-        ensure(graph_stderr.is_empty(), "graph export JSON stderr clean")?;
-        let graph_json: serde_json::Value =
-            serde_json::from_str(&graph_stdout).map_err(|error| error.to_string())?;
         ensure_equal(
-            &graph_json["data"]["status"],
-            &serde_json::json!("no_snapshot"),
-            "graph export reaches migrated scope_kind read",
-        )
+            &seed_exit,
+            &ProcessExitCode::Success,
+            "seed one current-schema diagnostic pack",
+        )?;
+        ensure(seed_stderr.is_empty(), "pack seed JSON stderr clean")?;
+
+        let migrated = snapshot()?;
+        for (surface, command) in &cases {
+            let mut args = vec!["ee", "--workspace", workspace.as_str(), "--json"];
+            args.extend(command.iter().copied());
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("{surface} succeeds after explicit migration"),
+            )?;
+            ensure(stderr.is_empty(), &format!("{surface} JSON stderr clean"))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            match *surface {
+                "why" => {
+                    ensure_equal(
+                        &value["data"]["found"],
+                        &serde_json::json!(true),
+                        "why finds the migrated memory",
+                    )?;
+                    ensure_equal(
+                        &value["data"]["storage"]["workflowId"],
+                        &serde_json::Value::Null,
+                        "why reads the migrated workflowId column",
+                    )?;
+                }
+                "graph export" => ensure_equal(
+                    &value["data"]["status"],
+                    &serde_json::json!("no_snapshot"),
+                    "graph export reaches the migrated scope_kind read",
+                )?,
+                "diag pack-latest" => ensure_equal(
+                    &value["data"]["query"],
+                    &serde_json::json!(pack_query),
+                    "latest-pack inspection returns the seeded pack",
+                )?,
+                "primer --no-persist" => ensure_equal(
+                    &value["data"]["cache_hit"],
+                    &serde_json::json!(false),
+                    "read-only primer does not populate its cache",
+                )?,
+                "curate candidates" => ensure(
+                    value["data"]["candidates"].is_array(),
+                    "curate candidates reads the migrated review_state column",
+                )?,
+                _ => return Err(format!("unexpected inspection case: {surface}")),
+            }
+            ensure_equal(
+                &snapshot()?,
+                &migrated,
+                &format!("{surface} leaves the migrated database unchanged"),
+            )?;
+        }
+
+        // The explicit no-persist path must not disable ordinary primer caching.
+        for expected_cache_hit in [false, true] {
+            let (exit, stdout, stderr) =
+                invoke(&["ee", "--workspace", &workspace, "--json", "primer"]);
+            ensure_equal(&exit, &ProcessExitCode::Success, "persistent primer exit")?;
+            ensure(stderr.is_empty(), "persistent primer JSON stderr clean")?;
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["data"]["cache_hit"],
+                &serde_json::json!(expected_cache_hit),
+                "ordinary primer populates and then reuses its cache",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
