@@ -22,10 +22,6 @@ type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
 
-fn ee_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
-
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -71,7 +67,7 @@ fn run_ee(workspace: &Path, args: &[&str]) -> Result<(i32, Value, String), Strin
     let mut full_args = vec!["--workspace", path_arg(workspace)?, "--json"];
     full_args.extend(args);
 
-    let output = Command::new(ee_bin())
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args(&full_args)
         .env_remove("EE_WORKSPACE")
         .env("NO_COLOR", "1")

@@ -45,7 +45,8 @@ fn read_one_response_line(
 
 #[test]
 fn ee_mcp_serve_stdio_pins_initialize_result_capabilities_and_server_info() -> TestResult {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::env::temp_dir().join(format!("ee-mcp-init-cap-iso-{}", std::process::id()));
+    let mut child = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(["mcp", "serve-stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

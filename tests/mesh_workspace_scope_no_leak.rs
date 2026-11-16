@@ -153,9 +153,14 @@ fn mesh_workspace_scope_shell_driver_proves_no_leak() -> TestResult {
     let script = repo_root.join("scripts/e2e_overhaul/mesh_workspace_scope_no_leak.sh");
     let log_path = unique_tmp_path("mesh-workspace-scope-no-leak", "jsonl");
     let retention_manifest = unique_tmp_path("mesh-workspace-scope-no-leak-retention", "json");
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
     let output = Command::new("bash")
         .arg(&script)
         .current_dir(repo_root)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
         .env("EE_TEST_LOG_PATH", &log_path)
         .env("EE_TEST_LOG_LEVEL", "normal")

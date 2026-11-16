@@ -82,16 +82,32 @@ fn private_runtime_tempdir(name: &str) -> Result<tempfile::TempDir, String> {
         })
 }
 
+fn isolated_env_for_workspace(workspace: &Path) -> PathBuf {
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"))
+}
+
 fn run_ee<I, S>(workspace: &Path, args: I) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let iso = isolated_env_for_workspace(workspace);
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("NO_COLOR", "1")
@@ -128,11 +144,16 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let iso = isolated_env_for_workspace(workspace);
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("NO_COLOR", "1")
@@ -1614,11 +1635,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let iso = isolated_env_for_workspace(workspace);
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("NO_COLOR", "1")

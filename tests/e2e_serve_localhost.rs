@@ -139,6 +139,7 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
         "serve_foreground_cli_keeps_accepting_after_first_request",
     );
     let token = "01234567890123456789012345678901";
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args([
             "serve",
@@ -149,6 +150,10 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
             "0",
             "--json",
         ])
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_SERVE_TOKEN", token)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -247,6 +252,7 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
 #[test]
 fn serve_foreground_real_context_first_consumes_process_advisory() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let iso = tempfile::tempdir().map_err(|error| error.to_string())?;
     for args in [
         vec!["init"],
         vec![
@@ -260,6 +266,10 @@ fn serve_foreground_real_context_first_consumes_process_advisory() -> TestResult
         vec!["index", "rebuild"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("HOME", iso.path().join("home"))
+            .env("XDG_DATA_HOME", iso.path().join("xdg-data"))
+            .env("XDG_CONFIG_HOME", iso.path().join("xdg-config"))
+            .env("EE_EMBED_DOWNLOAD", "off")
             .arg("--json")
             .arg("--workspace")
             .arg(workspace.path())

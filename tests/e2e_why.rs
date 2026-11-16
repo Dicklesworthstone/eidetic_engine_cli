@@ -55,7 +55,8 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::env::temp_dir().join(format!("ee-why-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

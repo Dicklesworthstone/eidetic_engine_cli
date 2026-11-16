@@ -390,8 +390,11 @@ fn spawn_import_process(
     path: OsString,
 ) -> thread::JoinHandle<Result<Output, String>> {
     thread::spawn(move || {
+        let ws = Path::new(&workspace_arg);
+        let isolated_root = ws.parent().unwrap_or(ws).join(".ee-isolated-env");
+        let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
         start.wait();
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        command
             .args([
                 "--workspace",
                 workspace_arg.as_str(),
@@ -422,7 +425,9 @@ fn run_import_once(
     view_json_arg: &str,
     path: OsString,
 ) -> Result<serde_json::Value, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let ws = Path::new(workspace_arg);
+    let isolated_root = ws.parent().unwrap_or(ws).join(".ee-isolated-env");
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args([
             "--workspace",
             workspace_arg,

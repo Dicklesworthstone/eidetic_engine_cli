@@ -28,8 +28,24 @@ struct RememberedMemory {
     source_uri: String,
 }
 
+fn isolated_root_for_args(args: &[&str], fallback: &Path) -> std::path::PathBuf {
+    args.windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let iso = isolated_root_for_args(args, temp.path());
+    isolated_ee::isolated_ee_command(&iso)?
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
@@ -39,7 +55,9 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 }
 
 fn run_ee_as_agent(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let iso = isolated_root_for_args(args, temp.path());
+    isolated_ee::isolated_ee_command(&iso)?
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
@@ -2105,8 +2123,9 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     // this explicit temporal snapshot without skipping any ledger/audit work.
     let pack_as_of = chrono::Utc::now().to_rfc3339();
     let pack_cache_dir = temp.path().join("pack-cache");
+    let iso = temp.path().join(".ee-isolated-pack");
     let run_pack = |args: &[&str], cache_disabled: bool| {
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        isolated_ee::isolated_ee_command(&iso)?
             .args(args)
             .env_remove("EE_WORKSPACE")
             .env_remove("EE_WORKSPACE_REGISTRY")

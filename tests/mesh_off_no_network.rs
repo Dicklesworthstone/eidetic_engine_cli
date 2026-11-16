@@ -19,7 +19,13 @@ fn temp_workspace() -> Result<tempfile::TempDir, String> {
 }
 
 fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let ws = std::path::Path::new(workspace);
+    let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+    let isolated_root = ws
+        .parent()
+        .unwrap_or(ws)
+        .join(format!(".ee-isolated-{name}"));
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .arg("--workspace")
         .arg(workspace)
@@ -361,9 +367,14 @@ fn mesh_off_shell_driver_emits_structured_log() -> TestResult {
     let script = repo_root.join("scripts/e2e_overhaul/mesh_off_no_network.sh");
     let log_path = unique_tmp_path("mesh-off-no-network", "jsonl")?;
     let retention_manifest = unique_tmp_path("mesh-off-no-network-retention", "json")?;
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
     let output = Command::new("bash")
         .arg(&script)
         .current_dir(repo_root)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
         .env("EE_TEST_LOG_PATH", &log_path)
         .env("EE_TEST_LOG_LEVEL", "normal")

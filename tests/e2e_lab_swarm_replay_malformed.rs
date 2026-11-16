@@ -174,7 +174,7 @@ fn run_ee_logged(
     )?;
 
     let start = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args(args)
         .env("NO_COLOR", "1")
         .env_remove("EE_WORKSPACE")

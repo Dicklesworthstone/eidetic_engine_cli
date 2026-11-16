@@ -17,6 +17,10 @@
 // already declare 256 for the same structural reason.
 #![recursion_limit = "256"]
 
+// Declared once here: modules below reach it as `super::isolated_ee`.
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
+
 mod inventory;
 
 #[path = "../adr_0028_docs.rs"]

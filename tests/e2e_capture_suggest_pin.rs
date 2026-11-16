@@ -97,7 +97,11 @@ fn run_ee_logged(log_path: &Path, args: &[&str]) -> Result<Output, String> {
     emit_event(log_path, start_event)?;
 
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = log_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".ee-iso");
+    let output = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
@@ -458,6 +462,7 @@ fn assert_event_log(log_path: &Path) -> TestResult {
 #[test]
 fn capture_suggest_real_binary_is_read_only_and_repairable() -> TestResult {
     let workspace = unique_workspace("read-only")?;
+    let _ = crate::isolated_ee::isolated_ee_command(&workspace);
     let log_path = workspace.join("capture-suggest-events.jsonl");
     emit_note(
         &log_path,

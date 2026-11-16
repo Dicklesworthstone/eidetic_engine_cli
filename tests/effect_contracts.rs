@@ -239,7 +239,9 @@ fn ensure_workspace_unchanged(
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-effect-contracts-iso-{}", std::process::id()));
+    let output = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .output()
         .map_err(|e| format!("Failed to run ee: {e}"))?;
@@ -481,7 +483,7 @@ fn bare_status_inspects_current_workspace() -> TestResult {
 
     // Run bare status from the workspace directory (using --workspace to simulate cwd)
     // The fix ensures that when --workspace is omitted, it defaults to "."
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args(["status", "--json"])
         .current_dir(workspace)
         .output()

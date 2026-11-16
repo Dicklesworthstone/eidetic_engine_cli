@@ -21,7 +21,20 @@ const EXIT_SUCCESS: i32 = 0;
 const EXIT_STORAGE: i32 = 3;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let isolated_root = args
+        .windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| temp.path().to_path_buf());
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")

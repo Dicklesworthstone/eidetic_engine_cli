@@ -1,4 +1,5 @@
 //! Shared real-binary (`CARGO_BIN_EXE_ee`) spawn hygiene for contracts tests.
+//! Isolates `"HOME"` and `EE_WORKSPACE_REGISTRY` per spawn.
 //!
 //! bd-7vtqm: under an unfiltered `cargo test --test contracts`, libtest runs
 //! each module's tests on its own worker threads, and every real-binary
@@ -359,6 +360,7 @@ pub(super) fn isolated_home_dir() -> PathBuf {
 /// Path of the real `ee` binary provided by the Cargo test harness. This is
 /// the only `CARGO_BIN_EXE_ee` reference allowed in `tests/contracts`.
 pub fn ee_binary() -> &'static str {
+    // Spawns via serialized_real_ee isolate "HOME" per child.
     env!("CARGO_BIN_EXE_ee")
 }
 

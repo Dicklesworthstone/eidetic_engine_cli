@@ -55,7 +55,9 @@ fn initialized_workspace() -> Result<(tempfile::TempDir, String), String> {
 }
 
 fn run_ee_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Result<Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-exit-code-conf-iso-{}", std::process::id()));
+    let mut command = crate::isolated_ee::isolated_ee_command(&iso_root)?;
     command
         .args(args)
         .env_remove(WORKSPACE_ENV_VAR)
@@ -786,7 +788,7 @@ fn exit_130_sigint_terminates_gracefully() -> TestResult {
     // rather than graceful termination. The FIFO tempdir above is the pipe's
     // home, not a workspace.
     let (_workspace_dir, workspace) = initialized_workspace()?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut child = crate::isolated_ee::isolated_ee_command(&tempdir.path().join(".ee-iso"))?
         .args([
             "--workspace",
             workspace.as_str(),

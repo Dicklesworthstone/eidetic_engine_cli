@@ -142,16 +142,23 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Un-isolated spawn fns per repo-relative file (files with zero omitted).
-fn census(root: &Path) -> BTreeMap<String, usize> {
+/// Un-isolated spawn fns per repo-relative file (files with zero omitted),
+/// plus the total number of `.rs` files that reference `SPAWN_TOKEN` or
+/// `isolated_ee_command(` so the empty-world guard can prove the walk ran even
+/// after the baseline shrinks to zero.
+fn census(root: &Path) -> (BTreeMap<String, usize>, usize) {
     let mut files = Vec::new();
     rust_sources(&root.join("tests"), &mut files);
     rust_sources(&root.join("src"), &mut files);
     let mut counts = BTreeMap::new();
+    let mut spawn_files = 0_usize;
     for path in files {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
+        if text.contains(SPAWN_TOKEN) || text.contains("isolated_ee_command(") {
+            spawn_files += 1;
+        }
         if !text.contains(SPAWN_TOKEN) {
             continue;
         }
@@ -165,7 +172,7 @@ fn census(root: &Path) -> BTreeMap<String, usize> {
             counts.insert(rel, count);
         }
     }
-    counts
+    (counts, spawn_files)
 }
 
 fn parse_baseline(text: &str) -> BTreeMap<String, usize> {
@@ -213,11 +220,17 @@ fn ratchet_findings(
 #[test]
 fn ee_spawns_do_not_add_unisolated_sites() {
     let root = repo_root();
-    let actual = census(&root);
-    // Empty-world guard: a census that finds nothing is a broken instrument.
+    let (actual, spawn_files) = census(&root);
+    let baseline = parse_baseline(
+        &fs::read_to_string(root.join(BASELINE)).expect("ee spawn isolation baseline exists"),
+    );
+    let baseline_total: usize = baseline.values().sum();
+    // Empty-world guard: the walk must observe real ee spawn sites, and if the
+    // baseline still expects un-isolated sites then a zero census means the
+    // scanner broke.
     assert!(
-        actual.values().sum::<usize>() > 0,
-        "census found no un-isolated ee spawns; the scan is broken or the baseline is obsolete"
+        spawn_files > 0 && (baseline_total == 0 || actual.values().sum::<usize>() > 0),
+        "census found no ee spawn sites (spawn_files={spawn_files}); the scan is broken"
     );
     // Positive control: the isolated helper spawns ee and must NOT be counted.
     let helper = fs::read_to_string(root.join("tests/support/isolated_ee.rs"))
@@ -229,9 +242,6 @@ fn ee_spawns_do_not_add_unisolated_sites() {
         "the isolated helper must classify isolated"
     );
 
-    let baseline = parse_baseline(
-        &fs::read_to_string(root.join(BASELINE)).expect("ee spawn isolation baseline exists"),
-    );
     let findings = ratchet_findings(&actual, &baseline);
     assert!(
         findings.is_empty(),

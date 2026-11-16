@@ -19,7 +19,9 @@ use std::process::Command;
 mod command_inventory;
 
 fn run_json(args: &[&str]) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().expect("isolated tempdir");
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())
+        .expect("isolated ee command")
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to run ee {args:?}: {e}"));

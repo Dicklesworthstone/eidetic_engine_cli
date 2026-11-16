@@ -37,7 +37,7 @@ fn status_command_emits_real_json_log_envelope_to_stderr_when_enabled() -> TestR
     let init = run_ee(&["--workspace", &workspace, "--json", "init"])?;
     assert_success(&init, "init")?;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let status = crate::isolated_ee::isolated_ee_command(&tempdir.path().join(".ee-isolated-env"))?
         .env("EE_LOG_FORMAT", "json")
         .args(["--workspace", &workspace, "status", "--json"])
         .output()
@@ -81,7 +81,20 @@ fn status_command_emits_real_json_log_envelope_to_stderr_when_enabled() -> TestR
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let isolated_root = args
+        .windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = std::path::Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| temp.path().to_path_buf());
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

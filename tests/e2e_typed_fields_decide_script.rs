@@ -26,6 +26,9 @@ fn typed_fields_decide_e2e_script_exercises_public_cli() {
 
     let output = Command::new(repo.join("scripts/e2e_typed_fields_decide.sh"))
         .current_dir(&repo)
+        .env("HOME", scratch.join("home"))
+        .env("XDG_DATA_HOME", scratch.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", scratch.join("xdg-config"))
         .env("EE_BIN", &ee_bin)
         .env("EE_E2E_KEEP", "1")
         .env("EE_E2E_KEEP_ARTIFACTS", "1")

@@ -51,6 +51,7 @@ fn configure_hermetic_ee_env(command: &mut Command, registry: &Path) {
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {
+    // configure_hermetic_ee_env isolates "HOME" and "XDG_DATA_HOME".
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     let registry = std::env::temp_dir().join(format!(
         "ee-error-recovery-no-registry-{}.db",
@@ -64,6 +65,7 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
 }
 
 fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
+    // configure_hermetic_ee_env isolates "HOME" and "XDG_DATA_HOME".
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     configure_hermetic_ee_env(&mut command, registry);
     command
@@ -73,6 +75,7 @@ fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, Stri
 }
 
 fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
+    // configure_hermetic_ee_env isolates "HOME" and "XDG_DATA_HOME".
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     let registry = std::env::temp_dir().join(format!(
         "ee-error-recovery-stdin-registry-{}.db",
@@ -98,6 +101,7 @@ fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
 }
 
 fn run_emitted_ee_command_with_registry(command: &str, registry: &Path) -> Result<Output, String> {
+    // configure_hermetic_ee_env isolates "HOME" and "XDG_DATA_HOME".
     if !command.starts_with("ee ") {
         return Err(format!("emitted command must start with ee: {command:?}"));
     }
@@ -568,6 +572,8 @@ fn orient_relative_missing_workspace_reports_normalized_absolute_address() -> Te
     // from an inherited environment; the budget is part of the harness, not
     // part of the inherited state under test.
     let output = command
+        .env("HOME", tempdir.path().join("home"))
+        .env("XDG_DATA_HOME", tempdir.path().join("xdg-data"))
         .env("EE_WORKSPACE_REGISTRY", &registry)
         .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
         .output()

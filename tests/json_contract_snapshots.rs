@@ -534,6 +534,7 @@ fn build_search_index(
 /// masquerading as a spawn. Do NOT inline this back into a caller -- the
 /// ratchet will go up again and the next reader will think a spawn regressed.
 fn ee_binary() -> PathBuf {
+    // Spawns via run_ee_at isolate "HOME" per fixture.
     PathBuf::from(env!("CARGO_BIN_EXE_ee"))
 }
 

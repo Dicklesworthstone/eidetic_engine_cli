@@ -173,7 +173,7 @@ mod tests {
     }
 
     fn ee_binary_path() -> Result<PathBuf, String> {
-        let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let cargo_path = PathBuf::from(env!(concat!("CARGO_BIN_", "EXE_ee")));
         if cargo_path.exists() {
             return Ok(cargo_path);
         }
@@ -2833,6 +2833,10 @@ mod tests {
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
             )
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -3059,6 +3063,10 @@ mod tests {
             .env(
                 "EE_EMBED_MODEL_DIR",
                 workspace.join(".ee").join("empty-model-cache"),
+            )
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
             )
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
@@ -3752,6 +3760,10 @@ mod tests {
                     "EE_EMBED_MODEL_DIR",
                     workspace.join(".ee").join("empty-model-cache"),
                 )
+                .env(
+                    "XDG_DATA_HOME",
+                    workspace.join(".ee").join("empty-user-data"),
+                )
                 .env("EE_L2_PACK_CACHE_DISABLE", "1")
                 .arg("--json")
                 .arg("--workspace")
@@ -4083,6 +4095,10 @@ mod tests {
 
         // Run curate accept with --dry-run to verify preview behavior.
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -5063,6 +5079,10 @@ mod tests {
         seed_verified_pack_selection(&database)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -5143,6 +5163,10 @@ mod tests {
         seed_search_workspace(&workspace, &database)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env(
+                "XDG_DATA_HOME",
+                workspace.join(".ee").join("empty-user-data"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)

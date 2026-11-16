@@ -29,7 +29,8 @@ fn parse_stdout_json(output: &Output, context: &str) -> Result<JsonValue, String
 
 #[test]
 fn diag_plan_cache_real_binary_emits_response_envelope() -> TestResult {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .env("EE_QUERY_PLAN_CACHE_ENTRIES", "4")
         .args(["--json", "diag", "plan-cache"])
         .output()

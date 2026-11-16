@@ -25,13 +25,13 @@
 //!
 //! Mirrors the harness shape of tests/e2e_cass_import_since_invalid_duration.rs
 //! (bd-cnsxf) and tests/e2e_context_show_missing_db.rs (bd-15ilq):
-//! stdlib only, env!(CARGO_BIN_EXE_ee), table-driven, single #[test] fn.
+//! stdlib only, isolated_ee_command, table-driven, single #[test] fn.
 
 #![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -53,7 +53,9 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str], cass_binary: &str) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-cass-invalid-bin-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .env("EE_CASS_BINARY", cass_binary)
         .args(args)
         .output()

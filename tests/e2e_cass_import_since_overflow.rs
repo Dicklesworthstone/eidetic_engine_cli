@@ -25,14 +25,14 @@
 //! test is hermetic (no fake cass binary, no DB writes, no network).
 //!
 //! Mirrors tests/e2e_cass_import_since_invalid_duration.rs harness
-//! shape: stdlib only, env!(CARGO_BIN_EXE_ee), table-driven, single
+//! shape: stdlib only, isolated_ee_command, table-driven, single
 //! #[test] fn.
 
 #![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -50,7 +50,9 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-cass-since-overflow-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

@@ -65,8 +65,24 @@ const CAPABILITIES_CASS_BINARY: &str = "tests/fixtures/missing-ee-workspace/no-c
 const GRAPH_ALGORITHMS: &[&str] = &["pagerank"];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
+    let isolated_home =
+        tempfile::tempdir().map_err(|error| format!("failed to create isolated HOME: {error}"))?;
+    let mut spellings = vec![isolated_home.path().to_string_lossy().into_owned()];
+    if let Ok(canonical) = isolated_home.path().canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if !spellings.contains(&canonical) {
+            spellings.push(canonical);
+        }
+    }
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+    ISOLATED_GOLDEN_HOME.with(|home| *home.borrow_mut() = spellings);
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("HOME", isolated_home.path())
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -117,8 +133,15 @@ fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, St
 }
 
 fn run_ee_with_deterministic_capabilities_env(args: &[&str]) -> Result<Output, String> {
+    let isolated_home =
+        tempfile::tempdir().map_err(|error| format!("failed to create isolated HOME: {error}"))?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
-    command.args(args);
+    command
+        .args(args)
+        .env("HOME", isolated_home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME");
     for (name, _) in env::vars_os() {
         if name.to_string_lossy().starts_with("EE_") {
             command.env_remove(name);

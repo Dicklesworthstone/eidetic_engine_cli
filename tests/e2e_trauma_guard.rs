@@ -14,7 +14,8 @@ type TestResult = Result<(), String>;
 const EXIT_SUCCESS: i32 = 0;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::env::temp_dir().join(format!("ee-trauma-guard-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")

@@ -17,7 +17,20 @@ const MACOS_ARTIFACT_WORKFLOW: &str = include_str!("../.github/workflows/macos-e
 const NATIVE_RERANKER_E2E: &str = include_str!("../scripts/e2e_native_reranker.sh");
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let isolated_root = args
+        .windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| temp.path().to_path_buf());
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -1878,6 +1891,10 @@ fn install_freshness_claim_gate_e2e_script_bd_3utv2_7() -> TestResult {
 
     let output = Command::new("bash")
         .arg(&script)
+        .env("HOME", artifacts.join("home"))
+        .env("XDG_DATA_HOME", artifacts.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", artifacts.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BIN", env!("CARGO_BIN_EXE_ee"))
         .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
         .env("EE_E2E_TMPDIR", &artifacts)

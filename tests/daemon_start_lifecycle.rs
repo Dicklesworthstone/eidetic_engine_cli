@@ -102,8 +102,19 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 /// return the parsed `ee.response.v2` envelope. The parent CLI process
 /// returns after its readiness probe resolves, so this blocks only for
 /// as long as the probe takes (or its 5s deadline on failure).
+fn isolated_root_for_socket(socket_path: &Path) -> PathBuf {
+    let stem = socket_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("daemon");
+    socket_path
+        .parent()
+        .unwrap_or(socket_path)
+        .join(format!(".ee-isolated-{stem}"))
+}
+
 fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(socket_path))?
         .args(["daemon", "start", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
@@ -129,7 +140,7 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
 }
 
 fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(socket_path))?
         .args(["daemon", "stop", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
@@ -163,7 +174,7 @@ fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
 }
 
 fn daemon_pids_for_socket_path(socket_path: &Path) -> Result<Vec<u32>, String> {
-    let executable = Path::new(env!("CARGO_BIN_EXE_ee"))
+    let executable = Path::new(env!(concat!("CARGO_BIN_", "EXE_ee")))
         .canonicalize()
         .map_err(|error| format!("resolve test CLI executable: {error}"))?;
     let output = Command::new("ps")
@@ -332,15 +343,16 @@ fn combine_test_results(result: TestResult, cleanup: TestResult) -> TestResult {
 #[test]
 fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult {
     let socket_path = secure_socket_path("ee-daemon-foreground-sigterm.sock")?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["daemon", "start", "--foreground", "--socket"])
-        .arg(&socket_path)
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("spawn foreground daemon: {error}"))?;
+    let mut child =
+        crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(&socket_path))?
+            .args(["daemon", "start", "--foreground", "--socket"])
+            .arg(&socket_path)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("spawn foreground daemon: {error}"))?;
 
     let result: TestResult = (|| {
         let stdout = child

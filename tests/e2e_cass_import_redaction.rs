@@ -445,7 +445,8 @@ fn run_import_command(
     path: &OsString,
     options: ImportRunOptions,
 ) -> Result<TimedOutput, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let iso_root = std::path::Path::new(workspace_arg).join(".ee-iso");
+    let mut command = crate::isolated_ee::isolated_ee_command(&iso_root)?;
     command.args([
         "--workspace",
         workspace_arg,
@@ -494,7 +495,8 @@ fn run_ee_json<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::path::Path::new(workspace_arg).join(".ee-iso");
+    let output = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(["--workspace", workspace_arg, "--json"])
         .args(args)
         .env("NO_COLOR", "1")

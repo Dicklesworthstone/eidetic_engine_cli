@@ -599,8 +599,12 @@ where
         .unwrap_or(0);
 
     let ee_binary = ee_binary_path();
+    let iso_root = workspace.join(".ee-iso");
     let mut cmd = Command::new(&ee_binary);
-    cmd.current_dir(workspace);
+    cmd.current_dir(workspace)
+        .env("HOME", iso_root.join("home"))
+        .env("XDG_DATA_HOME", iso_root.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso_root.join("xdg-config"));
     cmd.args(&args);
 
     let output = cmd.output();
@@ -652,6 +656,9 @@ where
 }
 
 fn ee_binary_path() -> PathBuf {
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-swarm-contention-iso-{}", std::process::id()));
+    let _ = crate::isolated_ee::isolated_ee_command(&iso_root);
     if let Some(binary) = env::var_os("EE_BINARY") {
         let path = PathBuf::from(binary);
         return if path.is_absolute() {

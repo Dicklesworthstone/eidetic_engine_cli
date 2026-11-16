@@ -41,11 +41,21 @@ fn workspace_dir() -> Result<String, String> {
 }
 
 fn run_ee(workspace: &str, args: &[&str], agent_name: Option<&str>) -> Result<Output, String> {
+    let ws = std::path::Path::new(workspace);
+    let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+    let iso = ws
+        .parent()
+        .unwrap_or(ws)
+        .join(format!(".ee-isolated-{name}"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
         .args(args)
         .arg("--workspace")
         .arg(workspace)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY");
     if let Some(agent_name) = agent_name {

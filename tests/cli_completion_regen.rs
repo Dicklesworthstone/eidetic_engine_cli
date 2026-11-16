@@ -5,7 +5,8 @@ use std::process::Command;
 type TestResult = Result<(), String>;
 
 fn run_completion(shell: &str) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["completion", shell])
         .output()
         .map_err(|error| format!("run ee completion {shell}: {error}"))?;

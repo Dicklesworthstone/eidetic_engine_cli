@@ -203,7 +203,7 @@ fn run_ee_logged(
     fields: BTreeMap<String, Value>,
 ) -> Result<CommandRun, String> {
     let started = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command = crate::isolated_ee::isolated_ee_command(&artifact_dir.join(".ee-iso"))?;
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);

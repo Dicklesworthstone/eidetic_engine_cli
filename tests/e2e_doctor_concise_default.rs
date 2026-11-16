@@ -53,7 +53,9 @@ fn run_ee(label: &str, args: &[&str]) -> Result<Output, String> {
             "argv": args,
         }),
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-doctor-concise-iso-{}", std::process::id()));
+    let output = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .env("EE_NO_COLOR", "1")
         .env_remove("EE_WORKSPACE")
@@ -581,7 +583,7 @@ fn doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution() -
         .path()
         .to_str()
         .ok_or_else(|| "environment workspace path must be UTF-8".to_owned())?;
-    let env_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let env_output = crate::isolated_ee::isolated_ee_command(unrelated_cwd.path())?
         .args(["doctor", "--list-runs"])
         .current_dir(unrelated_cwd.path())
         .env("EE_NO_COLOR", "1")
@@ -617,7 +619,7 @@ fn doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution() -
         .path()
         .to_str()
         .ok_or_else(|| "walk-up workspace path must be UTF-8".to_owned())?;
-    let walk_up_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let walk_up_output = crate::isolated_ee::isolated_ee_command(unrelated_cwd.path())?
         .args(["doctor", "--list-runs"])
         .current_dir(&nested)
         .env("EE_NO_COLOR", "1")

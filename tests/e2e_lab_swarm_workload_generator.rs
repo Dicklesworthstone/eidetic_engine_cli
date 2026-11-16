@@ -28,7 +28,7 @@ fn run_generate_workload(
     profile: &str,
     fixture_seed: &str,
 ) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
@@ -48,7 +48,7 @@ fn run_promote_workload(
     profile: &str,
     agents: u16,
 ) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
@@ -69,7 +69,7 @@ fn run_swarm_replay(
     trace_path: &Path,
     rch_proof_path: Option<&Path>,
 ) -> Result<Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?;
     command
         .arg("--workspace")
         .arg(workspace)
@@ -86,7 +86,7 @@ fn run_swarm_replay(
 }
 
 fn run_swarm_replay_dry_run(workspace: &Path, trace_path: &Path) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")

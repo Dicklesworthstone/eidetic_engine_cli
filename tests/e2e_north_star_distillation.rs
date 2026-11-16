@@ -32,12 +32,10 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
-fn ee_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
-
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_bin())
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-north-star-distill-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .env("NO_COLOR", "1")
         .output()
@@ -45,7 +43,9 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 }
 
 fn run_ee_with_env(args: &[&str], envs: &[(&str, String)]) -> Result<Output, String> {
-    let mut command = Command::new(ee_bin());
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-north-star-distill-iso-{}", std::process::id()));
+    let mut command = crate::isolated_ee::isolated_ee_command(&iso_root)?;
     command.args(args).env("NO_COLOR", "1");
     for (key, value) in envs {
         command.env(key, value);

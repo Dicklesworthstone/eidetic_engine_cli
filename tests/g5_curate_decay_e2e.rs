@@ -11,9 +11,14 @@ fn g5_curate_decay_script_passes_with_cargo_built_binary() {
         std::process::id()
     ));
 
+    let temp = tempfile::tempdir().expect("isolated tempdir");
     let output = Command::new("bash")
         .arg(&script)
         .current_dir(repo_root)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BINARY", ee_binary)
         .env("EE_E2E_KEEP_WORKSPACE", "1")
         .env("EE_TEST_LOG_PATH", &log_path)

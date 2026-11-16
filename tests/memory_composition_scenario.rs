@@ -111,7 +111,8 @@ fn run_step(
     args: Vec<String>,
     expected_schema: &str,
 ) -> Result<(CommandLog, Option<JsonValue>), String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let isolated_root = scenario_dir.join(".ee-isolated-env");
+    let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
     command.args(&args);
 
     let start = Instant::now();

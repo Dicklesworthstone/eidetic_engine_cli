@@ -35,13 +35,19 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::env::temp_dir().join(format!(
+        "ee-curate-propose-derived-iso-{}",
+        std::process::id()
+    ));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_copyable_ee_command(command: &str) -> Result<Output, String> {
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-curate-propose-copy-iso-{}", std::process::id()));
     let ee_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
     let ee_dir = ee_path
         .parent()
@@ -56,6 +62,9 @@ fn run_copyable_ee_command(command: &str) -> Result<Output, String> {
         .arg("-c")
         .arg(command)
         .env("PATH", path)
+        .env("HOME", iso_root.join("home"))
+        .env("XDG_DATA_HOME", iso_root.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso_root.join("xdg-config"))
         .output()
         .map_err(|error| format!("failed to run copied command `{command}`: {error}"))
 }

@@ -313,7 +313,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
@@ -333,7 +333,7 @@ fn spawn_remember_process(
 ) -> thread::JoinHandle<Result<Output, String>> {
     thread::spawn(move || {
         start.wait();
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
             .arg("--workspace")
             .arg(workspace)
             .arg("--json")
@@ -355,7 +355,7 @@ fn spawn_context_process(
 ) -> thread::JoinHandle<Result<Output, String>> {
     thread::spawn(move || {
         start.wait();
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
             .arg("--workspace")
             .arg(workspace)
             .arg("--json")

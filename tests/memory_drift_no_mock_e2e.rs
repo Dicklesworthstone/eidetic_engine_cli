@@ -218,7 +218,8 @@ fn run_ee(
             embed_model_dir.display()
         )
     })?;
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let isolated_root = artifact_dir.join(".ee-isolated-env");
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_EMBED_MODEL_DIR", &embed_model_dir)
         .env_remove("EE_EMBED_MODEL_PATH")
@@ -1415,7 +1416,8 @@ fn run_ee_swarm(
     args: &[&str],
 ) -> Result<CommandOutput, String> {
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let isolated_root = artifact_dir.join(".ee-isolated-env");
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .current_dir(workspace)
         .output()

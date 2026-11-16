@@ -59,7 +59,7 @@ where
 
 fn run_ee(workspace: &Path, args: &[&str], env: DedupEnv<'_>) -> Result<TimedOutput, String> {
     let started = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?;
     command
         .current_dir(workspace)
         .args(args)

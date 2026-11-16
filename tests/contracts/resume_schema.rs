@@ -838,6 +838,10 @@ fn run_resume_e2e_script_bridge(scope: &str) -> TestResult {
         ),
     )?;
     let mut child = Command::new(&script)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BIN", ee_bin)
         .env("EE_BINARY", ee_bin)
         .env("EE_E2E_TMPDIR", temp.path())

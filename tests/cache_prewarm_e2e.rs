@@ -78,8 +78,12 @@ fn run_ee_logged(
     let manifest_bytes = fs::read(manifest_path)
         .map_err(|error| format!("read manifest {}: {error}", manifest_path.display()))?;
     let manifest_hash = hash_bytes(&manifest_bytes);
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(".ee-isolated-env");
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .current_dir(workspace)
         .args(args)
         .output()

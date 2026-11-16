@@ -387,12 +387,9 @@ mod structured {
     }
 }
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
-
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    let iso_root = std::env::temp_dir().join(format!("ee-error-recall-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")

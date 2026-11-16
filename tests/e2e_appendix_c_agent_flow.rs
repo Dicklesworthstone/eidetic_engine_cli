@@ -188,7 +188,7 @@ fn run_step_with_env(
 ) -> Result<(CommandEvent, JsonValue), String> {
     let started_at_unix_ms = unix_ms_now()?;
     let start = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?;
     command.args(&spec.args);
     // Prohibit network downloads for every step. On a host without the local
     // embedding model cached, ee's first embedding call prints a one-time

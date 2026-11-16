@@ -141,7 +141,19 @@ fn run_public_hotset_cli(
     let git_arg = git_stub.to_string_lossy().into_owned();
     let bv_arg = bv_stub.to_string_lossy().into_owned();
     let authority_arg = authority_path.to_string_lossy().into_owned();
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let iso = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
     Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .args([
             "--json",
             "--workspace",

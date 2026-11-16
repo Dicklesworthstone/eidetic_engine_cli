@@ -309,7 +309,11 @@ fn run_logged_step(
     env_overrides: &[(&str, &str)],
     spec: &StepSpec,
 ) -> Result<CommandLog, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(".ee-isolated-env");
+    let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
     command.args(&spec.args);
     for (key, value) in env_overrides {
         command.env(key, value);

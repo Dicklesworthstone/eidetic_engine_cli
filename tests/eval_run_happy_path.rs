@@ -226,7 +226,9 @@ const GOLDEN_REPORTS: &[(&str, ProcessExitCode, &str)] = &[
 ];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-eval-run-happy-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(args)
         .output()
@@ -1020,6 +1022,9 @@ fn eval_retrieval_is_independent_of_host_model_selection() -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["--json", "eval", "run", "fx.async_migration.v1"])
+        .env("HOME", scratch.join("home"))
+        .env("XDG_DATA_HOME", scratch.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", scratch.join("xdg-config"))
         .env("EE_EMBED_DOWNLOAD", "auto")
         .env("EE_EMBED_MODEL_DIR", scratch.join("missing-host-model"))
         .env("FRANKENSEARCH_API_PROVIDER", "openai")

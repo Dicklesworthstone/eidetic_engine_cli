@@ -48,6 +48,10 @@ fn single_shot_write_contention_script_real_binary_acceptance_bridge() -> TestRe
         .join("scripts/e2e_single_shot_write_contention.sh");
     let ee_bin = env!("CARGO_BIN_EXE_ee");
     let output = Command::new(&script)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BIN", ee_bin)
         .env("EE_BINARY", ee_bin)
         .env("EE_E2E_TMPDIR", temp.path())
@@ -711,11 +715,23 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let iso = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("EE_TEST_SEED", "42")
@@ -732,6 +748,14 @@ fn spawn_writer_processes(
     writer_id: usize,
 ) -> thread::JoinHandle<Result<Vec<Output>, String>> {
     thread::spawn(move || {
+        let name = workspace
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("ws");
+        let iso = workspace
+            .parent()
+            .unwrap_or(&workspace)
+            .join(format!(".ee-isolated-{name}"));
         start.wait();
         let mut outputs = Vec::with_capacity(WRITES_PER_WRITER);
         for sequence in 0..WRITES_PER_WRITER {
@@ -745,6 +769,10 @@ fn spawn_writer_processes(
                 .arg("remember")
                 .arg(content)
                 .args(["--level", "procedural", "--kind", "fact"])
+                .env("HOME", iso.join("home"))
+                .env("XDG_DATA_HOME", iso.join("xdg-data"))
+                .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+                .env("EE_EMBED_DOWNLOAD", "off")
                 .env_remove("EE_WORKSPACE")
                 .env_remove("EE_WORKSPACE_REGISTRY")
                 .env("EE_TEST_SEED", "42")

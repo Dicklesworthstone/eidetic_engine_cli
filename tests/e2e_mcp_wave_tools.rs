@@ -31,7 +31,9 @@ fn scenario_dir(name: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-mcp-wave-tools-iso-{}", std::process::id()));
+    let output = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(args)
         .output()
         .map_err(|error| format!("run ee {args:?}: {error}"))?;
@@ -111,7 +113,7 @@ fn ee_mcp_serve_stdio_lists_wave_tools_and_round_trips_recall() -> TestResult {
         "--json",
     ])?;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut child = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args(["mcp", "serve-stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

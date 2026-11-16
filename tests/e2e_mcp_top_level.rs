@@ -37,7 +37,8 @@ fn read_one_response_line(
 
 #[test]
 fn ee_mcp_serve_stdio_completes_initialize_tools_list_shutdown_handshake() -> TestResult {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root = std::env::temp_dir().join(format!("ee-mcp-top-lvl-iso-{}", std::process::id()));
+    let mut child = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(["mcp", "serve-stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -204,7 +205,7 @@ fn ee_mcp_serve_stdio_completes_initialize_tools_list_shutdown_handshake() -> Te
 }
 
 fn run_workspace_setup(workspace: &std::path::Path, args: &[&str]) -> TestResult {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)
@@ -269,7 +270,7 @@ fn ee_mcp_real_stdio_context_first_consumes_process_advisory() -> TestResult {
     )?;
     run_workspace_setup(workspace.path(), &["index", "rebuild"])?;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut child = crate::isolated_ee::isolated_ee_command(&workspace.path().join(".ee-iso"))?
         .args(["mcp", "serve-stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

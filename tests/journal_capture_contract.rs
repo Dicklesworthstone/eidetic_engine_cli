@@ -567,9 +567,14 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn journal_capture_real_binary_e2e_completes_without_false_green() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
     let output = Command::new("bash")
         .arg(repo_path("scripts/e2e_journal_capture.sh"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BIN", env!("CARGO_BIN_EXE_ee"))
         .output()
         .map_err(|error| format!("run journal capture real-binary E2E: {error}"))?;

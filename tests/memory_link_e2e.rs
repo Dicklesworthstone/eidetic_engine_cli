@@ -40,34 +40,16 @@ fn unique_run_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn ee_binary_path() -> Result<PathBuf, String> {
-    let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
-    if cargo_path.exists() {
-        return Ok(cargo_path);
-    }
-
-    let current_exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
-    let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "failed to resolve debug directory from test binary {}",
-            current_exe.display()
-        )
-    })?;
-    let sibling = debug_dir.join("ee");
-    if sibling.exists() {
-        Ok(sibling)
-    } else {
-        Err(format!(
-            "ee binary not found at {} or {}",
-            cargo_path.display(),
-            sibling.display()
-        ))
-    }
-}
-
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
-    Command::new(ee_binary_path()?)
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .current_dir(workspace)
         .args(args)
         .output()

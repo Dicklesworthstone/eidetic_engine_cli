@@ -34,8 +34,16 @@ fn temp_workspace() -> Result<tempfile::TempDir, String> {
         .map_err(|error| format!("failed to create temp workspace under /tmp: {error}"))
 }
 
+fn isolated_root_for_workspace(workspace: &str) -> std::path::PathBuf {
+    let ws = std::path::Path::new(workspace);
+    let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+    ws.parent()
+        .unwrap_or(ws)
+        .join(format!(".ee-isolated-{name}"))
+}
+
 fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    crate::isolated_ee::isolated_ee_command(&isolated_root_for_workspace(workspace))?
         .args(args)
         .arg("--workspace")
         .arg(workspace)
@@ -46,7 +54,8 @@ fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
 }
 
 fn run_ee_with_stdin(workspace: &str, args: &[&str], stdin: &[u8]) -> Result<Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command =
+        crate::isolated_ee::isolated_ee_command(&isolated_root_for_workspace(workspace))?;
     command
         .args(args)
         .arg("--workspace")

@@ -23,8 +23,25 @@ type TestResult = Result<(), String>;
 const EXIT_SUCCESS: i32 = 0;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let iso = args
+        .windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| temp.path().to_path_buf());
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()

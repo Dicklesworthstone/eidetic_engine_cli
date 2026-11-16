@@ -636,7 +636,15 @@ fn run_ee_logged_with_env(
     let cwd = env::current_dir().map_err(|error| format!("failed to resolve cwd: {error}"))?;
 
     let start = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let isolated_root = workspace
+        .map(|ws| {
+            let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+            ws.parent()
+                .unwrap_or(ws)
+                .join(format!(".ee-isolated-{name}"))
+        })
+        .unwrap_or_else(|| dossier_dir.join(".ee-isolated-env"));
+    let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
     command.args(&args).current_dir(&cwd);
     for (key, value) in env_overrides {
         command.env(key, value);
@@ -721,7 +729,15 @@ fn run_ee_logged_with_env(
 
 fn init_workspace(workspace: &Path, context: &str) -> TestResult {
     let workspace_arg = workspace.display().to_string();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(["--workspace", &workspace_arg, "--json", "init"])
         .output()
         .map_err(|error| format!("failed to initialize {context} workspace: {error}"))?;
@@ -4279,10 +4295,11 @@ fn recorder_start_event_finish_persist_real_state() -> TestResult {
         )
     })?;
     let workspace_arg = workspace.display().to_string();
-    let init_output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["--workspace", &workspace_arg, "init", "--json"])
-        .output()
-        .map_err(|error| format!("failed to initialize recorder workspace: {error}"))?;
+    let init_output =
+        crate::isolated_ee::isolated_ee_command(&workspace_root.join(".ee-isolated-workspace"))?
+            .args(["--workspace", &workspace_arg, "init", "--json"])
+            .output()
+            .map_err(|error| format!("failed to initialize recorder workspace: {error}"))?;
     ensure(
         init_output.status.success(),
         format!(
@@ -4460,10 +4477,11 @@ fn recorder_tail_reads_initialized_store_without_degraded_sentinel() -> TestResu
         )
     })?;
     let workspace_arg = workspace.display().to_string();
-    let init_output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["--workspace", &workspace_arg, "init", "--json"])
-        .output()
-        .map_err(|error| format!("failed to initialize recorder tail workspace: {error}"))?;
+    let init_output =
+        crate::isolated_ee::isolated_ee_command(&workspace_root.join(".ee-isolated-workspace"))?
+            .args(["--workspace", &workspace_arg, "init", "--json"])
+            .output()
+            .map_err(|error| format!("failed to initialize recorder tail workspace: {error}"))?;
     ensure(
         init_output.status.success(),
         format!(

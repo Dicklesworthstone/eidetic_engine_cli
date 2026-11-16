@@ -719,6 +719,14 @@ fn unique_run_id() -> Result<String, String> {
 }
 
 fn spawn_foreground_daemon(workspace: &Path) -> Result<Child, String> {
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let iso = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
@@ -733,6 +741,10 @@ fn spawn_foreground_daemon(workspace: &Path) -> Result<Child, String> {
             "--job",
             JOB_KIND,
         ])
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("NO_COLOR", "1")
@@ -832,11 +844,23 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let iso = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("NO_COLOR", "1")

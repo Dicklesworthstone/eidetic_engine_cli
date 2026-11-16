@@ -88,7 +88,9 @@ fn assert_error_envelope(
 
 #[test]
 fn ee_mcp_serve_stdio_pins_resources_read_error_envelope_vocabulary() -> TestResult {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-mcp-res-read-err-iso-{}", std::process::id()));
+    let mut child = crate::isolated_ee::isolated_ee_command(&iso_root)?
         .args(["mcp", "serve-stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

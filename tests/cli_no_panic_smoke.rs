@@ -30,7 +30,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::CommandFactory;
 use ee::cli::Cli;
 
-const EE: &str = env!("CARGO_BIN_EXE_ee");
+fn isolated_env_root(workspace: &Path) -> PathBuf {
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"))
+}
 
 fn unique_workspace(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -46,7 +55,8 @@ fn unique_workspace(label: &str) -> PathBuf {
 }
 
 fn run(workspace: &Path, args: &[&str]) -> Output {
-    Command::new(EE)
+    crate::isolated_ee::isolated_ee_command(&isolated_env_root(workspace))
+        .expect("isolated ee command")
         .args(args)
         .env("EE_WORKSPACE", workspace) // harmless if unused
         .current_dir(workspace)
@@ -283,7 +293,8 @@ fn assert_capped_did_not_crash(label: &str, result: &CappedOutput) {
 /// sweep against any command that would block — we cannot enumerate every
 /// command's required args, so some will wait on input we never supply).
 fn run_capped(workspace: &Path, args: &[&str], secs: u64) -> CappedOutput {
-    let mut child = Command::new(EE)
+    let mut child = crate::isolated_ee::isolated_ee_command(&isolated_env_root(workspace))
+        .expect("isolated ee command")
         .args(args)
         .current_dir(workspace)
         .stdin(Stdio::null())

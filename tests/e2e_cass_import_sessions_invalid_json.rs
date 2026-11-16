@@ -113,7 +113,9 @@ esac
 }
 
 fn run_ee(args: &[&str], env: &[(&str, &OsString)]) -> Result<Output, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-cass-invalid-json-iso-{}", std::process::id()));
+    let mut cmd = crate::isolated_ee::isolated_ee_command(&iso_root)?;
     cmd.args(args);
     for (key, value) in env {
         cmd.env(key, value);

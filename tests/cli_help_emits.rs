@@ -14,7 +14,8 @@ const SENTINEL_KINDS: &[&str] = &[
 const TYPED_FIELD_FILTER_TOKENS: &[&str] = &["NAME=VALUE", "NAME~VALUE", "NAME^VALUE"];
 
 fn command_help(args: &[&str]) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("run ee {}: {error}", args.join(" ")))?;
@@ -94,7 +95,8 @@ fn assert_optional_arg_without_default(
 
 #[test]
 fn init_help_promises_a_ready_search_index() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["init", "--help"])
         .output()
         .map_err(|error| format!("run ee init --help: {error}"))?;
@@ -122,7 +124,8 @@ fn init_help_promises_a_ready_search_index() -> Result<(), String> {
 
 #[test]
 fn root_help_emits_walking_skeleton_prelude() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .arg("--help")
         .output()
         .map_err(|error| format!("run ee --help: {error}"))?;
@@ -276,7 +279,8 @@ fn remember_and_search_help_document_sentinel_and_typed_field_grammars() -> Resu
 
 #[test]
 fn agent_docs_commands_json_matches_help_grammars() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["agent-docs", "commands", "--json"])
         .output()
         .map_err(|error| format!("run ee agent-docs commands --json: {error}"))?;

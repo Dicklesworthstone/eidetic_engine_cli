@@ -51,10 +51,30 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+fn isolated_root_for_args(args: &[&str], fallback: &Path) -> PathBuf {
+    args.windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     let _serial_guard = lock_real_ee_serial();
+    let temp = tempfile::tempdir().map_err(|e| format!("isolated tempdir: {e}"))?;
+    let iso = isolated_root_for_args(args, temp.path());
     let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .args(args)
         .output()
         .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))?;
@@ -98,9 +118,16 @@ fn lock_real_ee_serial() -> MutexGuard<'static, ()> {
 /// model path) in degradation scenarios.
 fn run_ee_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output, String> {
     let _serial_guard = lock_real_ee_serial();
+    let temp = tempfile::tempdir().map_err(|e| format!("isolated tempdir: {e}"))?;
+    let iso = isolated_root_for_args(args, temp.path());
     let started = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
-    command.args(args);
+    command
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .args(args);
     for (key, value) in envs {
         command.env(key, value);
     }

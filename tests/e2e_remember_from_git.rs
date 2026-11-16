@@ -97,12 +97,19 @@ fn run_logged(
     emit_event(log_path, start_event)?;
 
     let started = Instant::now();
+    let iso_root = log_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".ee-iso");
     let mut command = Command::new(program);
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
     let output = command
+        .env("HOME", iso_root.join("home"))
+        .env("XDG_DATA_HOME", iso_root.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso_root.join("xdg-config"))
         .env("NO_COLOR", "1")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
@@ -137,6 +144,11 @@ fn run_git(log_path: &Path, repo: &Path, args: &[&str]) -> TestResult {
 }
 
 fn run_ee_logged(log_path: &Path, args: &[&str]) -> Result<Output, String> {
+    let iso_root = log_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".ee-iso");
+    let _ = crate::isolated_ee::isolated_ee_command(&iso_root)?;
     run_logged(log_path, env!("CARGO_BIN_EXE_ee"), args, None)
 }
 
@@ -660,6 +672,7 @@ fn remember_defer_index_persists_plain_and_git_captures_before_publication() -> 
 #[test]
 fn remember_from_git_real_binary_captures_dry_run_apply_and_anchors() -> TestResult {
     let workspace = unique_workspace("capture")?;
+    let _ = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?;
     let log_path = workspace.join("remember_from_git_events.jsonl");
     emit_note(
         &log_path,

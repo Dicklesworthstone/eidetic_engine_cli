@@ -88,8 +88,24 @@ fn read_json(path: &Path) -> Result<Value, String> {
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let iso = args
+        .windows(2)
+        .find_map(|window| {
+            (window[0] == "--workspace").then(|| {
+                let ws = Path::new(&window[1]);
+                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+                ws.parent()
+                    .unwrap_or(ws)
+                    .join(format!(".ee-isolated-{name}"))
+            })
+        })
+        .unwrap_or_else(|| temp.path().to_path_buf());
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("HOME", iso.join("home"))
+        .env("XDG_DATA_HOME", iso.join("xdg-data"))
+        .env("XDG_CONFIG_HOME", iso.join("xdg-config"))
         .env_remove(WORKSPACE_ENV_VAR)
         .env_remove(WORKSPACE_REGISTRY_ENV_VAR)
         // Envelope conformance must not depend on a worker's model cache or

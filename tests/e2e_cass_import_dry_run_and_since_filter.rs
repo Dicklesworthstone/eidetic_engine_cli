@@ -99,7 +99,7 @@ fn dry_run_import_creates_no_persistent_state() -> TestResult {
     let cass_binary_arg = cass_binary.to_string_lossy().into_owned();
     let path_env = path_with_fake_cass(&fake_bin_dir)?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args([
             "--workspace",
             workspace_arg.as_str(),
@@ -332,7 +332,7 @@ fn since_filter_drops_pre_cutoff_sessions() -> TestResult {
     let path_env = path_with_fake_cass(&fake_bin_dir)?;
     let new_ts = format_now_minus_hours(2);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .args([
             "--workspace",
             workspace_arg.as_str(),

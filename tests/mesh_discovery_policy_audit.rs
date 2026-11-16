@@ -21,7 +21,15 @@ fn workspace_dir() -> PathBuf {
 }
 
 fn run_ee(workspace: &PathBuf, args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ws");
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(format!(".ee-isolated-{name}"));
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .arg("--workspace")
         .arg(workspace)
         .args(args)

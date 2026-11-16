@@ -38,7 +38,7 @@ fn unique_run_dir() -> Result<PathBuf, String> {
 }
 
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?
         .current_dir(workspace)
         .args(args)
         .output()

@@ -24,8 +24,13 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 fn hotset_prewarm_script_emits_event_log_and_preserves_semantics() -> TestResult {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = repo.join("scripts").join("e2e_hotset_prewarm.sh");
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
     let output = Command::new("bash")
         .arg(&script)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
         .env("EE_E2E_KEEP_WORKSPACE", "1")
         .output()

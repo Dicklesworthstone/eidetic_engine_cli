@@ -53,6 +53,7 @@ fn successful(output: Output) -> Result<Value, String> {
 #[cfg(unix)]
 #[test]
 fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_stores() -> TestResult {
+    // isolated_command isolates "HOME" and "XDG_DATA_HOME".
     let temp = TempDir::new().map_err(|error| error.to_string())?;
     let root = temp.path();
     let binary = env!("CARGO_BIN_EXE_ee");
@@ -284,6 +285,7 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
 #[cfg(unix)]
 #[test]
 fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> TestResult {
+    // isolated_command isolates "HOME" and "XDG_DATA_HOME".
     let temp = TempDir::new().map_err(|error| error.to_string())?;
     let root = temp.path();
     let binary = env!("CARGO_BIN_EXE_ee");

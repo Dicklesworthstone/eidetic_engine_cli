@@ -207,7 +207,8 @@ fn run_step(
 ) -> Result<(CommandEvent, JsonValue), String> {
     let started_at_unix_ms = unix_ms_now()?;
     let start = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let isolated_root = artifact_dir.join(".ee-isolated-env");
+    let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
     command.args(&spec.args).env("NO_COLOR", "1");
     let output = command
         .output()

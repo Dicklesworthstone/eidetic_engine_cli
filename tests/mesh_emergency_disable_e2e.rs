@@ -22,7 +22,13 @@ fn temp_workspace() -> Result<tempfile::TempDir, String> {
 }
 
 fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let ws = Path::new(workspace);
+    let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+    let isolated_root = ws
+        .parent()
+        .unwrap_or(ws)
+        .join(format!(".ee-isolated-{name}"));
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
         .arg("--workspace")
         .arg(workspace)

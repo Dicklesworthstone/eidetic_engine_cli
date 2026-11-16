@@ -89,7 +89,9 @@ where
 }
 
 fn ee_command(workspace: &str, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let iso_root = std::path::Path::new(workspace).join(".ee-iso");
+    let mut command =
+        crate::isolated_ee::isolated_ee_command(&iso_root).expect("isolated ee command");
     command
         .arg("--workspace")
         .arg(workspace)
