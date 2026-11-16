@@ -9102,6 +9102,50 @@ fn model_initialization_checkpoint(cx: &asupersync::Cx, phase: &str) -> Result<(
     })
 }
 
+/// Keep cancellation authoritative across synchronous registry reads and model
+/// loads. A database retry can stop because its ambient request was cancelled,
+/// and a model load can finish after the caller's deadline. Check before any
+/// work and again before accepting either a fallback or an ordinary DB error.
+/// Synchronous backend work is not preempted; its result is dropped on cancel.
+fn model_registry_step<T>(
+    cx: &asupersync::Cx,
+    phase: &str,
+    operation: impl FnOnce() -> Result<T, DbError>,
+) -> Result<T, SearchError> {
+    model_initialization_checkpoint(cx, phase)?;
+    let result = {
+        // Storage retry helpers consult the ambient context. Bind this
+        // caller only for the synchronous work, then restore the parent.
+        let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+        operation()
+    };
+    model_initialization_checkpoint(cx, phase)?;
+    result.map_err(|error| {
+        let backend_cancelled = match &error {
+            DbError::SqlModel { source, .. } => {
+                matches!(source.as_ref(), sqlmodel_core::Error::Cancelled)
+                    || matches!(
+                        source.as_ref(),
+                        sqlmodel_core::Error::Query(query)
+                            if matches!(query.kind, sqlmodel_core::error::QueryErrorKind::Cancelled)
+                    )
+            }
+            _ => false,
+        };
+        if backend_cancelled {
+            SearchError::Cancelled {
+                phase: phase.to_owned(),
+                reason: "storage backend cancelled model registry preparation".to_owned(),
+            }
+        } else {
+            SearchError::SubsystemError {
+                subsystem: "model registry",
+                source: Box::new(error),
+            }
+        }
+    })
+}
+
 impl EeLazyModel2VecEmbedder {
     fn new(model_root: PathBuf) -> Self {
         Self {
@@ -9350,6 +9394,7 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
     workspace_path: &Path,
     database_path: &Path,
 ) -> Result<EmbedderPreparation, SearchError> {
+    model_initialization_checkpoint(cx, "before workspace embedder preparation")?;
     let started = Instant::now();
     if configured_embedder_model_root().is_none() && database_path.exists() {
         // A resident daemon retains this ordinary unpinned reader between
@@ -9362,18 +9407,12 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
             DatabaseConfig::file(database_path.to_path_buf()),
             PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
         );
-        let db = read_pool
-            .acquire()
-            .map_err(|error| SearchError::SubsystemError {
-                subsystem: "model registry",
-                source: Box::new(error),
-            })?;
+        let db = model_registry_step(cx, "opening workspace model registry", || {
+            read_pool.acquire()
+        })?;
         if let Some(workspace_id) =
-            workspace_id_for_index_status(&db, workspace_path).map_err(|error| {
-                SearchError::SubsystemError {
-                    subsystem: "model registry",
-                    source: Box::new(error),
-                }
+            model_registry_step(cx, "resolving model registry workspace", || {
+                workspace_id_for_index_status(&db, workspace_path)
             })?
         {
             #[cfg(test)]
@@ -9383,6 +9422,7 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                 .ok()
                 .and_then(|overrides| overrides.get(&workspace_id).cloned())
             {
+                model_initialization_checkpoint(cx, "after workspace embedder preparation")?;
                 let (backend, model_resolution) = if stack.fast().is_semantic() {
                     (
                         EmbedBackend::NeuralLocal,
@@ -9401,10 +9441,9 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                     stack.fast_arc(),
                 ));
             }
-            if let Some(selection) = workspace_registry_embedder_selection(&db, &workspace_id)
-                .map_err(|error| SearchError::SubsystemError {
-                    subsystem: "model registry",
-                    source: Box::new(error),
+            if let Some(selection) =
+                model_registry_step(cx, "preparing registered workspace embedder", || {
+                    workspace_registry_embedder_selection(&db, &workspace_id)
                 })?
             {
                 // bd-p1b4e. Same rule as `active_embed_backend`, and note that
@@ -18361,6 +18400,40 @@ mod tests {
                     && DEFAULT_SEARCH_EMBEDDER.get().is_none(),
                 "isolated child must start without a configured model root or resolved defaults",
             )?;
+            for expired_deadline in [false, true] {
+                let cx = if expired_deadline {
+                    asupersync::Cx::for_testing_with_budget(
+                        asupersync::Budget::INFINITE.with_deadline(asupersync::Time::ZERO),
+                    )
+                } else {
+                    let cx = asupersync::Cx::for_testing();
+                    cx.set_cancel_reason(asupersync::CancelReason::user(
+                        "cancelled before registered model preparation",
+                    ));
+                    cx
+                };
+                let preparation = crate::core::run_cli_future(
+                    prepare_search_embedder_for_workspace(&cx, &workspace, &database),
+                )
+                .map_err(|error| error.to_string())?;
+                ensure(
+                    matches!(preparation, Err(SearchError::Cancelled { .. })),
+                    "cancelled registry preparation must not return a successful fallback",
+                )?;
+                ensure(
+                    matches!(
+                        prepare_read_only_search_embedder_for_workspace(&cx, &workspace, &database),
+                        Err(SearchError::Cancelled { .. })
+                    ),
+                    "read-only registry preparation must preserve the same cancellation",
+                )?;
+                ensure(
+                    DEFAULT_SEARCH_EMBEDDER.get().is_none()
+                        && ACTIVE_REMOTE_EMBEDDER.get().is_none()
+                        && REGISTERED_MODEL2VEC_CACHE.get().is_none(),
+                    "cancelled callers must leave all model caches cold",
+                )?;
+            }
             let connection =
                 DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
             let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
@@ -18926,6 +18999,132 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn model_registry_step_does_not_start_after_cancellation_or_deadline() -> TestResult {
+        let cancelled = asupersync::Cx::for_testing();
+        cancelled.set_cancel_reason(asupersync::CancelReason::user("registry caller stopped"));
+        let expired = asupersync::Cx::for_testing_with_budget(
+            asupersync::Budget::INFINITE.with_deadline(asupersync::Time::ZERO),
+        );
+        for cx in [cancelled, expired] {
+            let started = std::cell::Cell::new(false);
+            let result = model_registry_step(&cx, "registry admission test", || {
+                started.set(true);
+                Ok(())
+            });
+            ensure(
+                !started.get() && matches!(result, Err(SearchError::Cancelled { .. })),
+                "a cancelled or expired request must not open the registry or load a model",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn model_registry_step_restores_ambient_context_on_success_and_storage_error() -> TestResult {
+        let parent = asupersync::Cx::for_testing();
+        let parent_reason = asupersync::CancelReason::user("unrelated ambient request");
+        parent.set_cancel_reason(parent_reason.clone());
+        let _parent = asupersync::Cx::set_current(Some(parent));
+        let cx = asupersync::Cx::for_testing();
+
+        let stack = model_registry_step(&cx, "successful registry read", || {
+            // The real storage retry boundary must see the explicit live
+            // caller, not the unrelated cancelled ambient context.
+            crate::db::sleep_retry_delay_or_cancel(DbOperation::Query, Duration::ZERO)?;
+            Ok(hash_fallback_embedder_stack())
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            stack.fast().id() == HashEmbedder::default_256().id()
+                && !stack.fast().is_semantic()
+                && cx.cancel_reason().is_none(),
+            "a live caller must retain its successful registry fallback",
+        )?;
+        ensure(
+            asupersync::Cx::current().and_then(|current| current.cancel_reason())
+                == Some(parent_reason.clone()),
+            "successful registry work must restore the previous ambient request",
+        )?;
+
+        let error = model_registry_step::<()>(&cx, "failed registry read", || {
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "registry metadata is malformed".to_owned(),
+            })
+        })
+        .err()
+        .ok_or_else(|| "an ordinary registry failure must remain an error".to_owned())?;
+        let SearchError::SubsystemError { subsystem, source } = error else {
+            return Err("an uncancelled storage failure must retain its subsystem type".to_owned());
+        };
+        ensure(
+            subsystem == "model registry"
+                && matches!(
+                    source.downcast_ref::<DbError>(),
+                    Some(DbError::MalformedRow { .. })
+                ),
+            "the original DB error must remain available to storage-error callers",
+        )?;
+        ensure(
+            asupersync::Cx::current().and_then(|current| current.cancel_reason())
+                == Some(parent_reason),
+            "failed registry work must restore the previous ambient request",
+        )
+    }
+
+    #[test]
+    fn model_registry_step_cancellation_beats_fallback_and_storage_failure() -> TestResult {
+        let parent = asupersync::Cx::for_testing();
+        let parent_reason = asupersync::CancelReason::user("registry parent sentinel");
+        parent.set_cancel_reason(parent_reason.clone());
+        let _parent = asupersync::Cx::set_current(Some(parent));
+        for expected in [
+            asupersync::CancelReason::user("cancelled during registered model load"),
+            asupersync::CancelReason::deadline().with_message("registered model load deadline"),
+        ] {
+            for storage_error in [false, true] {
+                let cx = asupersync::Cx::for_testing();
+                let result = model_registry_step(&cx, "registered model load", || {
+                    let ambient = asupersync::Cx::current().expect("registry caller is installed");
+                    ambient.set_cancel_reason(expected.clone());
+                    if storage_error {
+                        // Exercise the production DB retry path, which returns
+                        // sqlmodel::Error::Cancelled via the ambient caller.
+                        crate::db::sleep_retry_delay_or_cancel(DbOperation::Query, Duration::ZERO)?;
+                    }
+                    Ok(hash_fallback_embedder_stack())
+                });
+                ensure(
+                    matches!(result, Err(SearchError::Cancelled { reason, .. }) if reason == expected.to_string())
+                        && cx.cancel_reason() == Some(expected.clone()),
+                    "cancellation must override both a completed fallback and its storage error",
+                )?;
+                ensure(
+                    asupersync::Cx::current().and_then(|current| current.cancel_reason())
+                        == Some(parent_reason.clone()),
+                    "cancellation must restore the unrelated ambient request",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn model_registry_step_preserves_backend_cancellation_without_caller_flag() -> TestResult {
+        let cx = asupersync::Cx::for_testing();
+        let result = model_registry_step::<()>(&cx, "backend registry cancellation", || {
+            Err(DbError::SqlModel {
+                operation: DbOperation::Query,
+                source: Box::new(sqlmodel_core::Error::Cancelled),
+            })
+        });
+        ensure(
+            matches!(result, Err(SearchError::Cancelled { .. })) && cx.cancel_reason().is_none(),
+            "typed backend cancellation must not turn into a registry storage error",
+        )
     }
 
     #[test]

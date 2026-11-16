@@ -244,6 +244,7 @@ pub(crate) fn prepare_read_only_search_embedder_for_workspace(
     workspace_path: &Path,
     database_path: &Path,
 ) -> Result<EmbedderPreparation, SearchError> {
+    model_initialization_checkpoint(cx, "before read-only embedder discovery")?;
     prepare_read_only_search_embedder_with_settings(
         cx,
         workspace_path,
@@ -268,31 +269,23 @@ fn prepare_read_only_search_embedder_with_settings(
             PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
         )
     });
-    let database = read_pool
-        .as_ref()
-        .map(|pool| pool.acquire())
-        .transpose()
-        .map_err(|error| SearchError::SubsystemError {
-            subsystem: "model registry",
-            source: Box::new(error),
+    let database = model_registry_step(cx, "opening read-only model registry", || {
+        read_pool.as_ref().map(|pool| pool.acquire()).transpose()
+    })?;
+    let workspace_id =
+        model_registry_step(cx, "resolving read-only model registry workspace", || {
+            database
+                .as_ref()
+                .map(|database| workspace_id_for_index_status(database, workspace_path))
+                .transpose()
+                .map(Option::flatten)
         })?;
-    let workspace_id = database
-        .as_ref()
-        .map(|database| workspace_id_for_index_status(database, workspace_path))
-        .transpose()
-        .map_err(|error| SearchError::SubsystemError {
-            subsystem: "model registry",
-            source: Box::new(error),
-        })?
-        .flatten();
-    let selection = cached_local_selection(
-        database.as_deref().zip(workspace_id.as_deref()),
-        settings,
-        remote_selected,
-    )
-    .map_err(|error| SearchError::SubsystemError {
-        subsystem: "model registry",
-        source: Box::new(error),
+    let selection = model_registry_step(cx, "preparing read-only workspace embedder", || {
+        cached_local_selection(
+            database.as_deref().zip(workspace_id.as_deref()),
+            settings,
+            remote_selected,
+        )
     })?;
     model_initialization_checkpoint(cx, "after read-only embedder preparation")?;
     let backend = if selection.stack.fast().is_semantic() {
