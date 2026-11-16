@@ -33,13 +33,13 @@ Release(candidate) ==
 
 Stutter ==
   /\ reservations' = reservations
-  /\ step' = step + 1
+  /\ step' = IF step < MaxStep THEN step + 1 ELSE step
 
 Next ==
-  /\ step < MaxStep
-  /\ \/ \E candidate \in Reservation : Grant(candidate)
-     \/ \E candidate \in reservations : Release(candidate)
-     \/ Stutter
+  \/ /\ step < MaxStep
+     /\ \/ \E candidate \in Reservation : Grant(candidate)
+        \/ \E candidate \in reservations : Release(candidate)
+  \/ Stutter
 
 \* invariant: exclusive_reservations_do_not_overlap
 NoOverlap ==

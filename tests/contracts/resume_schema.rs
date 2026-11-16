@@ -913,7 +913,13 @@ fn run_resume_e2e_script_bridge(scope: &str) -> TestResult {
     let roots = std::fs::read_dir(temp.path())
         .map_err(|error| format!("read E2E temp root {}: {error}", temp.path().display()))?
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("ee-resume-e2e."))
+        })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
     ensure(

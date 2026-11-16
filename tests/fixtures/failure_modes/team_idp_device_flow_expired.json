@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "team_idp_device_flow_expired",
+  "introduced_by": {
+    "bead": "bd-n8r09",
+    "epic_letter": "T"
+  },
+  "surfaces": ["team idp device"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An RFC 8628 OIDC device authorization grant or poll budget expired before the member completed verification (`expired_token` or poll deadline exceeded).",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee team create --name Analysts --workspace ."
+    ],
+    "invocation": "ee team idp device --execute --discovery-json discovery.json --authorization-json expired-auth.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "team_idp_device_flow_expired",
+    "severity": "warning",
+    "message_contains": ["team_idp_device_flow_expired"],
+    "repair_contains": "ee team idp device"
+  }
+}

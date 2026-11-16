@@ -9261,18 +9261,25 @@ mod tests {
         request.params["strictSourceMode"] = serde_json::json!(false);
         let (instant_options, _, _, _) = DaemonSearchParams::from_value(&request.params)
             .expect("instant search params")
-            .into_search_parts(request.workspace_id.as_deref().expect("workspace authority"))
+            .into_search_parts(
+                request
+                    .workspace_id
+                    .as_deref()
+                    .expect("workspace authority"),
+            )
             .expect("instant search options");
         let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
         assert!(response.error.is_none(), "{response:?}");
         let result = response.result.expect("instant lexical retrieval");
-        let handoff =
-            crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
-                .expect("instant handoff");
+        let handoff = crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
+            .expect("instant handoff");
         assert!(handoff.matches_request(&instant_options));
         assert!(handoff.snapshot_matches(&instant_options, &connection));
         assert!(!handoff.has_cached_local_embedder());
-        assert_eq!(handoff.report.source_mode_requested, SearchSourceMode::Hybrid);
+        assert_eq!(
+            handoff.report.source_mode_requested,
+            SearchSourceMode::Hybrid
+        );
         assert_eq!(
             handoff.report.source_mode_applied,
             SearchSourceMode::LexicalOnly

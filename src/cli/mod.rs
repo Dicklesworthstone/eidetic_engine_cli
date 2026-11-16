@@ -97921,13 +97921,21 @@ mod tests {
 
         for pack_retrieval in [false, true] {
             for (speed, source_mode, should_dispatch) in [
-                (crate::search::SpeedMode::Instant, SearchSourceMode::Hybrid, true),
+                (
+                    crate::search::SpeedMode::Instant,
+                    SearchSourceMode::Hybrid,
+                    true,
+                ),
                 (
                     crate::search::SpeedMode::Default,
                     SearchSourceMode::LexicalOnly,
                     true,
                 ),
-                (crate::search::SpeedMode::Default, SearchSourceMode::Hybrid, false),
+                (
+                    crate::search::SpeedMode::Default,
+                    SearchSourceMode::Hybrid,
+                    false,
+                ),
             ] {
                 let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
                 let socket_path = temp.path().join("warming-daemon.sock");
@@ -97949,8 +97957,8 @@ mod tests {
                         DAEMON_SEARCH_RESPONSE_SCHEMA_V4
                     };
                     let mut capabilities_stream = accept_before(&listener, deadline)?;
-                    let request =
-                        read_request(&mut capabilities_stream).map_err(|error| error.to_string())?;
+                    let request = read_request(&mut capabilities_stream)
+                        .map_err(|error| error.to_string())?;
                     ensure_equal(
                         &request.method.as_str(),
                         &METHOD_CAPABILITIES,
@@ -97999,8 +98007,7 @@ mod tests {
                         request.workspace_id,
                         serde_json::json!({"served_during_warmup": true}),
                     );
-                    write_response(&mut search_stream, &response)
-                        .map_err(|error| error.to_string())
+                    write_response(&mut search_stream, &response).map_err(|error| error.to_string())
                 });
                 let options = SearchOptions {
                     workspace_path: temp.path().to_path_buf(),

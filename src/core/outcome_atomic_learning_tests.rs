@@ -532,7 +532,11 @@ fn zero_weight_helpful_feedback_cannot_authorize_later_legacy_promotion() {
             OutcomeRecordStatus::Recorded
         );
         assert_eq!(
-            fixture.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
+            fixture
+                .db
+                .get_memory_trust_class(MEMORY)
+                .unwrap()
+                .as_deref(),
             Some("legacy_import")
         );
 
@@ -543,7 +547,11 @@ fn zero_weight_helpful_feedback_cannot_authorize_later_legacy_promotion() {
             OutcomeRecordStatus::Recorded
         );
         assert_eq!(
-            fixture.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
+            fixture
+                .db
+                .get_memory_trust_class(MEMORY)
+                .unwrap()
+                .as_deref(),
             Some("cass_evidence")
         );
     }

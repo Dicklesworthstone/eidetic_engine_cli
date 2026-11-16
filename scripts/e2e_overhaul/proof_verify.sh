@@ -10,8 +10,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-WORK_DIR="${EE_PROOF_VERIFY_WORK_DIR:-$(mktemp -d /tmp/ee-proof-verify.XXXXXX)}"
+WORK_DIR="${EE_PROOF_VERIFY_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/ee-proof-verify.XXXXXX")}"
 EVENT_LOG="${EE_PROOF_VERIFY_EVENT_LOG:-}"
+
+TLA2TOOLS_VERSION="v1.8.0"
+TLA2TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/${TLA2TOOLS_VERSION}/tla2tools.jar"
+TLA2TOOLS_SHA256="7e53aa636dac8a3cb0533f343115c0548e03fc0ce5edc7739becf58d3d0fb84f"
 
 FAILED=0
 
@@ -129,8 +133,66 @@ run_lean_check() {
     fi
 }
 
+verify_sha256() {
+    local file="${1:?file required}"
+    local expected="${2:?expected sha256 required}"
+    python3 - "$file" "$expected" <<'PY'
+import hashlib
+import sys
+
+path, expected = sys.argv[1], sys.argv[2]
+digest = hashlib.sha256()
+with open(path, "rb") as handle:
+    for chunk in iter(lambda: handle.read(65536), b""):
+        digest.update(chunk)
+if digest.hexdigest() != expected:
+    raise SystemExit(1)
+PY
+}
+
+provision_tlc_shim() {
+    if command -v tlc >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v java >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local default_cache_base="${XDG_CACHE_HOME:-$HOME/.cache}"
+    if [ -d "/Volumes/USBNVME16TB/temp_agent_space" ]; then
+        default_cache_base="/Volumes/USBNVME16TB/temp_agent_space"
+    fi
+    local cache_dir="${EE_TLA2TOOLS_CACHE_DIR:-$default_cache_base/tla_cache}"
+    mkdir -p "$cache_dir"
+    local jar_path="$cache_dir/tla2tools-${TLA2TOOLS_VERSION}.jar"
+
+    if [ ! -f "$jar_path" ] || ! verify_sha256 "$jar_path" "$TLA2TOOLS_SHA256"; then
+        if ! command -v curl >/dev/null 2>&1; then
+            return 1
+        fi
+        local staged_jar="$WORK_DIR/tla2tools-${TLA2TOOLS_VERSION}.jar.part"
+        if ! curl -fsSL "$TLA2TOOLS_URL" -o "$staged_jar"; then
+            return 1
+        fi
+        if ! verify_sha256 "$staged_jar" "$TLA2TOOLS_SHA256"; then
+            return 1
+        fi
+        mv "$staged_jar" "$jar_path"
+    fi
+
+    mkdir -p "$WORK_DIR/bin"
+    cat > "$WORK_DIR/bin/tlc" <<EOF
+#!/usr/bin/env bash
+exec java -XX:+UseParallelGC -cp "$jar_path" tlc2.TLC "\$@"
+EOF
+    chmod +x "$WORK_DIR/bin/tlc"
+    export PATH="$WORK_DIR/bin:$PATH"
+    return 0
+}
+
 run_tla_check() {
     local start
+    provision_tlc_shim || true
     if ! command -v tlc >/dev/null 2>&1; then
         emit_event "tool_check" "degraded" 0 "proofs/tla/agent_mail_coordination.tla" "tla+" "tlc -workers 8 -config MC.cfg agent_mail_coordination.tla" "[\"proof_tool_missing\"]" "tlc not found in PATH"
         return 0

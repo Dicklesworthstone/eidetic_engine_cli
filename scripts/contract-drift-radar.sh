@@ -140,7 +140,8 @@ run_self_test() {
     (.violations.jsonExampleCheck | length) as $json_example_violations |
     (.violations.taxonomyXcheck | length) as $taxonomy_violations |
     (.violations.dependencyXcheck | length) as $dependency_violations |
-    ($docs_scan_violations + $json_example_violations + $taxonomy_violations + $dependency_violations) as $total_violations |
+    ((.violations.shellSchemaOwnership // []) | length) as $shell_schema_violations |
+    ($docs_scan_violations + $json_example_violations + $taxonomy_violations + $dependency_violations + $shell_schema_violations) as $total_violations |
     .schema == "ee.contract_drift_radar.v1" and
     .verdict == (if $total_violations > 0 then "violations" else "ok" end) and
     .summary.docsScanned > 0 and
@@ -159,7 +160,10 @@ run_self_test() {
       "docs/dependency-contract-matrix.md",
       "COMPREHENSIVE_PLAN.md"
     ] and
-    .summary.dependencyProfileViolations == $dependency_violations
+    .summary.dependencyProfileViolations == $dependency_violations and
+    (.summary.shellSchemaIdsChecked // 0) > 0 and
+    (.summary.shellSharedSchemaIds // 0) >= 13 and
+    (.summary.shellSchemaShapeViolations // 0) == $shell_schema_violations
   ' >/dev/null || {
     printf 'self-test FAILED: report contract did not match expected live radar shape\n' >&2
     printf '%s\n' "$report_json" >&2
@@ -184,6 +188,11 @@ run_self_test() {
   ' >/dev/null || {
     printf 'self-test FAILED: phase event set drifted\n' >&2
     printf '%s\n' "$phases_json" >&2
+    exit 1
+  }
+
+  python3 "$ROOT/scripts/check-shell-schema-ownership.py" --self-test >/dev/null || {
+    printf 'self-test FAILED: check-shell-schema-ownership.py --self-test failed\n' >&2
     exit 1
   }
 
@@ -537,7 +546,13 @@ emit_event "dependency_xcheck" "$dependency_status" \
 
 # ---- Phase 6: summary ------------------------------------------------------
 
-total_violations=$((stale_count + example_violation_count + taxonomy_orphan_count + dependency_violation_count))
+shell_schema_json="$(python3 "$ROOT/scripts/check-shell-schema-ownership.py" --root "$ROOT" --json)"
+shell_schema_distinct="$(printf '%s' "$shell_schema_json" | jq '.distinctSchemaIds // 0')"
+shell_schema_shared="$(printf '%s' "$shell_schema_json" | jq '.sharedSchemaIdCount // 0')"
+shell_schema_violations="$(printf '%s' "$shell_schema_json" | jq '.findings // []')"
+shell_schema_violation_count="$(printf '%s' "$shell_schema_violations" | jq 'length')"
+
+total_violations=$((stale_count + example_violation_count + taxonomy_orphan_count + dependency_violation_count + shell_schema_violation_count))
 verdict="ok"
 [ "$total_violations" -gt 0 ] && verdict="violations"
 
@@ -550,6 +565,10 @@ report=$(jq -n \
   --argjson examples "$example_violations" \
   --argjson taxonomy "$taxonomy_orphans" \
   --argjson dependency "$dependency_violations" \
+  --argjson shell_schema_violations "$shell_schema_violations" \
+  --argjson shell_schema_distinct "$shell_schema_distinct" \
+  --argjson shell_schema_shared "$shell_schema_shared" \
+  --argjson shell_schema_violation_count "$shell_schema_violation_count" \
   --argjson stale_count "$stale_count" \
   --argjson example_count "$example_count" \
   --argjson example_violation_count "$example_violation_count" \
@@ -577,14 +596,18 @@ report=$(jq -n \
       documentedMissingFixture: $taxonomy_orphan_count,
       dependencyDocsChecked: $dependency_docs_checked,
       dependencyDocsCheckedFiles: $dependency_docs_checked_files,
-      dependencyProfileViolations: $dependency_violation_count
+      dependencyProfileViolations: $dependency_violation_count,
+      shellSchemaIdsChecked: $shell_schema_distinct,
+      shellSharedSchemaIds: $shell_schema_shared,
+      shellSchemaShapeViolations: $shell_schema_violation_count
     },
     schemaInventory: $schema_ids,
     violations: {
       docsScan: $stale,
       jsonExampleCheck: $examples,
       taxonomyXcheck: $taxonomy,
-      dependencyXcheck: $dependency
+      dependencyXcheck: $dependency,
+      shellSchemaOwnership: $shell_schema_violations
     }
   }')
 

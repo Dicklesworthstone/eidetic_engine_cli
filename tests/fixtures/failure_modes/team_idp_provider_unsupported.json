@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "team_idp_provider_unsupported",
+  "introduced_by": {
+    "bead": "bd-n8r09",
+    "epic_letter": "T"
+  },
+  "surfaces": ["team idp set", "team idp device", "team idp status"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The OIDC discovery document requires a client secret (`client_secret_basic` without `none`) or omits required HTTPS `token_endpoint` / `device_authorization_endpoint` URLs.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee team create --name Analysts --workspace ."
+    ],
+    "invocation": "ee team idp set --issuer https://idp.example --client-id cli-client --discovery-json secret-required-discovery.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "team_idp_provider_unsupported",
+    "severity": "medium",
+    "message_contains": ["OIDC provider is unsupported", "team_idp_provider_unsupported"],
+    "repair_contains": "ee team idp set --issuer https://idp.example --client-id <id> --discovery-json <file> --workspace ."
+  }
+}

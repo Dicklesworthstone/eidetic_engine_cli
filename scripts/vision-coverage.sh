@@ -56,6 +56,7 @@ SOURCE_REF=""
 EVIDENCE_TEST_DIR="tests"
 EVIDENCE_SCRIPT_DIR="scripts"
 UNEXERCISED_BASELINE_FILE="tests/fixtures/vision_coverage/unexercised_baseline.txt"
+ORPHAN_BASELINE_FILE="tests/fixtures/e2e_invocation/orphan_baseline.txt"
 NEW_UNEXERCISED_CODE=4
 STALE_UNEXERCISED_BASELINE_CODE=5
 MISSING_EVIDENCE_CORPUS_CODE=6
@@ -989,7 +990,7 @@ REPORT_JSON=$(build_report "")
 # corpus at that ref is not read.
 EVIDENCE_WORK_DIR="${TMPDIR:-/tmp}/vision-coverage-evidence.$$"
 mkdir -p "$EVIDENCE_WORK_DIR"
-trap 'rm -f "$EVIDENCE_WORK_DIR"/documented "$EVIDENCE_WORK_DIR"/exercised "$EVIDENCE_WORK_DIR"/unexercised "$EVIDENCE_WORK_DIR"/baseline; rmdir "$EVIDENCE_WORK_DIR" 2>/dev/null || true' EXIT
+trap 'rm -f "$EVIDENCE_WORK_DIR"/documented "$EVIDENCE_WORK_DIR"/exercised "$EVIDENCE_WORK_DIR"/unexercised "$EVIDENCE_WORK_DIR"/baseline "$EVIDENCE_WORK_DIR"/orphans "$EVIDENCE_WORK_DIR"/all_pairs "$EVIDENCE_WORK_DIR"/pairs "$EVIDENCE_WORK_DIR"/evidence; rmdir "$EVIDENCE_WORK_DIR" 2>/dev/null || true' EXIT
 
 if evidence_corpus_present; then
     EVIDENCE_CORPUS_PRESENT=true
@@ -998,23 +999,47 @@ if evidence_corpus_present; then
     # and costs ~2s, and recomputing it would also let the two answers drift.
     printf "%s\n" "$REPORT_JSON" | jq -r '.documented_surfaces[]' | sort -u \
         > "$EVIDENCE_WORK_DIR/documented"
-    exercised_commands > "$EVIDENCE_WORK_DIR/pairs"
+    if [ -f "$ORPHAN_BASELINE_FILE" ]; then
+        sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$ORPHAN_BASELINE_FILE" |
+            sed '/^$/d' |
+            awk '{ print "scripts/" $0 }' > "$EVIDENCE_WORK_DIR/orphans"
+    else
+        : > "$EVIDENCE_WORK_DIR/orphans"
+    fi
+    exercised_commands > "$EVIDENCE_WORK_DIR/all_pairs"
+    if [ -s "$EVIDENCE_WORK_DIR/orphans" ]; then
+        awk -F'\t' 'FILENAME == ARGV[1] { orphan[$0] = 1; next } !($2 in orphan)' \
+            "$EVIDENCE_WORK_DIR/orphans" "$EVIDENCE_WORK_DIR/all_pairs" \
+            > "$EVIDENCE_WORK_DIR/pairs"
+    else
+        cp "$EVIDENCE_WORK_DIR/all_pairs" "$EVIDENCE_WORK_DIR/pairs"
+    fi
     cut -f1 "$EVIDENCE_WORK_DIR/pairs" | sort -u > "$EVIDENCE_WORK_DIR/exercised"
     comm -23 "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/exercised" \
         > "$EVIDENCE_WORK_DIR/unexercised"
 
-    # Per-surface proof artifact: which file actually invokes it, and how many
-    # distinct files do. Sorted, so the published witness is deterministic
-    # rather than whichever file the scan happened to reach first.
-    awk -F'\t' 'NR == FNR { documented[$0] = 1; next }
-                ($1 in documented) {
-                    if (!(($1 SUBSEP $2) in seen)) {
-                        seen[$1 SUBSEP $2] = 1
-                        count[$1]++
-                        if (!($1 in witness) || $2 < witness[$1]) witness[$1] = $2
-                    }
+    # Per-surface proof artifact: which reachable file actually invokes it, and
+    # how many distinct reachable files do. Sorted, so the published witness is
+    # deterministic rather than whichever file the scan happened to reach first.
+    # Scripts listed in $ORPHAN_BASELINE_FILE are excluded above so an
+    # unreachable e2e script can neither satisfy behavioral coverage nor be
+    # selected as a surface witness (bd-2mpct.1).
+    awk -F'\t' '
+        FILENAME == ARGV[1] { documented[$0] = 1; next }
+        ($1 in documented) {
+            if (!(($1 SUBSEP $2) in seen)) {
+                seen[$1 SUBSEP $2] = 1
+                count[$1]++
+                if (!($1 in witness) || $2 < witness[$1]) {
+                    witness[$1] = $2
                 }
-                END { for (cmd in witness) printf "%s\t%s\t%d\n", cmd, witness[cmd], count[cmd] }' \
+            }
+        }
+        END {
+            for (cmd in witness) {
+                printf "%s\t%s\t%d\t%d\n", cmd, witness[cmd], count[cmd], count[cmd]
+            }
+        }' \
         "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/pairs" |
         sort > "$EVIDENCE_WORK_DIR/evidence"
     baseline_unexercised_entries > "$EVIDENCE_WORK_DIR/baseline"
@@ -1046,12 +1071,13 @@ REPORT_JSON=$(
             --argjson evidence "$(
                 if [ -f "$EVIDENCE_WORK_DIR/evidence" ]; then
                     jq -Rsc 'split("\n") | map(select(length > 0) | split("\t"))
-                             | map({surface: .[0], witness: .[1], sources: (.[2] | tonumber)})' \
+                             | map({surface: .[0], witness: .[1], sources: (.[2] | tonumber), reachable_sources: ((.[3] // .[2]) | tonumber)})' \
                         < "$EVIDENCE_WORK_DIR/evidence"
                 else
                     echo '[]'
                 fi
             )" \
+            --arg last_commit "${EE_VERIFICATION_SOURCE_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')}" \
             --arg baseline_file "$UNEXERCISED_BASELINE_FILE" '
               . + {
                 # Whether a documented surface is actually INVOKED by something
@@ -1061,6 +1087,7 @@ REPORT_JSON=$(
                   corpus_present: $corpus_present,
                   corpus: ["tests/**/*.rs (excluding tests/fixtures/)", "scripts/**/*.sh"],
                   baseline_file: $baseline_file,
+                  last_verified_commit: $last_commit,
                   exercised: $exercised,
                   unexercised: $unexercised,
                   newly_unexercised: $newly,

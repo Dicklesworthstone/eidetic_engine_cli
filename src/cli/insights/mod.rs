@@ -416,6 +416,8 @@ type InsightsDegradedInput = (&'static str, DegradationReport);
 
 #[derive(Clone, Copy, Debug)]
 struct GraphFeatureGate {
+    code: &'static str,
+    severity: &'static str,
     key: &'static str,
     message: &'static str,
     repair: &'static str,
@@ -749,8 +751,8 @@ fn build_registry_section_with_runtime_gate(
                     degraded_signal: Some((
                         display_name,
                         DegradationReport {
-                            code: "graph_feature_disabled",
-                            severity: "medium",
+                            code: gate.code,
+                            severity: gate.severity,
                             message: gate.message,
                             repair: gate.repair,
                         },
@@ -884,26 +886,36 @@ fn build_registry_section(
 fn graph_feature_gate_for_section(display_name: &str) -> Option<GraphFeatureGate> {
     match display_name {
         "authorities" | "hubs" => Some(GraphFeatureGate {
+            code: "graph_hits_profiles_disabled",
+            severity: "info",
             key: GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
             message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
             repair: "ee config set graph.feature.hits_profiles.enabled true",
         }),
         "causalBottlenecks" => Some(GraphFeatureGate {
+            code: "graph_feature_disabled",
+            severity: "medium",
             key: GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
             message: "Causal bottleneck insights are disabled by graph.feature.causal_explain.enabled.",
             repair: "ee config set graph.feature.causal_explain.enabled true",
         }),
         "knowledgeSkyline" => Some(GraphFeatureGate {
+            code: "graph_feature_disabled",
+            severity: "medium",
             key: GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
             message: "Knowledge skyline insights are disabled by graph.feature.skyline.enabled.",
             repair: "ee config set graph.feature.skyline.enabled true",
         }),
         "loadBearingMemories" => Some(GraphFeatureGate {
+            code: "graph_feature_disabled",
+            severity: "medium",
             key: GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
             message: "Load-bearing memory insights are disabled by graph.feature.load_bearing.enabled.",
             repair: "ee config set graph.feature.load_bearing.enabled true",
         }),
         "revisionFrontiers" => Some(GraphFeatureGate {
+            code: "graph_feature_disabled",
+            severity: "medium",
             key: GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
             message: "Revision frontier insights are disabled by graph.feature.revision_dominance.enabled.",
             repair: "ee config set graph.feature.revision_dominance.enabled true",
@@ -4869,37 +4881,49 @@ mod tests {
         let cases = [
             (
                 "causalBottlenecks",
+                "graph_feature_disabled",
+                "medium",
                 "Causal bottleneck insights are disabled by graph.feature.causal_explain.enabled.",
                 "ee config set graph.feature.causal_explain.enabled true",
             ),
             (
                 "revisionFrontiers",
+                "graph_feature_disabled",
+                "medium",
                 "Revision frontier insights are disabled by graph.feature.revision_dominance.enabled.",
                 "ee config set graph.feature.revision_dominance.enabled true",
             ),
             (
                 "knowledgeSkyline",
+                "graph_feature_disabled",
+                "medium",
                 "Knowledge skyline insights are disabled by graph.feature.skyline.enabled.",
                 "ee config set graph.feature.skyline.enabled true",
             ),
             (
                 "loadBearingMemories",
+                "graph_feature_disabled",
+                "medium",
                 "Load-bearing memory insights are disabled by graph.feature.load_bearing.enabled.",
                 "ee config set graph.feature.load_bearing.enabled true",
             ),
             (
                 "hubs",
+                "graph_hits_profiles_disabled",
+                "info",
                 "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
                 "ee config set graph.feature.hits_profiles.enabled true",
             ),
             (
                 "authorities",
+                "graph_hits_profiles_disabled",
+                "info",
                 "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
                 "ee config set graph.feature.hits_profiles.enabled true",
             ),
         ];
 
-        for (section, message, repair) in cases {
+        for (section, expected_code, expected_severity, message, repair) in cases {
             let workspace = unique_insights_workspace(section)?;
             write_graph_feature_config(&workspace, false)?;
             // A fully gated request must not open unrelated graph storage.
@@ -4926,8 +4950,8 @@ mod tests {
             assert_eq!(section_names(&report), vec![section]);
             assert!(report.sections[0].items.is_empty());
             assert_eq!(report.degraded_signals.len(), 1);
-            assert_eq!(report.degraded_signals[0].code, "graph_feature_disabled");
-            assert_eq!(report.degraded_signals[0].severity, "medium");
+            assert_eq!(report.degraded_signals[0].code, expected_code);
+            assert_eq!(report.degraded_signals[0].severity, expected_severity);
             assert_eq!(report.degraded_signals[0].message, message);
             assert_eq!(report.degraded_signals[0].repair.as_deref(), Some(repair));
             assert_eq!(report.degraded_signals[0].sources, vec![section.to_owned()]);
@@ -4938,11 +4962,11 @@ mod tests {
 
     #[test]
     fn full_bundle_applies_runtime_graph_feature_gate_bd_2u60p() -> TestResult {
-        // bd-2u60p: the full-bundle path must apply the same runtime graph
-        // feature gate the selected-section path applies. With every graph
-        // rollout flag disabled, the bundle must emit graph_feature_disabled
-        // for each gated section instead of silently computing it (which it
-        // did before the fix, because it used build_registry_section directly).
+        // bd-2u60p / bd-reality-core-convergence-1azkt.54: the full-bundle path
+        // must apply the same runtime graph feature gate the selected-section
+        // path applies. With every graph rollout flag disabled, the bundle
+        // emits graph_hits_profiles_disabled (info) for hubs/authorities and
+        // graph_feature_disabled (medium) for the remaining gated sections.
         let workspace = unique_insights_workspace("full-bundle-gate")?;
         write_graph_feature_config(&workspace, false)?;
 
@@ -4964,7 +4988,7 @@ mod tests {
 
         assert_eq!(report.mode, InsightsMode::FullBundle);
 
-        assert_eq!(report.degraded_signals.len(), 2);
+        assert_eq!(report.degraded_signals.len(), 3);
         let workspace_empty = report
             .degraded_signals
             .iter()
@@ -4978,16 +5002,37 @@ mod tests {
         assert_eq!(workspace_empty.severity, "info");
         assert_eq!(workspace_empty.sources, vec!["insights".to_owned()]);
 
+        let hits_disabled = report
+            .degraded_signals
+            .iter()
+            .find(|signal| signal.code == "graph_hits_profiles_disabled")
+            .ok_or_else(|| {
+                format!(
+                    "full bundle must emit graph_hits_profiles_disabled when hits_profiles is off: {:?}",
+                    report.degraded_signals
+                )
+            })?;
+        assert_eq!(hits_disabled.severity, "info");
+        assert_eq!(
+            hits_disabled.sources,
+            vec!["authorities".to_owned(), "hubs".to_owned()]
+        );
+
         let gated_sources: std::collections::BTreeSet<&str> = report
             .degraded_signals
             .iter()
-            .filter(|signal| signal.code == "graph_feature_disabled")
+            .filter(|signal| {
+                matches!(
+                    signal.code.as_str(),
+                    "graph_feature_disabled" | "graph_hits_profiles_disabled"
+                )
+            })
             .flat_map(|signal| signal.sources.iter().map(String::as_str))
             .collect();
 
         assert!(
             !gated_sources.is_empty(),
-            "full bundle must emit graph_feature_disabled when graph flags are off, got {:?}",
+            "full bundle must emit disabled signals when graph flags are off, got {:?}",
             report.degraded_signals
         );
         for section in [
@@ -6526,8 +6571,8 @@ mod tests {
             (
                 "hubs",
                 DegradationReport {
-                    code: "graph_feature_disabled",
-                    severity: "medium",
+                    code: "graph_hits_profiles_disabled",
+                    severity: "info",
                     message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
                     repair: "ee config set graph.feature.hits_profiles.enabled true",
                 },
@@ -6535,8 +6580,8 @@ mod tests {
             (
                 "authorities",
                 DegradationReport {
-                    code: "graph_feature_disabled",
-                    severity: "medium",
+                    code: "graph_hits_profiles_disabled",
+                    severity: "info",
                     message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
                     repair: "ee config set graph.feature.hits_profiles.enabled true",
                 },
@@ -6544,7 +6589,8 @@ mod tests {
         ]);
 
         assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].code, "graph_feature_disabled");
+        assert_eq!(aggregated[0].code, "graph_hits_profiles_disabled");
+        assert_eq!(aggregated[0].severity, "info");
         assert_eq!(
             aggregated[0].sources,
             vec!["authorities".to_owned(), "hubs".to_owned()]

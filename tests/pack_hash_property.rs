@@ -266,10 +266,10 @@ fn text_degraded_signal_count(text: &str) -> Result<usize, String> {
     ))
 }
 
-/// ADR 0087 T2 banner ruling (2026-09-25): the JSON banner is a per-run report
-/// and counts every entry in `degraded[]`; canonical `pack.text` omits the
-/// volatile timing entry. With a forced overrun the two differ by exactly the
-/// volatile entries, so this fails if either side changes silently.
+/// Both the JSON `advisoryBanner` and canonical `pack.text` exclude volatile
+/// timing telemetry (`pack_assembly_elapsed_over_budget`) while `data.degraded[]`
+/// retains it as run telemetry. With a forced overrun, `banner` and `pack.text`
+/// agree in lockstep at `degraded.len() - volatile`.
 #[test]
 fn shipped_text_and_banner_disagree_by_exactly_the_volatile_entries() -> Result<(), String> {
     let envelope = shipped_envelope(timing_degradations(PackResourceProfile::Lean, 600_000))?;
@@ -297,15 +297,15 @@ fn shipped_text_and_banner_disagree_by_exactly_the_volatile_entries() -> Result<
     if volatile == 0 {
         return Err("the forced overrun must put a timing entry in degraded[]".to_owned());
     }
-    if banner != degraded.len() {
+    if banner != degraded.len() - volatile {
         return Err(format!(
-            "the banner must count every degraded[] entry: banner {banner}, degraded[] {}",
+            "the banner must count every non-volatile degraded[] entry: banner {banner}, degraded[] {}, volatile {volatile}",
             degraded.len()
         ));
     }
-    if text_count != banner - volatile {
+    if text_count != banner {
         return Err(format!(
-            "pack.text must count the banner minus the volatile entries: text {text_count}, \
+            "pack.text and advisoryBanner must agree on non-volatile degradationCount: text {text_count}, \
              banner {banner}, volatile {volatile}"
         ));
     }

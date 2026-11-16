@@ -1671,14 +1671,6 @@ pub(crate) fn run_context_pack_with_embedder(
 /// This deliberately returns pack items rather than stored memory bodies. The
 /// caller only receives content after temporal, workspace-scope, provenance,
 /// secret-screening, tier-admission, and output-redaction checks have run.
-#[cfg(test)]
-pub(crate) fn admit_recent_context_memories(
-    options: &ContextPackOptions,
-    limit: usize,
-) -> Result<Vec<AdmittedContextMemory>, ContextPackError> {
-    admit_recent_context_memories_with_connection(options, limit, None)
-}
-
 pub(crate) fn admit_recent_context_memories_with_connection(
     options: &ContextPackOptions,
     limit: usize,
@@ -3009,7 +3001,9 @@ async fn run_context_pack_attempt(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
     };
-    search_options.validate().map_err(ContextPackError::Search)?;
+    search_options
+        .validate()
+        .map_err(ContextPackError::Search)?;
     // A read-only semantic handoff is allowed only through an explicit
     // already-loaded local-model capability. Readiness alone is not proof:
     // the provider must request it and the returned handoff must attest it.
@@ -10295,12 +10289,16 @@ fn context_store_address_digest(path: &Path) -> String {
     // Address identity survives ordinary writes and resolvable path aliases.
     // Size, mtime and inode are deliberately absent: this is not a content root
     // or the stronger, process-local L2 replacement guard.
-    let canonical = path.canonicalize().unwrap_or_else(|_| {
-        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
-    });
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.store_address.v1");
-    hash_labeled_bytes(&mut hasher, "path", canonical.as_os_str().as_encoded_bytes());
+    hash_labeled_bytes(
+        &mut hasher,
+        "path",
+        canonical.as_os_str().as_encoded_bytes(),
+    );
     finalize_blake3(hasher)
 }
 
@@ -11371,12 +11369,9 @@ fn candidates_from_search_for_task_paths(
                     // Sourced rules share the existing batched parent
                     // admission, then enter the native rule lane.
                     .or_else(|| {
-                        match rule_linked_memory_id(
-                            &rule_projections,
-                            targets,
-                            hit,
-                            degraded,
-                        ) {
+                        let resolution =
+                            rule_linked_memory_id(&rule_projections, targets, hit, degraded);
+                        match resolution {
                             Some(RuleHitResolution::Linked(memory_id, projection)) => {
                                 let rule_id = projection.rule().id.clone();
                                 rules_map.insert(rule_id.clone(), projection);

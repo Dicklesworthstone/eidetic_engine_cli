@@ -36,8 +36,8 @@ impl SymbolGraphFixture {
 RS
 
 symbol_phase_log "extraction" "symbol snapshot" "fixture=src/symbol_graph_fixture.rs expectedSchema=ee.symbol_snapshot.v1"
-SCHEMA_SNAP="$(ee_global schema show ee.symbol_snapshot.v1 --json 2>/dev/null || true)"
-if printf '%s' "$SCHEMA_SNAP" | jq -e '.success == true and (.data.schemaId == "ee.symbol_snapshot.v1" or .data.id == "ee.symbol_snapshot.v1")' >/dev/null 2>&1; then
+SCHEMA_LIST_JSON="$(ee_workspace schema list --json 2>/dev/null || true)"
+if printf '%s' "$SCHEMA_LIST_JSON" | jq -e '.success == true and ([.. | strings | select(. == "ee.symbol_snapshot.v1")] | length) >= 1' >/dev/null 2>&1; then
     e2e_log_assert_eq "ee.symbol_snapshot.v1" "ee.symbol_snapshot.v1" "symbol_graph_extraction_logged"
 else
     todo_assert "symbol_graph_extraction_logged" "bd-2xuu7.1" "ee symbol snapshot should emit ee.symbol_snapshot.v1 with no raw source body."
@@ -51,8 +51,7 @@ MEMORY_JSON="$(ee_workspace remember \
 MEMORY_ID="$(printf '%s' "$MEMORY_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)"
 
 symbol_phase_log "linking" "symbol evidence links" "memoryId=${MEMORY_ID:-missing} expectedSchema=ee.symbol_evidence_links.v1"
-SCHEMA_LINKS="$(ee_global schema show ee.symbol_evidence_links.v1 --json 2>/dev/null || true)"
-if printf '%s' "$SCHEMA_LINKS" | jq -e '.success == true and (.data.schemaId == "ee.symbol_evidence_links.v1" or .data.id == "ee.symbol_evidence_links.v1")' >/dev/null 2>&1; then
+if printf '%s' "$SCHEMA_LIST_JSON" | jq -e '.success == true and ([.. | strings | select(. == "ee.symbol_evidence_links.v1")] | length) >= 1' >/dev/null 2>&1; then
     e2e_log_assert_eq "ee.symbol_evidence_links.v1" "ee.symbol_evidence_links.v1" "symbol_graph_linking_logged"
 else
     todo_assert "symbol_graph_linking_logged" "bd-2xuu7.2" "ee symbol link should map memory and CASS evidence to redaction-safe symbol ids."

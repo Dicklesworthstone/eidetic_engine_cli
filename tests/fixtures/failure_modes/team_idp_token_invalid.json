@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "team_idp_token_invalid",
+  "introduced_by": {
+    "bead": "bd-n8r09",
+    "epic_letter": "T"
+  },
+  "surfaces": ["team idp attest", "team idp device"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "An OIDC device token poll or compact JWT failed structural, claim, or signature validation against the pinned discovery and JWKS.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee team create --name Analysts --workspace ."
+    ],
+    "invocation": "ee team idp attest --id-token malformed.jwt --discovery-json discovery.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "team_idp_token_invalid",
+    "severity": "high",
+    "message_contains": ["team_idp_token_invalid"],
+    "repair_contains": "ee team idp attest --id-token - --discovery-json <file> --workspace ."
+  }
+}

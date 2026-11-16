@@ -3220,7 +3220,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-CONTEXT-ZERO-LIMIT",
         "src/core/context.rs",
-        "admit_recent_context_memories",
+        "admit_recent_context_memories_with_connection",
         "return Ok(Vec::new());",
         "A caller asking for zero memories gets zero. The guard is the explicit `if limit == 0` directly above, so this is a requested empty result and not a failed query.",
     ),
@@ -4758,7 +4758,12 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String
                 continue;
             }
             collect_rust_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("._"))
+        {
             files.push(path);
         }
     }

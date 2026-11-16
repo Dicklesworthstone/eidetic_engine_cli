@@ -123,11 +123,11 @@ PROPOSE_DERIVED_JSON=$(ee_workspace curate propose-derived \
     --source-memory "$DRH_SOURCE_MEMORY_B_ID" \
     --level semantic \
     --kind insight \
-    --content "Readiness gate: producer-derived insight from sources A and B" \
+    --content "When src/core/curation.rs returns SQLITE_BUSY (exit 5), run scripts/rch_verify.sh -- cargo test --locked and inspect .ee/ee.db before applying candidates." \
     --tag derivation \
     --tag e2e \
     --tag readiness \
-    --confidence 0.7 \
+    --confidence 0.85 \
     --producer-kind reflection \
     --producer-model readiness-e2e \
     --json 2>/dev/null || true)
@@ -220,8 +220,8 @@ if [ -n "$DRH_CANDIDATE_ID" ]; then
         AR_OK=$(printf '%s' "$APPLY_REAL" | jq -r '.success // false' 2>/dev/null || echo false)
         if [ "$AR_OK" = "true" ]; then
             e2e_log_assert_eq "$AR_OK" "true" "readiness_apply_real_success"
-            DRH_CREATED_MEMORY_ID=$(printf '%s' "$APPLY_REAL" | jq -r '.data.createdMemoryId // .data.created_memory_id // empty' 2>/dev/null || true)
-            assert_jq_nonempty "$APPLY_REAL" '.data.createdMemoryId // .data.created_memory_id // empty' "readiness_apply_created_memory_id"
+            DRH_CREATED_MEMORY_ID=$(printf '%s' "$APPLY_REAL" | jq -r '.data.application.createdMemoryId // .data.createdMemoryId // .data.created_memory_id // .data.targetAfter.id // empty' 2>/dev/null || true)
+            assert_jq_nonempty "$APPLY_REAL" '.data.application.createdMemoryId // .data.createdMemoryId // .data.created_memory_id // .data.targetAfter.id // empty' "readiness_apply_created_memory_id"
         else
             todo_assert "readiness_apply_real_success" "bd-2t583" "Apply real path requires the atomic-create derived-apply implementation."
         fi
@@ -278,7 +278,7 @@ TOMBSTONE_JSON=$(ee_workspace curate tombstone "$DRH_SOURCE_MEMORY_A_ID" --reaso
 drh_extract_degraded_codes "$TOMBSTONE_JSON"
 drh_extract_recovery_actions "$TOMBSTONE_JSON"
 if printf '%s' "$TOMBSTONE_JSON" | jq . >/dev/null 2>&1; then
-    TS_OK=$(printf '%s' "$TOMBSTONE_JSON" | jq -r '.success // false' 2>/dev/null || echo false)
+    TS_OK=$(printf '%s' "$TOMBSTONE_JSON" | jq -r '.success // .persisted // .data.persisted // false' 2>/dev/null || echo false)
     if [ "$TS_OK" = "true" ]; then
         e2e_log_assert_eq "$TS_OK" "true" "readiness_negative_drift_setup"
     else

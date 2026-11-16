@@ -10,6 +10,14 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g10_hits"
 seed_corpus
+# bd-reality-core-convergence-1azkt.54: before enabling hits_profiles, verify
+# that the default disabled config emits graph_hits_profiles_disabled at info
+# severity rather than the build-time graph_feature_disabled code.
+DISABLED_HUBS_JSON=$(ee_workspace insights --section hubs --json 2>/dev/null || true)
+if printf '%s' "$DISABLED_HUBS_JSON" | jq . >/dev/null 2>&1; then
+    assert_jq "$DISABLED_HUBS_JSON" '.data.degradedSignals[0].code // empty' "graph_hits_profiles_disabled" "g10_hits_disabled_code"
+    assert_jq "$DISABLED_HUBS_JSON" '.data.degradedSignals[0].severity // empty' "info" "g10_hits_disabled_severity"
+fi
 # graph.feature.hits_profiles.enabled DEFAULTS TO FALSE (src/config/merge.rs:1304,
 # built_in_config). This suite carried 39 of the 75 graph failures on 2026-10-19
 # -- the largest single block -- and they are the signature of a dormant
@@ -195,9 +203,11 @@ if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 \
     assert_jq "$CONTEXT_GROUNDING_JSON" '.data.pack.meta.algorithm.profile // empty' "grounding" "g10_hits_context_grounding_algorithm_profile"
     assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.pack.meta.algorithm.profile // empty' "orientation" "g10_hits_context_orientation_algorithm_profile"
     assert_jq "$CONTEXT_BALANCED_JSON" '.data.pack.meta.algorithm.profile // empty' "balanced" "g10_hits_context_balanced_algorithm_profile"
-    GROUNDING_FIRST=$(printf '%s' "$CONTEXT_GROUNDING_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
-    ORIENTATION_FIRST=$(printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
-    BALANCED_FIRST=$(printf '%s' "$CONTEXT_BALANCED_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
+    # Skip the reserved "What NOT to do:" anti-pattern/failure/risk slice when
+    # reading the first task-ranked candidate in the seeded workspace.
+    GROUNDING_FIRST=$(printf '%s' "$CONTEXT_GROUNDING_JSON" | jq -r '[.data.pack.items[]? | select((.why // "" | startswith("What NOT to do:")) | not)][0].memoryId // .data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
+    ORIENTATION_FIRST=$(printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq -r '[.data.pack.items[]? | select((.why // "" | startswith("What NOT to do:")) | not)][0].memoryId // .data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
+    BALANCED_FIRST=$(printf '%s' "$CONTEXT_BALANCED_JSON" | jq -r '[.data.pack.items[]? | select((.why // "" | startswith("What NOT to do:")) | not)][0].memoryId // .data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
     assert_jq_nonempty "$CONTEXT_GROUNDING_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_grounding_first_present"
     assert_jq_nonempty "$CONTEXT_ORIENTATION_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_orientation_first_present"
     assert_jq_nonempty "$CONTEXT_BALANCED_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_balanced_first_present"

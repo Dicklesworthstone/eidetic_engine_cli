@@ -82,7 +82,13 @@ fn list_fixture_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("._"))
+        })
         .collect();
     paths.sort();
     Ok(paths)
@@ -998,7 +1004,12 @@ fn append_rust_sources(dir: &Path, out: &mut String) -> Result<(), String> {
         let path = entry.path();
         if path.is_dir() {
             append_rust_sources(&path, out)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("._"))
+        {
             out.push_str(
                 &fs::read_to_string(&path)
                     .map_err(|error| format!("read {}: {error}", path.display()))?,

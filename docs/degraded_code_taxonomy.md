@@ -866,11 +866,12 @@ that helper is the thing to change.
 | `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
-#### Other (9)
+#### Other (10)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
 | `graph_feature_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the graph feature flag's value is unknown; distinct from `graph_feature_disabled` (`insights`, `graph feature-enrichment`) |
+| `graph_hits_profiles_disabled` | info | bd-reality-core-convergence-1azkt.54 — config-time: `[graph.feature.hits_profiles] enabled = false` on a graph-enabled build; distinct from build-time `graph_feature_disabled` |
 | `graph_skyline_disabled` | info | bd-reality-core-convergence-1azkt.31 — config-time: `[graph.feature.skyline] enabled = false` on a graph-enabled build; do not confuse with the build-time codes above |
 | `graph_skyline_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the flag's value is unknown; distinct from `graph_skyline_disabled`, which asserts the operator turned the section off. Previously folded into the same `None` as "no workspace" and emitted nothing, so an empty skyline came back with `success: true` and no signal |
 | `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
@@ -955,7 +956,7 @@ that helper is the thing to change.
 | `mesh_responder_port_conflict` | high | bd-tc-epic-qzk7o.3.3 (TC) |
 | `mesh_responder_route_unavailable` | high | bd-tc-epic-qzk7o.3.3 (TC) |
 
-#### Mesh lane approval and store-local authentication (3)
+#### Mesh lane approval and store-local authentication (6)
 | Code | Severity | Bead |
 |------|----------|------|
 | `mesh_approval_token_invalid` | high | bd-tc-epic-qzk7o.2.2 |

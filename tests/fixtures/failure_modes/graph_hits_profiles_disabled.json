@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_hits_profiles_disabled",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.54",
+    "epic_letter": "E"
+  },
+  "surfaces": ["insights"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The HITS profile insights sections (hubs and authorities) are turned off for this workspace by the graph.feature.hits_profiles.enabled config key. The binary's graph feature is enabled; only this optional profile section is off, so the code is response_time and info severity. Previously this emitted the build-time code graph_feature_disabled at medium severity.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.hits_profiles.enabled false --workspace ."
+    ],
+    "invocation": "ee insights --section hubs --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_hits_profiles_disabled",
+    "severity": "info",
+    "message_contains": ["HITS profile insights are disabled", "graph.feature.hits_profiles.enabled"],
+    "repair_contains": "ee config set graph.feature.hits_profiles.enabled true"
+  }
+}

@@ -10,8 +10,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
 use serde_json::Value;
 

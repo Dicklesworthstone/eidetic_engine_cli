@@ -12,8 +12,8 @@
 //! contract).
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 

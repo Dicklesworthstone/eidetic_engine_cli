@@ -1066,6 +1066,43 @@ fn vision_coverage_names_a_witness_for_every_exercised_surface() -> TestResult {
     )
 }
 
+#[test]
+fn vision_coverage_refuses_orphan_script_as_behavioral_witness() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-orphan-witness")?;
+    write_behavioral_vision_fixture(&fixture_root, &["alpha", "beta"], &["alpha"], &["beta"])?;
+    fs::create_dir_all(
+        fixture_root
+            .join("tests")
+            .join("fixtures")
+            .join("e2e_invocation"),
+    )
+    .map_err(|error| format!("failed to create e2e_invocation fixture dir: {error}"))?;
+    fs::write(
+        fixture_root
+            .join("tests")
+            .join("fixtures")
+            .join("e2e_invocation")
+            .join("orphan_baseline.txt"),
+        "e2e_fixture.sh\n",
+    )
+    .map_err(|error| format!("failed to write orphan_baseline.txt: {error}"))?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+    let report = read_report(&report_path)?;
+
+    ensure_eq_u64(
+        &report,
+        "/behavioral_evidence/exercised",
+        0,
+        "an orphaned script listed in orphan_baseline.txt must not count as behavioral evidence",
+    )?;
+    string_array_contains(&report, "/behavioral_evidence/newly_unexercised", "alpha")?;
+    ensure(
+        !output.status.success(),
+        "a surface invoked only by an orphaned script must fail the behavioral gate",
+    )
+}
+
 /// The live arm, against this repository rather than a fixture. A term that
 /// only ever runs on constructed trees gates nothing.
 #[test]

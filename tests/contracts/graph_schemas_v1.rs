@@ -272,12 +272,12 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         "ee insights data",
         "runDurationMs",
     )?;
-    // bd-g3yh5: since d4a5809f (bd-2u60p) every graph-gated section consults
-    // the runtime `graph.feature.*` flags, whose documented defaults are
-    // false (docs/configuration/graph.md). A fresh workspace therefore
-    // emits one medium `graph_feature_disabled` signal per gated section,
-    // aggregated ahead of the info-level `graph.workspace_empty` signal
-    // (degraded aggregation sorts by descending severity, then code).
+    // bd-g3yh5 / bd-reality-core-convergence-1azkt.54: since d4a5809f (bd-2u60p)
+    // every graph-gated section consults the runtime `graph.feature.*` flags,
+    // whose documented defaults are false (docs/configuration/graph.md). A fresh
+    // workspace emits the medium `graph_feature_disabled` signal for the four
+    // remaining rollout-gated sections, plus info-level `graph.workspace_empty`
+    // and `graph_hits_profiles_disabled` (for hubs and authorities).
     ensure_eq(
         data.pointer("/degradedSignals/0/code")
             .and_then(Value::as_str),
@@ -306,17 +306,40 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         "ee insights degraded signal",
         "graph.workspace_empty presence",
     )?;
+    let hits_disabled_present = data
+        .pointer("/degradedSignals")
+        .and_then(Value::as_array)
+        .is_some_and(|signals| {
+            signals.iter().any(|signal| {
+                signal.get("code").and_then(Value::as_str) == Some("graph_hits_profiles_disabled")
+                    && signal.get("severity").and_then(Value::as_str) == Some("info")
+            })
+        });
+    ensure_eq(
+        Some(hits_disabled_present),
+        Some(true),
+        "ee insights degraded signal",
+        "graph_hits_profiles_disabled presence",
+    )?;
     let signals = data["degradedSignals"]
         .as_array()
         .ok_or_else(|| "insights degradedSignals must be an array".to_owned())?;
     ensure_eq(
         Some(signals.len()),
-        Some(2),
+        Some(3),
         "ee insights degraded signals",
-        "distinct gate and empty-workspace causes",
+        "distinct gate, hits-profile, and empty-workspace causes",
     )?;
-    let gated_sources =
+    let mut gated_sources =
         collect_string_set(&signals[0]["sources"], "graph_feature_disabled.sources")?;
+    for signal in signals {
+        if signal.get("code").and_then(Value::as_str) == Some("graph_hits_profiles_disabled") {
+            gated_sources.extend(collect_string_set(
+                &signal["sources"],
+                "graph_hits_profiles_disabled.sources",
+            )?);
+        }
+    }
     let expected_gated_sources = [
         "authorities",
         "causalBottlenecks",

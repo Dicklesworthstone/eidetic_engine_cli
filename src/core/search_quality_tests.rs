@@ -382,12 +382,10 @@ fn instant_hybrid_search_and_diagnostics_never_use_the_semantic_producer() {
         assert_eq!(report.source_mode_requested, SearchSourceMode::Hybrid);
         assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
         assert!(!report.source_mode_fallback);
-        assert!(
-            report.degraded.iter().all(|entry| !matches!(
-                entry.code.as_str(),
-                "embed_model_unavailable" | "index_incompatible" | "rerank_model_unavailable"
-            ))
-        );
+        assert!(report.degraded.iter().all(|entry| !matches!(
+            entry.code.as_str(),
+            "embed_model_unavailable" | "index_incompatible" | "rerank_model_unavailable"
+        )));
     }
     assert!(!diagnostic.pre_fusion.semantic_fast.available);
     assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
