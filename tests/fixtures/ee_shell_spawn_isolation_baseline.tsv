@@ -1,0 +1,7 @@
+# Shell E2E spawn-isolation shrink-only baseline (bd-xuznt).
+#
+# Format: <un-isolated-script-count>\t<repo-relative-path>
+#
+# All 163 shell E2E scripts that invoke `ee` have been migrated to isolated
+# HOME / XDG_DATA_HOME / XDG_CONFIG_HOME / XDG_CACHE_HOME / XDG_STATE_HOME
+# directories (with EE_EMBED_DOWNLOAD=off by default). Baseline is 0.
