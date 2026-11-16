@@ -23,16 +23,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
-
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 fn workspace_root() -> Result<PathBuf, String> {
     let nanos = SystemTime::now()
@@ -51,12 +47,11 @@ fn workspace_root() -> Result<PathBuf, String> {
 }
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }

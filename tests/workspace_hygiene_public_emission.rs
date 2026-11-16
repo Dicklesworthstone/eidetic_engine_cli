@@ -198,13 +198,10 @@ fn write_synthetic_secret_fixture(workspace: &Path) -> TestResult {
 }
 
 fn run_ee(args: &[&str], workspace: &Path, context: &str) -> Result<Output, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let mut command = crate::isolated_ee::isolated_ee_command(temp.path())?;
     run_command(
-        Command::new(env!("CARGO_BIN_EXE_ee"))
-            .args(args)
-            .arg("--workspace")
-            .arg(workspace)
-            .env_remove("EE_WORKSPACE")
-            .env_remove("EE_WORKSPACE_REGISTRY"),
+        command.args(args).arg("--workspace").arg(workspace),
         context,
     )
 }

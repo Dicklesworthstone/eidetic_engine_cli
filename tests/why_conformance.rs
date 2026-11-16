@@ -18,7 +18,8 @@ use std::process::{Command, Output};
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

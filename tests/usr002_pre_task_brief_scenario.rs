@@ -4,7 +4,7 @@
 use std::fs;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 #[cfg(unix)]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,7 +45,8 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

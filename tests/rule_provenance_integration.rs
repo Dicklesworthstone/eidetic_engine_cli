@@ -3,7 +3,7 @@
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
@@ -32,32 +32,6 @@ fn unique_run_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn ee_binary_path() -> Result<PathBuf, String> {
-    let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
-    if cargo_path.exists() {
-        return Ok(cargo_path);
-    }
-
-    let current_exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
-    let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "failed to resolve debug directory from test binary {}",
-            current_exe.display()
-        )
-    })?;
-    let sibling = debug_dir.join("ee");
-    if sibling.exists() {
-        Ok(sibling)
-    } else {
-        Err(format!(
-            "ee binary not found at {} or {}",
-            cargo_path.display(),
-            sibling.display()
-        ))
-    }
-}
-
 fn workspace_args(workspace: &Path) -> Vec<String> {
     vec![
         "--workspace".to_owned(),
@@ -67,7 +41,11 @@ fn workspace_args(workspace: &Path) -> Vec<String> {
 }
 
 fn run_ee(workspace: &Path, args: Vec<String>) -> Result<Output, String> {
-    let output = Command::new(ee_binary_path()?)
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(".ee-isolated-env");
+    let output = crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .current_dir(workspace)
         .args(&args)
         .output()

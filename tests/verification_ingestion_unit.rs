@@ -2,16 +2,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
-
-fn ee_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 fn artifact_root() -> PathBuf {
     option_env!("CARGO_TARGET_TMPDIR").map_or_else(
@@ -31,7 +26,8 @@ fn unique_dir(name: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<JsonValue, String> {
-    let output = Command::new(ee_bin())
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")

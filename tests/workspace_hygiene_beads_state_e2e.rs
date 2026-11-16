@@ -97,17 +97,17 @@ fn init_beads_workspace() -> Result<PathBuf, String> {
 }
 
 fn run_hygiene_json(workspace: &Path, context: &str) -> Result<Value, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let mut command = crate::isolated_ee::isolated_ee_command(temp.path())?;
     let output = run_command(
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        command
             .arg("--json")
             .arg("workspace")
             .arg("hygiene")
             .arg("--agent-name")
             .arg("SapphireElk")
             .arg("--workspace")
-            .arg(workspace)
-            .env_remove("EE_WORKSPACE")
-            .env_remove("EE_WORKSPACE_REGISTRY"),
+            .arg(workspace),
         context,
     )?;
     ensure_success(&output, context)?;

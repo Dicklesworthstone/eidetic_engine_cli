@@ -28,14 +28,9 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
 }
 
 fn trace_readme_cli_parity(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
@@ -160,7 +155,8 @@ fn parse_readme_commands(readme: &str) -> Vec<Vec<String>> {
 /// Run `ee <args...> --help` and return a structured outcome.
 fn invoke_help(path: &[String]) -> Result<(), String> {
     trace_readme_cli_parity("dependency_check", 0, &[]);
-    let output = Command::new(ee_binary())
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(path)
         .arg("--help")
         .output()

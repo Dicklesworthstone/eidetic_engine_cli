@@ -6,7 +6,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -129,7 +128,8 @@ where
     );
 
     let start = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command =
+        crate::isolated_ee::isolated_ee_command(&dossier_dir.join(".ee-isolated-env"))?;
     command
         .args(&argv)
         .current_dir(&cwd)

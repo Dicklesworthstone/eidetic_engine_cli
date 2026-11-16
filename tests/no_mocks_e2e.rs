@@ -462,7 +462,8 @@ fn run_step_with_env(
 ) -> Result<(CommandEvent, JsonValue), String> {
     let started_at_unix_ms = unix_ms_now()?;
     let start = Instant::now();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let mut command =
+        crate::isolated_ee::isolated_ee_command(&artifact_dir.join(".ee-isolated-env"))?;
     command.args(&spec.args);
     if !envs.iter().any(|(key, _)| *key == "PATH") {
         command.env("PATH", default_tool_path()?);

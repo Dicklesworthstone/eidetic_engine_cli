@@ -301,8 +301,10 @@ fn git_status(workspace: &Path) -> Result<String, String> {
 }
 
 fn run_hygiene_json(workspace: &Path, snapshot_path: &Path) -> Result<Value, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let mut command = crate::isolated_ee::isolated_ee_command(temp.path())?;
     let output = run_command(
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        command
             .arg("--json")
             .arg("workspace")
             .arg("hygiene")
@@ -311,9 +313,7 @@ fn run_hygiene_json(workspace: &Path, snapshot_path: &Path) -> Result<Value, Str
             .arg("--agent-mail-snapshot")
             .arg(snapshot_path)
             .arg("--workspace")
-            .arg(workspace)
-            .env_remove("EE_WORKSPACE")
-            .env_remove("EE_WORKSPACE_REGISTRY"),
+            .arg(workspace),
         "workspace hygiene recommendations",
     )?;
     ensure_success(&output, "workspace hygiene recommendations")?;

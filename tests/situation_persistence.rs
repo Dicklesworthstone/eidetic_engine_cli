@@ -197,7 +197,6 @@ fn category_all_includes_new_variants() {
 
 mod adoption_cli {
     use std::path::PathBuf;
-    use std::process::Command;
 
     fn unique_adoption_workspace(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -216,7 +215,9 @@ mod adoption_cli {
     }
 
     fn run_ee_raw(workspace: &PathBuf, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        let temp = tempfile::tempdir().expect("isolated tempdir");
+        crate::isolated_ee::isolated_ee_command(temp.path())
+            .expect("isolated ee command")
             .arg("--json")
             .arg("--workspace")
             .arg(workspace)

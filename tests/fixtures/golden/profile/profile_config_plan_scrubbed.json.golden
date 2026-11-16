@@ -42,6 +42,14 @@
     "configExists": false,
     "configPath": "[WORKSPACE]/.ee/config.toml",
     "conflicts": [],
+    "degraded": [
+      {
+        "code": "heavy_gates_skipped",
+        "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+        "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+        "severity": "info"
+      }
+    ],
     "dryRun": true,
     "edits": [
       {

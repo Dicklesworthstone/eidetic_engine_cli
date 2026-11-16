@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .current_dir(workspace)
         .args(args)
         .output()

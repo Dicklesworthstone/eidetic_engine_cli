@@ -429,12 +429,11 @@ fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
         }),
     );
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .arg("--workspace")
         .arg(workspace)
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     log_event(

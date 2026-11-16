@@ -30,7 +30,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
@@ -39,10 +39,9 @@ const EXIT_SUCCESS: i32 = 0;
 fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
     let mut all_args = vec!["--workspace", workspace];
     all_args.extend_from_slice(args);
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(&all_args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", all_args.join(" ")))
 }

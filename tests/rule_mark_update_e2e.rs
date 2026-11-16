@@ -39,37 +39,20 @@ fn unique_run_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn ee_binary_path() -> Result<PathBuf, String> {
-    let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
-    if cargo_path.exists() {
-        return Ok(cargo_path);
-    }
-
-    let current_exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
-    let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "failed to resolve debug directory from test binary {}",
-            current_exe.display()
-        )
-    })?;
-    let sibling = debug_dir.join("ee");
-    if sibling.exists() {
-        Ok(sibling)
-    } else {
-        Err(format!(
-            "ee binary not found at {} or {}",
-            cargo_path.display(),
-            sibling.display()
-        ))
-    }
+fn isolated_ee(workspace: &Path) -> Result<Command, String> {
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(".ee-isolated-env");
+    let mut command = crate::isolated_ee::isolated_ee_command(&isolated_root)?;
+    command
+        .current_dir(workspace)
+        .env("EE_EMBED_DOWNLOAD_ENABLED", "false");
+    Ok(command)
 }
 
 fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
-    Command::new(ee_binary_path()?)
-        .current_dir(workspace)
-        .env("EE_EMBED_DOWNLOAD", "off")
-        .env("EE_EMBED_DOWNLOAD_ENABLED", "false")
+    isolated_ee(workspace)?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {:?}: {error}", args))
@@ -900,9 +883,7 @@ fn native_rule_outcome_changes_rule_once_without_changing_source_memory() -> Tes
             "signal": "helpful",
             "eventId": event,
         });
-        let mut child = Command::new(ee_binary_path()?)
-            .current_dir(addressed)
-            .env("EE_EMBED_DOWNLOAD_ENABLED", "false")
+        let mut child = isolated_ee(addressed)?
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -8,17 +8,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 type TestResult = Result<(), String>;
-
-fn ee_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 fn worker_local_tempdir(prefix: &str) -> Result<TempDir, String> {
     let tmp_root = Path::new("/tmp");
@@ -41,11 +37,13 @@ fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
         .ok_or_else(|| format!("workspace path is not UTF-8: {}", workspace.display()))?;
     let mut full_args = vec!["--workspace", workspace_arg, "--json"];
     full_args.extend_from_slice(args);
+    let isolated_root = workspace
+        .parent()
+        .unwrap_or(workspace)
+        .join(".ee-isolated-env");
 
-    Command::new(ee_bin())
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(full_args)
-        .env_remove("EE_WORKSPACE")
-        .env("NO_COLOR", "1")
         .output()
         .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
 }

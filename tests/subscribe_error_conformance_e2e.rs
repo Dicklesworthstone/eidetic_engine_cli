@@ -5,7 +5,7 @@
 //! subscribe poll, then drives an invalid subscribe filter and checks that the
 //! emitted `ee.error.v2` recovery action shape conforms to the public schema.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::{Value, json};
 
@@ -14,10 +14,9 @@ type TestResult = Result<(), String>;
 const EXIT_USAGE: i32 = 1;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }

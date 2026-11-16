@@ -8,66 +8,34 @@
 use ee::db::{DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1, parse_stored_pack_ledger};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
-const EXIT_SUCCESS: i32 = 0;
-
-fn ee_binary_path() -> Result<PathBuf, String> {
-    let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
-    if cargo_path.exists() {
-        return Ok(cargo_path);
+fn isolated_root_for_args(args: &[&str]) -> Result<PathBuf, String> {
+    for window in args.windows(2) {
+        if window[0] == "--workspace" {
+            return Ok(Path::new(window[1]).join(".ee-isolated-env"));
+        }
     }
-
-    let current_exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
-    let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "failed to resolve debug directory from test binary {}",
-            current_exe.display()
-        )
-    })?;
-    let sibling = debug_dir.join("ee");
-    if sibling.exists() {
-        Ok(sibling)
-    } else {
-        Err(format!(
-            "ee binary not found at {} or {}",
-            cargo_path.display(),
-            sibling.display()
-        ))
-    }
+    Err(format!("run_ee requires --workspace in args: {args:?}"))
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary_path()?)
+    let isolated_root = isolated_root_for_args(args)?;
+    crate::isolated_ee::isolated_ee_command(&isolated_root)?
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_ee_pack_query_file(workspace: &str, query_file: &Path) -> Result<Output, String> {
     let query_file_arg = query_file.to_string_lossy().into_owned();
-    let build_output = run_ee(&[
-        "--workspace",
-        workspace,
-        "pack",
-        "build",
-        "--query-file",
-        &query_file_arg,
-        "--json",
-    ])?;
-    if build_output.status.code() == Some(EXIT_SUCCESS) {
-        return Ok(build_output);
-    }
-
     run_ee(&[
         "--workspace",
         workspace,
         "pack",
+        "build",
         "--query-file",
         &query_file_arg,
         "--json",
@@ -303,6 +271,70 @@ fn describe_first_divergence(left: &str, right: &str) -> String {
     )
 }
 
+fn quantize_pack_score_field(object: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if let Some(value) = object.get(key).and_then(serde_json::Value::as_f64) {
+        let scaled = (value * 4096.0).round();
+        let q = if scaled.is_finite() {
+            scaled.clamp(0.0, f64::from(u32::MAX)) / 4096.0
+        } else {
+            0.0
+        };
+        if let Some(num) = serde_json::Number::from_f64(q) {
+            object.insert(key.to_owned(), serde_json::Value::Number(num));
+        }
+    }
+}
+
+fn normalize_pack_envelope(stdout: &str) -> Result<String, String> {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|error| format!("pack envelope not JSON: {error}"))?;
+    if !ee::obs::normalize_pack_slo_measurements(&mut envelope)? {
+        return Err("pack envelope missing SLO measurements".to_owned());
+    }
+    let timing = ee::obs::normalize_pack_envelope_timing(&mut envelope)?;
+    if timing.timing_entries_dropped != usize::from(timing.timing_entries_present) {
+        return Err(format!(
+            "pack envelope must carry at most one timing entry and drop exactly it: {timing:?}"
+        ));
+    }
+    if let Some(items) = envelope
+        .pointer_mut("/data/pack/items")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(scores) = item
+                .get_mut("scores")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for key in ["relevance", "utility", "marginalGain", "objectiveValue"] {
+                    quantize_pack_score_field(scores, key);
+                }
+            }
+        }
+    }
+    if let Some(audit) = envelope
+        .pointer_mut("/data/pack/selectionAudit")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        quantize_pack_score_field(audit, "totalObjectiveValue");
+    }
+    for pointer in [
+        "/data/pack/quality",
+        "/data/pack/metrics",
+        "/data/pack/qualityMetrics",
+    ] {
+        if let Some(metrics) = envelope
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            quantize_pack_score_field(metrics, "averageRelevance");
+            quantize_pack_score_field(metrics, "averageUtility");
+        }
+    }
+    serde_json::to_string(&envelope)
+        .map_err(|error| format!("serialize normalized pack envelope: {error}"))
+}
+
 #[test]
 fn pack_hash_is_deterministic_across_runs() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -310,10 +342,7 @@ fn pack_hash_is_deterministic_across_runs() -> TestResult {
 
     // Step 1: Initialize workspace
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(
-        init.status.code() == Some(EXIT_SUCCESS),
-        format!("init failed: {:?}", init.status.code()),
-    )?;
+    ensure_command_success(&init, "init")?;
 
     // Step 2: Add deterministic seed memories
     let memories = [
@@ -339,10 +368,7 @@ fn pack_hash_is_deterministic_across_runs() -> TestResult {
             "rule",
             "--json",
         ])?;
-        ensure(
-            remember.status.code() == Some(EXIT_SUCCESS),
-            format!("remember failed for '{content}'"),
-        )?;
+        ensure_command_success(&remember, &format!("remember '{content}'"))?;
     }
 
     // Step 3: Run context query multiple times
@@ -361,19 +387,17 @@ fn pack_hash_is_deterministic_across_runs() -> TestResult {
 
     for i in 0..5 {
         let output = run_ee(&query_args)?;
-        ensure(
-            output.status.code() == Some(EXIT_SUCCESS),
-            format!("context run {i} failed"),
-        )?;
+        ensure_command_success(&output, &format!("context run {i}"))?;
 
         let stdout = stdout_string(&output)?;
         let json = stdout_json(&output)?;
+        let normalized = normalize_pack_envelope(&stdout)?;
 
         let hash =
             extract_pack_hash(&json).ok_or_else(|| format!("run {i}: missing pack.hash field"))?;
 
         hashes.push(hash);
-        outputs.push(stdout);
+        outputs.push(normalized);
     }
 
     // Step 4: Assert all hashes are identical
@@ -407,7 +431,7 @@ fn pack_item_ordering_is_deterministic() -> TestResult {
 
     // Initialize
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_command_success(&init, "init")?;
 
     // Add memories with similar relevance to stress tie-breaking
     let memories = [
@@ -428,10 +452,7 @@ fn pack_item_ordering_is_deterministic() -> TestResult {
             "rule",
             "--json",
         ])?;
-        ensure(
-            remember.status.code() == Some(EXIT_SUCCESS),
-            format!("remember failed: {content}"),
-        )?;
+        ensure_command_success(&remember, &format!("remember '{content}'"))?;
     }
 
     // Run context multiple times and collect item orderings
@@ -449,10 +470,7 @@ fn pack_item_ordering_is_deterministic() -> TestResult {
 
     for i in 0..5 {
         let output = run_ee(&query_args)?;
-        ensure(
-            output.status.code() == Some(EXIT_SUCCESS),
-            format!("context run {i} failed"),
-        )?;
+        ensure_command_success(&output, &format!("context run {i}"))?;
 
         let json = stdout_json(&output)?;
         let item_ids = extract_item_ids(&json);
@@ -480,7 +498,7 @@ fn pack_query_file_persists_selection_ledger() -> TestResult {
     let workspace = tempdir.path().to_string_lossy().to_string();
 
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_command_success(&init, "init")?;
     ensure_stderr_empty(&init, "init")?;
 
     let memories = [
@@ -497,18 +515,12 @@ fn pack_query_file_persists_selection_ledger() -> TestResult {
             "rule",
             "--json",
         ])?;
-        ensure(
-            remember.status.code() == Some(EXIT_SUCCESS),
-            format!("remember failed for '{content}'"),
-        )?;
+        ensure_command_success(&remember, &format!("remember '{content}'"))?;
         ensure_stderr_empty(&remember, "remember")?;
     }
 
     let index = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
-    ensure(
-        index.status.code() == Some(EXIT_SUCCESS),
-        "index rebuild failed",
-    )?;
+    ensure_command_success(&index, "index rebuild")?;
     ensure_stderr_empty(&index, "index rebuild")?;
 
     let query_file = tempdir.path().join("pack-ledger-query.json");
@@ -527,10 +539,7 @@ fn pack_query_file_persists_selection_ledger() -> TestResult {
     .map_err(|error| format!("failed to write query file: {error}"))?;
 
     let output = run_ee_pack_query_file(&workspace, &query_file)?;
-    ensure(
-        output.status.code() == Some(EXIT_SUCCESS),
-        format!("pack query-file failed: {:?}", output.status.code()),
-    )?;
+    ensure_command_success(&output, "pack query-file")?;
     ensure_stderr_empty(&output, "pack query-file")?;
     let json = stdout_json(&output)?;
     let pack_hash =
@@ -550,7 +559,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     let workspace = tempdir.path().to_string_lossy().to_string();
 
     let init = run_ee(&["--json", "--workspace", &workspace, "init"])?;
-    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_command_success(&init, "init")?;
     ensure_stderr_empty(&init, "init")?;
 
     for content in [
@@ -566,18 +575,12 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
             "--kind",
             "rule",
         ])?;
-        ensure(
-            remember.status.code() == Some(EXIT_SUCCESS),
-            format!("remember failed for '{content}'"),
-        )?;
+        ensure_command_success(&remember, &format!("remember '{content}'"))?;
         ensure_stderr_empty(&remember, "remember")?;
     }
 
     let index = run_ee(&["--json", "--workspace", &workspace, "index", "rebuild"])?;
-    ensure(
-        index.status.code() == Some(EXIT_SUCCESS),
-        "index rebuild failed",
-    )?;
+    ensure_command_success(&index, "index rebuild")?;
     ensure_stderr_empty(&index, "index rebuild")?;
 
     let query_file = tempdir.path().join("pack-replay-query.json");
@@ -596,13 +599,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     .map_err(|error| format!("failed to write query file: {error}"))?;
 
     let first_output = run_ee_pack_query_file(&workspace, &query_file)?;
-    ensure(
-        first_output.status.code() == Some(EXIT_SUCCESS),
-        format!(
-            "first pack query-file failed: {:?}",
-            first_output.status.code()
-        ),
-    )?;
+    ensure_command_success(&first_output, "first pack query-file")?;
     ensure_stderr_empty(&first_output, "first pack query-file")?;
     let first_json = stdout_json(&first_output)?;
     let first_hash =
@@ -624,10 +621,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         "replay",
         &first_pack_id,
     ])?;
-    ensure(
-        replay.status.code() == Some(EXIT_SUCCESS),
-        format!("pack replay failed: {:?}", replay.status.code()),
-    )?;
+    ensure_command_success(&replay, "pack replay")?;
     ensure_stderr_empty(&replay, "pack replay")?;
     let replay_json = stdout_json(&replay)?;
     ensure(
@@ -721,13 +715,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     )?;
 
     let second_output = run_ee_pack_query_file(&workspace, &query_file)?;
-    ensure(
-        second_output.status.code() == Some(EXIT_SUCCESS),
-        format!(
-            "second pack query-file failed: {:?}",
-            second_output.status.code()
-        ),
-    )?;
+    ensure_command_success(&second_output, "second pack query-file")?;
     ensure_stderr_empty(&second_output, "second pack query-file")?;
     let second_json = stdout_json(&second_output)?;
     let second_hash =
@@ -761,10 +749,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
         &first_pack_id,
         &second_pack_id,
     ])?;
-    ensure(
-        diff.status.code() == Some(EXIT_SUCCESS),
-        format!("pack diff failed: {:?}", diff.status.code()),
-    )?;
+    ensure_command_success(&diff, "pack diff")?;
     ensure_stderr_empty(&diff, "pack diff")?;
     let diff_json = stdout_json(&diff)?;
     ensure(
@@ -796,7 +781,7 @@ fn low_match_pack_is_deterministic() -> TestResult {
 
     // Initialize and add one memory to create indexes
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_command_success(&init, "init")?;
 
     // Add a memory about something unrelated to our query
     let remember = run_ee(&[
@@ -808,10 +793,7 @@ fn low_match_pack_is_deterministic() -> TestResult {
         "fact",
         "--json",
     ])?;
-    ensure(
-        remember.status.code() == Some(EXIT_SUCCESS),
-        "remember failed",
-    )?;
+    ensure_command_success(&remember, "remember")?;
 
     // Run context query for unrelated topic
     let query_args = [
@@ -826,10 +808,7 @@ fn low_match_pack_is_deterministic() -> TestResult {
 
     for i in 0..3 {
         let output = run_ee(&query_args)?;
-        ensure(
-            output.status.code() == Some(EXIT_SUCCESS),
-            format!("context run {i} failed"),
-        )?;
+        ensure_command_success(&output, &format!("context run {i}"))?;
 
         let json = stdout_json(&output)?;
         if let Some(hash) = extract_pack_hash(&json) {

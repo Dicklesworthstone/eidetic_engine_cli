@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -151,7 +151,8 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

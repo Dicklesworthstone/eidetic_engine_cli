@@ -5,11 +5,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::process::Command;
-
 #[test]
 fn bash_preflight_shell_interceptor_is_not_a_public_command() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["hook", "preflight-shell", "--shell", "bash"])
         .output()
         .map_err(|error| error.to_string())?;
@@ -24,7 +23,8 @@ fn bash_preflight_shell_interceptor_is_not_a_public_command() -> Result<(), Stri
 
 #[test]
 fn explicit_preflight_memory_query_remains_available() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["preflight", "check", "--help"])
         .output()
         .map_err(|error| error.to_string())?;

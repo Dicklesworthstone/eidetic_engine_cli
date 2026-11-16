@@ -80,7 +80,8 @@ fn no_smoke_fixture_addresses_a_store_it_never_initialised() -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -93,7 +94,8 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 /// stderr and `ee status` reports embedding posture -- on a host with no model
 /// cache the one-time download notice would land on stderr and fail them.
 fn run_ee_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let mut command = crate::isolated_ee::isolated_ee_command(temp.path())?;
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);
@@ -111,7 +113,8 @@ fn run_ee_with_env(args: &[&str], envs: &[(&str, OsString)]) -> Result<Output, S
 
 #[cfg(unix)]
 fn run_ee_in_dir(args: &[&str], cwd: &Path) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .current_dir(cwd)
         .args(args)
         .output()
@@ -130,7 +133,8 @@ fn run_ee_with_env_in_dir(
     envs: &[(&str, OsString)],
     cwd: &Path,
 ) -> Result<Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let mut command = crate::isolated_ee::isolated_ee_command(temp.path())?;
     command.current_dir(cwd).args(args);
     for (key, value) in envs {
         command.env(key, value);

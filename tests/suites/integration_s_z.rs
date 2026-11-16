@@ -1,5 +1,8 @@
 //! Integration modules S–Z. Filter with `cargo test --test integration_s_z <module>::`.
 
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
+
 // Shared Agent Mail reservation fixture. Declared once here because the two
 // workspace-hygiene modules below both consume it, and loading one file as a
 // module twice in the same target trips clippy::duplicate_mod.

@@ -408,7 +408,7 @@ fn recorder_tail_follow_idle_timeout_exits_without_hanging() -> TestResult {
     conn.migrate().map_err(|error| error.to_string())?;
     conn.close().map_err(|error| error.to_string())?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&tempdir.path().join(".ee-isolated-env"))?
         .arg("--workspace")
         .arg(tempdir.path())
         .arg("recorder")
@@ -467,6 +467,10 @@ fn assert_recorder_follow_sigint(
 
     let stdout_path = workspace.join(format!("{label}.stdout.jsonl"));
     let stderr_path = workspace.join(format!("{label}.stderr.log"));
+    let isolated_home = workspace.join(".ee-isolated-home");
+    let isolated_data = workspace.join(".ee-isolated-data");
+    fs::create_dir_all(&isolated_home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&isolated_data).map_err(|error| error.to_string())?;
     let stdout = fs::File::create_new(&stdout_path).map_err(|error| error.to_string())?;
     let stderr = fs::File::create_new(&stderr_path).map_err(|error| error.to_string())?;
     // Bash deliberately passes SIG_IGN through exec, reproducing the inherited
@@ -480,6 +484,9 @@ fn assert_recorder_follow_sigint(
         .arg(workspace)
         .arg("recorder")
         .args(args)
+        .env("HOME", &isolated_home)
+        .env("XDG_DATA_HOME", &isolated_data)
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("BASH_ENV")
         .stdout(stdout)
         .stderr(stderr)

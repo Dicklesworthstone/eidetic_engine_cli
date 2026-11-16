@@ -5,11 +5,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::process::Command;
-
 #[test]
 fn zsh_preflight_shell_interceptor_is_not_a_public_command() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["hook", "preflight-shell", "--shell", "zsh"])
         .output()
         .map_err(|error| error.to_string())?;
@@ -24,7 +23,8 @@ fn zsh_preflight_shell_interceptor_is_not_a_public_command() -> Result<(), Strin
 
 #[test]
 fn hook_help_does_not_advertise_a_shell_interceptor() -> Result<(), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let output = crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(["hook", "--help"])
         .output()
         .map_err(|error| error.to_string())?;

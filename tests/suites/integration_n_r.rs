@@ -1,5 +1,8 @@
 //! Integration modules N–R. Filter with `cargo test --test integration_n_r <module>::`.
 
+#[path = "../support/isolated_ee.rs"]
+mod isolated_ee;
+
 #[path = "../neural_default_docs_contract.rs"]
 mod neural_default_docs_contract;
 #[path = "../no_forbidden_suffixes.rs"]

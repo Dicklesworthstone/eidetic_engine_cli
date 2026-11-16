@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
@@ -56,7 +56,8 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

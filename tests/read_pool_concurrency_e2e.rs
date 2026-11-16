@@ -12,10 +12,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
-
 fn unique_temp_dir(name: &str) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,7 +62,10 @@ fn strict_speedup_gate_requires_in_process_harness() -> TestResult {
 #[test]
 fn read_pool_concurrency_script_smoke_emits_valid_events() -> TestResult {
     let run_dir = unique_temp_dir("read-pool-concurrency");
-    fs::create_dir_all(&run_dir)
+    let isolated_home = run_dir.join("home");
+    let isolated_data = run_dir.join("xdg-data");
+    fs::create_dir_all(&isolated_home)
+        .and_then(|()| fs::create_dir_all(&isolated_data))
         .map_err(|error| format!("create run dir {}: {error}", run_dir.display()))?;
     let event_log = run_dir.join("read_pool_concurrency.jsonl");
 
@@ -78,7 +77,10 @@ fn read_pool_concurrency_script_smoke_emits_valid_events() -> TestResult {
                 .join("read_pool_concurrency.sh"),
         )
         .current_dir(repo_root())
-        .env("EE_BINARY", ee_binary())
+        .env("HOME", &isolated_home)
+        .env("XDG_DATA_HOME", &isolated_data)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
         .env("EE_TEST_LOG_PATH", &event_log)
         .env("EE_E2E_TMPDIR", &run_dir)
         .env(

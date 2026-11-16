@@ -18,7 +18,6 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use ee::db::{CreatePackBaselineInput, CreatePackRecordInput, DbConnection, audit_actions};
 
@@ -35,7 +34,7 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 /// `ee init` a temp workspace (runs migrations incl. V078) and return the
 /// opened connection plus the registered workspace id.
 fn initialized_connection(workspace: &Path) -> Result<(DbConnection, String), String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let output = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-isolated-env"))?
         .arg("--workspace")
         .arg(workspace)
         .arg("init")

@@ -14,7 +14,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use ee::core::recall::{RecallCandidateRow, RecallProvenanceRef, RecallQuery, evaluate_recall};
 use ee::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
@@ -32,12 +32,10 @@ const MEM_FAILURE: &str = "mem_00000000000000000000000042";
 const MEM_DECISION: &str = "mem_00000000000000000000000043";
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
         .env_remove("EE_MAX_OUTPUT_TOKENS")
-        .env("EE_EMBED_DOWNLOAD", "off")
         .output()
         .map_err(|error| format!("failed to run ee {args:?}: {error}"))
 }

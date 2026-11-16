@@ -1,7 +1,5 @@
 //! EE-USR-005: degraded/offline trust and repair-plan acceptance scenario.
 
-use std::process::Command;
-
 use ee::models::degradation::{ALL_DEGRADATION_CODES, DegradedSubsystem};
 use ee::models::error_codes::{AGENT_DETECTOR_UNAVAILABLE, DATABASE_LOCKED};
 use serde_json::Value as JsonValue;
@@ -17,7 +15,8 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    crate::isolated_ee::isolated_ee_command(temp.path())?
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

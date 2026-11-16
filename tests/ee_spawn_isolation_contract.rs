@@ -132,7 +132,11 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             rust_sources(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs")
+            && !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+        {
             out.push(path);
         }
     }
