@@ -1546,7 +1546,6 @@ impl EffectManifest {
             CommandEffect::read_only("demo list", "List demo manifests"),
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
-            CommandEffect::read_only_db("diag advisory-lock", "Inspect advisory-lock diagnostics"),
             CommandEffect::read_only_db(
                 "diag agentsmd-drift",
                 "Report AGENTS.md bridge drift: stale export, file-vs-memory contradictions, missing rules",
@@ -1556,14 +1555,8 @@ impl EffectManifest {
                 "diag build-admission",
                 "Inspect build-admission diagnostics",
             ),
-            CommandEffect::read_only_db("diag causal-edge", "Inspect causal-edge diagnostics"),
             CommandEffect::read_only_db("diag claims", "Inspect claim diagnostics"),
             CommandEffect::read_only_db("diag contention", "Inspect contention diagnostics"),
-            CommandEffect::read_only_db(
-                "diag curation-candidate",
-                "Inspect curation-candidate diagnostics",
-            ),
-            CommandEffect::read_only_db("diag database-skew", "Inspect database-skew diagnostics"),
             CommandEffect::read_only_db("diag dependencies", "Inspect dependency diagnostics"),
             CommandEffect::read_only_db("diag disk-pressure", "Inspect disk-pressure diagnostics"),
             CommandEffect::read_only_db(
@@ -1571,21 +1564,9 @@ impl EffectManifest {
                 "Inspect environment attestation diagnostics",
             ),
             CommandEffect::read_only_db("diag graph", "Inspect graph diagnostics"),
-            CommandEffect::read_only_db(
-                "diag graph-snapshot",
-                "Inspect graph-snapshot diagnostics",
-            ),
             CommandEffect::read_only_db("diag host-profile", "Inspect host-profile diagnostics"),
             CommandEffect::read_only_db("diag incident", "Inspect incident diagnostics"),
             CommandEffect::read_only_db("diag integrity", "Inspect storage integrity diagnostics"),
-            CommandEffect::read_only_db(
-                "diag memory-validity",
-                "Inspect memory-validity diagnostics",
-            ),
-            CommandEffect::read_only_db(
-                "diag model-registry",
-                "Inspect model-registry diagnostics",
-            ),
             CommandEffect::read_only_db("diag pack-latest", "Inspect latest pack diagnostics"),
             CommandEffect::read_only(
                 "diag resource-admission",
@@ -1608,7 +1589,6 @@ impl EffectManifest {
                 "diag toolchain-provenance",
                 "Inspect observed toolchain provenance without mutating state",
             ),
-            CommandEffect::read_only_db("diag tripwire", "Inspect tripwire diagnostics"),
             CommandEffect::read_only_db("diag write-owner", "Inspect write-owner diagnostics"),
             CommandEffect::read_only_db("diag write-spool", "Inspect write-spool diagnostics"),
             CommandEffect::read_only_db("doctor", "Run health checks"),
@@ -1913,7 +1893,7 @@ impl EffectManifest {
                 "recorder import",
                 "Recorder import planning is read-only unless explicitly promoted to execution",
             ),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db(
                 "recorder events list",
                 "List persisted recorder events without mutation",
             ),
@@ -2661,6 +2641,63 @@ impl EffectManifest {
 
     fn durable_write_commands() -> Vec<CommandEffect> {
         vec![
+            // Diagnostic fixture-seeding and lock-mutation surfaces
+            // (bd-read-only-declared-rw-opens-4opk0). Each opens the store
+            // read-write and mutates the named tables on default invocation, as
+            // already recorded in docs/mechanical-boundary-command-inventory.md.
+            CommandEffect::durable_write(
+                "diag advisory-lock",
+                vec!["ee_advisory_locks", "audit_log"],
+                "Acquire, release, or list diagnostic advisory locks with audited lock-state changes",
+            ),
+            CommandEffect::durable_write(
+                "diag causal-edge",
+                vec!["causal_evidence"],
+                "Seed a diagnostic causal-evidence edge row",
+            ),
+            CommandEffect::durable_write(
+                "diag curation-candidate",
+                vec!["curation_candidates"],
+                "Seed or update a diagnostic curation-candidate fixture row",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "diag database-skew",
+                vec![
+                    "causal_evidence",
+                    "curation_ttl_policies",
+                    "ee_schema_migrations",
+                    "feedback_events",
+                    "feedback_quarantine",
+                    "memories",
+                    "memory_links",
+                    "pack_items",
+                    "procedural_rules",
+                    "trust_quarantine",
+                    "workspaces",
+                ],
+                vec![".ee/ee.db", "<--output-database path>"],
+                "Apply a diagnostic schema skew to a copied database or in-place fixture store",
+            ),
+            CommandEffect::durable_write(
+                "diag graph-snapshot",
+                vec!["graph_snapshots"],
+                "Seed a diagnostic graph-snapshot fixture row",
+            ),
+            CommandEffect::durable_write(
+                "diag memory-validity",
+                vec!["memories"],
+                "Mutate a memory row's diagnostic validity window in place",
+            ),
+            CommandEffect::durable_write(
+                "diag model-registry",
+                vec!["model_registry", "workspaces"],
+                "Seed a diagnostic model-registry fixture row and ensure its workspace binding",
+            ),
+            CommandEffect::durable_write(
+                "diag tripwire",
+                vec!["tripwires"],
+                "Seed a diagnostic tripwire fixture row",
+            ),
             CommandEffect::durable_write(
                 "graph suggest-links",
                 vec!["curation_candidates"],
@@ -5409,6 +5446,95 @@ mod tests {
                 &format!("{command} must declare .ee/audit.jsonl in workspace_files"),
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn diag_seeding_and_rw_open_sweep_classifications_match_writes_bd_4opk0() -> TestResult {
+        let manifest = EffectManifest::build();
+
+        let expected_diag_mutations: &[(&str, &[&str])] = &[
+            ("diag advisory-lock", &["ee_advisory_locks", "audit_log"]),
+            ("diag causal-edge", &["causal_evidence"]),
+            ("diag curation-candidate", &["curation_candidates"]),
+            (
+                "diag database-skew",
+                &[
+                    "causal_evidence",
+                    "curation_ttl_policies",
+                    "ee_schema_migrations",
+                    "feedback_events",
+                    "feedback_quarantine",
+                    "memories",
+                    "memory_links",
+                    "pack_items",
+                    "procedural_rules",
+                    "trust_quarantine",
+                    "workspaces",
+                ],
+            ),
+            ("diag graph-snapshot", &["graph_snapshots"]),
+            ("diag memory-validity", &["memories"]),
+            ("diag model-registry", &["model_registry", "workspaces"]),
+            ("diag pack-record", &["pack_records", "audit_log"]),
+            ("diag tripwire", &["tripwires"]),
+        ];
+
+        for (command, expected_tables) in expected_diag_mutations {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not in manifest"))?;
+            ensure(
+                effect.default_effect,
+                EffectClass::DurableMemoryWrite,
+                &format!("{command} mutates durable database state"),
+            )?;
+            ensure(
+                effect.write_surfaces.db_tables.as_slice(),
+                *expected_tables,
+                &format!("{command} declares its exact table write surface"),
+            )?;
+            ensure(
+                effect.read_snapshot(),
+                false,
+                &format!("{command} is not a read-snapshot command"),
+            )?;
+        }
+
+        let confirmed_non_writers = [
+            "why",
+            "orient",
+            "diag pack-latest",
+            "diag quarantine show",
+            "graph centrality",
+            "graph diff",
+            "graph export",
+            "graph neighborhood",
+            "rationale list",
+            "rationale show",
+            "recorder events list",
+        ];
+        for command in confirmed_non_writers {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not in manifest"))?;
+            ensure(
+                effect.default_effect,
+                EffectClass::ReadOnly,
+                &format!("{command} remains read-only"),
+            )?;
+            ensure(
+                effect.write_surfaces.is_empty(),
+                true,
+                &format!("{command} has empty write surfaces"),
+            )?;
+            ensure(
+                effect.read_snapshot(),
+                true,
+                &format!("{command} requires a DB read snapshot"),
+            )?;
+        }
+
         Ok(())
     }
 }

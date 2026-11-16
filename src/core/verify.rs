@@ -2246,7 +2246,36 @@ fn record_verification_evidence_with_authority(
 pub fn verification_closure_guidance_from_ledger(
     options: &VerificationClosureGuidanceOptions<'_>,
 ) -> Result<VerificationClosureGuidanceReport, DomainError> {
-    let connection = open_verification_database(options.database_path)?;
+    if !options.database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Failed to open database: {} does not exist",
+                options.database_path.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    let connection =
+        DbConnection::open_file_read_only(options.database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee init --workspace .".to_owned()),
+            }
+        })?;
+    if connection
+        .needs_migration()
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect database schema before verification ledger access: {error}"
+            ),
+            repair: Some("ee migrate run --workspace .".to_owned()),
+        })?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "Database requires migration before verification ledger access.".to_owned(),
+            repair: Some("ee migrate run --workspace .".to_owned()),
+        });
+    }
     let records = if let Some(bead_id) = options.bead_id {
         list_verification_records_for_bead(&connection, bead_id)?
     } else {
@@ -2889,7 +2918,7 @@ pub(crate) fn gather_verification_posture_with_connection(
                 "ee doctor --workspace . --json",
             );
         }
-        match DbConnection::open_file(&database_path) {
+        match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
                 &owned_connection
