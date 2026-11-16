@@ -641,9 +641,44 @@ ee_resolve_fixture_binary() {
     # `|| echo unknown` because a candidate that cannot report a version must
     # not break resolution; that is a different failure and the callers that
     # care have ee_require_current_binary.
-    local candidate_version
+    local candidate_version source_version currency
     candidate_version="$(ee_binary_version "$candidate" 2>/dev/null || true)"
-    printf '%s: ee_binary=%s origin=%s version=%s\n' \
-        "$label" "$candidate" "$origin" "${candidate_version:-unknown}" >&2
+    source_version="$(ee_source_version 2>/dev/null || true)"
+    if [ -n "$candidate_version" ] && [ -n "$source_version" ]; then
+        if [ "$candidate_version" = "$source_version" ]; then
+            currency=current
+        else
+            currency=stale
+        fi
+    else
+        currency=unknown
+    fi
+    printf '%s: ee_binary=%s origin=%s version=%s source_version=%s currency=%s\n' \
+        "$label" "$candidate" "$origin" "${candidate_version:-unknown}" \
+        "${source_version:-unknown}" "$currency" >&2
+    if [ "$origin" = "path_fallback" ] && [ "$currency" != "current" ] \
+        && [ "${EE_ALLOW_STALE_PATH_FALLBACK:-0}" != "1" ]; then
+        printf '%s: REFUSING non-current PATH fallback (version=%s, source_version=%s, currency=%s); build a native current binary, set EE_BINARY/EE_DOCTOR_FIXTURE_BINARY, or set EE_ALLOW_STALE_PATH_FALLBACK=1 to override (bd-r6t36)\n' \
+            "$label" "${candidate_version:-unknown}" "${source_version:-unknown}" "$currency" >&2
+        printf '%s\n' "${REPO_ROOT}/target/debug/ee-stale-path-fallback-refused"
+        return 0
+    fi
     printf '%s\n' "$candidate"
+}
+
+# ee_isolate_data_dirs <root_dir> — Redirect HOME and XDG_{DATA,CONFIG,CACHE,STATE}_HOME
+# to <root_dir> and default EE_EMBED_DOWNLOAD=off so shell e2e scripts never
+# read or mutate the runner host's ~/.local/share/ee store or model cache (bd-xuznt).
+ee_isolate_data_dirs() {
+    local root="${1:?ee_isolate_data_dirs: root directory required}"
+    mkdir -p "$root/home" "$root/xdg/data" "$root/xdg/config" "$root/xdg/cache" "$root/xdg/state"
+    if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -n "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+        export EE_EMBED_MODEL_DIR="$EE_EMBED_MODEL_FIXTURE_DIR"
+    fi
+    export HOME="$root/home"
+    export XDG_DATA_HOME="$root/xdg/data"
+    export XDG_CONFIG_HOME="$root/xdg/config"
+    export XDG_CACHE_HOME="$root/xdg/cache"
+    export XDG_STATE_HOME="$root/xdg/state"
+    export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 }

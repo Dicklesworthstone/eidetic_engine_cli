@@ -694,3 +694,56 @@ esac
 # and breaks the harness rather than the message.
 fixture_out="$(ee_resolve_fixture_binary selftest "$fixture_bin" 2>/dev/null)"
 assert_eq "$fixture_out" "$fixture_bin" "resolver returns ONLY the path on stdout"
+
+# 25-27. bd-r6t36: PATH fallback currency enforcement.
+#    When no built binary can execute here and no caller override is set,
+#    origin=path_fallback must refuse a stale PATH `ee` by default (returning a
+#    non-executable sentinel path so callers skip with exit 3 instead of
+#    certifying a stale binary), accept a current PATH `ee`, and honor
+#    EE_ALLOW_STALE_PATH_FALLBACK=1 when explicitly requested.
+empty_target_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-empty-target.XXXXXX")"
+stale_path_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-stale-path.XXXXXX")"
+printf '#!/bin/sh\necho "ee 0.14.2"\n' >"$stale_path_dir/ee"
+chmod +x "$stale_path_dir/ee"
+
+stale_fallback_prov="$(
+    CARGO_TARGET_DIR="$empty_target_dir" EE_BINARY="" EE_DOCTOR_FIXTURE_BINARY="" \
+        PATH="$stale_path_dir:$PATH" \
+        ee_resolve_fixture_binary selftest 2>&1 >/dev/null
+)"
+case "$stale_fallback_prov" in
+    *"origin=path_fallback"*currency=stale*REFUSING\ non-current\ PATH\ fallback*)
+        printf 'ok %s\n' "stale PATH fallback logs currency=stale and refusal" ;;
+    *)
+        printf 'FAIL stale PATH fallback must log currency=stale and refusal\n%s\n' "$stale_fallback_prov" >&2
+        exit 1 ;;
+esac
+
+stale_fallback_out="$(
+    CARGO_TARGET_DIR="$empty_target_dir" EE_BINARY="" EE_DOCTOR_FIXTURE_BINARY="" \
+        PATH="$stale_path_dir:$PATH" \
+        ee_resolve_fixture_binary selftest 2>/dev/null
+)"
+if command -v "$stale_fallback_out" >/dev/null 2>&1; then
+    printf 'FAIL stale PATH fallback must not resolve to an executable binary (%s)\n' "$stale_fallback_out" >&2
+    exit 1
+fi
+printf 'ok %s\n' "stale PATH fallback returns non-executable sentinel path"
+
+allow_stale_out="$(
+    CARGO_TARGET_DIR="$empty_target_dir" EE_BINARY="" EE_DOCTOR_FIXTURE_BINARY="" \
+        EE_ALLOW_STALE_PATH_FALLBACK=1 PATH="$stale_path_dir:$PATH" \
+        ee_resolve_fixture_binary selftest 2>/dev/null
+)"
+assert_eq "$allow_stale_out" "ee" "EE_ALLOW_STALE_PATH_FALLBACK=1 permits explicit stale fallback"
+
+current_path_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-current-path.XXXXXX")"
+current_src_ver="$(ee_source_version)"
+printf '#!/bin/sh\necho "ee %s"\n' "$current_src_ver" >"$current_path_dir/ee"
+chmod +x "$current_path_dir/ee"
+current_fallback_out="$(
+    CARGO_TARGET_DIR="$empty_target_dir" EE_BINARY="" EE_DOCTOR_FIXTURE_BINARY="" \
+        PATH="$current_path_dir:$PATH" \
+        ee_resolve_fixture_binary selftest 2>/dev/null
+)"
+assert_eq "$current_fallback_out" "ee" "current PATH fallback resolves cleanly when version matches Cargo.toml"

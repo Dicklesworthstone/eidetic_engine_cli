@@ -14,17 +14,24 @@
 # consumed by the cross-repo matrix (hfdt zu12ia.48), the phase, the host, and
 # the workspace path.
 #
-# ARMS IMPLEMENTED HERE — only beads whose fix has actually landed:
+# ARMS IMPLEMENTED HERE — all six 2026-08-25 beads plus the four 2026-08-26 additions:
 #   bd-status-search-lexical-honesty-ejdpo     e91c115fc
 #   bd-auto-index-rebuild-on-fallback-x35vi    3a3b3f212
 #   bd-fallback-relevance-floor-labeling-dlr6a 9a6d8eab9
 #   bd-ns-gate-open-retry-classifier-wg18a     8068719e9
+#   bd-tag-case-roundtrip-tkq8v                d357e1b78
+#   bd-cik-phone-number-false-positive-pmsri   3877aa078
+#   bd-pack-doctor-posture-disagreement-nts29  afdfec853 (two arms)
+#   bd-pack-compact-mode-ibksx                 ef2f88b6e
+#   bd-r1gbq (superseding bd-lexical-fallback-hint-suppression-s2c10) eaa1e1ac0
 #
-# DELIBERATELY NOT IMPLEMENTED (see the bead comment): an arm for
-# bd-lexical-fallback-hint-suppression-s2c10. That fix has not landed — there is
-# no suppression mechanism in src/ — so an arm would assert behaviour that does
-# not exist. Per this suite's own MUST-be-RED-pre-fix rule, a green arm against
-# absent behaviour is worse than no arm.
+# NOTE ON ARM 4 (bd-lexical-fallback-hint-suppression-s2c10 -> bd-r1gbq):
+# s2c10 was closed as NOT-BUILDABLE-AS-WRITTEN and superseded by bd-r1gbq
+# (`eaa1e1ac0`, "feat(output): elide the degraded repair hint by output profile,
+# never the entry") because `ee` is a one-shot CLI with no session to suppress
+# across and persisting a session marker would violate determinism. Arm 10
+# (`arm_degraded_repair_hint_elision_r1gbq`) tests the shipped profile-based
+# repair-hint elision contract.
 
 set -uo pipefail
 
@@ -890,6 +897,93 @@ arm_pack_compact_mode_ibksx() {
         duration_ms "$(( $(now_ms) - started ))"
 }
 
+# ---------------------------------------------------------------------------
+# Arm 10: bd-r1gbq (superseding bd-lexical-fallback-hint-suppression-s2c10) —
+# degraded repair hints are elided by output profile (--pack-profile lean /
+# --compact) while the degraded[] entry itself (code, severity, message) is
+# never suppressed, and pack.hash reflects the profile-aware output options.
+# ---------------------------------------------------------------------------
+arm_degraded_repair_hint_elision_r1gbq() {
+    local bead="bd-r1gbq"
+    local started ws empty_index standard_json lean_json standard_hash lean_hash
+    ws="$(arm_workspace "$bead" degraded_repair_hint_elision)"
+    started="$(now_ms)"
+    empty_index="$ws/empty-index"
+    mkdir -p "$empty_index"
+
+    step "[$bead] degraded repair hints elided under lean profile while retaining degraded[] entry and lockstep text"
+    ee_in "$ws" init --json >/dev/null
+    ee_in "$ws" remember \
+        "Degraded repair hint elision memory: Lean profile drops the repeated repair string while preserving the degraded code, severity, and message." \
+        --level procedural --kind rule \
+        --tags repair-hint,profile,lean \
+        --json >/dev/null
+
+    standard_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "degraded repair hint elision memory" \
+            --pack-profile standard --json
+    )"
+    lean_json="$(
+        export EE_INDEX_DIR="$empty_index"
+        ee_in "$ws" pack "degraded repair hint elision memory" \
+            --pack-profile lean --json
+    )"
+    printf '%s\n' "$standard_json" >"$ws/pack.standard.json"
+    printf '%s\n' "$lean_json" >"$ws/pack.lean.json"
+
+    log_event arm_act bead_id "$bead" phase act check degraded_repair_hint_elision \
+        workspace "$ws" host "$SUITE_HOST"
+
+    # Positive non-vacuity guards on both responses (paired with the absence
+    # assertion below for audit-absence-assertion-guards.py --strict).
+    assert_jq "$standard_json" \
+        '.success == true and (.data.pack.hash != null) and ((.degraded // []) | length >= 1)' \
+        "$bead: standard profile degraded pack succeeded with non-empty degraded[]"
+    assert_jq "$lean_json" \
+        '.success == true and (.data.pack.hash != null) and ((.degraded // []) | length >= 1)' \
+        "$bead: lean profile degraded pack succeeded with non-empty degraded[]"
+
+    # 1. Standard profile carries non-empty .repair on degraded[] entries and
+    #    keeps advisoryBanner and degraded[] in lockstep (bd-2v6r0).
+    assert_jq "$standard_json" \
+        '[(.degraded // [])[] | select(.code == "embed_model_unavailable" and ((.repair // "") | length > 0))] | length == 1' \
+        "$bead: --pack-profile standard emits non-empty .repair on embed_model_unavailable"
+    assert_jq "$standard_json" \
+        '.data.pack.advisoryBanner.status == "degraded" and (.data.pack.advisoryBanner.degradationCount == ((.degraded // []) | length)) and ((.data.pack.advisoryBanner.summary // "") | length > 0)' \
+        "$bead: --pack-profile standard keeps advisoryBanner and degraded[] in lockstep"
+
+    # 2. Lean profile retains the exact degraded[] entry (code, severity, message)
+    #    and elides only .repair / .repairKind.
+    assert_jq "$lean_json" \
+        '[(.degraded // [])[] | select(.code == "embed_model_unavailable" and ((.severity // "") | length > 0) and ((.message // "") | length > 0))] | length == 1' \
+        "$bead: --pack-profile lean preserves degraded[] code, severity, and message"
+    assert_jq "$lean_json" \
+        '[(.degraded // [])[] | select((.repair // "") != "")] | length == 0' \
+        "$bead: --pack-profile lean elides .repair across all degraded[] entries"
+
+    # 3. Both profiles emit the identical sorted set of degraded[] codes (no
+    #    entry is ever demoted or dropped by Lean).
+    local standard_codes lean_codes
+    standard_codes="$(printf '%s\n' "$standard_json" | jq -c '[(.degraded // [])[].code] | sort')"
+    lean_codes="$(printf '%s\n' "$lean_json" | jq -c '[(.degraded // [])[].code] | sort')"
+    assert_eq "$standard_codes" "$lean_codes" \
+        "$bead: standard and lean profiles emit the identical degraded[] code set"
+
+    # 4. Pack hash differs between standard and lean because ContextPackOutputOptions
+    #    is bound into the request component of the v6 pack hash.
+    standard_hash="$(printf '%s\n' "$standard_json" | jq -r '.data.pack.hash')"
+    lean_hash="$(printf '%s\n' "$lean_json" | jq -r '.data.pack.hash')"
+    assert_jq "$(printf '{"standard":%s,"lean":%s}' "$(printf '%s' "$standard_hash" | jq -Rs .)" "$(printf '%s' "$lean_hash" | jq -Rs .)")" \
+        '.standard != .lean' \
+        "$bead: pack.hash differs between standard and lean profiles (profile-bound hash)"
+
+    log_event arm_done bead_id "$bead" phase assert check degraded_repair_hint_elision \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        standard_hash "$standard_hash" lean_hash "$lean_hash" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
 suite_environment_probe
 suite_environment_line
 
@@ -902,8 +996,33 @@ arm_cik_accession_false_positive
 arm_pack_banner_names_its_scope
 arm_cross_surface_verdict_vocabulary
 arm_pack_compact_mode_ibksx
+arm_degraded_repair_hint_elision_r1gbq
 
 printf '[suite] artifacts retained under %s\n' "$SUITE_ROOT" >&2
+# Emit the per-bead verdict table consumed by the cross-repo verification matrix.
+if [ -f "${EE_TEST_LOG_PATH:-${LOG_DIR:-}/events.jsonl}" ]; then
+    jq -cs --arg host "$SUITE_HOST" --arg os "$SUITE_OS" --arg ee_bin "$SUITE_EE_BIN" '
+        {
+            schema: "ee.field_report_suite.bead_verdicts.v1",
+            host: $host,
+            os: $os,
+            ee_bin: $ee_bin,
+            beads: (
+                [ .[] | select(.kind == "arm_done") | .fields ]
+                | group_by(.bead_id)
+                | map({
+                    bead_id: .[0].bead_id,
+                    arms: (map(.check)),
+                    workspaces: (map(.workspace)),
+                    total_duration_ms: (map(.duration_ms | tonumber? // 0) | add)
+                })
+            )
+        }
+    ' "${EE_TEST_LOG_PATH:-${LOG_DIR:-}/events.jsonl}" >"$SUITE_ROOT/bead_verdicts.json" 2>/dev/null || true
+    if [ -s "$SUITE_ROOT/bead_verdicts.json" ]; then
+        cat "$SUITE_ROOT/bead_verdicts.json" >&2
+    fi
+fi
 # Repeated next to the tally so the tally states where it came from.
 suite_environment_line
 harness_summary

@@ -68,7 +68,7 @@ import sys
 # not appear in the per-file output at all even though bd-tnfge's line census
 # credits it with 8 absence lines.
 CALL = re.compile(
-    r"""assert_jq[\s\\]+"(?P<payload>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)"[\s\\]+'(?P<pred>[^']*)'""",
+    r"""assert_jq[\s\\]+"(?P<payload>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)"[\s\\]+(?:'(?P<pred>[^']*)'|"(?P<pred_d>(?:\\.|[^"\\])*)")""",
     re.DOTALL,
 )
 # Any assert_jq whose payload is not a simple variable (inline $(...), etc.)
@@ -161,11 +161,12 @@ def classify(text):
     calls = []
     for m in CALL.finditer(text):
         ln = text.count("\n", 0, m.start())
+        pred = m.group("pred") if m.group("pred") is not None else m.group("pred_d")
         calls.append(
             {
                 "line": ln + 1,
                 "payload": m.group("payload").strip("${}"),
-                "pred": m.group("pred"),
+                "pred": pred,
                 "fn": enclosing(lines, ln, spans),
             }
         )

@@ -54,6 +54,9 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     echo "ee binary missing (set EE_BIN)" >&2
     exit 3
 fi
+if ! ee_require_current_binary "${REAL_EE}" "e2e_global_lane"; then
+    exit 3
+fi
 
 # bd-mfqa2: the macOS temp path is a PLATFORM preference, not a default for
 # every host. Resolved centrally so this script does not re-implement it.
@@ -61,18 +64,75 @@ fi
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e_tmproot.sh"
 ROOT_BASE="$(e2e_temp_root)"
-ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-global-lane-e2e.XXXXXX")"
+# bd-5lh8i: Reuse a deterministic slot directory by default instead of leaking
+# a new ee-global-lane-e2e.XXXXXX directory on every invocation, consistent
+# with the repository no-delete policy. Set EE_GLOBAL_LANE_UNIQUE=1 when an
+# isolated per-invocation directory is explicitly desired.
+if [[ "${EE_GLOBAL_LANE_UNIQUE:-0}" == "1" ]]; then
+    ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-global-lane-e2e.XXXXXX")"
+else
+    ROOT="${EE_GLOBAL_LANE_ROOT:-${ROOT_BASE%/}/ee-global-lane-e2e}"
+    mkdir -p "${ROOT}"
+fi
+RUN_TAG="gl-${BASHPID:-$$}-$(date +%s)"
 WS_A="${ROOT}/ws_a"
 WS_B="${ROOT}/ws_b"
 WS_C="${ROOT}/ws_c"
 LOG_DIR="${ROOT}/logs"
 EVENT_LOG="${LOG_DIR}/events.jsonl"
+RETENTION_MANIFEST="${ROOT}/e2e_retention_manifest.json"
 mkdir -p "${WS_A}" "${WS_B}" "${WS_C}" "${LOG_DIR}"
 : >"${EVENT_LOG}"
 
+# bd-5lh8i: Preserve the host's shared model cache before redirecting
+# XDG_DATA_HOME to the hermetic global memory store, and default
+# EE_EMBED_DOWNLOAD=off so this harness never downloads a 512 MB copy of
+# potion-multilingual-128M/model.safetensors into TMPDIR.
+HOST_XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME:-}/.local/share}"
+if [[ -z "${EE_EMBED_MODEL_DIR:-}" && -d "${HOST_XDG_DATA_HOME}/ee/models" ]]; then
+    export EE_EMBED_MODEL_DIR="${HOST_XDG_DATA_HOME}/ee/models"
+fi
+export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
+
 # Hermetic user-global store: the global tier resolves under XDG_DATA_HOME.
+export HOME="${ROOT}/home"
 export XDG_DATA_HOME="${ROOT}/xdg"
-mkdir -p "${XDG_DATA_HOME}"
+export XDG_CONFIG_HOME="${ROOT}/xdg-config"
+export XDG_CACHE_HOME="${ROOT}/xdg-cache"
+export XDG_STATE_HOME="${ROOT}/xdg-state"
+mkdir -p "${HOME}" "${XDG_DATA_HOME}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STATE_HOME}"
+
+write_retention_manifest() {
+    local exit_code=$?
+    local policy="reused_deterministic_slot_no_delete_policy"
+    if [[ "${EE_GLOBAL_LANE_UNIQUE:-0}" == "1" ]]; then
+        policy="retained_unique_workspace_no_delete_policy"
+    fi
+    jq -n \
+        --arg schema "ee.e2e_retention_manifest.v1" \
+        --arg test_id "${TEST_ID}" \
+        --arg root "${ROOT}" \
+        --arg event_log "${EVENT_LOG}" \
+        --arg policy "${policy}" \
+        --arg embed_download "${EE_EMBED_DOWNLOAD}" \
+        --arg embed_model_dir "${EE_EMBED_MODEL_DIR:-none}" \
+        --argjson steps "${STEP}" \
+        --argjson failures "${FAILURES}" \
+        --argjson exit_code "${exit_code}" \
+        '{
+            schema: $schema,
+            test_id: $test_id,
+            root: $root,
+            event_log: $event_log,
+            retention_policy: $policy,
+            embed_download: $embed_download,
+            embed_model_dir: $embed_model_dir,
+            steps: $steps,
+            failures: $failures,
+            exit_code: $exit_code
+        }' >"${RETENTION_MANIFEST}" 2>/dev/null || true
+}
+trap write_retention_manifest EXIT
 
 event() {
     local label="$1" status="$2" diagnosis="${3:-}"
@@ -102,7 +162,7 @@ done
 event workspaces_initialized pass
 
 # --- evidence gate: promote from workspace A ----------------------------
-run_ee remember "Always run the schema drift gate before altering public JSON." \
+run_ee remember "Always run the schema drift gate before altering public JSON (${RUN_TAG})." \
     --workspace "${WS_A}" --level procedural --kind rule --json
 MEMORY_A="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
 if [[ -z "${MEMORY_A}" ]]; then
@@ -145,7 +205,7 @@ if [[ "${TRUST_A}" == "human_explicit" || "${TRUST_A}" == "agent_validated" ]]; 
 
     # Same content promoted from a DIFFERENT workspace must merge into the
     # existing global row, not create a duplicate.
-    run_ee remember "Always run the schema drift gate before altering public JSON." \
+    run_ee remember "Always run the schema drift gate before altering public JSON (${RUN_TAG})." \
         --workspace "${WS_B}" --level procedural --kind rule --json
     MEMORY_B="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
     run_ee memory promote-global "${MEMORY_B}" --workspace "${WS_B}" --dry-run --json
