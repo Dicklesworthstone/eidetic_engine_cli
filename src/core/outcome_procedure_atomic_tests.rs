@@ -186,6 +186,96 @@ impl Fixture {
 }
 
 #[test]
+fn zero_weight_procedure_feedback_is_audited_without_counting_or_retirement() {
+    for signal in ["helpful", "harmful"] {
+        for weight in [0.0_f32, -0.0] {
+            let fixture = Fixture::new();
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE procedures SET maturity = 'mature', harmful_count = 2 WHERE id = '{PROCEDURE}'"
+                ))
+                .unwrap();
+            let before = fixture.procedure();
+            let counts = fixture.counts();
+            let mut options = fixture.options();
+            options.signal = signal.to_owned();
+            options.weight = Some(weight);
+            let report = record_outcome(&options).unwrap();
+            assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+            let event = fixture.db.get_feedback_event(EVENT).unwrap().unwrap();
+            assert_eq!(event.signal, signal);
+            assert_eq!(event.weight, 0.0);
+            let audit = fixture
+                .db
+                .get_audit(report.audit_id.as_deref().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(audit.action, audit_actions::FEEDBACK_RECORD);
+            assert_eq!(audit.target_id.as_deref(), Some(PROCEDURE));
+            let recorded_counts = (counts.0 + 1, counts.1 + 1, counts.2);
+            fixture.assert_unchanged(&before, recorded_counts);
+            assert_eq!(
+                record_outcome(&options).unwrap().status,
+                OutcomeRecordStatus::AlreadyRecorded
+            );
+            fixture.assert_unchanged(&before, recorded_counts);
+
+            // The next actual observation must retain its established weight
+            // calibration, and a real third harmful vote must still retire.
+            options.event_id = Some(FIRST_EVENT.to_owned());
+            options.weight = Some(0.5);
+            assert_eq!(
+                record_outcome(&options).unwrap().status,
+                OutcomeRecordStatus::Recorded
+            );
+            let learned = fixture.procedure();
+            if signal == "helpful" {
+                assert_eq!(learned.helpful_count, 1);
+                assert_eq!(learned.harmful_count, 2);
+                assert_eq!(learned.maturity, "mature");
+                assert!((learned.confidence - 0.52).abs() < 1e-6);
+                assert!((learned.utility - 0.54).abs() < 1e-6);
+            } else {
+                assert_eq!(learned.helpful_count, 0);
+                assert_eq!(learned.harmful_count, 3);
+                assert_eq!(learned.maturity, "retired");
+                assert!(learned.retired_at.is_some());
+                assert!((learned.confidence - 0.45).abs() < 1e-6);
+                assert!((learned.utility - 0.44).abs() < 1e-6);
+            }
+            assert_eq!(fixture.counts().2, counts.2 + 1);
+        }
+    }
+}
+
+#[test]
+fn standalone_zero_weight_procedure_feedback_does_not_write_learning_history() {
+    let fixture = Fixture::new();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    for signal in ["helpful", "harmful"] {
+        for weight in [0.0_f32, -0.0] {
+            let update = fixture
+                .db
+                .apply_procedure_feedback(ApplyProcedureFeedbackInput {
+                    workspace_id: WORKSPACE,
+                    procedure_id: PROCEDURE,
+                    signal,
+                    weight,
+                    auto_retire_harmful_threshold: 1,
+                    event_id: SPARE_EVENT,
+                    reason: None,
+                    actor: None,
+                })
+                .unwrap();
+            assert!(update.is_none());
+            fixture.assert_unchanged(&before, counts);
+        }
+    }
+}
+
+#[test]
 fn procedure_history_failure_rolls_back_feedback_id_and_primary_audit() {
     let fixture = Fixture::new();
     fixture.collide_history();
@@ -369,14 +459,19 @@ fn missing_or_foreign_procedure_rolls_back_outer_feedback_even_for_neutral_signa
         (WORKSPACE, "proc_00000000000000000000000074"),
         (other_workspace, PROCEDURE),
     ] {
-        for signal in ["helpful", "neutral"] {
+        for (signal, weight) in [
+            ("helpful", 0.5),
+            ("neutral", 0.5),
+            ("helpful", 0.0),
+            ("harmful", -0.0),
+        ] {
             let input = AuditedFeedbackEventInput {
                 event: CreateFeedbackEventInput {
                     workspace_id: workspace.to_owned(),
                     target_type: "procedure".to_owned(),
                     target_id: procedure.to_owned(),
                     signal: signal.to_owned(),
-                    weight: 0.5,
+                    weight,
                     source_type: "outcome_observed".to_owned(),
                     source_id: None,
                     reason: None,
@@ -470,6 +565,56 @@ fn caller_owned_procedure_update_never_commits_before_its_parent_transaction() {
             .contains("parent transaction failure")
     );
     fixture.assert_unchanged(&before, counts);
+}
+
+#[test]
+fn zero_weight_procedure_quarantine_release_preserves_maturity_and_learning_history() {
+    for weight in [0.0_f32, -0.0] {
+        let fixture = Fixture::new();
+        fixture.seed_before_retirement();
+        let mut options = fixture.harmful_options();
+        options.event_id = Some(FIRST_EVENT.to_owned());
+        options.harmful_per_source_per_hour = 1;
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        let before = fixture.procedure();
+        assert_eq!(before.harmful_count, 2);
+        assert_eq!(before.maturity, "mature");
+        options.event_id = Some(EVENT.to_owned());
+        options.weight = Some(weight);
+        let queued = record_outcome(&options).unwrap();
+        assert_eq!(queued.status, OutcomeRecordStatus::Quarantined);
+        assert_eq!(fixture.procedure(), before);
+        assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+        let quarantine_id = queued.quarantine.and_then(|summary| summary.id).unwrap();
+        let release = fixture.release_options(&quarantine_id);
+        let counts = fixture.counts();
+        let report = review_feedback_quarantine(&release).unwrap();
+        assert_eq!(report.status, "released");
+        assert!(report.changed);
+        assert_eq!(report.feedback_event_id.as_deref(), Some(EVENT));
+        let audit = fixture
+            .db
+            .get_audit(report.audit_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(audit.action, audit_actions::FEEDBACK_QUARANTINE_RELEASE);
+        let event = fixture.db.get_feedback_event(EVENT).unwrap().unwrap();
+        assert_eq!(event.signal, "harmful");
+        assert_eq!(event.weight, 0.0);
+        let released_counts = (counts.0 + 1, counts.1 + 1, counts.2);
+        fixture.assert_unchanged(&before, released_counts);
+        let replay = review_feedback_quarantine(&release).unwrap();
+        assert_eq!(replay.status, "already_reviewed");
+        assert!(!replay.changed);
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        fixture.assert_unchanged(&before, released_counts);
+    }
 }
 
 #[test]

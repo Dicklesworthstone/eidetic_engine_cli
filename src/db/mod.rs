@@ -24129,7 +24129,10 @@ impl DbConnection {
             input.signal,
             "harmful" | "negative" | "contradiction" | "inaccurate"
         );
-        if !helpful && !harmful {
+        // Zero-weight outcomes stay in the caller's feedback/audit ledger,
+        // but cannot supply a validation vote or a retirement strike. Avoid
+        // writing procedure history or timestamps for that learning no-op.
+        if input.weight <= 0.0 || (!helpful && !harmful) {
             return Ok(None);
         }
 
@@ -24554,6 +24557,27 @@ impl DbConnection {
         }
 
         Ok(counts)
+    }
+
+    /// Count helpful observations that carry evidence for trust promotion.
+    ///
+    /// Zero-weight observations remain visible in the raw ledger summary.
+    pub(crate) fn count_helpful_learning_feedback(
+        &self,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM feedback_events WHERE target_type = ?1 AND target_id = ?2 AND weight > 0 AND signal IN ('positive', 'helpful', 'confirmation')",
+            &[
+                Value::Text(target_type.to_string()),
+                Value::Text(target_id.to_string()),
+            ],
+        )?;
+        rows.first().map_or(Ok(0), |row| {
+            required_u32(row, 0, DbOperation::Query, "count")
+        })
     }
 
     /// Count harmful feedback events from one source in a bounded time window.

@@ -1450,7 +1450,7 @@ fn record_outcome_inner(
                             &event_id,
                             options.actor.as_deref(),
                         )?;
-                        if target_type == "memory" {
+                        if target_type == "memory" && feedback_input.weight > 0.0 {
                             record_agent_context_profile_update_in_txn(
                                 &connection,
                                 &target.workspace_id,
@@ -1593,7 +1593,8 @@ fn apply_procedure_outcome_in_txn(
         reason: feedback.reason.as_deref(),
         actor,
     })?;
-    if update.is_none()
+    if feedback.weight > 0.0
+        && update.is_none()
         && (HELPFUL_SIGNALS.contains(&feedback.signal.as_str())
             || is_harmful_signal(&feedback.signal))
     {
@@ -1772,15 +1773,21 @@ fn apply_memory_outcome_in_txn(
         .ok_or_else(missing_target)?;
     let prior =
         BetaPosterior::new(current_alpha, current_beta).unwrap_or_else(BetaPosterior::jeffreys);
-    // Preserve the established signal model. Event-weight calibration is a
-    // separate policy decision, not part of repairing commit atomicity.
-    let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&feedback.signal) {
-        FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
-        FeedbackSignal::Harmful => (
-            prior.update_harmful(DEFAULT_HARMFUL_WEIGHT),
-            DEFAULT_HARMFUL_WEIGHT,
-        ),
-        FeedbackSignal::Neutral => (prior, 0.0),
+    // A zero-weight event remains auditable evidence, but carries no learning
+    // signal. Match native-rule feedback, including on release from quarantine.
+    // Positive weights retain the established unit-event calibration; this
+    // is not a rescaling of historical memory posteriors.
+    let (posterior, applied_weight) = if feedback.weight <= 0.0 {
+        (prior, 0.0)
+    } else {
+        match FeedbackSignal::from_signal_str(&feedback.signal) {
+            FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
+            FeedbackSignal::Harmful => (
+                prior.update_harmful(DEFAULT_HARMFUL_WEIGHT),
+                DEFAULT_HARMFUL_WEIGHT,
+            ),
+            FeedbackSignal::Neutral => (prior, 0.0),
+        }
     };
     if posterior != prior {
         tracing::debug!(
@@ -1826,12 +1833,12 @@ fn apply_memory_outcome_in_txn(
                 details: Some(details),
             },
         )?;
-        // This count includes the event inserted in the same transaction.
+        // This count includes eligible evidence inserted in this transaction.
+        // Zero-weight ledger entries cannot authorize a later promotion.
         // Family-completeness admission, trust CAS and their audits therefore
         // cannot observe a different evidence state from the posterior.
-        let validation_events = connection
-            .count_feedback_by_signal("memory", &feedback.target_id)?
-            .positive_count;
+        let validation_events =
+            connection.count_helpful_learning_feedback("memory", &feedback.target_id)?;
         apply_memory_trust_class_transition_in_transaction(
             connection,
             &feedback.workspace_id,
@@ -1862,8 +1869,9 @@ fn apply_memory_outcome_in_txn(
     }
     // The live confidence already includes this observation. A later score
     // decay pass must not apply the legacy scalar adjustment to it again.
-    // Neutral observations are consumed too, without changing the memory or
-    // queuing publication. Keep the marker inside the evidence transaction.
+    // Neutral and zero-weight observations are consumed too, without changing
+    // the memory or queuing publication. Keep the marker inside the evidence
+    // transaction so maintenance cannot learn a zero-weight event later.
     if !connection.apply_feedback_event(event_id)? {
         return Err(crate::db::DbError::MalformedRow {
             operation: crate::db::DbOperation::Execute,

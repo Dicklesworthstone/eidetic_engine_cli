@@ -442,6 +442,114 @@ impl Fixture {
 }
 
 #[test]
+fn zero_weight_memory_feedback_is_audited_without_learning_or_profile_changes() {
+    for signal in ["helpful", "harmful", "neutral"] {
+        for weight in [0.0_f32, -0.0] {
+            let fixture = Fixture::new();
+            // A helpful human observation normally promotes this predecessor.
+            // Zero-weight evidence must not bypass the learning no-op through
+            // explicit promotion authority or per-agent profile learning.
+            fixture.seed_agent_validated();
+            let before = fixture.persisted_feedback_state();
+            let mut options = fixture.options();
+            options.signal = signal.to_owned();
+            options.weight = Some(weight);
+            options.source_type = "human_explicit".to_owned();
+            options.agent_name = Some(REPLAY_AGENT.to_owned());
+            let report = record_outcome(&options).unwrap();
+            assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+            assert_eq!(report.confidence_before, report.confidence_after);
+            assert_eq!(report.confidence_before, Some(0.5));
+
+            let recorded = fixture.persisted_feedback_state();
+            assert_eq!(recorded.posterior, before.posterior);
+            assert_eq!(recorded.memory, before.memory);
+            assert_eq!(recorded.profile, before.profile);
+            assert_eq!(recorded.profile_rows, before.profile_rows);
+            assert_eq!(recorded.index_jobs, before.index_jobs);
+            assert_eq!(recorded.events.len(), 1);
+            assert_eq!(recorded.events[0].signal, signal);
+            assert_eq!(recorded.events[0].weight, 0.0);
+            assert!(recorded.events[0].applied_at.is_some());
+            assert!(report.audit_id.is_some());
+            assert!(recorded.audits.iter().any(|audit| {
+                audit.action == audit_actions::FEEDBACK_RECORD
+                    && audit.target_id.as_deref() == Some(MEMORY)
+            }));
+            assert!(!recorded.audits.iter().any(|audit| {
+                matches!(
+                    audit.action.as_str(),
+                    audit_actions::OUTCOME_BAYES_UPDATE | audit_actions::AGENT_PROFILE_UPDATE
+                )
+            }));
+            assert_eq!(
+                record_outcome(&options).unwrap().status,
+                OutcomeRecordStatus::AlreadyRecorded
+            );
+            assert_eq!(fixture.persisted_feedback_state(), recorded);
+            fixture.assert_no_feedback_relearning();
+        }
+    }
+}
+
+#[test]
+fn zero_weight_helpful_feedback_cannot_authorize_later_legacy_promotion() {
+    for weight in [0.0_f32, -0.0] {
+        let fixture = Fixture::new();
+        assert!(
+            fixture
+                .db
+                .update_memory_trust_class_if(MEMORY, "agent_assertion", "legacy_import")
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .db
+                .update_memory_learning_posterior(MEMORY, 100.0, 1.0)
+                .unwrap()
+        );
+        let mut options = fixture.options();
+        options.weight = Some(weight);
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        let ledger = fixture
+            .db
+            .count_feedback_by_signal("memory", MEMORY)
+            .unwrap();
+        assert_eq!(ledger.positive_count, 1);
+        assert_eq!(ledger.positive_weight, 0.0);
+
+        // The imported posterior stays above the promotion confidence gate
+        // even after this harmful observation. Zero helpful evidence cannot
+        // supply the separate validation requirement on that later update.
+        options.event_id = Some(HELD_EVENT.to_owned());
+        options.signal = "harmful".to_owned();
+        options.weight = Some(0.5);
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        assert_eq!(
+            fixture.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
+            Some("legacy_import")
+        );
+
+        options.event_id = Some("fb_00000000000000000000000073".to_owned());
+        options.signal = "helpful".to_owned();
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        assert_eq!(
+            fixture.db.get_memory_trust_class(MEMORY).unwrap().as_deref(),
+            Some("cass_evidence")
+        );
+    }
+}
+
+#[test]
 fn memory_feedback_replay_requires_the_same_representable_weight() {
     for weight in [0.0_f32, 0.25, 1.0] {
         let fixture = Fixture::new();
@@ -2242,6 +2350,19 @@ fn signed_zero_quarantine_replays_preserve_identity_and_hash_integrity() {
         "the established hash encoding distinguishes numerically equal signed zeros"
     );
     for original_weight in [0.0_f32, -0.0] {
+        let direct = Fixture::new();
+        let mut direct_options = direct.harmful_options();
+        assert_eq!(
+            record_outcome(&direct_options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        direct_options.event_id = Some(HELD_EVENT.to_owned());
+        direct_options.weight = Some(original_weight);
+        assert_eq!(
+            record_outcome(&direct_options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+
         let fixture = Fixture::new();
         let mut options = fixture.harmful_options();
         options.harmful_per_source_per_hour = 1;
@@ -2266,13 +2387,11 @@ fn signed_zero_quarantine_replays_preserve_identity_and_hash_integrity() {
                 assert!(reviewed.changed);
                 assert_eq!(reviewed.feedback_event_id.as_deref(), Some(HELD_EVENT));
                 let learned = fixture.persisted_feedback_state();
-                assert_eq!(
-                    learned.posterior,
-                    (
-                        pending.posterior.0,
-                        pending.posterior.1 + DEFAULT_HARMFUL_WEIGHT
-                    )
-                );
+                assert_eq!(learned.posterior, pending.posterior);
+                assert_eq!(learned.posterior, direct.posterior());
+                assert_eq!(learned.memory, pending.memory);
+                assert_eq!(learned.profile, pending.profile);
+                assert_eq!(learned.profile_rows, pending.profile_rows);
                 assert_eq!(learned.events.len(), pending.events.len() + 1);
                 assert!(
                     learned
@@ -2280,7 +2399,7 @@ fn signed_zero_quarantine_replays_preserve_identity_and_hash_integrity() {
                         .iter()
                         .all(|event| event.applied_at.is_some())
                 );
-                fixture.assert_pending_memory_jobs(pending.index_jobs.len() + 1);
+                assert_eq!(learned.index_jobs, pending.index_jobs);
             }
             let before = fixture.persisted_feedback_state();
             for replay_weight in [0.0_f32, -0.0] {
@@ -2335,6 +2454,8 @@ fn signed_zero_quarantine_replays_preserve_identity_and_hash_integrity() {
                 .unwrap();
             assert_eq!(fixture.persisted_feedback_state(), before);
         }
+        direct.assert_no_feedback_relearning();
+        fixture.assert_no_feedback_relearning();
     }
 }
 
