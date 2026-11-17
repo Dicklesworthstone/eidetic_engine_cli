@@ -3807,11 +3807,19 @@ fn every_run_stage_call_site_is_accountable_in_the_manifest() {
     // Names used by more than one call site, with the reason each is allowed.
     // A name earns a place here only when the call sites are MUTUALLY
     // EXCLUSIVE, so at most one executes per invocation.
-    const MUTUALLY_EXCLUSIVE: &[(&str, &str)] = &[(
-        "Native Reranker E2E (bd-1nl13.14)",
-        "if/else on CI_SMOKE: full run requires the model, ci-smoke runs \
-         degradation-only. At most one executes per invocation.",
-    )];
+    const MUTUALLY_EXCLUSIVE: &[(&str, &str)] = &[
+        (
+            "All-Targets Compile Gate (bd-qdxc0)",
+            "COMPILE_GATE_ONLY early-exit branch vs INCLUDE_COMPILE_GATE in-flow \
+             branch; the early-exit branch exits immediately after running the \
+             stage, so at most one executes per invocation.",
+        ),
+        (
+            "Native Reranker E2E (bd-1nl13.14)",
+            "if/else on CI_SMOKE: full run requires the model, ci-smoke runs \
+             degradation-only. At most one executes per invocation.",
+        ),
+    ];
 
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for name in &call_sites {

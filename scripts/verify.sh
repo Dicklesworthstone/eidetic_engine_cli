@@ -30,6 +30,7 @@ set -euo pipefail
 #                                       # bd-2dgn0 swarm SLO evidence trail.
 #                                       # Documented in docs/operator-swarm-slo.md.
 #   ./scripts/verify.sh --plan-doc-smoke # Run plan-sweep verify_cmd smoke checks
+#   ./scripts/verify.sh --static-only  # Run all binary-free static, contract, and hygiene gates
 #   ./scripts/verify.sh --compile-gate-only # Run only the all-targets cargo check compile gate
 #   ./scripts/verify.sh --include-compile-gate # Include the all-targets cargo check compile gate
 #   ./scripts/verify.sh --fuzz-target-audit-self-test # Run only the no-Cargo fuzz audit matcher self-test
@@ -134,6 +135,7 @@ INCLUDE_SAFETY_HARNESS=false
 INCLUDE_E2E_ORPHANS=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
+STATIC_ONLY=false
 COMPILE_GATE_ONLY=false
 INCLUDE_COMPILE_GATE=false
 CI_SMOKE=false
@@ -178,6 +180,9 @@ for arg in "$@"; do
             ;;
         --plan-doc-smoke)
             PLAN_DOC_SMOKE=true
+            ;;
+        --static-only)
+            STATIC_ONLY=true
             ;;
         --compile-gate-only)
             COMPILE_GATE_ONLY=true
@@ -241,6 +246,8 @@ fi
 echo "=== EE Verification Runner ==="
 if [ "$CI_SMOKE" = "true" ]; then
     echo "Profile: ci-smoke (fast minimal gate set; see docs/operator-swarm-slo.md)"
+elif [ "$STATIC_ONLY" = "true" ]; then
+    echo "Profile: static-only (binary-free static, contract, and hygiene gates)"
 elif [ "$SWARM_HEAVY" = "true" ]; then
     echo "Profile: swarm-heavy (includes bench, eval, fuzz-smoke, plan-doc-smoke)"
 else
@@ -493,11 +500,15 @@ fi
 # Contention E2E" at :1923 runs `cargo build --locked --bin ee` -- or it compares
 # the binary to itself and cannot fail. Recording the hash here is also what lets
 # the proof capsule bind the binary that produced a verdict.
-if [ "$FUZZ_TARGET_AUDIT_SELF_TEST" != "true" ] && [ "$PLAN_DOC_SMOKE" != "true" ] && [ "$COMPILE_GATE_ONLY" != "true" ]; then
+if [ "$FUZZ_TARGET_AUDIT_SELF_TEST" != "true" ] && [ "$PLAN_DOC_SMOKE" != "true" ] && [ "$COMPILE_GATE_ONLY" != "true" ] && [ "$STATIC_ONLY" != "true" ]; then
 if ! ee_require_current_binary "${EE_BINARY}" "verify"; then
     printf 'verify: refusing to run stages against an unverified binary.\n' >&2
     printf 'verify: build it first (cargo build --locked --bin ee) or export\n' >&2
     printf 'verify: EE_BINARY to one built from this source tree.\n' >&2
+    printf 'verify: on hosts where local cargo build is tripwired (macOS dev host),\n' >&2
+    printf 'verify: run binary-free gates via ./scripts/verify.sh --static-only\n' >&2
+    printf 'verify: (or --plan-doc-smoke) and dispatch full builds/tests via\n' >&2
+    printf 'verify: scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- ...\n' >&2
     exit 1
 fi
 EE_BINARY_SHA256="$(
@@ -1951,7 +1962,11 @@ run_stage "Repo Hygiene E2E (bd-udjrq)" "./scripts/e2e_repo_hygiene.sh"
 # Its orphan_baseline.txt row is deleted in the same commit, for the same
 # reason the Repo Hygiene row was: the audit fails on a stale baseline entry
 # as well as on a new orphan.
-run_stage "Read Coalescing E2E (bd-udjrq)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_read_coalescing.sh"
+if [ "$STATIC_ONLY" = "true" ]; then
+    record_gated_off "Read Coalescing E2E (bd-udjrq)" "static-only"
+else
+    run_stage "Read Coalescing E2E (bd-udjrq)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=\"${E2E_TMPDIR_BASE}\" ./scripts/e2e_read_coalescing.sh"
+fi
 
 # Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
 # no-Cargo test proves the shared resolver refuses a stale or missing binary
@@ -2385,6 +2400,12 @@ fi
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
+
+if [ "$STATIC_ONLY" = "true" ]; then
+    verification_summary_banner
+    printf "%b" "$STAGE_RESULTS"
+    exit "$(verification_exit_status)"
+fi
 
 # Gate 4.5: Mechanized proof artifacts. Missing Lean4/TLA+ tools degrade
 # inside the driver instead of blocking the default readiness gate.

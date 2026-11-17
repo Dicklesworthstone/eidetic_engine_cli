@@ -101,7 +101,7 @@ def core_module_letters(root: Path) -> dict[str, list[str]]:
     if not core.is_dir():
         return out
     for entry in sorted(os.listdir(core)):
-        if not entry.endswith(".rs"):
+        if entry.startswith(".") or not entry.endswith(".rs"):
             continue
         name = entry[:-3]
         if not name:

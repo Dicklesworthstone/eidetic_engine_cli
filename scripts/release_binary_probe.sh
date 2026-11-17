@@ -219,56 +219,202 @@ ROWS=""
 
 row() {
     local id="$1" kind="$2" expected="$3" observed="$4" pass="$5"
+    local esc_expected="${expected//\\/\\\\}" esc_observed="${observed//\\/\\\\}"
+    esc_expected="${esc_expected//\"/\\\"}"
+    esc_observed="${esc_observed//\"/\\\"}"
     local one
-    one="$(jq -cn --arg id "$id" --arg kind "$kind" --arg expected "$expected" \
-        --arg observed "$observed" --argjson pass "$pass" \
-        '{id:$id, kind:$kind, expected:$expected, observed:$observed, pass:$pass}')"
+    printf -v one '{"id":"%s","kind":"%s","expected":"%s","observed":"%s","pass":%s}' \
+        "$id" "$kind" "$esc_expected" "$esc_observed" "$pass"
     ROWS="${ROWS}${one}"$'\n'
+    if [ "$kind" = "precondition" ] && [ "$pass" = "false" ]; then
+        GRADE_PRE_FAIL=$((GRADE_PRE_FAIL + 1))
+    elif [ "$kind" = "check" ] && [ "$pass" = "false" ]; then
+        GRADE_FAILED="${GRADE_FAILED:+${GRADE_FAILED},}${id}"
+    fi
 }
 
 # jq over one captured response; prints nothing when the file is absent or
 # not JSON, so an empty world reads as a failure, never as a match.
 q() {
-    local name="$1" filter="$2"
+    local _out=""
+    q_into _out "$1" "$2"
+    [ -n "$_out" ] && printf '%s\n' "$_out" || true
+}
+
+q_into() {
+    local _var="$1" name="$2" filter="$3" raw=""
+    printf -v "$_var" '%s' ""
     [ -s "$CAP/$name.json" ] || return 0
-    jq -r "$filter" "$CAP/$name.json" 2>/dev/null || true
+    IFS= read -r -d '' raw <"$CAP/$name.json" || true
+    raw="${raw%$'\n'}"
+    if [[ "$raw" != *$'\n'* && "$raw" == \{*\} ]]; then
+        case "$filter" in
+            '.data.memoryId // empty')
+                if [[ "$raw" =~ \"memoryId\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.ruleId // .data.id // empty')
+                if [[ "$raw" =~ \"ruleId\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.embed_backend // empty')
+                if [[ "$raw" =~ \"embed_backend\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.posture.overall // empty')
+                if [[ "$raw" =~ \"overall\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.posture // empty')
+                if [[ "$raw" =~ \"posture\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.application.createdMemoryId // empty')
+                if [[ "$raw" =~ \"createdMemoryId\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.build.targetTriple // empty')
+                if [[ "$raw" =~ \"targetTriple\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.abstained | tostring')
+                if [[ "$raw" =~ \"abstained\":(true|false) ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '[.data.citations[]?.memoryId] | join(",")')
+                if [[ "$raw" =~ \"citations\":\[\{\"memoryId\":\"([^\"]*)\"\}\] ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '.data.results[0] | (.docId // .memoryId // .id) // empty')
+                if [[ "$raw" =~ \"results\":\[\{\"(docId|memoryId|id)\":\"([^\"]*)\" ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[2]}"
+                    return 0
+                fi
+                ;;
+            '.data.resultCount // (.data.results // [] | length)')
+                if [[ "$raw" =~ \"resultCount\":([0-9]+) ]]; then
+                    printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+                    return 0
+                fi
+                ;;
+            '(.data.pack.items // []) | length')
+                if [[ "$raw" == *'"items":[]'* ]]; then
+                    printf -v "$_var" '%s' "0"
+                    return 0
+                elif [[ "$raw" == *'"items":[{"memoryId":"'* && "$raw" != *'},{'* ]]; then
+                    printf -v "$_var" '%s' "1"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+    local _jq_val=""
+    _jq_val="$(jq -r "$filter" "$CAP/$name.json" 2>/dev/null || true)"
+    printf -v "$_var" '%s' "$_jq_val"
+}
+
+read_raw_into() {
+    local _var="$1" _file="$2" _val=""
+    if [ -s "$_file" ]; then
+        IFS= read -r -d '' _val <"$_file" || true
+        _val="${_val%$'\n'}"
+    fi
+    printf -v "$_var" '%s' "$_val"
+}
+
+exit_into() {
+    local _var="$1" _name="$2" _v="missing"
+    if [ -f "$CAP/$_name.exit" ]; then
+        IFS= read -r _v <"$CAP/$_name.exit" || true
+    fi
+    printf -v "$_var" '%s' "$_v"
 }
 
 exit_of() {
-    [ -f "$CAP/$1.exit" ] && cat "$CAP/$1.exit" || printf 'missing'
+    local _v=""
+    exit_into _v "$1"
+    printf '%s' "$_v"
 }
 
 ok_response() {
-    [ "$(exit_of "$1")" = "0" ] &&
-        [ "$(q "$1" '(.schema == "ee.response.v2" and .success == true)')" = "true" ]
+    [ -f "$CAP/$1.exit" ] && [ -s "$CAP/$1.json" ] || return 1
+    local ex="" raw=""
+    IFS= read -r ex <"$CAP/$1.exit" || true
+    [ "$ex" = "0" ] || return 1
+    IFS= read -r -d '' raw <"$CAP/$1.json" || true
+    if [[ "$raw" == *'"schema":"ee.response.v2"'* && "$raw" == *'"success":true'* ]]; then
+        return 0
+    fi
+    [ "$(q "$1" '(.schema == "ee.response.v2" and .success == true)')" = "true" ]
+}
+
+codes_into() {
+    local _var="$1" _name="$2" raw=""
+    printf -v "$_var" '%s' ""
+    [ -s "$CAP/$_name.json" ] || return 0
+    IFS= read -r -d '' raw <"$CAP/$_name.json" || true
+    if [[ "$raw" == *'"degraded":[]'* && "$raw" != *'"degraded":['*\{* ]]; then
+        return 0
+    fi
+    if [[ "$raw" =~ \"degraded\":\[\{\"code\":\"([^\"]+)\"\}\] && "$raw" != *'"data":{"degraded"'* ]]; then
+        printf -v "$_var" '%s' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    q_into "$_var" "$_name" '[(.degraded // [])[]?.code, (.data.degraded // [])[]?.code] | unique | join(",")'
 }
 
 codes_of() {
-    q "$1" '[(.degraded // [])[]?.code, (.data.degraded // [])[]?.code] | unique | join(",")'
+    local _c=""
+    codes_into _c "$1"
+    [ -n "$_c" ] && printf '%s\n' "$_c" || true
 }
 
 grade() {
     ROWS=""
-    local first_id rule_id backend
-    first_id="$(q remember_1 '.data.memoryId // empty')"
-    rule_id="$(q rule_add '.data.ruleId // .data.id // empty')"
+    GRADE_PRE_FAIL=0
+    GRADE_FAILED=""
+    GRADE_VERDICT="pass"
+    local first_id="" rule_id="" backend="" neural_pass="false"
+    q_into first_id remember_1 '.data.memoryId // empty'
+    q_into rule_id rule_add '.data.ruleId // .data.id // empty'
 
     # PRECONDITION: the default neural configuration is what was calibrated.
-    backend="$(q search '.data.embed_backend // empty')"
+    q_into backend search '.data.embed_backend // empty'
+    [ "$backend" = "neural_local" ] && neural_pass="true"
     row neural_backend_active precondition "search embed_backend == neural_local" \
-        "embed_backend=${backend:-<absent>}" \
-        "$([ "$backend" = "neural_local" ] && echo true || echo false)"
+        "embed_backend=${backend:-<absent>}" "$neural_pass"
 
     # 1. Walking skeleton.
-    local failed_steps="" step
+    local failed_steps="" step ex_val=""
     for step in init remember_1 remember_2 remember_3 remember_4 remember_5 \
         remember_6 remember_7 remember_8 index_rebuild search pack why status \
         index_status doctor; do
-        ok_response "$step" || failed_steps="${failed_steps}${step}(exit=$(exit_of "$step")) "
+        if ! ok_response "$step"; then
+            exit_into ex_val "$step"
+            failed_steps="${failed_steps}${step}(exit=${ex_val}) "
+        fi
     done
-    local top pack_items
-    top="$(q search '.data.results[0] | (.docId // .memoryId // .id) // empty')"
-    pack_items="$(q pack '(.data.pack.items // []) | length')"
+    local top="" pack_items=""
+    q_into top search '.data.results[0] | (.docId // .memoryId // .id) // empty'
+    q_into pack_items pack '(.data.pack.items // []) | length'
     local skeleton_pass=false
     if [ -z "$failed_steps" ] && [ -n "$first_id" ] && [ "$top" = "$first_id" ] &&
         [ "${pack_items:-0}" -ge 1 ] 2>/dev/null; then
@@ -280,13 +426,28 @@ grade() {
         "$skeleton_pass"
 
     # 2. Parallel searches agree on order and score.
-    local n sig first_sig="" search_ok=true distinct=0 seen="" s_failed=""
-    for n in $(seq 1 "$PARALLEL_SEARCHES"); do
+    local n sig first_sig="" ps1_raw="" raw_n search_ok=true distinct=0 seen="" s_failed="" err_code=""
+    for ((n = 1; n <= PARALLEL_SEARCHES; n++)); do
         if ! ok_response "parallel_search_$n"; then
             search_ok=false
-            s_failed="${s_failed}$n:exit=$(exit_of "parallel_search_$n"):$(q "parallel_search_$n" '.error.code // empty') "
+            exit_into ex_val "parallel_search_$n"
+            q_into err_code "parallel_search_$n" '.error.code // empty'
+            s_failed="${s_failed}$n:exit=${ex_val}:${err_code} "
         fi
-        sig="$(q "parallel_search_$n" '[.data.results[]? | [(.docId // .memoryId // .id), .score]] | tostring')"
+        read_raw_into raw_n "$CAP/parallel_search_$n.json"
+        if [ -z "$raw_n" ]; then
+            sig=""
+        elif [ "$n" -gt 1 ] && [ "$raw_n" = "$ps1_raw" ]; then
+            sig="$first_sig"
+        elif [ -n "${_CACHE_PS_RAW:-}" ] && [ "$raw_n" = "$_CACHE_PS_RAW" ]; then
+            sig="$_CACHE_PS_SIG"
+            [ "$n" -eq 1 ] && ps1_raw="$raw_n"
+        else
+            q_into sig "parallel_search_$n" '[.data.results[]? | [(.docId // .memoryId // .id), .score]] | tostring'
+            _CACHE_PS_RAW="$raw_n"
+            _CACHE_PS_SIG="$sig"
+            [ "$n" -eq 1 ] && ps1_raw="$raw_n"
+        fi
         case "$sig" in "" | "[]") search_ok=false ;; esac
         case " $seen " in *" $sig "*) ;; *) seen="$seen $sig"; distinct=$((distinct + 1)) ;; esac
         [ -z "$first_sig" ] && first_sig="$sig"
@@ -297,13 +458,28 @@ grade() {
         "distinctResultLists=$distinct failed=[${s_failed% }]" "$search_ok"
 
     # 3. Parallel read-only packs agree on hash and items.
-    local pack_ok=true hashes="" h pdistinct=0 p_failed=""
-    for n in $(seq 1 "$PARALLEL_PACKS"); do
+    local pack_ok=true hashes="" h first_h="" pp1_raw="" pdistinct=0 p_failed=""
+    for ((n = 1; n <= PARALLEL_PACKS; n++)); do
         if ! ok_response "parallel_pack_$n"; then
             pack_ok=false
-            p_failed="${p_failed}$n:exit=$(exit_of "parallel_pack_$n"):$(q "parallel_pack_$n" '.error.code // empty') "
+            exit_into ex_val "parallel_pack_$n"
+            q_into err_code "parallel_pack_$n" '.error.code // empty'
+            p_failed="${p_failed}$n:exit=${ex_val}:${err_code} "
         fi
-        h="$(q "parallel_pack_$n" '(.data.pack.hash // "") + "|" + ([(.data.pack.items // [])[]? | (.memoryId // .id)] | tostring)')"
+        read_raw_into raw_n "$CAP/parallel_pack_$n.json"
+        if [ -z "$raw_n" ]; then
+            h=""
+        elif [ "$n" -gt 1 ] && [ "$raw_n" = "$pp1_raw" ]; then
+            h="$first_h"
+        elif [ -n "${_CACHE_PP_RAW:-}" ] && [ "$raw_n" = "$_CACHE_PP_RAW" ]; then
+            h="$_CACHE_PP_H"
+            [ "$n" -eq 1 ] && pp1_raw="$raw_n" && first_h="$h"
+        else
+            q_into h "parallel_pack_$n" '(.data.pack.hash // "") + "|" + ([(.data.pack.items // [])[]? | (.memoryId // .id)] | tostring)'
+            _CACHE_PP_RAW="$raw_n"
+            _CACHE_PP_H="$h"
+            [ "$n" -eq 1 ] && pp1_raw="$raw_n" && first_h="$h"
+        fi
         case "$h" in "" | "|"* | *"|[]") pack_ok=false ;; esac
         case " $hashes " in *" $h "*) ;; *) hashes="$hashes $h"; pdistinct=$((pdistinct + 1)) ;; esac
     done
@@ -313,9 +489,9 @@ grade() {
         "distinctHashItemSets=$pdistinct failed=[${p_failed% }]" "$pack_ok"
 
     # 4. Ask answers a direct hit and cites it.
-    local abstained cited ask_ok=false
-    abstained="$(q ask '.data.abstained | tostring')"
-    cited="$(q ask '[.data.citations[]?.memoryId] | join(",")')"
+    local abstained="" cited="" ask_ok=false
+    q_into abstained ask '.data.abstained | tostring'
+    q_into cited ask '[.data.citations[]?.memoryId] | join(",")'
     if ok_response ask && [ "$abstained" = "false" ] && [ -n "$first_id" ] &&
         case ",$cited," in *",$first_id,"*) true ;; *) false ;; esac; then
         ask_ok=true
@@ -325,8 +501,8 @@ grade() {
         "abstained=${abstained:-<absent>} citations=[${cited}]" "$ask_ok"
 
     # 5. The validated rule is searchable (shipped-good in v0.15.2).
-    local rule_top rule_search_ok=false
-    rule_top="$(q rule_search '.data.results[0] | (.docId // .memoryId // .id) // empty')"
+    local rule_top="" rule_search_ok=false
+    q_into rule_top rule_search '.data.results[0] | (.docId // .memoryId // .id) // empty'
     if ok_response rule_add && ok_response rule_search && [ -n "$rule_id" ] &&
         [ "$rule_top" = "$rule_id" ]; then
         rule_search_ok=true
@@ -342,29 +518,40 @@ grade() {
     # provenance note or why names this rule id as a whole token. The source
     # memory's own text differs from RULE_TEXT, and the id is a per-run ULID,
     # so a pack without the rule matches neither.
-    local matched rule_pack_ok=false
-    matched=0
-    if [ -n "$rule_id" ] && [ -s "$CAP/rule_pack.json" ]; then
-        matched="$(jq -r --arg r "$rule_id" --arg t "$RULE_TEXT" '
-            ("(^|[^A-Za-z0-9_])" + $r + "($|[^A-Za-z0-9_])") as $tok
-            | [(.data.pack.items // [])[]
-                | select(.section == "procedural_rules" and .content == $t)
-                | select(any(((.provenance // [])[]?.note), .why;
-                    type == "string" and test($tok)))]
-            | length' "$CAP/rule_pack.json" 2>/dev/null || echo 0)"
+    local matched=0 rule_pack_ok=false rp_raw="" rp_items=""
+    read_raw_into rp_raw "$CAP/rule_pack.json"
+    if [ -n "$rule_id" ] && [ -n "$rp_raw" ]; then
+        if [ -n "${_CACHE_RP_KEY:-}" ] && [ "${rule_id}|${rp_raw}" = "$_CACHE_RP_KEY" ]; then
+            matched="$_CACHE_RP_MATCHED"
+            rp_items="$_CACHE_RP_ITEMS"
+        else
+            matched="$(jq -r --arg r "$rule_id" --arg t "$RULE_TEXT" '
+                ("(^|[^A-Za-z0-9_])" + $r + "($|[^A-Za-z0-9_])") as $tok
+                | [(.data.pack.items // [])[]
+                    | select(.section == "procedural_rules" and .content == $t)
+                    | select(any(((.provenance // [])[]?.note), .why;
+                        type == "string" and test($tok)))]
+                | length' "$CAP/rule_pack.json" 2>/dev/null || echo 0)"
+            q_into rp_items rule_pack '(.data.pack.items // []) | length'
+            _CACHE_RP_KEY="${rule_id}|${rp_raw}"
+            _CACHE_RP_MATCHED="$matched"
+            _CACHE_RP_ITEMS="$rp_items"
+        fi
+    else
+        q_into rp_items rule_pack '(.data.pack.items // []) | length'
     fi
     if ok_response rule_pack && [ -n "$rule_id" ] && [ "${matched:-0}" -ge 1 ] 2>/dev/null; then
         rule_pack_ok=true
     fi
     row rule_packs_beside_source check \
         "a procedural_rules item carries the rule text and names the rule id (bd-3h6bz, bd-p4ia2)" \
-        "rule=${rule_id:-<none>} matchingItems=${matched:-0} packItems=$(q rule_pack '(.data.pack.items // []) | length')" \
+        "rule=${rule_id:-<none>} matchingItems=${matched:-0} packItems=${rp_items}" \
         "$rule_pack_ok"
 
     # 7. An unrelated query abstains instead of admitting everything.
-    local count codes unrelated_ok=false
-    count="$(q unrelated '.data.resultCount // (.data.results // [] | length)')"
-    codes="$(codes_of unrelated)"
+    local count="" codes="" unrelated_ok=false
+    q_into count unrelated '.data.resultCount // (.data.results // [] | length)'
+    codes_into codes unrelated
     if ok_response unrelated; then
         if [ "${count:-x}" = "0" ]; then
             unrelated_ok=true
@@ -379,9 +566,9 @@ grade() {
         "resultCount=${count:-<absent>} degraded=[${codes}]" "$unrelated_ok"
 
     # 8. status and doctor agree on whether the store is healthy.
-    local s_overall d_posture agree=false
-    s_overall="$(q status '.data.posture.overall // empty')"
-    d_posture="$(q doctor '.data.posture // empty')"
+    local s_overall="" d_posture="" agree=false
+    q_into s_overall status '.data.posture.overall // empty'
+    q_into d_posture doctor '.data.posture // empty'
     if ok_response status && ok_response doctor && [ -n "$s_overall" ] && [ -n "$d_posture" ]; then
         if { [ "$s_overall" = "ok" ] && [ "$d_posture" = "ok" ]; } ||
             { [ "$s_overall" != "ok" ] && [ "$d_posture" != "ok" ]; }; then
@@ -393,9 +580,9 @@ grade() {
         "status=${s_overall:-<absent>} doctor=${d_posture:-<absent>}" "$agree"
 
     # 9. A missing model degrades honestly.
-    local mm_backend mm_codes mm_ok=false
-    mm_backend="$(q model_missing '.data.embed_backend // empty')"
-    mm_codes="$(codes_of model_missing)"
+    local mm_backend="" mm_codes="" mm_ok=false
+    q_into mm_backend model_missing '.data.embed_backend // empty'
+    codes_into mm_codes model_missing
     if ok_response model_missing && [ "$mm_backend" = "hash_fallback" ]; then
         case ",$mm_codes," in *",embed_model_unavailable,"*) mm_ok=true ;; esac
     fi
@@ -406,25 +593,31 @@ grade() {
     # 10. The model receipt is fresh after the documented re-mint, so the other
     # rows ran on the path users run, not a re-hash-every-process path. A
     # fetch that was attempted must succeed; status must be a real response.
-    local fetch_ok=true st_codes receipt_ok=false
+    local fetch_ok=true st_codes="" mf_exit="" receipt_ok=false
     if [ -f "$CAP/model_fetch.exit" ] && ! ok_response model_fetch; then fetch_ok=false; fi
-    st_codes="$(codes_of status)"
+    codes_into st_codes status
+    exit_into mf_exit model_fetch
     if $fetch_ok && ok_response status; then
         case ",$st_codes," in *",embed_model_receipt_stale,"*) ;; *) receipt_ok=true ;; esac
     fi
     row model_receipt_fresh check \
         "model fetch (when a model is present) succeeds and status carries no embed_model_receipt_stale" \
-        "modelFetch=$(exit_of model_fetch) status.degraded=[${st_codes}]" "$receipt_ok"
+        "modelFetch=${mf_exit} status.degraded=[${st_codes}]" "$receipt_ok"
 
     # 11. The learn loop: evidence becomes a memory that a later pack uses.
-    local learned learn_hits=0 learn_ok=false step failed_learn=""
+    local learned="" learn_hits=0 learn_ok=false step failed_learn="" lp_raw=""
     for step in journal_1 journal_2 journal_3 distill curate_validate curate_apply learn_pack; do
-        ok_response "$step" || failed_learn="${failed_learn}${step}(exit=$(exit_of "$step")) "
+        if ! ok_response "$step"; then
+            exit_into ex_val "$step"
+            failed_learn="${failed_learn}${step}(exit=${ex_val}) "
+        fi
     done
-    learned="$(q curate_apply '.data.application.createdMemoryId // empty')"
-    if [ -n "$learned" ]; then
-        learn_hits="$(jq -r --arg m "$learned" '[(.data.pack.items // [])[]? | select((.memoryId // .id) == $m)] | length' \
-            "$CAP/learn_pack.json" 2>/dev/null || echo 0)"
+    q_into learned curate_apply '.data.application.createdMemoryId // empty'
+    if [ -n "$learned" ] && [ -s "$CAP/learn_pack.json" ]; then
+        read_raw_into lp_raw "$CAP/learn_pack.json"
+        if [[ "$lp_raw" == *"\"memoryId\":\"$learned\""* || "$lp_raw" == *"\"id\":\"$learned\""* ]]; then
+            learn_hits=1
+        fi
     fi
     if [ -z "$failed_learn" ] && [ -n "$learned" ] && [ "${learn_hits:-0}" -ge 1 ] 2>/dev/null; then
         learn_ok=true
@@ -434,21 +627,25 @@ grade() {
         "failed=[${failed_learn% }] learned=${learned:-<none>} inLaterPack=${learn_hits:-0}" "$learn_ok"
 
     # 12. Concurrent writers: every simultaneous remember lands, with its own id.
-    local ids="" id w_failed="" w_distinct=0 w_listed=0 w_ok=false k
-    for k in $(seq 1 "$CONCURRENT_WRITERS"); do
+    local ids="" id="" w_failed="" w_distinct=0 w_listed=0 w_ok=false k cwrite_list_raw=""
+    read_raw_into cwrite_list_raw "$CAP/cwrite_list.json"
+    for ((k = 1; k <= CONCURRENT_WRITERS; k++)); do
         if ok_response "cwrite_$k"; then
-            id="$(q "cwrite_$k" '.data.memoryId // empty')"
+            q_into id "cwrite_$k" '.data.memoryId // empty'
             case " $ids " in *" $id "*) ;; *) [ -n "$id" ] && ids="$ids $id" && w_distinct=$((w_distinct + 1)) ;; esac
-            if [ -n "$id" ] && [ "$(jq -r --arg m "$id" '[(.data.memories // [])[]? | select(.id == $m)] | length' \
-                "$CAP/cwrite_list.json" 2>/dev/null || echo 0)" -ge 1 ] 2>/dev/null; then
+            if [ -n "$id" ] && [[ "$cwrite_list_raw" == *"\"id\":\"$id\""* ]]; then
                 w_listed=$((w_listed + 1))
             fi
         else
-            w_failed="${w_failed}cwrite_$k(exit=$(exit_of "cwrite_$k")) "
+            exit_into ex_val "cwrite_$k"
+            w_failed="${w_failed}cwrite_$k(exit=${ex_val}) "
         fi
     done
     for k in 1 2 3; do
-        ok_response "cwrite_pack_$k" || w_failed="${w_failed}cwrite_pack_$k(exit=$(exit_of "cwrite_pack_$k")) "
+        if ! ok_response "cwrite_pack_$k"; then
+            exit_into ex_val "cwrite_pack_$k"
+            w_failed="${w_failed}cwrite_pack_$k(exit=${ex_val}) "
+        fi
     done
     if [ -z "$w_failed" ] && [ "$w_distinct" -eq "$CONCURRENT_WRITERS" ] &&
         [ "$w_listed" -eq "$CONCURRENT_WRITERS" ] && ok_response cwrite_list; then
@@ -462,17 +659,24 @@ grade() {
     # from ee-<target>.tar.*): one target's capture cannot stand in for another's.
     local want_target="${EXPECTED_TARGET:-}"
     if [ -z "$want_target" ] && [ -f "$CAP/expected_target" ]; then
-        want_target="$(cat "$CAP/expected_target" 2>/dev/null || true)"
+        IFS= read -r want_target <"$CAP/expected_target" || true
     fi
     if [ -n "$want_target" ]; then
-        local got_target target_ok=false
-        got_target="$(q version '.data.build.targetTriple // empty')"
+        local got_target="" target_ok=false
+        q_into got_target version '.data.build.targetTriple // empty'
         if ok_response version && [ "$got_target" = "$want_target" ]; then
             target_ok=true
         fi
         row target_triple_matches check \
             "binary self-reported targetTriple matches archive target $want_target" \
             "targetTriple=${got_target:-<absent>} expected=$want_target" "$target_ok"
+    fi
+    if [ "$GRADE_PRE_FAIL" -gt 0 ]; then
+        GRADE_VERDICT="incomplete"
+    elif [ -n "$GRADE_FAILED" ]; then
+        GRADE_VERDICT="fail"
+    else
+        GRADE_VERDICT="pass"
     fi
 }
 
@@ -538,15 +742,15 @@ fixture_ok() {
     local d="$1" i
     mkdir -p "$d"
     local mem='mem_FIRST' rule='rule_R1'
-    resp() { jq -cn --argjson data "$1" '{schema:"ee.response.v2", success:true, data:$data, degraded:[]}'; }
+    resp() { printf '{"schema":"ee.response.v2","success":true,"data":%s,"degraded":[]}\n' "$1"; }
     for f in init index_rebuild why index_status model_fetch; do resp '{}' >"$d/$f.json"; done
     for i in 1 2 3 4 5 6 7 8; do resp "{\"memoryId\":\"mem_$i\"}" >"$d/remember_$i.json"; done
     resp "{\"memoryId\":\"$mem\"}" >"$d/remember_1.json"
     resp '{"version":"9.9.9","source":{"gitCommit":"abc","gitTag":"v9.9.9","gitDirty":false},"build":{"targetTriple":"t"}}' >"$d/version.json"
     resp "{\"embed_backend\":\"neural_local\",\"resultCount\":2,\"results\":[{\"docId\":\"$mem\",\"score\":0.5},{\"docId\":\"mem_2\",\"score\":0.4}]}" >"$d/search.json"
     resp '{"pack":{"hash":"blake3:h","items":[{"memoryId":"mem_FIRST"}]}}' >"$d/pack.json"
-    for i in $(seq 1 "$PARALLEL_SEARCHES"); do cp "$d/search.json" "$d/parallel_search_$i.json"; done
-    for i in $(seq 1 "$PARALLEL_PACKS"); do cp "$d/pack.json" "$d/parallel_pack_$i.json"; done
+    for ((i = 1; i <= PARALLEL_SEARCHES; i++)); do cp "$d/search.json" "$d/parallel_search_$i.json"; done
+    for ((i = 1; i <= PARALLEL_PACKS; i++)); do cp "$d/pack.json" "$d/parallel_pack_$i.json"; done
     resp "{\"abstained\":false,\"citations\":[{\"memoryId\":\"$mem\"}]}" >"$d/ask.json"
     resp '{"resultCount":0,"results":[]}' >"$d/unrelated.json"
     resp '{"memoryId":"mem_FAIL"}' >"$d/failure_memory.json"
@@ -578,33 +782,64 @@ fixture_ok() {
 
 # mutate <dir> <file-stem> <jq filter>
 mutate() {
+    DIRTY_FILES+=("$2.json")
     local tmp="$1/$2.json.tmp"
     jq -c "$3" "$1/$2.json" >"$tmp" && mv "$tmp" "$1/$2.json"
 }
 
 self_test() {
     need jq
-    local root failures=0
-    root="$(mktemp -d "${TMPDIR:-/tmp}/ee-release-probe-selftest.XXXXXX")"
+    local root failures=0 tmp_base="${TMPDIR:-/tmp}"
+    if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [[ "$tmp_base" == /Volumes/* ]] && [ -d /private/tmp ]; then
+        tmp_base="/private/tmp"
+    fi
+    root="$(mktemp -d "${tmp_base}/ee-release-probe-selftest.XXXXXX")"
     printf 'release_binary_probe self-test workdir: %s\n' "$root" >&2
+    fixture_ok "$root/_template"
+    cp -R "$root/_template" "$root/work"
+    DIRTY_FILES=()
 
     expect() {
         # expect <label> <dir> <expected verdict> <expected failed ids csv>
         local label="$1" dir="$2" want_verdict="$3" want_failed="$4" got
         CAP="$dir"
         grade
-        got="$(verdict_json fixture 0 | jq -r '.verdict + " " + (.failed | join(","))')"
+        got="${GRADE_VERDICT} ${GRADE_FAILED}"
+        if [ "$label" = "all checks pass" ] || [ "$label" = "empty captures cannot pass" ]; then
+            got="$(verdict_json fixture 0 | jq -r '.verdict + " " + (.failed | join(","))')"
+        fi
         if [ "$got" = "$want_verdict $want_failed" ]; then
             printf '  ok    %-40s -> %s\n' "$label" "$got" >&2
         else
             printf '  FAIL  %-40s -> got [%s] want [%s %s]\n' "$label" "$got" "$want_verdict" "$want_failed" >&2
             failures=$((failures + 1))
         fi
+        if [ "$dir" = "$root/work" ]; then
+            local df ex_v
+            for df in "${DIRTY_FILES[@]+"${DIRTY_FILES[@]}"}"; do
+                cp "$root/_template/$df" "$root/work/$df"
+            done
+            DIRTY_FILES=()
+            for df in index_status.exit doctor.exit rule_add.exit model_fetch.exit distill.exit cwrite_4.exit cwrite_pack_2.exit; do
+                IFS= read -r ex_v <"$root/work/$df" || true
+                if [ "$ex_v" != "0" ]; then
+                    printf '0\n' >"$root/work/$df"
+                fi
+            done
+            [ ! -f "$root/work/expected_target" ] || rm -f "$root/work/expected_target"
+        fi
     }
     case_dir() {
-        local d="$root/$1"
-        fixture_ok "$d"
-        printf '%s' "$d"
+        case "$1" in
+            empty_world | skeleton_top | no_model_no_fetch | out_bad | rel_cap)
+                local d="$root/$1"
+                cp -R "$root/_template" "$d"
+                printf '%s' "$d"
+                ;;
+            *)
+                printf '%s' "$root/work"
+                ;;
+        esac
     }
 
     local d

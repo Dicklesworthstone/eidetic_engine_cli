@@ -135,7 +135,11 @@ def code_files(root: pathlib.Path) -> list[pathlib.Path]:
         if not base.is_dir():
             continue
         for path in base.rglob("*"):
-            if path.is_file() and path.suffix in CODE_SUFFIXES:
+            if (
+                path.is_file()
+                and not path.name.startswith("._")
+                and path.suffix in CODE_SUFFIXES
+            ):
                 out.append(path)
     return sorted(out)
 
@@ -143,7 +147,9 @@ def code_files(root: pathlib.Path) -> list[pathlib.Path]:
 def census(root: pathlib.Path) -> dict:
     golden_dir = root / "tests" / "golden"
     artifacts = sorted(
-        p.name for p in golden_dir.glob("*.snap") if p.is_file()
+        p.name
+        for p in golden_dir.glob("*.snap")
+        if p.is_file() and not p.name.startswith("._")
     ) if golden_dir.is_dir() else []
 
     read: dict[str, list[str]] = {}
@@ -296,10 +302,11 @@ def self_test() -> int:
     # THE FLOOR, BOTH POLARITIES. Without the failing arm the floor could be
     # removed and every run would still pass.
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap", "b.snap", "c.snap"], {
-            "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
-                        'include_str!("../tests/golden/b.snap");\n'
-                        'include_str!("../tests/golden/c.snap");\n',
+        exact_snaps = [f"s{i}.snap" for i in range(READ_FLOOR)]
+        root = tree(tmp, exact_snaps, {
+            "src/x.rs": "".join(
+                f'include_str!("../tests/golden/{s}");\n' for s in exact_snaps
+            ),
         })
         code, text = report(root)
         arm("meeting the floor exactly exits 0",
@@ -309,19 +316,21 @@ def self_test() -> int:
     # a run that MET the floor, so the arm failed on correct code -- the test was
     # wrong, not the gate.
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap", "b.snap", "c.snap", "d.snap"], {
-            "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
-                        'include_str!("../tests/golden/b.snap");\n'
-                        'include_str!("../tests/golden/c.snap");\n'
-                        'include_str!("../tests/golden/d.snap");\n',
+        exceed_snaps = [f"s{i}.snap" for i in range(READ_FLOOR + 1)]
+        root = tree(tmp, exceed_snaps, {
+            "src/x.rs": "".join(
+                f'include_str!("../tests/golden/{s}");\n' for s in exceed_snaps
+            ),
         })
         code, text = report(root)
         arm("exceeding the floor says the floor is STALE and still exits 0",
             code == 0 and "floor is STALE" in text)
     with tempfile.TemporaryDirectory() as tmp:
-        root = tree(tmp, ["a.snap", "b.snap"], {
-            "src/x.rs": 'include_str!("../tests/golden/a.snap");\n'
-                        'include_str!("../tests/golden/b.snap");\n',
+        below_snaps = [f"s{i}.snap" for i in range(READ_FLOOR - 1)]
+        root = tree(tmp, below_snaps, {
+            "src/x.rs": "".join(
+                f'include_str!("../tests/golden/{s}");\n' for s in below_snaps
+            ),
         })
         code, text = report(root)
         arm("falling BELOW the floor exits 1", code == 1)
@@ -341,11 +350,12 @@ def self_test() -> int:
     live = census(REPO_ROOT)
     arm("the live tree reports a non-empty denominator",
         len(live["artifacts"]) > 50)
-    arm("the live tree's read set is exactly the three measured consumers",
+    arm("the live tree's read set is exactly the four measured consumers",
         sorted(live["read"]) == [
             "plan-decisioning.snap",
             "probe-fail-closed.snap",
             "skyline.snap",
+            "tailscale_peer_autodiscovery.snap",
         ])
 
     failed = arms.count(False)

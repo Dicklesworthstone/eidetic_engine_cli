@@ -570,8 +570,8 @@ write_closure_quality_report() {
             | . as $bead
             | (cites_compile($bead.close_reason)) as $compile
             | (cites_execution($bead.close_reason)) as $exec
-            | (is_behavioural_criterion($bead)) as $behav
-            | (any(($bead.comments // [])[]?; cites_execution(.text // ""))) as $comment_exec
+            | (if ($compile and ($exec | not)) then is_behavioural_criterion($bead) else false end) as $behav
+            | (if ($compile and ($exec | not) and $behav) then any(($bead.comments // [])[]?; cites_execution(.text // "")) else false end) as $comment_exec
             | {
                 bead_id: $bead.id,
                 title: ($bead.title // ""),
@@ -595,7 +595,7 @@ write_closure_quality_report() {
                         "not_candidate"
                     end
                 ),
-                names_surface: names_first_slice_surface($bead)
+                names_surface: (if ($compile and ($exec | not) and $behav and ($comment_exec | not)) then names_first_slice_surface($bead) else false end)
               }
           ] as $compile_audit
         | ($compile_audit | map(select(.is_candidate))) as $compile_candidates
@@ -606,6 +606,7 @@ write_closure_quality_report() {
         | ($compile_suspects | map(select(.names_surface))) as $first_slice_candidates
         | [
             $closed_beads[]
+            | select(any((.comments // [])[]?; (.text // "") | test("^Reopened:"; "i")))
             | . as $bead
             | normalized_epoch($bead.closed_at // $bead.updated_at // "") as $closed_epoch
             | normalized_epoch($bead.created_at // "") as $created_epoch

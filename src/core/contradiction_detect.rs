@@ -1258,8 +1258,11 @@ pub fn plan_conflict_resolution(
                     proposal.rationale
                 ),
                 repair: format!(
-                    "Pass distinct, non-blank memory IDs for --keep ({} or {}).",
-                    pair.memory_a.id, pair.memory_b.id
+                    "ee conflict resolve {} {} --verb {} --keep {} --reason \"...\" --json",
+                    pair.memory_a.id,
+                    pair.memory_b.id,
+                    request.verb.as_str(),
+                    pair.memory_a.id
                 ),
             };
         }

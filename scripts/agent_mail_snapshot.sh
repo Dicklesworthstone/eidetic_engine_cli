@@ -1327,7 +1327,14 @@ def run_publication_self_test(healthy_commands: Any) -> None:
     import threading
     from unittest.mock import patch
 
-    with tempfile.TemporaryDirectory(prefix="ee-mail-publication-") as directory:
+    posix_tmp = (
+        "/private/tmp"
+        if sys.platform == "darwin"
+        and str(Path(tempfile.gettempdir())).startswith("/Volumes/")
+        and Path("/private/tmp").is_dir()
+        else None
+    )
+    with tempfile.TemporaryDirectory(prefix="ee-mail-publication-", dir=posix_tmp) as directory:
         root = Path(directory).resolve()
         destination = root / "snapshot.json"
         atomic_write_output(destination, '{"generation":0}\n')

@@ -87,23 +87,34 @@ audit() {
     fi
 
     local file
+    local -a files=()
     # `find` rather than a glob: an unmatched zsh/bash glob behaves differently
     # across shells and an empty expansion here would read as "nothing to check".
     while IFS= read -r file; do
-        total_files=$((total_files + 1))
-        local line inv pin
-        line="$(count_file "$file" "$channel")"
-        inv="${line%% *}"
-        pin="$(printf '%s' "$line" | cut -d' ' -f2)"
-        total_invocations=$((total_invocations + inv))
-        total_pins=$((total_pins + pin))
-        if [ "$inv" -gt 0 ] && [ "$pin" -lt "$inv" ]; then
-            local base_name; base_name="$(basename "$file")"
-            offenders+=("$base_name: $inv invocation(s), $pin pinned")
-            unpinned_by_file["$base_name"]=$((inv - pin))
-            bad=$((bad + 1))
-        fi
+        [ -n "$file" ] && files+=("$file")
     done < <(find "$dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+    total_files="${#files[@]}"
+    if [ "$total_files" -gt 0 ]; then
+        local inv pin
+        while IFS=' ' read -r inv pin file; do
+            total_invocations=$((total_invocations + inv))
+            total_pins=$((total_pins + pin))
+            if [ "$inv" -gt 0 ] && [ "$pin" -lt "$inv" ]; then
+                local base_name="${file##*/}"
+                offenders+=("$base_name: $inv invocation(s), $pin pinned")
+                unpinned_by_file["$base_name"]=$((inv - pin))
+                bad=$((bad + 1))
+            fi
+        done < <(awk -v act="$TOOLCHAIN_ACTION" -v ch="$channel" '
+            FNR == 1 {
+                if (NR > 1) print inv, pin, prev
+                inv = 0; pin = 0; prev = FILENAME
+            }
+            index($0, act) > 0 { inv++ }
+            $0 ~ "^[[:space:]]*toolchain:[[:space:]]*" ch "[[:space:]]*$" { pin++ }
+            END { if (NR > 0) print inv, pin, prev }
+        ' "${files[@]}")
+    fi
 
     # PRINTED UNCONDITIONALLY, pass or fail. The predicate first, so the number
     # is never quotable without the rule that produced it.

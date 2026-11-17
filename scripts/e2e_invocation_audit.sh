@@ -95,6 +95,7 @@ e2e_orphans() {
     local script_dir="$root/scripts"
     [ -d "$script_dir" ] || return 0
     local path base needle
+    local -a orphans=() frontier=() alive=()
     while IFS= read -r base; do
         [ -n "$base" ] || continue
         path="$script_dir/$base"
@@ -279,9 +280,69 @@ e2e_orphans() {
                    { body = $0; sub(/^[^:]*:/, "", body)
                      if (body !~ /^[[:space:]]*\/\//) { found = 1 } }
                    END { exit(found ? 0 : 1) }'; then
-            printf '%s\n' "$base"
+            orphans+=("$base")
+            frontier+=("$base")
+        else
+            alive+=("$base")
         fi
     done < <(e2e_audit_paths "$script_dir")
+
+    # (h) TRANSITIVE-CLOSURE FIXPOINT (bd-unreachable-e2e-scripts-u14sr).
+    #     An orphan script cannot keep another script "invoked". When
+    #     e2e_overhaul/derivation_reflection_readiness.sh is itself orphaned,
+    #     the sub-suites it dispatches (external_derivation_lifecycle.sh,
+    #     reflection_handshake_gaps.sh) and the library they source
+    #     (lib/derivation_reflection.sh) have zero reachable callers. Exclude
+    #     already-orphaned scripts from the search space iteratively until no
+    #     new orphans are discovered, re-evaluating only candidates whose
+    #     basename actually appears inside the newly-orphaned frontier.
+    while [ "${#frontier[@]}" -gt 0 ] && [ "${#alive[@]}" -gt 0 ]; do
+        local -a exclude_globs=() frontier_files=() next_frontier=() next_alive=()
+        local o f
+        for o in "${orphans[@]}"; do
+            exclude_globs+=(--glob "!scripts/$o")
+        done
+        for f in "${frontier[@]}"; do
+            [ -f "$script_dir/$f" ] && frontier_files+=("$script_dir/$f")
+        done
+        if [ "${#frontier_files[@]}" -eq 0 ]; then
+            break
+        fi
+        for base in "${alive[@]}"; do
+            needle="${base##*/}"
+            if ! grep -Fq -- "$needle" "${frontier_files[@]}" 2>/dev/null; then
+                next_alive+=("$base")
+                continue
+            fi
+            if ! (
+                cd "$root" && rg --hidden --no-require-git --no-heading -N \
+                    "^[^#]*(^|[^[:alnum:]_-])$(printf '%s' "$needle" | sed 's/\./\\./g')" . \
+                    --glob 'scripts/**' \
+                    --glob 'tests/**' \
+                    --glob '.github/**' \
+                    --glob "!scripts/$base" \
+                    "${exclude_globs[@]}" \
+                    --glob '!**/tests/fixtures/**' \
+                    --glob '!**/scripts/check-*.py' \
+                    --glob '!**/scripts/audit-*.py' \
+                    --glob '!**/*.md' 2>/dev/null
+            ) | awk 'BEGIN { found = 0 }
+                       { body = $0; sub(/^[^:]*:/, "", body)
+                         if (body !~ /^[[:space:]]*\/\//) { found = 1 } }
+                       END { exit(found ? 0 : 1) }'; then
+                orphans+=("$base")
+                next_frontier+=("$base")
+            else
+                next_alive+=("$base")
+            fi
+        done
+        alive=("${next_alive[@]+"${next_alive[@]}"}")
+        frontier=("${next_frontier[@]+"${next_frontier[@]}"}")
+    done
+
+    for base in "${orphans[@]+"${orphans[@]}"}"; do
+        printf '%s\n' "$base"
+    done
 }
 
 read_baseline() {
@@ -502,6 +563,32 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # bd-unreachable-e2e-scripts-u14sr: transitive-closure fixpoint twin arms.
+    # An orphan cannot keep a downstream script or library "invoked", while a
+    # reachable root DOES keep its downstream chain alive.
+    mkdir -p "$tmp/fixture/scripts/e2e_overhaul/lib"
+    printf '#!/bin/sh\n./scripts/e2e_overhaul/chain_mid.sh\n' >"$tmp/fixture/scripts/e2e_overhaul/chain_root.sh"
+    printf '#!/bin/sh\n. scripts/e2e_overhaul/lib/chain_leaf.sh\n' >"$tmp/fixture/scripts/e2e_overhaul/chain_mid.sh"
+    printf '#!/bin/sh\nreturn 0\n' >"$tmp/fixture/scripts/e2e_overhaul/lib/chain_leaf.sh"
+    printf '#!/bin/sh\n./scripts/e2e_overhaul/live_mid.sh\n' >"$tmp/fixture/scripts/e2e_overhaul/live_root.sh"
+    printf '#!/bin/sh\n. scripts/e2e_overhaul/lib/live_leaf.sh\n' >"$tmp/fixture/scripts/e2e_overhaul/live_mid.sh"
+    printf '#!/bin/sh\nreturn 0\n' >"$tmp/fixture/scripts/e2e_overhaul/lib/live_leaf.sh"
+    printf 'declare -A EPIC_SCRIPTS=(\n    [A]="wired_epic.sh"\n    [B]="live_root.sh"\n)\n' \
+        >"$tmp/fixture/scripts/driver_registry.sh"
+    got_chain="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_chain" == *"e2e_overhaul/chain_root.sh"* && "$got_chain" == *"e2e_overhaul/chain_mid.sh"* && "$got_chain" == *"e2e_overhaul/lib/chain_leaf.sh"* ]]; then
+        echo "ok   - a chain reachable only from an orphan is transitively orphaned"
+    else
+        echo "FAIL - transitive orphan chain not fully detected, got '$got_chain'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_chain" != *"live_root.sh"* && "$got_chain" != *"live_mid.sh"* && "$got_chain" != *"live_leaf.sh"* ]]; then
+        echo "ok   - a chain reachable from a live driver stays invoked across hops"
+    else
+        echo "FAIL - live transitive chain misclassified as orphaned, got '$got_chain'"
+        failures=$((failures + 1))
+    fi
+
     # Direction 1: a new orphan against an empty baseline must fail.
     printf '# empty\n' >"$tmp/baseline_empty.txt"
     new_orphans="$(comm -23 <(printf 'e2e_lonely.sh\n') <(read_baseline "$tmp/baseline_empty.txt"))"
@@ -578,7 +665,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((20 - failures))/20 passed"
+    echo "self-test: $((22 - failures))/22 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi

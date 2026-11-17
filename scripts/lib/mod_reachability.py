@@ -174,6 +174,32 @@ def target_roots(manifest: str | None = None) -> list[pathlib.Path] | None:
     all 28 of their files as unreachable, because the ROOT invocation never
     walks them.
     """
+    meta_command = ["cargo", "metadata", "--no-deps", "--format-version", "1"]
+    if manifest is not None:
+        meta_command += ["--manifest-path", manifest]
+    try:
+        meta_proc = subprocess.run(
+            meta_command,
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if meta_proc.returncode == 0 and meta_proc.stdout.strip():
+            import json as _json
+
+            data = _json.loads(meta_proc.stdout)
+            roots = [
+                pathlib.Path(t["src_path"])
+                for pkg in data.get("packages", [])
+                for t in pkg.get("targets", [])
+                if "src_path" in t and pathlib.Path(t["src_path"]).is_file()
+            ]
+            if roots:
+                return roots
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+
     command = ["cargo", "fmt", "--verbose", "--check"]
     if manifest is not None:
         command += ["--manifest-path", manifest]
@@ -226,56 +252,62 @@ def children(path: pathlib.Path) -> list[tuple[pathlib.Path, str | None]]:
     only their ADJACENCY binds them.
     """
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        text = path.read_text(errors="replace")
     except OSError:
         return []
+    if "mod " not in text and "include!" not in text:
+        return []
+    lines = text.splitlines()
     here = path.parent
     found: list[tuple[pathlib.Path, str | None]] = []
     pending_cfg: str | None = None
     pending_path: str | None = None
 
     for raw in lines:
-        cfg = CFG_ATTR.match(raw)
-        if cfg:
-            # Nested cfgs on one declaration are rare; join rather than drop one.
-            pending_cfg = (
-                cfg.group("expr")
-                if pending_cfg is None
-                else f"{pending_cfg} + {cfg.group('expr')}"
-            )
+        s = raw.lstrip()
+        if not s:
             continue
-        redirect = PATH_ATTR.match(raw)
-        if redirect:
-            pending_path = redirect.group("target")
+        if s.startswith("#["):
+            cfg = CFG_ATTR.match(raw)
+            if cfg:
+                # Nested cfgs on one declaration are rare; join rather than drop one.
+                pending_cfg = (
+                    cfg.group("expr")
+                    if pending_cfg is None
+                    else f"{pending_cfg} + {cfg.group('expr')}"
+                )
+                continue
+            redirect = PATH_ATTR.match(raw)
+            if redirect:
+                pending_path = redirect.group("target")
+                continue
             continue
-        included = INCLUDE_LINE.match(raw)
-        if included:
-            candidate = (here / included.group("target")).resolve()
-            if candidate.is_file():
-                found.append((candidate, pending_cfg))
-                INCLUDE_ONLY.add(candidate)
-            pending_cfg = None
-            pending_path = None
-            continue
-        declaration = MOD_LINE.match(raw)
-        if declaration:
-            if pending_path is not None:
-                candidate = (here / pending_path).resolve()
+        if s.startswith("include!"):
+            included = INCLUDE_LINE.match(raw)
+            if included:
+                candidate = (here / included.group("target")).resolve()
                 if candidate.is_file():
                     found.append((candidate, pending_cfg))
-            else:
-                name = declaration.group("name")
-                for candidate in (here / f"{name}.rs", here / name / "mod.rs"):
+                    INCLUDE_ONLY.add(candidate)
+                pending_cfg = None
+                pending_path = None
+                continue
+        if s.startswith(("mod ", "pub ", "pub(")):
+            declaration = MOD_LINE.match(raw)
+            if declaration:
+                if pending_path is not None:
+                    candidate = (here / pending_path).resolve()
                     if candidate.is_file():
-                        found.append((candidate.resolve(), pending_cfg))
-                        break
-            pending_cfg = None
-            pending_path = None
-            continue
-        if OTHER_ATTR.match(raw) or not raw.strip():
-            # Another attribute or a blank line does not break the run of
-            # attributes attached to the declaration below.
-            continue
+                        found.append((candidate, pending_cfg))
+                else:
+                    name = declaration.group("name")
+                    for candidate in (here / f"{name}.rs", here / name / "mod.rs"):
+                        if candidate.is_file():
+                            found.append((candidate.resolve(), pending_cfg))
+                            break
+                pending_cfg = None
+                pending_path = None
+                continue
         # Any other code ends the attribute run.
         pending_cfg = None
         pending_path = None

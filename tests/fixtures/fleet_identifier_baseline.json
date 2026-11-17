@@ -3,17 +3,15 @@
   "bead": "bd-42puv",
   "observed_at": "2026-11-08",
   "observed_by": "scripts/check-fleet-identifier-census.py at 0687d7293. Its word-boundary predicate changed at 6d6756a99, where a backslash escape became a boundary so that a JSON-escaped line break no longer hides the token after it. That change can only ADD matches, and re-measuring the three historical revisions below with the new predicate reproduces 1149, 1150 and 1159 unchanged -- so the two instruments agree everywhere except on the single line the fix was written to catch.",
-  "total_carrying_lines": 1161,
-  "files": [
+  "total_carrying_lines": 0,
+  "files": [],
+  "cleared": [
     {
       "path": ".beads/issues.jsonl",
-      "ceiling": 1161,
-      "observed": 1161,
-      "reason": "The tracker export is generated from .beads/beads.db, so scrubbing the JSONL is undone by the next `br sync` flush. The identifiers live in SQLite across 90 issue descriptions and 1088 comments, which makes the repair ~1178 `br` writes against a live multi-agent tracker -- an operator-scheduled, quiesced migration, not a text pass. Tracked as the tracker half of bd-42puv.",
-      "ceiling_rationale": "AN EQUALITY, since 2026-11-08. It was 1200 before that, and the headroom was justified like this: the file is regenerated on every flush and its count 'moves with ordinary tracker churn: measured 1149 on 2026-10-14, 1150 on 2026-10-19 and 1159 on 2026-10-27, so roughly +10 per fortnight as beads are filed ... loose enough not to fire on churn', with the claim that the arm which matters for a new disclosure is the ABSENCE of any other path from this list, 'that arm has no headroom at all'. THAT PREMISE WAS MEASURED AGAINST ITS OWN THREE DATA POINTS AND IS FALSE. Replaying this check over the JSONL at the commits behind those numbers reproduces 1149, 1150 and 1159 exactly, and classifying every increment by bead id gives 12 of 12 that are NEW DISCLOSURES -- a bead row that carried no identifier before and does now -- with ZERO rows ever ceasing to carry. Over the same window 87 bead rows were added and three flushes regenerated the file, changing no existing row's status: regeneration and churn move the ROW count, not this one. So the +10 a fortnight was never drift to be tolerated, it was the rule being broken about ten times a fortnight. Ten of the twelve predate this entry, but two landed after it and the gate reported OK for both: one on 2026-10-29 in a bead-close comment, and one in a comment written by the agent that took this measurement. Both arrived through the same channel -- verification evidence quoted into a bead naming the worker it ran on -- and that channel is not the arm with no headroom, because every `br` write lands in THIS file and in no other. An equality is safe precisely because the count does not move on churn, and it means the next disclosure fails here with exit 1 inside the commit that introduces it, since this check is in the scripts/check-*.py family CLAUDE.md tells agents to run before committing. WHEN IT FIRES, replace the value with a placeholder; do not raise this number. It only goes down, and bd-42puv's scrub is what moves it."
-    }
-  ],
-  "cleared": [
+      "cleared_at": "2026-11-17",
+      "commit": "a11616657",
+      "note": "1161 carrying lines across 3485 SQLite text columns in .beads/beads.db pseudonymized one-to-one to deterministic worker-01..worker-18, worker-a..worker-j, mac-host-*, windows-host-1, operator-1, and RFC 5737 198.51.100.1..13 placeholders, then flushed via br sync --flush-only --force."
+    },
     {
       "path": "proofs/oracle/1azkt10/README.md",
       "cleared_at": "2026-10-27",

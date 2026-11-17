@@ -208,7 +208,9 @@ def check_repo(
     src_root = repo_root / "src"
     if not src_root.is_dir():
         raise CannotAnswer(f"missing src directory under {repo_root}")
-    rs_files = sorted(src_root.rglob("*.rs"))
+    rs_files = sorted(
+        p for p in src_root.rglob("*.rs") if not p.name.startswith("._")
+    )
     if not rs_files:
         raise CannotAnswer(f"enumerated 0 Rust source files under {src_root}")
 

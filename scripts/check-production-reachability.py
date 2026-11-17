@@ -109,6 +109,7 @@ def strip_line_comment(line: str) -> str:
     """
     return line.split("//", 1)[0]
 MOD_RE = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
+MOD_FAST_RE = re.compile(r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
 MOD_DECL_RE = re.compile(
     r"^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
     re.M,
@@ -120,6 +121,7 @@ OWN_SURFACE_RE = re.compile(
 )
 IMPL_BLOCK_RE = re.compile(r"^impl\b", re.M)
 IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+BRACE_RE = re.compile(r"[{}]")
 NON_CODE_BRACE_MASK_RE = re.compile(
     r"//[^\n]*"
     r"|/\*[\s\S]*?\*/"
@@ -177,15 +179,15 @@ def test_line_ranges(text: str) -> list[tuple[int, int]]:
             masked = mask_non_code_braces(text[attr.start() :])
             mask_offset = attr.start()
         depth = 0
-        i = m_raw.end() - 1 - mask_offset
-        while i < len(masked):
-            if masked[i] == "{":
+        i = len(masked)
+        for bm in BRACE_RE.finditer(masked, m_raw.end() - 1 - mask_offset):
+            if bm.group(0) == "{":
                 depth += 1
-            elif masked[i] == "}":
+            else:
                 depth -= 1
                 if depth == 0:
+                    i = bm.start()
                     break
-            i += 1
         end_pos = min(i + mask_offset, len(text) - 1)
         start_line = text.count("\n", 0, attr.start()) + 1
         end_line = text.count("\n", 0, end_pos) + 1
@@ -220,52 +222,94 @@ def read(path: Path) -> str:
 
 def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
     files = rust_files(root)
-    cache: dict[Path, tuple[str, list[str], list[tuple[int, int]]]] = {}
+    text_cache: dict[Path, str] = {}
+    lines_cache: dict[Path, list[str]] = {}
+    tranges_cache: dict[Path, list[tuple[int, int]]] = {}
     for f in files:
-        t = read(f)
-        cache[f] = (t, t.splitlines(), test_line_ranges(t))
+        text_cache[f] = read(f)
+
+    def get_lines(f: Path) -> list[str]:
+        res = lines_cache.get(f)
+        if res is None:
+            res = text_cache[f].splitlines()
+            lines_cache[f] = res
+        return res
+
+    def get_tranges(f: Path) -> list[tuple[int, int]]:
+        res = tranges_cache.get(f)
+        if res is None:
+            res = test_line_ranges(text_cache[f])
+            tranges_cache[f] = res
+        return res
+
+    first_cfg_cache: dict[Path, int] = {}
+
+    def is_pos_in_test_range(f: Path, pos: int, idx: int) -> bool:
+        first_cfg = first_cfg_cache.get(f)
+        if first_cfg is None:
+            first_cfg = text_cache[f].find("#[cfg(test)]")
+            first_cfg_cache[f] = first_cfg
+        if first_cfg == -1 or pos < first_cfg:
+            return False
+        return in_ranges(idx, get_tranges(f))
 
     findings = []
     examined = 0
     resolved = 0
     for rel, name_pat in surfaces:
         path = root / rel
-        if path not in cache:
+        if path not in text_cache:
             findings.append({"surface": rel, "name": None, "issue": "surface file not found"})
             continue
         resolved += 1
-        text, lines, tranges = cache[path]
+        text = text_cache[path]
         def_re = re.compile(DEF_RE_TEMPLATE.format(name=name_pat), re.M)
         for m in def_re.finditer(text):
             fname = m.group(1)
             def_line = text.count("\n", 0, m.start()) + 1
             # A fn DEFINED inside a test module is a test helper, not a surface.
-            if in_ranges(def_line, tranges):
+            if is_pos_in_test_range(path, m.start(), def_line):
                 continue
             examined += 1
-            prod_refs = []
-            test_refs = 0
+            has_prod_ref = False
             word = re.compile(r"\b" + re.escape(fname) + r"\b")
-            for f, (ftext, flines, franges) in cache.items():
+            # Check defining file first (dispatch tables live next to fixers).
+            ordered_files = [path] + [f for f in files if f != path]
+            for f in ordered_files:
+                ftext = text_cache[f]
                 if fname not in ftext:
                     continue
-                for idx, line in enumerate(flines, start=1):
-                    if not word.search(line):
+                flines = get_lines(f)
+                seen_lines: set[int] = set()
+                for wm in word.finditer(ftext):
+                    idx = ftext.count("\n", 0, wm.start()) + 1
+                    if idx in seen_lines or (f == path and idx == def_line):
                         continue
-                    if f == path and idx == def_line:
-                        continue  # the definition itself is not a caller
-                    # A MENTION IS NOT A REFERENCE, in either direction, so
-                    # this is checked before the test/production split rather
-                    # than inside one branch of it.
-                    if not word.search(strip_line_comment(line)):
+                    seen_lines.add(idx)
+                    if not word.search(strip_line_comment(flines[idx - 1])):
                         continue
-                    if in_ranges(idx, franges):
-                        test_refs += 1
+                    if is_pos_in_test_range(f, wm.start(), idx):
                         continue
-                    prod_refs.append(
-                        f"{os.path.relpath(f, root)}:{idx}".replace(os.sep, "/")
-                    )
-            if not prod_refs:
+                    has_prod_ref = True
+                    break
+                if has_prod_ref:
+                    break
+            if not has_prod_ref:
+                test_refs = 0
+                for f, ftext in text_cache.items():
+                    if fname not in ftext:
+                        continue
+                    flines = get_lines(f)
+                    seen_lines = set()
+                    for wm in word.finditer(ftext):
+                        idx = ftext.count("\n", 0, wm.start()) + 1
+                        if idx in seen_lines or (f == path and idx == def_line):
+                            continue
+                        seen_lines.add(idx)
+                        if not word.search(strip_line_comment(flines[idx - 1])):
+                            continue
+                        if is_pos_in_test_range(f, wm.start(), idx):
+                            test_refs += 1
                 findings.append(
                     {
                         "surface": rel,
@@ -280,16 +324,17 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
     mod_decls: list[tuple[Path, int, str, Path, bool]] = []
     test_mod_files: set[Path] = set()
     for f in src_files:
-        ftext, flines, franges = cache[f]
+        ftext = text_cache[f]
         if "mod " not in ftext:
             continue
-        for m in MOD_DECL_RE.finditer(ftext):
+        flines = get_lines(f)
+        for m in MOD_FAST_RE.finditer(ftext):
             idx = ftext.count("\n", 0, m.start()) + 1
             if not MOD_DECL_RE.match(strip_line_comment(flines[idx - 1])):
                 continue
             mod_name = m.group(1)
             j = idx - 2
-            is_cfg_test = in_ranges(idx, franges)
+            is_cfg_test = False
             path_override = None
             while j >= 0:
                 prev = strip_line_comment(flines[j]).strip()
@@ -305,6 +350,8 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
                     j -= 1
                 else:
                     break
+            if not is_cfg_test:
+                is_cfg_test = is_pos_in_test_range(f, m.start(), idx)
             parent_dir = (
                 f.parent
                 if f.name in ("mod.rs", "lib.rs", "main.rs")
@@ -312,12 +359,12 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
             )
             if path_override:
                 target = Path(os.path.normpath(f.parent / path_override))
-                if target not in cache:
+                if target not in text_cache:
                     target = Path(os.path.normpath(parent_dir / path_override))
             else:
                 c1 = Path(os.path.normpath(parent_dir / f"{mod_name}.rs"))
                 c2 = Path(os.path.normpath(parent_dir / mod_name / "mod.rs"))
-                target = c1 if c1 in cache else c2
+                target = c1 if c1 in text_cache else c2
             mod_decls.append((f, idx, mod_name, target, is_cfg_test))
 
     changed = True
@@ -339,71 +386,71 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
         for d in mod_decls
         if not d[4] and d[0] not in test_mod_files and d[3] not in test_mod_files
     ]
+    decl_files_set = {d[0] for d in prod_mod_decls}
     non_test_src_files = sorted(
         (f for f in src_files if f not in test_mod_files),
-        key=lambda p: len(cache[p][0]),
+        key=lambda p: (0 if p in decl_files_set else 1, len(text_cache[p])),
     )
     decl_locations: set[tuple[Path, int, str]] = {
         (d[0], d[1], d[2]) for d in prod_mod_decls
     }
-    line_comment_re = re.compile(r"//[^\n]*")
     # Track which declarations still need a production reference outside their target.
     pending_decls: list[tuple[Path, int, str, Path]] = [
         (d[0], d[1], d[2], d[3]) for d in prod_mod_decls
     ]
-    # Fast pass over small/medium files (< 120 KB) using token set intersection.
-    small_cutoff = 120_000
-    ref_files_by_mod: dict[str, set[Path]] = {d[2]: set() for d in prod_mod_decls}
-    large_files: list[Path] = []
+    modules_examined = len(pending_decls)
+    unresolved_by_idx: dict[int, tuple[Path, int, str, Path]] = dict(
+        enumerate(pending_decls)
+    )
+    word_re_cache: dict[str, re.Pattern[str]] = {
+        d[2]: re.compile(r"\b" + re.escape(d[2]) + r"\b") for d in pending_decls
+    }
+    # Scan non_test_src_files (smallest first) and retire each declaration as
+    # soon as its first production reference is found, using a single combined
+    # regex pass per file rather than one regex pass per candidate module.
     for f in non_test_src_files:
-        ftext, flines, franges = cache[f]
-        if len(ftext) > small_cutoff:
-            large_files.append(f)
+        if not unresolved_by_idx:
+            break
+        ftext = text_cache.get(f)
+        if not ftext:
             continue
-        if not franges:
-            prod_slice = ftext
-        else:
-            kept: list[str] = []
-            prev_idx = 1
-            for lo, hi in franges:
-                if lo > prev_idx:
-                    kept.extend(flines[prev_idx - 1 : lo - 1])
-                prev_idx = hi + 1
-            if prev_idx <= len(flines):
-                kept.extend(flines[prev_idx - 1 :])
-            prod_slice = "\n".join(kept)
-        cleaned = MOD_DECL_RE.sub("", line_comment_re.sub("", prod_slice))
-        for mname in set(IDENT_TOKEN_RE.findall(cleaned)) & ref_files_by_mod.keys():
-            ref_files_by_mod[mname].add(f)
-
-    large_files.reverse()
-    modules_examined = 0
-    for decl_file, decl_idx, mod_name, target in pending_decls:
-        modules_examined += 1
-        has_prod_ref = any(
-            f != target for f in ref_files_by_mod.get(mod_name, ())
+        by_name: dict[str, list[int]] = {}
+        for i, (_, _, mod_name, target) in unresolved_by_idx.items():
+            if f != target and mod_name in ftext:
+                by_name.setdefault(mod_name, []).append(i)
+        if not by_name:
+            continue
+        flines = get_lines(f)
+        combined_re = re.compile(
+            r"\b("
+            + "|".join(re.escape(m) for m in sorted(by_name, key=len, reverse=True))
+            + r")\b"
         )
-        if not has_prod_ref and large_files:
-            word = re.compile(r"\b" + re.escape(mod_name) + r"\b")
-            for f in large_files:
-                if f == target:
-                    continue
-                ftext, flines, franges = cache[f]
-                if mod_name not in ftext:
-                    continue
-                for m in word.finditer(ftext):
-                    idx = ftext.count("\n", 0, m.start()) + 1
-                    if (f, idx, mod_name) in decl_locations or in_ranges(idx, franges):
-                        continue
-                    if word.search(strip_line_comment(flines[idx - 1])):
-                        has_prod_ref = True
-                        break
-                if has_prod_ref:
-                    break
-        if not has_prod_ref:
-            target_tuple = cache.get(target)
-            if target_tuple is not None:
-                t_masked = mask_non_code_braces(target_tuple[0])
+        for m in combined_re.finditer(ftext):
+            mod_name = m.group(1)
+            indices = by_name.get(mod_name)
+            if not indices:
+                continue
+            idx = ftext.count("\n", 0, m.start()) + 1
+            if (f, idx, mod_name) in decl_locations:
+                continue
+            if not word_re_cache[mod_name].search(strip_line_comment(flines[idx - 1])):
+                continue
+            if is_pos_in_test_range(f, m.start(), idx):
+                continue
+            for i in indices:
+                unresolved_by_idx.pop(i, None)
+            del by_name[mod_name]
+            if not by_name:
+                break
+
+    for _, (decl_file, decl_idx, mod_name, target) in sorted(
+        unresolved_by_idx.items()
+    ):
+        if True:
+            target_text = text_cache.get(target)
+            if target_text is not None:
+                t_masked = mask_non_code_braces(target_text)
                 # Exclude impl-only extension modules (e.g. daemon_search_diagnostics.rs)
                 # that attach inherent methods to a parent type without declaring
                 # their own top-level public types/functions.
@@ -415,16 +462,23 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
             for f in src_files:
                 if f == target:
                     continue
-                ftext, flines, franges = cache[f]
+                ftext = text_cache[f]
                 if mod_name not in ftext:
                     continue
-                for idx, line in enumerate(flines, start=1):
-                    if f == decl_file and idx == decl_idx:
+                flines = get_lines(f)
+                seen_lines: set[int] = set()
+                for wm in word.finditer(ftext):
+                    idx = ftext.count("\n", 0, wm.start()) + 1
+                    if idx in seen_lines or (f == decl_file and idx == decl_idx):
                         continue
-                    if (f in test_mod_files or in_ranges(idx, franges)) and word.search(
-                        strip_line_comment(line)
+                    seen_lines.add(idx)
+                    if not word.search(strip_line_comment(flines[idx - 1])):
+                        continue
+                    if f not in test_mod_files and not is_pos_in_test_range(
+                        f, wm.start(), idx
                     ):
-                        test_refs += 1
+                        continue
+                    test_refs += 1
             rel_decl = os.path.relpath(decl_file, root).replace(os.sep, "/")
             rel_target = (
                 os.path.relpath(target, root).replace(os.sep, "/")

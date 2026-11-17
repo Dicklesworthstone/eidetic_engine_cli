@@ -52,7 +52,10 @@ import re
 import sys
 import tempfile
 
-DECL = re.compile(r'^pub const ([A-Z0-9_]*CODE[A-Z0-9_]*): &str = "([^"]+)"', re.M)
+DECL = re.compile(
+    r'^pub const ((?:[A-Z0-9]+_)*CODE(?:_[A-Z0-9]+)*): &str = "([^"]+)"',
+    re.M,
+)
 TAXONOMY = "docs/degraded_code_taxonomy.md"
 BASELINE = "scripts/degraded-code-classification-baseline.txt"
 
@@ -232,6 +235,8 @@ def self_test():
         decl == [("FOO_CODE", "foo_bar")])
     arm("an indented (non-top-level) declaration is NOT extracted",
         DECL.findall('    pub const INNER_CODE: &str = "x";\n') == [])
+    arm("a constant whose name contains UNICODE/ENCODE is NOT mistaken for CODE",
+        DECL.findall('pub const PACK_CONTENT_UNICODE_POLICY_V1: &str = "byte_exact_utf8_v1";\n') == [])
 
     # 3-4: taxonomy extraction
     tax = taxonomy_codes("| `alpha_beta` | low | owner |\n| `Gamma Delta` | low |\n")

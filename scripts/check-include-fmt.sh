@@ -55,8 +55,12 @@ if [ "${1:-}" = "--self-test" ]; then
     # toolchain or rustfmt is unavailable; NOT a pass", rather than inventing a
     # fourth meaning or returning 0.
     self_toolchain="$(grep -oE 'nightly-[0-9-]+' "$self_root/rust-toolchain.toml" | head -1 || true)"
-    if [ -z "$self_toolchain" ] ||
-        ! rustup run "$self_toolchain" rustfmt --version >/dev/null 2>&1; then
+    self_rustfmt_bin=""
+    if [ -n "$self_toolchain" ]; then
+        self_rustfmt_bin="$(rustup which --toolchain "$self_toolchain" rustfmt 2>/dev/null || true)"
+    fi
+    if [ -z "$self_toolchain" ] || [ -z "$self_rustfmt_bin" ] ||
+        ! "$self_rustfmt_bin" --version >/dev/null 2>&1; then
         printf 'check-include-fmt self-test: INCONCLUSIVE, not run.\n' >&2
         printf 'check-include-fmt self-test: rustfmt is unavailable under %s.\n' \
             "${self_toolchain:-<unreadable pin>}" >&2
@@ -75,7 +79,7 @@ if [ "${1:-}" = "--self-test" ]; then
         arms=$((arms + 1))
         local rc
         set +e
-        EE_INCLUDE_ONLY_LIST_CMD="$3" "$self_script" >/dev/null 2>&1
+        EE_INCLUDE_FMT_RUSTFMT_BIN="$self_rustfmt_bin" EE_INCLUDE_ONLY_LIST_CMD="$3" "$self_script" >/dev/null 2>&1
         rc=$?
         set -e
         if [ "$rc" = "$2" ]; then
@@ -118,7 +122,8 @@ if [ -z "$TOOLCHAIN" ]; then
     printf 'check-include-fmt: refusing to format-check under an unknown toolchain.\n' >&2
     exit 3
 fi
-if ! rustup run "$TOOLCHAIN" rustfmt --version >/dev/null 2>&1; then
+RUSTFMT_BIN="${EE_INCLUDE_FMT_RUSTFMT_BIN:-$(rustup which --toolchain "$TOOLCHAIN" rustfmt 2>/dev/null || true)}"
+if [ -z "$RUSTFMT_BIN" ] || ! "$RUSTFMT_BIN" --version >/dev/null 2>&1; then
     printf 'check-include-fmt: rustfmt unavailable under %s.\n' "$TOOLCHAIN" >&2
     printf 'check-include-fmt: this is an ENVIRONMENT error, not a formatting verdict.\n' >&2
     exit 3
@@ -160,7 +165,7 @@ while IFS= read -r rel; do
         exit 2
     fi
     checked=$((checked + 1))
-    if ! rustup run "$TOOLCHAIN" rustfmt --check --edition 2024 "$rel" >/dev/null 2>&1; then
+    if ! "$RUSTFMT_BIN" --check --edition 2024 "$rel" >/dev/null 2>&1; then
         unformatted+=("$rel")
     fi
 done <<<"$files_raw"

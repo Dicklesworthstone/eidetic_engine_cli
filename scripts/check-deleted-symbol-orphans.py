@@ -291,6 +291,8 @@ def find_orphans(
     anomalies: dict[str, list[str]] = {}
     defined: set[str] = set()
     for path, text in files.items():
+        if not any(name in text for name in removed):
+            continue
         clean, notes = strip_rust_noise(text)
         stripped[path] = clean
         if notes:

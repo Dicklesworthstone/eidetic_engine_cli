@@ -1667,14 +1667,16 @@ fn closure_lint_compile_only_behavioural_classifier_self_test_and_quality_report
         .map_err(|error| {
             format!("run closure-lint.sh --self-test-compile-only-classifier: {error}")
         })?;
+    let stdout = String::from_utf8_lossy(&self_test.stdout);
+    let stderr = String::from_utf8_lossy(&self_test.stderr);
     ensure(
         self_test.status.success(),
         format!(
-            "closure-lint.sh --self-test-compile-only-classifier failed:\n{}",
-            output_excerpt(&self_test)
+            "closure-lint.sh --self-test-compile-only-classifier failed: {} (code {:?})\nstdout={stdout}\nstderr={stderr}",
+            self_test.status,
+            self_test.status.code(),
         ),
     )?;
-    let stdout = String::from_utf8_lossy(&self_test.stdout);
     ensure(
         stdout.contains("7/7 control arms"),
         format!("expected 7/7 control arms in stdout, got: {stdout}"),

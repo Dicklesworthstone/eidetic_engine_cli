@@ -19334,5 +19334,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:10b2d93f34538cae3f1108810653d28e849da7911d59c9b2420612181e0debca -->
-<!-- degraded-codes-fingerprint body=sha256:e6e42138d2ec8ee603e8aee7819f8021043c58bcc6cc6d6cfd48895f1df9e794 -->
+<!-- degraded-codes-fingerprint inputs=sha256:ef516de14e893b7af3a9f3cfcea254ed8a8cae42504a3564250a1037d6bc4fc2 -->
+<!-- degraded-codes-fingerprint body=sha256:80a3a24a2469892ee2ec25548e7d9bd7a267a3dd7020df06e0eada8ada3dd866 -->

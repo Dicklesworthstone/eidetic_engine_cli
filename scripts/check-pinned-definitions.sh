@@ -76,15 +76,30 @@ PINNED=(
 # working in checkouts with no .git (the RCH clean-overlay lane has none).
 scan_definitions() {
     local root="$1" name="$2"
-    grep -rnE "(^|[^A-Za-z0-9_])const[[:space:]]+${name}[[:space:]]*:" \
-        --include='*.rs' \
-        --exclude-dir='.git' \
-        --exclude-dir='.ntm' \
-        --exclude-dir='.rch' \
-        --exclude-dir='target' \
-        --exclude-dir='tmp' \
-        --exclude-dir='beads_compliance_audit' \
-        "$root" 2>/dev/null || true
+    if command -v rg >/dev/null 2>&1; then
+        (
+            cd "$root" && rg --no-require-git --no-heading --with-filename -n \
+                "(^|[^A-Za-z0-9_])const[[:space:]]+${name}[[:space:]]*:" \
+                --glob '*.rs' \
+                --glob '!.git/**' \
+                --glob '!.ntm/**' \
+                --glob '!.rch/**' \
+                --glob '!target/**' \
+                --glob '!tmp/**' \
+                --glob '!beads_compliance_audit/**' \
+                . 2>/dev/null
+        ) | sed "s|^\./|${root%/}/|" || true
+    else
+        grep -rnE "(^|[^A-Za-z0-9_])const[[:space:]]+${name}[[:space:]]*:" \
+            --include='*.rs' \
+            --exclude-dir='.git' \
+            --exclude-dir='.ntm' \
+            --exclude-dir='.rch' \
+            --exclude-dir='target' \
+            --exclude-dir='tmp' \
+            --exclude-dir='beads_compliance_audit' \
+            "$root" 2>/dev/null || true
+    fi
 }
 
 # Check one pinned identifier. Prints its hits, always.
@@ -138,7 +153,12 @@ run_audit() {
 
 if [[ "${1:-}" == "--self-test" ]]; then
     command -v grep >/dev/null 2>&1 || { echo "error: grep not found" >&2; exit 3; }
-    tmp="$(mktemp -d "${TMPDIR:-/tmp}/pinned-definitions.XXXXXX")" || exit 3
+    tmp_base="${TMPDIR:-/tmp}"
+    if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [[ "$tmp_base" == /Volumes/* ]] && [ -d /private/tmp ]; then
+        tmp_base="/private/tmp"
+    fi
+    root_tmp="$(mktemp -d "${tmp_base}/pinned-definitions.XXXXXX")" || exit 3
+    tmp="$root_tmp/main"
     failures=0
     mkdir -p "$tmp/src"
 
@@ -160,7 +180,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
     arm "$tmp" 0 "exactly one definition passes"
 
     # EMPTY WORLD. The arm this gate exists to have.
-    empty="$(mktemp -d "${TMPDIR:-/tmp}/pinned-empty.XXXXXX")" || exit 3
+    empty="$root_tmp/empty"
     mkdir -p "$empty/src"
     printf 'fn unrelated() {}\n' >"$empty/src/other.rs"
     arm "$empty" 1 "ZERO definitions FAILS (not vacuously green)"
@@ -171,7 +191,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 
     # A near-miss name must not count, or the pin fires on unrelated edits and
     # gets switched off.
-    near="$(mktemp -d "${TMPDIR:-/tmp}/pinned-near.XXXXXX")" || exit 3
+    near="$root_tmp/near"
     mkdir -p "$near/src"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\nconst PINNED_TABLE_V2: &[&str] = &["b"];\n' \
         >"$near/src/near.rs"
@@ -179,7 +199,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 
     # A mention in prose is not a declaration -- the substitution this repo
     # keeps finding, including in the verification of this very fix.
-    prose="$(mktemp -d "${TMPDIR:-/tmp}/pinned-prose.XXXXXX")" || exit 3
+    prose="$root_tmp/prose"
     mkdir -p "$prose/src"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\n// do not add a local const PINNED_TABLE here\n' \
         >"$prose/src/prose.rs"
@@ -187,7 +207,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 
     # A non-.rs file must not contribute, which is what the quoted --include
     # protects. Unquoted, this arm would pass for the wrong reason.
-    other="$(mktemp -d "${TMPDIR:-/tmp}/pinned-other.XXXXXX")" || exit 3
+    other="$root_tmp/other"
     mkdir -p "$other/src"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$other/src/only.rs"
     printf 'const PINNED_TABLE: &[&str] = &["b"];\n' >"$other/src/notes.txt"
@@ -197,7 +217,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
     # DEFINITION. This is the arm the exclusion exists for: before it, .ntm
     # and beads_compliance_audit copies made a clean tree read as 3 and the
     # gate failed locally while passing in CI.
-    scratch="$(mktemp -d "${TMPDIR:-/tmp}/pinned-scratch.XXXXXX")" || exit 3
+    scratch="$root_tmp/scratch"
     mkdir -p "$scratch/src" "$scratch/.ntm/fmt2/tree/src" "$scratch/beads_compliance_audit/tree/src"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$scratch/src/real.rs"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$scratch/.ntm/fmt2/tree/src/copy.rs"
@@ -208,7 +228,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
     # ...AND THE EXCLUSION MUST NOT SWALLOW REAL SOURCE. Without this, an
     # over-broad --exclude-dir would make the arm above pass for the wrong
     # reason and quietly stop guarding a whole subtree.
-    nested="$(mktemp -d "${TMPDIR:-/tmp}/pinned-nested.XXXXXX")" || exit 3
+    nested="$root_tmp/nested"
     mkdir -p "$nested/src/policy" "$nested/.ntm/tree/src"
     printf 'const PINNED_TABLE: &[&str] = &["a"];\n' >"$nested/src/policy/mod.rs"
     printf 'const PINNED_TABLE: &[&str] = &["b"];\n' >"$nested/src/policy/shadow.rs"
