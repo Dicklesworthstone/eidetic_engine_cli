@@ -68,6 +68,19 @@ impl ExplicitConflictSignal {
         }
     }
 
+    #[must_use]
+    pub fn from_str_name(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "contradiction_link" => Some(Self::ContradictionLink),
+            "supersession" => Some(Self::Supersession),
+            "validity_window_overlap" => Some(Self::ValidityWindowOverlap),
+            "duplicate_divergent" => Some(Self::DuplicateDivergent),
+            "trust_outcome_split" => Some(Self::TrustOutcomeSplit),
+            "repeated_co_selection" => Some(Self::RepeatedCoSelection),
+            _ => None,
+        }
+    }
+
     /// Load-bearing weight (milli-units): how strongly this signal implicates a
     /// genuine contradiction. A direct contradiction link is the heaviest; mere
     /// repeated co-selection is the lightest explicit signal.
@@ -526,6 +539,51 @@ pub struct ConflictPairView {
     pub preferred_reason: String,
     pub memory_a: ConflictMemberView,
     pub memory_b: ConflictMemberView,
+}
+
+impl ConflictPairView {
+    #[must_use]
+    pub fn parsed_signal(&self) -> ExplicitConflictSignal {
+        ExplicitConflictSignal::from_str_name(&self.signal)
+            .unwrap_or(ExplicitConflictSignal::ContradictionLink)
+    }
+
+    /// Propose and validate a default resolution for this pair using
+    /// [`crate::core::contradiction_resolution::propose_contradiction_resolution`].
+    #[must_use]
+    pub fn propose_default_resolution(
+        &self,
+    ) -> Option<crate::core::contradiction_resolution::ContradictionResolutionProposal> {
+        let (winner_id, loser_id) = match self.preferred_side.as_str() {
+            "a" => (self.memory_a.id.as_str(), self.memory_b.id.as_str()),
+            "b" => (self.memory_b.id.as_str(), self.memory_a.id.as_str()),
+            _ => return None,
+        };
+        let proposal = crate::core::contradiction_resolution::propose_contradiction_resolution(
+            winner_id,
+            loser_id,
+            self.parsed_signal(),
+        );
+        crate::core::contradiction_resolution::validate_contradiction_resolution(&proposal)
+            .ok()
+            .map(|()| proposal)
+    }
+
+    /// Convert a decided conflict pair into a pending curation candidate input
+    /// via [`crate::core::contradiction_resolution::to_curation_candidate_input`].
+    #[must_use]
+    pub fn to_default_curation_candidate_input(
+        &self,
+        workspace_id: &str,
+    ) -> Option<crate::db::CreateCurationCandidateInput> {
+        let proposal = self.propose_default_resolution()?;
+        Some(
+            crate::core::contradiction_resolution::to_curation_candidate_input(
+                &proposal,
+                workspace_id,
+            ),
+        )
+    }
 }
 
 /// A detected contradiction cluster projected for the surface.
@@ -1185,6 +1243,26 @@ pub fn plan_conflict_resolution(
         } else {
             pair.memory_a.id.clone()
         };
+        let proposal = crate::core::contradiction_resolution::propose_contradiction_resolution(
+            keep,
+            &lose,
+            pair.parsed_signal(),
+        );
+        if let Err(err) =
+            crate::core::contradiction_resolution::validate_contradiction_resolution(&proposal)
+        {
+            return ConflictResolutionOutcome::InvalidRequest {
+                message: format!(
+                    "Invalid contradiction resolution keep/lose pair ({}): {}",
+                    err.as_str(),
+                    proposal.rationale
+                ),
+                repair: format!(
+                    "Pass distinct, non-blank memory IDs for --keep ({} or {}).",
+                    pair.memory_a.id, pair.memory_b.id
+                ),
+            };
+        }
         (Some(keep.to_owned()), Some(lose))
     } else {
         (None, None)

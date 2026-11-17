@@ -109,39 +109,86 @@ def strip_line_comment(line: str) -> str:
     """
     return line.split("//", 1)[0]
 MOD_RE = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
+MOD_DECL_RE = re.compile(
+    r"^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.M,
+)
+PATH_ATTR_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
+OWN_SURFACE_RE = re.compile(
+    r"^pub(?:\s*\([^)]*\))?\s+(?:struct|enum|trait|type|fn)\s+",
+    re.M,
+)
+IMPL_BLOCK_RE = re.compile(r"^impl\b", re.M)
+IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+NON_CODE_BRACE_MASK_RE = re.compile(
+    r"//[^\n]*"
+    r"|/\*[\s\S]*?\*/"
+    r'|b?r(#*)"[\s\S]*?"\1'
+    r'|b?"(?:\\.|[^"\\])*"'
+    r"|b?'(?:\\.|[^'\\])'"
+)
+
+
+def _mask_match(m: re.Match[str]) -> str:
+    s = m.group(0)
+    if "{" not in s and "}" not in s and not s.startswith("//") and not s.startswith("/*"):
+        return s
+    if "\n" not in s:
+        return " " * len(s)
+    return "".join("\n" if ch == "\n" else " " for ch in s)
+
+
+def mask_non_code_braces(text: str) -> str:
+    """Replace comments, string literals, and char literals with spaces while
+    preserving newlines so brace matching in `test_line_ranges` is never thrown
+    off by `'{'` char literals or comments between `#[cfg(test)]` and `mod`.
+    """
+    return NON_CODE_BRACE_MASK_RE.sub(_mask_match, text)
 
 
 def test_line_ranges(text: str) -> list[tuple[int, int]]:
     """1-based inclusive line ranges of every `#[cfg(test)] mod ... { .. }`.
 
-    Brace-matched, so several test modules in one file are all found and
-    production code BETWEEN them is not swallowed.
+    Brace-matched over masked code, so several test modules in one file are all
+    found, `'{'` char literals inside tests do not unbalance braces, and
+    production code BETWEEN test modules is not swallowed.
     """
+    if "#[cfg(test)]" not in text:
+        return []
+    attrs = list(CFG_TEST_RE.finditer(text))
+    if not attrs:
+        return []
     ranges: list[tuple[int, int]] = []
-    for attr in CFG_TEST_RE.finditer(text):
-        # find the `mod ... {` that follows the attribute
-        m = MOD_RE.search(text, attr.end())
-        if not m:
+    masked: str | None = None
+    mask_offset = 0
+    for attr in attrs:
+        # Fast pre-check: `mod <name> {` must appear within 500 chars of `#[cfg(test)]`.
+        m_raw = MOD_RE.search(text, attr.end(), attr.end() + 500)
+        if not m_raw:
             continue
-        # Only treat it as the attribute's module if nothing but attributes and
-        # whitespace sits between them.
-        between = text[attr.end() : m.start()]
-        if between.strip().replace("\n", "") and not re.fullmatch(
-            r"[\s]*(?:#\[[^\]]*\]\s*)*", between
+        between_slice = text[attr.end() : m_raw.start()]
+        if "//" in between_slice or "/*" in between_slice:
+            between_slice = mask_non_code_braces(between_slice)
+        if between_slice.strip().replace("\n", "") and not re.fullmatch(
+            r"[\s]*(?:#\[[^\]]*\]\s*)*", between_slice
         ):
             continue
+        if masked is None:
+            masked = mask_non_code_braces(text[attr.start() :])
+            mask_offset = attr.start()
         depth = 0
-        i = m.end() - 1
-        while i < len(text):
-            if text[i] == "{":
+        i = m_raw.end() - 1 - mask_offset
+        while i < len(masked):
+            if masked[i] == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif masked[i] == "}":
                 depth -= 1
                 if depth == 0:
                     break
             i += 1
+        end_pos = min(i + mask_offset, len(text) - 1)
         start_line = text.count("\n", 0, attr.start()) + 1
-        end_line = text.count("\n", 0, min(i, len(text) - 1)) + 1
+        end_line = text.count("\n", 0, end_pos) + 1
         ranges.append((start_line, end_line))
     return ranges
 
@@ -228,23 +275,178 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
                         "test_references": test_refs,
                     }
                 )
+    # Tree-wide module reachability across src/**.rs (bd-6czxg Clause 2).
+    src_files = [f for f in files if f.is_relative_to(root / "src")]
+    mod_decls: list[tuple[Path, int, str, Path, bool]] = []
+    test_mod_files: set[Path] = set()
+    for f in src_files:
+        ftext, flines, franges = cache[f]
+        if "mod " not in ftext:
+            continue
+        for m in MOD_DECL_RE.finditer(ftext):
+            idx = ftext.count("\n", 0, m.start()) + 1
+            if not MOD_DECL_RE.match(strip_line_comment(flines[idx - 1])):
+                continue
+            mod_name = m.group(1)
+            j = idx - 2
+            is_cfg_test = in_ranges(idx, franges)
+            path_override = None
+            while j >= 0:
+                prev = strip_line_comment(flines[j]).strip()
+                if not prev:
+                    j -= 1
+                    continue
+                if prev.startswith("#["):
+                    if "cfg(" in prev and "test" in prev:
+                        is_cfg_test = True
+                    pm = PATH_ATTR_RE.search(prev)
+                    if pm:
+                        path_override = pm.group(1)
+                    j -= 1
+                else:
+                    break
+            parent_dir = (
+                f.parent
+                if f.name in ("mod.rs", "lib.rs", "main.rs")
+                else f.parent / f.stem
+            )
+            if path_override:
+                target = Path(os.path.normpath(f.parent / path_override))
+                if target not in cache:
+                    target = Path(os.path.normpath(parent_dir / path_override))
+            else:
+                c1 = Path(os.path.normpath(parent_dir / f"{mod_name}.rs"))
+                c2 = Path(os.path.normpath(parent_dir / mod_name / "mod.rs"))
+                target = c1 if c1 in cache else c2
+            mod_decls.append((f, idx, mod_name, target, is_cfg_test))
+
+    changed = True
+    while changed:
+        changed = False
+        for decl_file, _, _, target, is_cfg_test in mod_decls:
+            if (
+                is_cfg_test
+                or decl_file in test_mod_files
+                or target.name.endswith("_tests.rs")
+                or target.name.endswith("_test_module.rs")
+            ):
+                if target not in test_mod_files:
+                    test_mod_files.add(target)
+                    changed = True
+
+    prod_mod_decls = [
+        d
+        for d in mod_decls
+        if not d[4] and d[0] not in test_mod_files and d[3] not in test_mod_files
+    ]
+    non_test_src_files = sorted(
+        (f for f in src_files if f not in test_mod_files),
+        key=lambda p: len(cache[p][0]),
+    )
+    decl_locations: set[tuple[Path, int, str]] = {
+        (d[0], d[1], d[2]) for d in prod_mod_decls
+    }
+    line_comment_re = re.compile(r"//[^\n]*")
+    # Track which declarations still need a production reference outside their target.
+    pending_decls: list[tuple[Path, int, str, Path]] = [
+        (d[0], d[1], d[2], d[3]) for d in prod_mod_decls
+    ]
+    # Fast pass over small/medium files (< 120 KB) using token set intersection.
+    small_cutoff = 120_000
+    ref_files_by_mod: dict[str, set[Path]] = {d[2]: set() for d in prod_mod_decls}
+    large_files: list[Path] = []
+    for f in non_test_src_files:
+        ftext, flines, franges = cache[f]
+        if len(ftext) > small_cutoff:
+            large_files.append(f)
+            continue
+        if not franges:
+            prod_slice = ftext
+        else:
+            kept: list[str] = []
+            prev_idx = 1
+            for lo, hi in franges:
+                if lo > prev_idx:
+                    kept.extend(flines[prev_idx - 1 : lo - 1])
+                prev_idx = hi + 1
+            if prev_idx <= len(flines):
+                kept.extend(flines[prev_idx - 1 :])
+            prod_slice = "\n".join(kept)
+        cleaned = MOD_DECL_RE.sub("", line_comment_re.sub("", prod_slice))
+        for mname in set(IDENT_TOKEN_RE.findall(cleaned)) & ref_files_by_mod.keys():
+            ref_files_by_mod[mname].add(f)
+
+    large_files.reverse()
+    modules_examined = 0
+    for decl_file, decl_idx, mod_name, target in pending_decls:
+        modules_examined += 1
+        has_prod_ref = any(
+            f != target for f in ref_files_by_mod.get(mod_name, ())
+        )
+        if not has_prod_ref and large_files:
+            word = re.compile(r"\b" + re.escape(mod_name) + r"\b")
+            for f in large_files:
+                if f == target:
+                    continue
+                ftext, flines, franges = cache[f]
+                if mod_name not in ftext:
+                    continue
+                for m in word.finditer(ftext):
+                    idx = ftext.count("\n", 0, m.start()) + 1
+                    if (f, idx, mod_name) in decl_locations or in_ranges(idx, franges):
+                        continue
+                    if word.search(strip_line_comment(flines[idx - 1])):
+                        has_prod_ref = True
+                        break
+                if has_prod_ref:
+                    break
+        if not has_prod_ref:
+            target_tuple = cache.get(target)
+            if target_tuple is not None:
+                t_masked = mask_non_code_braces(target_tuple[0])
+                # Exclude impl-only extension modules (e.g. daemon_search_diagnostics.rs)
+                # that attach inherent methods to a parent type without declaring
+                # their own top-level public types/functions.
+                if not OWN_SURFACE_RE.search(t_masked) and IMPL_BLOCK_RE.search(t_masked):
+                    modules_examined -= 1
+                    continue
+            word = re.compile(r"\b" + re.escape(mod_name) + r"\b")
+            test_refs = 0
+            for f in src_files:
+                if f == target:
+                    continue
+                ftext, flines, franges = cache[f]
+                if mod_name not in ftext:
+                    continue
+                for idx, line in enumerate(flines, start=1):
+                    if f == decl_file and idx == decl_idx:
+                        continue
+                    if (f in test_mod_files or in_ranges(idx, franges)) and word.search(
+                        strip_line_comment(line)
+                    ):
+                        test_refs += 1
+            rel_decl = os.path.relpath(decl_file, root).replace(os.sep, "/")
+            rel_target = (
+                os.path.relpath(target, root).replace(os.sep, "/")
+                if target.exists()
+                else mod_name
+            )
+            findings.append(
+                {
+                    "surface": rel_target,
+                    "name": f"module:{mod_name}",
+                    "defined_at": f"{rel_decl}:{decl_idx}",
+                    "issue": "module unreferenced in production src/",
+                    "test_references": test_refs,
+                }
+            )
+
     return {
         "schema": "ee.production_reachability.v1",
         "surfacesExamined": examined,
-        # SCOPE, reported because this gate's pass is scoped and its wording
-        # was not. `SURFACES` is a hand-maintained list of file/pattern pairs,
-        # one per bead that already suspected a defect, so a green here means
-        # "no test-only fn among the surfaces someone already enumerated" and
-        # NOT "nothing in this tree is test-only". On 2026-10-18 the gate
-        # reported `OK` across 31 surfaces drawn from 2 of 672 scanned .rs
-        # files, while src/core/explanation_latency_budget.rs (572 lines, 8
-        # inline tests) had no production consumer at all -- outside the
-        # population, so invisible by construction rather than by oversight.
-        #
-        # This mirrors the defect bd-vejqk fixed in the fleet-identifier guard
-        # one layer down: a count that reads as "the published set" while
-        # describing a subset of it. The repair there is the repair here --
-        # report the source and the denominator so it cannot be misread.
+        "modulesExamined": modules_examined,
+        # SCOPE, reported because this gate's function pass is scoped to SURFACES
+        # while `modulesExamined` covers all non-test module declarations in src/.
         "surfaceFilesDeclared": len(surfaces),
         "surfaceFilesResolved": resolved,
         "rustFilesScanned": len(files),
@@ -484,6 +686,64 @@ def self_test() -> int:
         arm(
             "a missing surface file is reported, not silently passed",
             any(f.get("issue") == "surface file not found" for f in rep2["testOnly"]),
+        )
+
+        # MODULE REACHABILITY ARMS (bd-6czxg Clause 2):
+        # 1. A `'{'` char literal inside a #[cfg(test)] mod must not unbalance
+        #    brace matching and swallow production code after the test module.
+        # 2. A `pub mod unwired_mod;` with no production consumer is flagged as
+        #    `module:unwired_mod`.
+        # 3. A `mod wired_immediately;` followed on the very next line by
+        #    `use wired_immediately::Thing;` is NOT flagged (no line-window bug).
+        # 4. A `#[cfg(test)] mod test_only_mod;` is NOT flagged.
+        (root / "src" / "lib.rs").write_text(
+            "pub mod unwired_mod;\n"
+            "mod wired_immediately;\n"
+            "use wired_immediately::Thing;\n"
+            "#[cfg(test)]\n"
+            "mod test_only_mod;\n"
+            "#[cfg(test)]\n"
+            "mod char_brace_tests {\n"
+            "    #[test]\n"
+            "    fn char_literal_brace() {\n"
+            "        let s = \"{hello}\";\n"
+            "        assert!(s.starts_with('{'));\n"
+            "    }\n"
+            "}\n"
+            "pub fn use_thing() -> u32 { Thing::val() }\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "unwired_mod.rs").write_text(
+            "pub fn never_called() -> u32 { 42 }\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "wired_immediately.rs").write_text(
+            "pub struct Thing;\n"
+            "impl Thing { pub fn val() -> u32 { 7 } }\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "test_only_mod.rs").write_text(
+            "pub fn helper() -> u32 { 1 }\n",
+            encoding="utf-8",
+        )
+        rep3 = audit(root, surfaces)
+        names3 = {f["name"] for f in rep3["testOnly"]}
+        arm(
+            "an unwired production module in src/ is flagged as module:<name>",
+            "module:unwired_mod" in names3,
+        )
+        arm(
+            "a module used on the line immediately after its declaration is NOT flagged",
+            "module:wired_immediately" not in names3,
+        )
+        arm(
+            "a #[cfg(test)]-gated module declaration is NOT flagged",
+            "module:test_only_mod" not in names3,
+        )
+        lib_ranges = test_line_ranges(read(root / "src" / "lib.rs"))
+        arm(
+            "a '{' char literal in a test module does not swallow trailing production code",
+            len(lib_ranges) == 1 and lib_ranges[0][1] < 14,
         )
 
     passed = sum(1 for _, ok in arms if ok)

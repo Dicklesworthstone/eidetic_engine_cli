@@ -13604,6 +13604,14 @@ pub struct SwarmBriefArgs {
     #[arg(long, value_name = "PATH")]
     pub duplicate_work_input: Option<PathBuf>,
 
+    /// Optional ownership snapshot JSON file (`ee.ownership_snapshot.v1`) to attach or use for compile-blocker attribution.
+    #[arg(long, value_name = "PATH")]
+    pub ownership_snapshot: Option<PathBuf>,
+
+    /// Optional Rust compiler diagnostic log/excerpt file to attribute to active file reservation holders or Beads assignees (`ee.compile_blocker_attribution.v1`).
+    #[arg(long, value_name = "PATH")]
+    pub compile_blocker_log: Option<PathBuf>,
+
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
     pub agent_inventory_only: Option<String>,
@@ -69947,6 +69955,56 @@ where
             }
         }
     }
+    if args.ownership_snapshot.is_some() || args.compile_blocker_log.is_some() {
+        let snapshot = match &args.ownership_snapshot {
+            Some(snapshot_path) => {
+                match crate::core::ownership_snapshot::OwnershipSnapshot::from_json_path(
+                    snapshot_path,
+                ) {
+                    Ok(snapshot) => snapshot,
+                    Err(message) => {
+                        let error = DomainError::Usage {
+                            message,
+                            repair: Some(
+                                "Pass a readable ee.ownership_snapshot.v1 JSON file to --ownership-snapshot."
+                                    .to_string(),
+                            ),
+                        };
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+                    }
+                }
+            }
+            None => crate::core::ownership_snapshot::OwnershipSnapshot::from_report(&report),
+        };
+        let as_of = chrono::DateTime::parse_from_rfc3339(&snapshot.generated_at)
+            .map(|ts| ts.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        report.dirty_file_ownership =
+            crate::core::ownership_snapshot::dirty_file_reports(&snapshot, as_of);
+        if let Some(log_path) = &args.compile_blocker_log {
+            let excerpt = match fs::read_to_string(log_path) {
+                Ok(raw) => raw,
+                Err(io_error) => {
+                    let error = DomainError::Usage {
+                        message: format!(
+                            "Failed to read compile-blocker log {}: {io_error}",
+                            log_path.display()
+                        ),
+                        repair: Some(
+                            "Pass a readable Rust compiler diagnostic excerpt file to --compile-blocker-log."
+                                .to_string(),
+                        ),
+                    };
+                    return write_domain_error(&error, cli.renderer(), stdout, stderr);
+                }
+            };
+            report.compile_blocker_attribution =
+                Some(crate::core::ownership_snapshot::attribute_compile_blocker(
+                    &excerpt, &snapshot, as_of,
+                ));
+        }
+        report.ownership_snapshot = Some(snapshot);
+    }
     let unavailable_sources = swarm_brief_unavailable_sources(&report);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {
@@ -71023,6 +71081,42 @@ fn render_swarm_brief_json(
                     })?;
                     object.insert("duplicateWork".to_string(), dw_value);
                 }
+                if matches!(profile, output::FieldProfile::Full)
+                    && report.ownership_snapshot.is_none()
+                {
+                    let snapshot =
+                        crate::core::ownership_snapshot::OwnershipSnapshot::from_report(report);
+                    let as_of = chrono::DateTime::parse_from_rfc3339(&snapshot.generated_at)
+                        .map(|ts| ts.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
+                    let dirty_reports =
+                        crate::core::ownership_snapshot::dirty_file_reports(&snapshot, as_of);
+                    if !dirty_reports.is_empty() {
+                        let dirty_value = serde_json::to_value(dirty_reports).map_err(|error| {
+                            DomainError::Storage {
+                                message: format!(
+                                    "Failed to serialize swarm brief dirty-file ownership: {error}."
+                                ),
+                                repair: Some(
+                                    "Fix the dirty-file ownership serializer before emitting JSON."
+                                        .to_string(),
+                                ),
+                            }
+                        })?;
+                        object.insert("dirtyFileOwnership".to_string(), dirty_value);
+                    }
+                    let snapshot_value =
+                        serde_json::to_value(snapshot).map_err(|error| DomainError::Storage {
+                            message: format!(
+                                "Failed to serialize swarm brief ownership snapshot: {error}."
+                            ),
+                            repair: Some(
+                                "Fix the ownership-snapshot serializer before emitting JSON."
+                                    .to_string(),
+                            ),
+                        })?;
+                    object.insert("ownershipSnapshot".to_string(), snapshot_value);
+                }
             }
             data
         }
@@ -71110,6 +71204,48 @@ fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Val
                 ),
             })?;
         object.insert("duplicateWork".to_string(), dw_value);
+    }
+    if let (Some(ownership_snapshot), Some(object)) =
+        (&report.ownership_snapshot, summary.as_object_mut())
+    {
+        let os_value =
+            serde_json::to_value(ownership_snapshot).map_err(|error| DomainError::Storage {
+                message: format!("Failed to serialize swarm brief ownership snapshot: {error}."),
+                repair: Some(
+                    "Fix the swarm brief ownership-snapshot serializer before emitting JSON."
+                        .to_string(),
+                ),
+            })?;
+        object.insert("ownershipSnapshot".to_string(), os_value);
+    }
+    if !report.dirty_file_ownership.is_empty()
+        && let Some(object) = summary.as_object_mut()
+    {
+        let dfo_value = serde_json::to_value(&report.dirty_file_ownership).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to serialize swarm brief dirty-file ownership: {error}."),
+                repair: Some(
+                    "Fix the swarm brief dirty-file ownership serializer before emitting JSON."
+                        .to_string(),
+                ),
+            }
+        })?;
+        object.insert("dirtyFileOwnership".to_string(), dfo_value);
+    }
+    if let (Some(attribution), Some(object)) =
+        (&report.compile_blocker_attribution, summary.as_object_mut())
+    {
+        let attr_value =
+            serde_json::to_value(attribution).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to serialize swarm brief compile-blocker attribution: {error}."
+                ),
+                repair: Some(
+                    "Fix the swarm brief compile-blocker attribution serializer before emitting JSON."
+                        .to_string(),
+                ),
+            })?;
+        object.insert("compileBlockerAttribution".to_string(), attr_value);
     }
     Ok(summary)
 }
@@ -76986,6 +77122,8 @@ mod tests {
                 since,
                 after_snapshot,
                 duplicate_work_input,
+                ownership_snapshot,
+                compile_blocker_log,
                 agent_inventory_only,
                 max_recent_commits,
                 command_timeout_ms,
@@ -77002,6 +77140,8 @@ mod tests {
                 ensure_equal(&since, &None, "since snapshot default")?;
                 ensure_equal(&after_snapshot, &None, "after snapshot default")?;
                 ensure_equal(&duplicate_work_input, &None, "duplicate work input default")?;
+                ensure_equal(&ownership_snapshot, &None, "ownership snapshot default")?;
+                ensure_equal(&compile_blocker_log, &None, "compile blocker log default")?;
                 ensure_equal(
                     &agent_inventory_only,
                     &None,
@@ -77233,6 +77373,115 @@ mod tests {
             &full_response["data"]["duplicateWork"]["schema"],
             &serde_json::json!("ee.swarm.duplicate_work.v1"),
             "fields full duplicate work schema",
+        )?;
+        ensure_equal(
+            &full_response["data"]["ownershipSnapshot"]["schema"],
+            &serde_json::json!("ee.ownership_snapshot.v1"),
+            "fields full ownership snapshot schema",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_ownership_snapshot_and_compile_blocker_attribution_contract() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| format!("create workspace dir: {error}"))?;
+        let snapshot_path = temp_dir.path().join("ownership-snapshot.json");
+        let log_path = temp_dir.path().join("compile-blocker.log");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "schema": "ee.ownership_snapshot.v1",
+                "generatedAt": "2026-05-15T06:20:00Z",
+                "reservations": [{
+                    "pathPattern": "src/graph/hits.rs",
+                    "holderAgent": "NobleStork",
+                    "exclusive": true,
+                    "expiresAt": "2026-05-15T10:16:11Z",
+                    "beadId": "bd-1o99v",
+                    "threadId": "bd-1o99v",
+                    "provenance": {
+                        "sourceKind": "agent_mail_reservation",
+                        "sourceId": "reservation-1",
+                        "contentHash": "blake3:1111"
+                    }
+                }],
+                "beads": [],
+                "dirtyFiles": [{
+                    "path": "src/graph/hits.rs",
+                    "status": "modified",
+                    "provenance": {
+                        "sourceKind": "git_status",
+                        "sourceId": "src/graph/hits.rs",
+                        "contentHash": "blake3:2222"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("write ownership snapshot fixture: {error}"))?;
+        fs::write(
+            &log_path,
+            "error[E0603]: constant `HITS_DEFAULT_MAX_ITERATIONS` is private\n  --> src/graph/hits.rs:25:22\n",
+        )
+        .map_err(|error| format!("write compile blocker log: {error}"))?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let workspace_arg = workspace.display().to_string();
+        let snapshot_arg = snapshot_path.display().to_string();
+        let log_arg = log_path.display().to_string();
+        let exit = run(
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "swarm",
+                "brief",
+                "--sources",
+                "none",
+                "--ownership-snapshot",
+                &snapshot_arg,
+                "--compile-blocker-log",
+                &log_arg,
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "swarm brief --ownership-snapshot --compile-blocker-log exit",
+        )?;
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("parse swarm brief ownership json: {error}"))?;
+        ensure_equal(
+            &response["data"]["ownershipSnapshot"]["schema"],
+            &serde_json::json!("ee.ownership_snapshot.v1"),
+            "ownership snapshot schema",
+        )?;
+        ensure_equal(
+            &response["data"]["dirtyFileOwnership"][0]["schema"],
+            &serde_json::json!("ee.ownership_file_report.v1"),
+            "dirty file ownership schema",
+        )?;
+        ensure_equal(
+            &response["data"]["compileBlockerAttribution"]["schema"],
+            &serde_json::json!("ee.compile_blocker_attribution.v1"),
+            "compile blocker attribution schema",
+        )?;
+        ensure_equal(
+            &response["data"]["compileBlockerAttribution"]["status"],
+            &serde_json::json!("attributed"),
+            "compile blocker attribution status",
+        )?;
+        ensure_equal(
+            &response["data"]["compileBlockerAttribution"]["ownerCandidates"][0]["owner"],
+            &serde_json::json!("NobleStork"),
+            "compile blocker owner candidate",
         )
     }
 

@@ -76,10 +76,39 @@ Every machine-facing response partitions into exactly three classes:
 Non-canonical telemetry degradation codes are listed once, in
 `NON_CANONICAL_TELEMETRY_DEGRADATION_CODES` (`src/pack/mod.rs`). The pack hash
 drops them by construction, and the volatile registry
-(`src/obs/volatile_fields.rs`) reads the same list. The timing entry still
-appears in the envelope's `degraded[]`. Moving it into a dedicated telemetry
-field is a deferred schema decision owned by
-`bd-pack-timing-telemetry-field-2pfzo`.
+(`src/obs/volatile_fields.rs`) reads the same list.
+
+#### 1a. Phase-2 timing telemetry schema decision (`bd-pack-timing-telemetry-field-2pfzo`)
+
+Under `ee.response.v2` and `ee.pack.v2`, `data.pack.slo` (`ee.pack.slo.v1`) is
+the dedicated structured telemetry block for pack latency and budget posture
+(`actuals.elapsedMs`, `elapsedStatus`, `status`, and `slo.degradations`). At
+the same time, `pack_assembly_elapsed_over_budget` intentionally remains in the
+response envelope's `degraded[]` array (`src/core/context.rs`) to preserve the
+GH49 / `bd-jikgj` contract that any caller inspecting `degraded[]` sees an
+elapsed-budget overrun without having to parse `data.pack.slo`. Because
+`NON_CANONICAL_TELEMETRY_DEGRADATION_CODES` is excluded before canonical prompt
+rendering, advisory-banner retrieval-signal counting (`bd-ophw7`), and pack-hash
+finalization, keeping the overrun entry in `degraded[]` alongside `data.pack.slo`
+requires no compatibility shim and never forks `pack.hash` or `pack.text`.
+
+#### 1b. State-creating command specification (`bd-state-creating-spec-8hjtj`)
+
+State-creating commands mint durable entity IDs, audit sequence/IDs, index-queue
+job IDs, and creation timestamps on purpose. Their canonical registry lives in
+`STATE_CREATING_COMMAND_SPECS` (`src/obs/volatile_fields.rs`), and two
+consecutive runs of the same command against equivalent workspace state must
+differ only in these declared fields (plus registered operational telemetry):
+
+| Command | Minted ID fields | Minted timestamp fields | Derived integrity fields |
+|---|---|---|---|
+| `remember` | `id`, `memoryId`, `memory_id`, `auditId`, `audit_id`, `indexJobId`, `index_job_id`, `logicalId`, `logical_id` | `createdAt`, `created_at`, `updatedAt`, `updated_at` | `provenanceChainHash`, `provenance_chain_hash` |
+| `pack` (persisted) | `packRecordId`, `pack_record_id`, `recordId`, `record_id`, `auditId`, `audit_id` | `persistedAt`, `persisted_at`, `createdAt`, `created_at` | *(none — `pack.hash` and `snapshotIdentity` remain identical)* |
+| `handoff` (`create`) | `capsuleId`, `capsule_id`, `auditId`, `audit_id` | `createdAt`, `created_at`, `generatedAt`, `generated_at` | `integrity`, `capsuleHash`, `capsule_hash` |
+| `journal` | `id`, `entryId`, `entry_id`, `sessionId`, `session_id`, `memoryId`, `memory_id`, `auditId`, `audit_id`, `indexJobId`, `index_job_id` | `createdAt`, `created_at`, `updatedAt`, `updated_at`, `recordedAt` | `provenanceChainHash`, `provenance_chain_hash` |
+| `decide` | `id`, `decisionId`, `decision_id`, `memoryId`, `memory_id`, `auditId`, `audit_id`, `indexJobId`, `index_job_id` | `decidedAt`, `createdAt`, `created_at`, `updatedAt`, `updated_at` | `provenanceChainHash`, `provenance_chain_hash` |
+| `curate` | `candidateId`, `candidate_id`, `auditId`, `audit_id`, `indexJobId`, `index_job_id` | `createdAt`, `created_at`, `updatedAt`, `updated_at`, `reviewedAt`, `reviewed_at`, `appliedAt`, `applied_at`, `ttlExpiresAt`, `ttl_expires_at` | *(none)* |
+| `backup` (`create`) | `backupId`, `backup_id`, `auditId`, `audit_id` | `createdAt`, `created_at`, `completedAt` | `archivePath`, `manifestPath` |
 
 Resource-limit and admission-refusal degradations remain canonical: an empty
 pack refused admission must remain distinguishable from an admitted empty pack.
@@ -118,9 +147,6 @@ timing-only case remains pinned by
 `tests/pack_hash_property.rs`. The shared timing normalizers leave `pack.text`
 untouched; they do not scrub a wrong prompt into agreement.
 
-State-creating commands are specified separately, owned by
-`bd-state-creating-spec-8hjtj`.
-
 ### 2. Snapshot identity components
 
 The full target identity is S1–S10:
@@ -131,11 +157,11 @@ The full target identity is S1–S10:
 | S2 | immutable index manifest root / entity-revision root | hotset manifest (ADR 0084); per-entity revision |
 | S3 | retrieval subsystem identities | lexical cache epoch, L2 candidate-set key, PPR/plan cache keys |
 | S4 | model identity | `EmbeddingConfig{model_id, dimension, deterministic}`, reranker id when active, provider class |
-| S5 | request surface | query (trimmed bytes, no NFC), profile, budget, output options, task lens, task paths |
+| S5 | request surface | query (CRLF/CR normalized to LF, trimmed, Unicode NFC via `canonicalize_pack_query`), profile, budget, output options, task lens, task paths; tokenizer/Unicode/locale policy versions bound in `effective_config` |
 | S6 | effective config slice | only keys that can change selection/order/scoring, each individually named and versioned |
 | S7 | reference time domain | explicit `as_of` instant + lifecycle cutoffs; wall-clock absence is itself part of identity |
-| S8 | authorization/redaction/trust epochs | capability set hash, redaction policy version, trust-class floor |
-| S9 | execution domain | target triple class, CPU feature class relevant to declared numeric paths, binary/toolchain digest, enabled features |
+| S8 | authorization/redaction/trust epochs | capability policy version + self/team producer eligibility in `store_scopes`; redaction bypass/categories/level, trust-policy version, redaction-policy version, and security epoch in `effective_config` |
+| S9 | execution domain | declared `PackExecutionDomain` (`ee.pack.execution_domain.v1`: numeric score domain `q20.12`, selection tie domain `ieee754_f32_total_cmp_v1`, endianness, enabled features, target arch/OS) bound in `effective_config` |
 | S10 | serialization versions | `ee.pack.v2`, hash input schema, canonical-hash construction |
 
 #### 2a. What v7 binds, literally
@@ -146,7 +172,7 @@ exactly these components and nothing else
 
 | v7 component | Binds |
 |---|---|
-| `request` | query bytes (trimmed, no NFC), request profile, `budget.max_tokens`, output profile, resource profile, coverage/text/skipped/meta/verbose-meta output flags, non-affecting-degradation visibility, requested Pack DNA, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
+| `request` | query bytes (LF-normalized, trimmed, Unicode NFC via `canonicalize_pack_query`), request profile, `budget.max_tokens`, output profile, resource profile, coverage/text/skipped/meta/verbose-meta output flags, non-affecting-degradation visibility, requested Pack DNA, `read_snapshot_generation` (S1, generation only), task lens id/version/hash, normalized task paths |
 | `reference_time` | S7: `mode=explicit` and the effective UTC millisecond reference instant, or `mode=wall_clock` when no explicit clock was supplied |
 | `quality_scoring` | Explicit presence plus the execution-captured quality policy digest: algorithm version and the eight active resolved coefficients. Direct builders without retrieval bind absence. |
 | `items` | `used_tokens`; every selected item (id, rank, section, content, estimated tokens, Q20.12 relevance/utility/proximity/score breakdown, attempt-family multiplicity, why, selection phase, provenance URIs and notes, diversity key, trust class and subclass, the procedural-rule posture policy, tombstone, lifecycle, redactions, freshness facets and anchors); every evidence span with Q20.12 scores |
@@ -154,8 +180,8 @@ exactly these components and nothing else
 | `degraded` | the degraded set at finalization: telemetry codes dropped, sorted by (code, severity, message, repair), exact duplicates removed; later delivery notices are excluded |
 | `coordination` | the coordination snapshot, when present |
 | `rendered_text` | exact finalized output-renderer markdown, including backend, consensus/conflict analysis and requested DNA, with only the typed terminal hash-footer value replaced by the declared placeholder (§1) |
-| `effective_config` | S6: effective capped candidate pool, optional result limit, section set, and the captured runtime policy described in §3a; direct builders explicitly bind runtime-policy absence |
-| `store_scopes` | S1: concrete database/root addresses and actual workspace bindings; requested scope and strictness; global-tier inclusion posture; current producer for self/team scopes; canonical team membership and roster availability (§3b). Direct builders without stores bind explicit absence. |
+| `effective_config` | S5/S6/S8/S9: effective capped candidate pool, optional result limit, section set, and the captured runtime policy described in §3a (including trust/redaction/security policy epochs, execution domain, and tokenizer/Unicode/locale policies); direct builders explicitly bind runtime-policy absence |
+| `store_scopes` | S1/S8: authorization capability policy version (`PACK_AUTHZ_CAPABILITY_POLICY_V1`), concrete database/root addresses and actual workspace bindings; requested scope and strictness; global-tier inclusion posture; current producer for self/team scopes; canonical team membership and roster availability (§3b). Direct builders without stores bind explicit absence. |
 
 The composite is blake3 over the schema tag and the tagged component
 digests, in this order: `request`, `reference_time`, `quality_scoring`, `items`, `omitted` (only when skipped items
@@ -170,10 +196,10 @@ differing composite is localized by comparing the component digests.
 | S2 index manifest / entity-revision root | not bound | `bd-reality-core-convergence-1azkt.2` |
 | S3 retrieval subsystem identities (lexical cache, L2 candidate set, PPR/plan caches) | not bound | `bd-reality-core-convergence-1azkt.2` (lexical cache), `bd-reality-core-convergence-1azkt.3` (cache identity under concurrency) |
 | S4 model identity | backend label is bound through text; full model/provider/weight identity is not | `bd-reality-core-convergence-1azkt.2` |
-| S8 authorization / capability / agent | capabilities and authorization epochs not bound; self/team producer eligibility is bound in `store_scopes` | `bd-pack-identity-authz-ctr51` |
-| S8 trust / redaction / security policy epochs | per-item results bound, policy versions not | `bd-pack-identity-trust-epochs-b7cq9` |
-| S9 execution domain | not bound; see §3 | `bd-pack-identity-exec-domain-junoz` |
-| S5 tokenizer identity, Unicode normalization, locale, line endings | query hashed as trimmed bytes; nothing normalized; tokenizer not bound | `bd-pack-identity-unicode-gitmy` |
+| S8 authorization / capability / agent | bound in `store_scopes` (`PACK_AUTHZ_CAPABILITY_POLICY_V1` + self/team producer eligibility) and `effective_config` (redaction bypass/categories/level); ambient `AGENT_NAME` in shared `workspace`/`swarm`/`global` scopes is intentionally excluded | closed (`bd-pack-identity-authz-ctr51`) |
+| S8 trust / redaction / security policy epochs | bound in `effective_config` (`PACK_TRUST_POLICY_VERSION_V1`, `PACK_REDACTION_POLICY_VERSION_V1`, `PACK_SECURITY_EPOCH_V1`) | closed (`bd-pack-identity-trust-epochs-b7cq9`) |
+| S9 execution domain | declared by `PackExecutionDomain` (`ee.pack.execution_domain.v1`) and bound in `effective_config`; see §3 | closed (`bd-pack-identity-exec-domain-junoz`) |
+| S5 tokenizer identity, Unicode normalization, locale, line endings | query LF-normalized, trimmed, and NFC-normalized (`canonicalize_pack_query`); content kept byte-exact; tokenizer/Unicode/locale policies bound in `effective_config` | closed (`bd-pack-identity-unicode-gitmy`) |
 | Selection thresholds/ties on Q20.12; one score domain for JSON | not done | `bd-reality-core-convergence-1azkt.11` |
 | Cross-process and cross-host determinism gates | not established by v7 | `bd-reality-core-convergence-1azkt.3` |
 
@@ -247,12 +273,20 @@ rendered-text component binds displayed numeric strings exactly, including
 DNA explanations; it does not normalize or quantize already-rendered text.
 
 Selection thresholds and tie-breaks still compare raw f32, and JSON item
-scores are six-decimal display copies. Until
-`bd-reality-core-convergence-1azkt.11` moves them onto the quantized domain,
-two runs agree on `pack.hash` only when their raw-f32 selection agrees, which
-is guaranteed within one binary on one target and is NOT claimed across
-targets. That execution domain is owned by
-`bd-pack-identity-exec-domain-junoz`.
+scores are six-decimal display copies. `PackExecutionDomain`
+(`ee.pack.execution_domain.v1`, `src/pack/mod.rs`, `bd-pack-identity-exec-domain-junoz`)
+declares the execution domain literally: `numeric_score_domain = "q20.12"`,
+`selection_tie_domain = "ieee754_f32_total_cmp_v1"`, `endianness`, sorted
+`enabled_features` (`embed-fast`, `fts5`, `graph`, `json`, `lexical-bm25`),
+`target_arch`, and `target_os`. Its `portable_domain_key()` is bound into
+`effectiveConfig` (`execution.domain`), so two little-endian targets compiled
+with the same feature set claim equality when their raw-f32 selection agrees,
+while any change to the numeric domain, tie domain, endianness, feature set, or
+explicit `target_domain_key()` moves `effectiveConfig` and is named by
+`PackHashComponentDigests::differing_components`. Until
+`bd-reality-core-convergence-1azkt.11` moves selection thresholds onto the
+quantized domain, cross-target equality is conditional on equal raw-f32
+selection.
 
 ### 3a. Effective retrieval and assembly policy
 
@@ -338,10 +372,19 @@ instead of manufacturing a runtime identity.
   and its component name.
 - The composite is `blake3` over the labeled schema tag and the labeled
   component digests (§2a).
-- Unicode: bytes are hashed as stored. The query is trimmed and hashed as
-  bytes with no NFC; memory content is never normalized (normalization would
-  break content identity). Line endings are not normalized. Both are owned by
-  `bd-pack-identity-unicode-gitmy`.
+- Unicode, line endings, tokenizer, and locale (`bd-pack-identity-unicode-gitmy`):
+  the query is canonicalized by `canonicalize_pack_query` (`src/pack/mod.rs`),
+  which normalizes CRLF (`\r\n`) and CR (`\r`) line endings to LF (`\n`), trims
+  outer whitespace, and applies Unicode Canonical Composition (NFC,
+  `PACK_QUERY_UNICODE_POLICY_V1 = "nfc_lf_trimmed_v1"`). Candidate memory
+  `content` is never Unicode- or line-ending-normalized
+  (`PACK_CONTENT_UNICODE_POLICY_V1 = "byte_exact_utf8_v1"`), because normalizing
+  stored memory bodies would break content-addressed memory identity (two
+  byte-distinct memories must stay distinct). Canonical rendered prompt text
+  (`pack.text`) always uses LF (`\n`) line endings. The tokenizer identity
+  (`PACK_TOKENIZER_IDENTITY_V1 = "tiktoken_cl100k_base_or_char4_v1"`) and
+  locale-independent C policy (`PACK_LOCALE_POLICY_V1 = "c_locale_independent_v1"`)
+  are bound into `effectiveConfig`.
 - Degraded entries: canonicalized in the hash input as in §2a. Emission order
   in `degraded[]` is a separate, presentational contract.
 - Reference-time precedence is explicit CLI `as_of`, then query-file
@@ -455,6 +498,7 @@ is part of v7.
 | Store scopes | `pack_hash_v7_*`, `pack_store_scope_identity_*`, `pack_global_scope_identity_*`, `pack_store_address_identity_*`, `pack_l2_cache_key_tracks_canonical_inputs` | equal content distinguishes concrete stores/bindings, global tier sets and team membership; comparator names `storeScopes`; aliases and unordered memberships canonicalize; disabled stores remain unopened; only digests are public; L2 binds scope changes |
 | Property | `tests/pack_hash_property.rs` (in `integration_property`) | timing stays outside prompt identity but visible in the envelope; order/repetition and sub-quantum noise properties remain; independently derived v7 composite and text-component vectors pin exact renderer bytes with the declared footer exception |
 | Finalization and replay | `src/core/context_test_module.rs` | backend/DNA changes move the text component; literal placeholder text is preserved; late notices do not rewrite finalized text; Lean still binds Markdown; cache tampering and forged composites are rejected; Lean cache hits retain canonical text; real seeded persistence records the finalized DNA hash |
+| State-creating commands | `src/obs/volatile_fields.rs` `state_creating_command_registry_covers_all_mutating_surfaces_and_converges_bd_state_creating_spec_8hjtj` | every state-creating command surface (`remember`, `pack`, `handoff`, `journal`, `decide`, `curate`, `backup`) is registered in `STATE_CREATING_COMMAND_SPECS`, consecutive runs differ only in declared state-creating and operational-telemetry fields, and undeclared canonical drift fails convergence |
 | Existing | `determinism_unit`, `property_query_and_pack`, `pack_envelope_byte_identical_*` | unchanged determinism evidence |
 
 Tests compare product output directly. The v7 text-leaf oracle substitutes only

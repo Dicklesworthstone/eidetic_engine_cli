@@ -43,6 +43,215 @@ impl OwnershipSnapshot {
         self.dirty_files.sort_by(compare_dirty_files);
         self
     }
+
+    /// Build a normalized, redaction-safe [`OwnershipSnapshot`] from an
+    /// already-collected [`crate::core::swarm_brief::SwarmBriefReport`].
+    #[must_use]
+    pub fn from_report(report: &crate::core::swarm_brief::SwarmBriefReport) -> Self {
+        let generated_at = report
+            .sources
+            .iter()
+            .find_map(|source| source.freshness.observed_at.clone())
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+
+        let reservations = report
+            .file_reservations
+            .iter()
+            .enumerate()
+            .map(|(index, reservation)| {
+                let path_pattern = redact_ownership_text(&reservation.path_pattern);
+                let holder_agent = redact_ownership_text(&reservation.holder);
+                let expires_at = reservation.expires_at.as_deref().map(redact_ownership_text);
+                let hash_input = format!(
+                    "{path_pattern}|{holder_agent}|{}|{}",
+                    reservation.exclusive,
+                    expires_at.as_deref().unwrap_or("")
+                );
+                let content_hash =
+                    format!("blake3:{}", blake3::hash(hash_input.as_bytes()).to_hex());
+                OwnershipReservationSnapshot {
+                    path_pattern,
+                    holder_agent,
+                    exclusive: reservation.exclusive,
+                    expires_at,
+                    bead_id: None,
+                    thread_id: None,
+                    provenance: OwnershipProvenance {
+                        source_kind: "agent_mail_reservation".to_owned(),
+                        source_id: format!("reservation-{index}"),
+                        content_hash,
+                    },
+                }
+            })
+            .collect();
+
+        let all_beads = report
+            .beads
+            .in_progress
+            .iter()
+            .chain(report.beads.ready.iter())
+            .chain(report.beads.blocked.iter())
+            .chain(report.beads.deferred.iter());
+
+        let beads = all_beads
+            .map(|bead| {
+                let bead_id = redact_ownership_text(&bead.id);
+                let title = redact_ownership_text(&bead.title);
+                let status = redact_ownership_text(&bead.status);
+                let assignee = bead.assignee.as_deref().map(redact_ownership_text);
+                let file_patterns = extract_file_patterns_from_text(&title);
+                let hash_input = format!(
+                    "{bead_id}|{status}|{}|{title}",
+                    assignee.as_deref().unwrap_or("")
+                );
+                let content_hash =
+                    format!("blake3:{}", blake3::hash(hash_input.as_bytes()).to_hex());
+                BeadOwnershipRecord {
+                    bead_id: bead_id.clone(),
+                    title,
+                    status,
+                    assignee,
+                    labels: vec![redact_ownership_text(&bead.source_bucket)],
+                    file_patterns,
+                    provenance: OwnershipProvenance {
+                        source_kind: "beads_issue".to_owned(),
+                        source_id: bead_id,
+                        content_hash,
+                    },
+                }
+            })
+            .collect();
+
+        let dirty_files = report
+            .dirty_files
+            .iter()
+            .map(|dirty| {
+                let path = redact_ownership_text(&dirty.path);
+                let status = redact_ownership_text(&dirty.status);
+                let hash_input = format!("{path}|{status}");
+                let content_hash =
+                    format!("blake3:{}", blake3::hash(hash_input.as_bytes()).to_hex());
+                DirtyFileRecord {
+                    path: path.clone(),
+                    status,
+                    provenance: OwnershipProvenance {
+                        source_kind: "git_status".to_owned(),
+                        source_id: path,
+                        content_hash,
+                    },
+                }
+            })
+            .collect();
+
+        Self {
+            schema: OWNERSHIP_SNAPSHOT_SCHEMA_V1.to_owned(),
+            generated_at,
+            reservations,
+            beads,
+            dirty_files,
+        }
+        .normalized()
+    }
+
+    /// Parse an [`OwnershipSnapshot`] from a JSON value (supporting either a
+    /// raw `ee.ownership_snapshot.v1` object, an envelope with `data`, or a
+    /// `ee.swarm.brief.v1` object).
+    pub fn from_json_value(value: &serde_json::Value) -> Result<Self, String> {
+        let payload = value
+            .get("data")
+            .filter(|inner| inner.is_object())
+            .unwrap_or(value);
+        if payload.get("schema").and_then(serde_json::Value::as_str)
+            == Some(OWNERSHIP_SNAPSHOT_SCHEMA_V1)
+        {
+            let parsed: Self = serde_json::from_value(payload.clone())
+                .map_err(|error| format!("invalid ownership snapshot JSON: {error}"))?;
+            return Ok(parsed.redacted().normalized());
+        }
+        if let Some(nested) = payload.get("ownershipSnapshot") {
+            let parsed: Self = serde_json::from_value(nested.clone())
+                .map_err(|error| format!("invalid nested ownershipSnapshot JSON: {error}"))?;
+            return Ok(parsed.redacted().normalized());
+        }
+        Err("JSON does not contain an ee.ownership_snapshot.v1 payload".to_owned())
+    }
+
+    /// Load an [`OwnershipSnapshot`] from a JSON file path.
+    pub fn from_json_path(path: &std::path::Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read ownership snapshot file {}: {error}",
+                path.display()
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+            format!(
+                "Failed to parse ownership snapshot JSON {}: {error}",
+                path.display()
+            )
+        })?;
+        Self::from_json_value(&value)
+    }
+
+    #[must_use]
+    pub fn redacted(mut self) -> Self {
+        self.generated_at = redact_ownership_text(&self.generated_at);
+        for r in &mut self.reservations {
+            r.path_pattern = redact_ownership_text(&r.path_pattern);
+            r.holder_agent = redact_ownership_text(&r.holder_agent);
+            r.expires_at = r.expires_at.as_deref().map(redact_ownership_text);
+            r.bead_id = r.bead_id.as_deref().map(redact_ownership_text);
+            r.thread_id = r.thread_id.as_deref().map(redact_ownership_text);
+        }
+        for b in &mut self.beads {
+            b.bead_id = redact_ownership_text(&b.bead_id);
+            b.title = redact_ownership_text(&b.title);
+            b.status = redact_ownership_text(&b.status);
+            b.assignee = b.assignee.as_deref().map(redact_ownership_text);
+            b.labels = b.labels.iter().map(|s| redact_ownership_text(s)).collect();
+            b.file_patterns = b
+                .file_patterns
+                .iter()
+                .map(|s| redact_ownership_text(s))
+                .collect();
+        }
+        for d in &mut self.dirty_files {
+            d.path = redact_ownership_text(&d.path);
+            d.status = redact_ownership_text(&d.status);
+        }
+        self
+    }
+}
+
+fn redact_ownership_text(raw: &str) -> String {
+    crate::policy::redact_secret_like_content(raw).content
+}
+
+fn extract_file_patterns_from_text(text: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for token in text.split_whitespace() {
+        let cleaned = token.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+            )
+        });
+        if (cleaned.starts_with("src/")
+            || cleaned.starts_with("tests/")
+            || cleaned.starts_with("scripts/")
+            || cleaned.starts_with("docs/")
+            || cleaned.starts_with("benches/")
+            || cleaned.ends_with(".rs")
+            || cleaned.ends_with(".sh")
+            || cleaned.ends_with(".py")
+            || cleaned.ends_with(".toml"))
+            && !patterns.iter().any(|existing| existing == cleaned)
+        {
+            patterns.push(cleaned.to_owned());
+        }
+    }
+    patterns.sort();
+    patterns
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -219,10 +428,13 @@ pub fn attribute_compile_blocker(
 
 #[must_use]
 pub fn attribute_compile_blocker_diagnostic(
-    diagnostic: RustCompileDiagnostic,
+    mut diagnostic: RustCompileDiagnostic,
     snapshot: &OwnershipSnapshot,
     as_of: DateTime<Utc>,
 ) -> CompileBlockerAttributionReport {
+    diagnostic.path = redact_ownership_text(&diagnostic.path);
+    diagnostic.message = redact_ownership_text(&diagnostic.message);
+    diagnostic.error_code = diagnostic.error_code.as_deref().map(redact_ownership_text);
     let candidates = ownership_candidates_for_path(snapshot, &diagnostic.path, as_of)
         .into_iter()
         .filter(|candidate| !candidate.expired)

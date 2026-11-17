@@ -1696,6 +1696,18 @@ pub struct ContextRequest {
     /// Normalized, captured bead-scoring input. Absent requests retain their
     /// historical pack identity and never read the workspace tracker.
     pub bead_affinity_identity: Option<String>,
+    /// Optional explicit authorization/capability posture identity (S8,
+    /// `bd-pack-identity-authz-ctr51`), bound into `storeScopes`.
+    pub authz_capability_identity: Option<String>,
+    /// Optional explicit trust/redaction/security policy epoch identity (S8,
+    /// `bd-pack-identity-trust-epochs-b7cq9`), bound into `effectiveConfig`.
+    pub policy_epochs_identity: Option<String>,
+    /// Optional explicit execution-domain identity (S9,
+    /// `bd-pack-identity-exec-domain-junoz`), bound into `effectiveConfig`.
+    pub execution_domain_identity: Option<String>,
+    /// Optional explicit tokenizer/Unicode/locale policy identity (S5,
+    /// `bd-pack-identity-unicode-gitmy`), bound into `effectiveConfig`.
+    pub unicode_tokenizer_policy_identity: Option<String>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1715,7 +1727,7 @@ impl ContextRequest {
     /// [`PackValidationError::ZeroCandidatePool`] when the candidate
     /// pool is zero.
     pub fn new(input: ContextRequestInput) -> Result<Self, PackValidationError> {
-        let query = trim_required(input.query, PackValidationError::EmptyQuery)?;
+        let query = canonicalize_pack_query(input.query)?;
         let budget = match input.max_tokens {
             Some(max_tokens) => TokenBudget::new(max_tokens)?,
             None => TokenBudget::default_context(),
@@ -1740,6 +1752,10 @@ impl ContextRequest {
             effective_config_policy: None,
             store_scope_identity: None,
             bead_affinity_identity: None,
+            authz_capability_identity: None,
+            policy_epochs_identity: None,
+            execution_domain_identity: None,
+            unicode_tokenizer_policy_identity: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -3956,6 +3972,100 @@ pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 7;
 /// The only substituted value in the rendered-text digest. This value is
 /// supplied to the typed footer renderer, never replaced in arbitrary content.
 pub const PACK_HASH_TEXT_FOOTER_PLACEHOLDER: &str = "ee.pack.hash.self.v1";
+
+/// S8 authorization capability posture version (`bd-pack-identity-authz-ctr51`).
+pub const PACK_AUTHZ_CAPABILITY_POLICY_V1: &str = "ee.pack.authz_capability_policy.v1";
+/// S8 trust policy epoch version (`bd-pack-identity-trust-epochs-b7cq9`).
+pub const PACK_TRUST_POLICY_VERSION_V1: &str = "ee.pack.trust_policy.v1";
+/// S8 redaction policy epoch version (`bd-pack-identity-trust-epochs-b7cq9`).
+pub const PACK_REDACTION_POLICY_VERSION_V1: &str = "ee.pack.redaction_policy.v1";
+/// S8 security policy epoch version (`bd-pack-identity-trust-epochs-b7cq9`).
+pub const PACK_SECURITY_EPOCH_V1: &str = "ee.pack.security_epoch.v1";
+/// S9 execution domain schema (`bd-pack-identity-exec-domain-junoz`).
+pub const PACK_EXECUTION_DOMAIN_SCHEMA_V1: &str = "ee.pack.execution_domain.v1";
+/// S5 tokenizer identity (`bd-pack-identity-unicode-gitmy`).
+pub const PACK_TOKENIZER_IDENTITY_V1: &str = "tiktoken_cl100k_base_or_char4_v1";
+/// S5 query Unicode and line-ending normalization policy (`bd-pack-identity-unicode-gitmy`).
+pub const PACK_QUERY_UNICODE_POLICY_V1: &str = "nfc_lf_trimmed_v1";
+/// S5 candidate content Unicode policy (`bd-pack-identity-unicode-gitmy`).
+pub const PACK_CONTENT_UNICODE_POLICY_V1: &str = "byte_exact_utf8_v1";
+/// S5 locale policy (`bd-pack-identity-unicode-gitmy`).
+pub const PACK_LOCALE_POLICY_V1: &str = "c_locale_independent_v1";
+
+/// Declared execution domain for context-pack selection and scoring
+/// (ADR 0087 §3 / S9, `bd-pack-identity-exec-domain-junoz`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackExecutionDomain {
+    pub schema: String,
+    pub numeric_score_domain: String,
+    pub selection_tie_domain: String,
+    pub target_arch: String,
+    pub target_os: String,
+    pub endianness: String,
+    pub enabled_features: Vec<String>,
+}
+
+impl PackExecutionDomain {
+    #[must_use]
+    pub fn current() -> Self {
+        let mut enabled_features = Vec::new();
+        if cfg!(feature = "embed-fast") {
+            enabled_features.push("embed-fast".to_owned());
+        }
+        if cfg!(feature = "fts5") {
+            enabled_features.push("fts5".to_owned());
+        }
+        if cfg!(feature = "graph") {
+            enabled_features.push("graph".to_owned());
+        }
+        if cfg!(feature = "json") {
+            enabled_features.push("json".to_owned());
+        }
+        if cfg!(feature = "lexical-bm25") {
+            enabled_features.push("lexical-bm25".to_owned());
+        }
+        enabled_features.sort();
+        Self {
+            schema: PACK_EXECUTION_DOMAIN_SCHEMA_V1.to_owned(),
+            numeric_score_domain: "q20.12".to_owned(),
+            selection_tie_domain: "ieee754_f32_total_cmp_v1".to_owned(),
+            target_arch: std::env::consts::ARCH.to_owned(),
+            target_os: std::env::consts::OS.to_owned(),
+            endianness: if cfg!(target_endian = "little") {
+                "little".to_owned()
+            } else {
+                "big".to_owned()
+            },
+            enabled_features,
+        }
+    }
+
+    /// Cross-target portable domain key binding the numeric score domain,
+    /// selection tie domain, endianness, and enabled cargo feature set.
+    #[must_use]
+    pub fn portable_domain_key(&self) -> String {
+        format!(
+            "{}|score={}|tie={}|endian={}|features={}",
+            self.schema,
+            self.numeric_score_domain,
+            self.selection_tie_domain,
+            self.endianness,
+            self.enabled_features.join(","),
+        )
+    }
+
+    /// Target-specific domain key including `target_arch` and `target_os`.
+    #[must_use]
+    pub fn target_domain_key(&self) -> String {
+        format!(
+            "{}|arch={}|os={}",
+            self.portable_domain_key(),
+            self.target_arch,
+            self.target_os,
+        )
+    }
+}
 
 /// The component digests behind a v7 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
@@ -6970,7 +7080,7 @@ fn assemble_mmr_draft(
         "threaded deterministic token through MMR pack assembly"
     );
 
-    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
+    let query = canonicalize_pack_query(query.into())?;
     let mut candidates: Vec<MmrCandidate> = candidates
         .into_iter()
         .map(|candidate| MmrCandidate::from_candidate(candidate, options.output_redaction_enabled))
@@ -7367,7 +7477,7 @@ fn assemble_mmr_draft_reusing_workspace(
     determinism: &Deterministic<Seed>,
     arena: &mut PackArenaWorkspace,
 ) -> Result<PackDraft, PackValidationError> {
-    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
+    let query = canonicalize_pack_query(query.into())?;
     let candidates = candidates.into_iter().collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let Some(mut scratch) = arena.take_mmr_scratch(candidate_count) else {
@@ -7766,7 +7876,7 @@ fn assemble_facility_location_draft(
     candidates: impl IntoIterator<Item = PackCandidate>,
     options: PackAssemblyOptions,
 ) -> Result<PackDraft, PackValidationError> {
-    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
+    let query = canonicalize_pack_query(query.into())?;
     let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
     candidates.sort_by(compare_candidates);
     let mut candidates: Vec<FacilityCandidateProfile> = candidates
@@ -8064,7 +8174,7 @@ fn assemble_facility_location_draft_reusing_workspace(
     options: PackAssemblyOptions,
     arena: &mut PackArenaWorkspace,
 ) -> Result<PackDraft, PackValidationError> {
-    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
+    let query = canonicalize_pack_query(query.into())?;
     let candidates = candidates.into_iter().collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let Some(mut scratch) = arena.take_facility_scratch(candidate_count) else {
@@ -9580,6 +9690,33 @@ fn compare_candidates(left: &PackCandidate, right: &PackCandidate) -> Ordering {
         })
         .then_with(|| left.section.cmp(&right.section))
         .then_with(|| left.memory_id.cmp(&right.memory_id))
+}
+
+/// Normalize a pack query under [`PACK_QUERY_UNICODE_POLICY_V1`] (ADR 0087 §4,
+/// `bd-pack-identity-unicode-gitmy`):
+/// 1. Normalize CRLF (`\r\n`) and standalone CR (`\r`) line endings to LF (`\n`).
+/// 2. Trim leading and trailing whitespace.
+/// 3. Apply Unicode Canonical Composition (NFC) so canonically equivalent
+///    composed/decomposed spellings produce identical query bytes and hashes.
+///
+/// Candidate memory `content` intentionally does NOT use this helper and stays
+/// byte-exact (`PACK_CONTENT_UNICODE_POLICY_V1`) so content-addressed memory
+/// identities never collide across byte-distinct stored texts.
+pub fn canonicalize_pack_query(value: String) -> Result<String, PackValidationError> {
+    let lf_normalized = if value.contains('\r') {
+        value.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        value
+    };
+    let trimmed = lf_normalized.trim();
+    if trimmed.is_empty() {
+        return Err(PackValidationError::EmptyQuery);
+    }
+    let nfc: String = unicode_normalization::UnicodeNormalization::nfc(trimmed).collect();
+    if nfc.trim().is_empty() {
+        return Err(PackValidationError::EmptyQuery);
+    }
+    Ok(nfc)
 }
 
 fn trim_required(value: String, error: PackValidationError) -> Result<String, PackValidationError> {

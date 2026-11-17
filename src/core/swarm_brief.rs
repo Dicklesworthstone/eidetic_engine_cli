@@ -294,6 +294,21 @@ pub struct SwarmBriefReport {
     /// `--fields full` or `--duplicate-work-input <PATH>` is supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate_work: Option<crate::core::duplicate_work_detector::DuplicateWorkVerdict>,
+    /// Optional deterministic ownership snapshot (bd-nwzbb / bd-6czxg). Included
+    /// when `--fields full`, `--ownership-snapshot <PATH>`, or `--compile-blocker-log <PATH>`
+    /// is supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_snapshot: Option<crate::core::ownership_snapshot::OwnershipSnapshot>,
+    /// Optional per-dirty-file ownership reports derived from `ownership_snapshot`
+    /// via `dirty_file_reports` (bd-nwzbb).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirty_file_ownership: Vec<crate::core::ownership_snapshot::FileOwnershipReport>,
+    /// Optional Rust compile-blocker attribution report (`ee.compile_blocker_attribution.v1`,
+    /// bd-nwzbb) produced by `attribute_compile_blocker` when `--compile-blocker-log <PATH>`
+    /// is supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compile_blocker_attribution:
+        Option<crate::core::ownership_snapshot::CompileBlockerAttributionReport>,
 }
 
 /// Maximum query-miss audit rows scanned when assembling knowledge gaps. Bounds
@@ -605,6 +620,9 @@ impl SwarmBriefReport {
             adaptive: None,
             delta: None,
             duplicate_work: None,
+            ownership_snapshot: None,
+            dirty_file_ownership: Vec::new(),
+            compile_blocker_attribution: None,
         }
     }
 

@@ -61,6 +61,15 @@ impl TagBitmapIndex {
 
     #[must_use]
     pub fn matching(&self, query: &TagBitmapQuery) -> Vec<u64> {
+        self.matching_with_negation_prefilter(query, None)
+    }
+
+    #[must_use]
+    pub fn matching_with_negation_prefilter(
+        &self,
+        query: &TagBitmapQuery,
+        negation_prefilter: Option<&super::bloom_prefilter::CountingBloomPrefilter>,
+    ) -> Vec<u64> {
         let mut candidates = if let Some(first) = query.include.first() {
             self.by_tag.get(first).cloned().unwrap_or_default()
         } else {
@@ -77,6 +86,9 @@ impl TagBitmapIndex {
         }
 
         for tag in &query.exclude {
+            if negation_prefilter.is_some_and(|filter| filter.definitely_absent(tag)) {
+                continue;
+            }
             if let Some(ids) = self.by_tag.get(tag) {
                 candidates = candidates.difference(ids).copied().collect();
             }

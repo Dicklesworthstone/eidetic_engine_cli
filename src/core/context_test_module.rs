@@ -16074,4 +16074,188 @@ pub fn unrelated_context() -> u64 {{
             assert!(!error.repair_hint().unwrap_or_default().contains("ee init"));
         }
     }
+
+    #[test]
+    fn pack_hash_binds_authz_capability_identity_and_ignores_unrelated_scope_agent_bd_pack_identity_authz_ctr51()
+    -> TestResult {
+        let workspace = store_scope_test_binding();
+        let mut ws_scope_a = store_scope_test_context(MemoryScope::Workspace);
+        ws_scope_a.current_agent = Some("AgentAlpha".to_owned());
+        let mut ws_scope_b = store_scope_test_context(MemoryScope::Workspace);
+        ws_scope_b.current_agent = Some("AgentBeta".to_owned());
+        // Under shared Workspace scope, ambient producer identity does not change
+        // selection or redaction and therefore does not fork storeScopes.
+        assert_eq!(
+            super::hash_context_store_scopes(&workspace, &ws_scope_a, "outside_scope", None),
+            super::hash_context_store_scopes(&workspace, &ws_scope_b, "outside_scope", None),
+        );
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |req: &ContextRequest| {
+            super::compute_pack_hash_components(
+                req,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let base = hash(&request);
+        let mut changed_authz = request.clone();
+        changed_authz.authz_capability_identity =
+            Some("ee.pack.authz_capability_policy.v2+redaction_bypass_granted".to_owned());
+        let moved = hash(&changed_authz);
+        assert_eq!(
+            base.digests.differing_components(&moved.digests),
+            ["storeScopes"],
+        );
+        assert_ne!(base.composite_hash, moved.composite_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_binds_trust_redaction_and_security_policy_epochs_bd_pack_identity_trust_epochs_b7cq9()
+    -> TestResult {
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |req: &ContextRequest| {
+            super::compute_pack_hash_components(
+                req,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let base = hash(&request);
+        for epoch in [
+            format!(
+                "trust={}|redaction={}|security={}",
+                "ee.pack.trust_policy.v2",
+                crate::pack::PACK_REDACTION_POLICY_VERSION_V1,
+                crate::pack::PACK_SECURITY_EPOCH_V1
+            ),
+            format!(
+                "trust={}|redaction={}|security={}",
+                crate::pack::PACK_TRUST_POLICY_VERSION_V1,
+                "ee.pack.redaction_policy.v2",
+                crate::pack::PACK_SECURITY_EPOCH_V1
+            ),
+            format!(
+                "trust={}|redaction={}|security={}",
+                crate::pack::PACK_TRUST_POLICY_VERSION_V1,
+                crate::pack::PACK_REDACTION_POLICY_VERSION_V1,
+                "ee.pack.security_epoch.v2"
+            ),
+        ] {
+            let mut variant = request.clone();
+            variant.policy_epochs_identity = Some(epoch.clone());
+            let moved = hash(&variant);
+            assert_eq!(
+                base.digests.differing_components(&moved.digests),
+                ["effectiveConfig"],
+                "epoch change {epoch} must name effectiveConfig"
+            );
+            assert_ne!(base.composite_hash, moved.composite_hash);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_binds_execution_domain_and_names_component_bd_pack_identity_exec_domain_junoz()
+    -> TestResult {
+        let domain_a = crate::pack::PackExecutionDomain {
+            schema: crate::pack::PACK_EXECUTION_DOMAIN_SCHEMA_V1.to_owned(),
+            numeric_score_domain: "q20.12".to_owned(),
+            selection_tie_domain: "ieee754_f32_total_cmp_v1".to_owned(),
+            target_arch: "x86_64".to_owned(),
+            target_os: "linux".to_owned(),
+            endianness: "little".to_owned(),
+            enabled_features: vec!["fts5".to_owned(), "lexical-bm25".to_owned()],
+        };
+        let mut domain_b = domain_a.clone();
+        domain_b.target_arch = "aarch64".to_owned();
+        domain_b.target_os = "macos".to_owned();
+        // Portable domain key agrees across little-endian targets with identical
+        // numeric/tie domains and enabled features, while target_domain_key
+        // distinguishes target arch/OS.
+        assert_eq!(
+            domain_a.portable_domain_key(),
+            domain_b.portable_domain_key()
+        );
+        assert_ne!(domain_a.target_domain_key(), domain_b.target_domain_key());
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |req: &ContextRequest| {
+            super::compute_pack_hash_components(
+                req,
+                &draft,
+                &[],
+                Default::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let mut req_a = request.clone();
+        req_a.execution_domain_identity = Some(domain_a.target_domain_key());
+        let mut req_b = request;
+        req_b.execution_domain_identity = Some(domain_b.target_domain_key());
+        let hash_a = hash(&req_a);
+        let hash_b = hash(&req_b);
+        assert_eq!(
+            hash_a.digests.differing_components(&hash_b.digests),
+            ["effectiveConfig"]
+        );
+        assert_ne!(hash_a.composite_hash, hash_b.composite_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_normalizes_query_unicode_and_crlf_while_keeping_content_byte_exact_bd_pack_identity_unicode_gitmy()
+    -> TestResult {
+        // 1. NFC ("caf\u{00e9}") vs NFD ("cafe\u{0301}") and CRLF vs LF queries
+        //    canonicalize to identical query bytes and produce identical pack hashes.
+        let req_nfc =
+            ContextRequest::from_query("  caf\u{00e9}\nsearch  ").map_err(|e| e.to_string())?;
+        let req_nfd =
+            ContextRequest::from_query("cafe\u{0301}\r\nsearch").map_err(|e| e.to_string())?;
+        assert_eq!(req_nfc.query, req_nfd.query);
+
+        let (_, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let hash = |req: &ContextRequest, d: &crate::pack::PackDraft| {
+            super::compute_pack_hash_components(req, d, &[], Default::default(), None, None, None)
+        };
+        assert_eq!(
+            hash(&req_nfc, &draft).composite_hash,
+            hash(&req_nfd, &draft).composite_hash
+        );
+
+        // 2. Candidate memory content stays byte-exact: CRLF vs LF in memory
+        //    content produces distinct `items` and `renderedText` digests.
+        let mut draft_crlf = draft.clone();
+        draft_crlf.items[0].content = "Line one\r\nLine two".to_owned();
+        let mut draft_lf = draft.clone();
+        draft_lf.items[0].content = "Line one\nLine two".to_owned();
+        let h_crlf = hash(&req_nfc, &draft_crlf);
+        let h_lf = hash(&req_nfc, &draft_lf);
+        assert_ne!(h_crlf.digests.items, h_lf.digests.items);
+        assert_ne!(h_crlf.composite_hash, h_lf.composite_hash);
+
+        // 3. Tokenizer/Unicode/locale policy version change moves effectiveConfig.
+        let base = hash(&req_nfc, &draft);
+        let mut policy_changed = req_nfc;
+        policy_changed.unicode_tokenizer_policy_identity =
+            Some("tokenizer=tiktoken_v2|unicode=nfkc".to_owned());
+        let moved = hash(&policy_changed, &draft);
+        assert_eq!(
+            base.digests.differing_components(&moved.digests),
+            ["effectiveConfig"]
+        );
+        assert_ne!(base.composite_hash, moved.composite_hash);
+        Ok(())
+    }
 }

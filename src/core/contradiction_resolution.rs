@@ -1,19 +1,10 @@
 //! bd-1n0np.7.4 — audited contradiction resolution: propose → validate (→ apply
 //! via curate).
 //!
-//! THIS MODULE HAS NO CALLER. Verified 2026-10-12 and re-verified 2026-10-13
-//! against its own public symbols (`propose_contradiction_resolution` and
-//! friends), not its name: the only mention of it in `src/` outside this file
-//! is its `pub mod` line in `src/core/mod.rs`. Note that a bare-name grep DOES
-//! hit `"contradiction_resolution"` in test files, where it is a feature-id
-//! STRING naming a verify.sh e2e stage rather than a reference to this module;
-//! that false positive is what made it look wired. bd-1n0np.7.4 is open for the
-//! consumer wiring, whose acceptance is "propose -> validate -> apply ... full
-//! audit rows" and is not satisfiable by this stage alone.
-//!
 //! Resolutions follow ADR-0014 (propose → validate → apply). This module is the
 //! contradiction-specific propose + validate stage: given a detected, decided
-//! contradiction (winner vs loser, from `contradiction_guard`), it proposes the
+//! contradiction (winner vs loser, from `contradiction_guard` or
+//! [`crate::core::contradiction_detect::ConflictPairView`]), it proposes the
 //! appropriate resolution and bridges it to a curate [`CreateCurationCandidateInput`]
 //! so the *existing* curate pipeline performs the audited apply (Supersede =
 //! tombstone-with-pointer, Split = scope edit, Merge = consolidation), emitting
@@ -27,9 +18,10 @@ use crate::core::contradiction_detect::ExplicitConflictSignal;
 use crate::curate::CandidateType;
 use crate::db::CreateCurationCandidateInput;
 
-/// Source-type tag recorded on curation candidates this module proposes, so the
-/// curate surface can distinguish contradiction-driven resolutions.
-pub const CONTRADICTION_RESOLUTION_SOURCE_TYPE: &str = "contradiction_resolution";
+/// Source-type tag recorded on curation candidates this module proposes, matching
+/// the `curation_candidates.source_type` CHECK vocabulary so `ee curate` can
+/// persist and accept contradiction-driven resolutions.
+pub const CONTRADICTION_RESOLUTION_SOURCE_TYPE: &str = "contradiction_detected";
 
 /// Default confidence attached to a proposed (unconfirmed) resolution.
 pub const CONTRADICTION_RESOLUTION_PROPOSAL_CONFIDENCE: f32 = 0.5;

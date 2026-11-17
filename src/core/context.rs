@@ -10274,6 +10274,9 @@ fn compute_pack_store_scopes_digest(request: &ContextRequest) -> String {
         "runtime_scopes",
         request.store_scope_identity.as_deref().map(str::as_bytes),
     );
+    if let Some(authz) = &request.authz_capability_identity {
+        hash_labeled_bytes(&mut hasher, "authz_capability", authz.as_bytes());
+    }
     finalize_blake3(hasher)
 }
 
@@ -10398,6 +10401,11 @@ fn hash_context_store_scopes(
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.store_scopes.v1");
+    hash_labeled_bytes(
+        &mut hasher,
+        "authz.capability_policy",
+        crate::pack::PACK_AUTHZ_CAPABILITY_POLICY_V1.as_bytes(),
+    );
     hash_context_store_binding(&mut hasher, "workspace", workspace);
     hash_labeled_bytes(&mut hasher, "scope", scope.scope.as_str().as_bytes());
     hash_labeled_bool(&mut hasher, "strict_scope", scope.strict_scope);
@@ -10482,6 +10490,19 @@ fn compute_pack_effective_config_digest(request: &ContextRequest) -> String {
             .as_deref()
             .map(str::as_bytes),
     );
+    if let Some(epochs) = &request.policy_epochs_identity {
+        hash_labeled_bytes(&mut hasher, "policy_epochs", epochs.as_bytes());
+    }
+    if let Some(exec_domain) = &request.execution_domain_identity {
+        hash_labeled_bytes(&mut hasher, "execution_domain", exec_domain.as_bytes());
+    }
+    if let Some(unicode_policy) = &request.unicode_tokenizer_policy_identity {
+        hash_labeled_bytes(
+            &mut hasher,
+            "unicode_tokenizer_policy",
+            unicode_policy.as_bytes(),
+        );
+    }
     finalize_blake3(hasher)
 }
 
@@ -10541,6 +10562,7 @@ fn context_effective_config_policy(
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.effective_config.v1");
+    let exec_domain = crate::pack::PackExecutionDomain::current().portable_domain_key();
     for (label, value) in [
         ("speed", options.speed.as_str()),
         ("source.requested", options.source_mode.as_str()),
@@ -10548,6 +10570,29 @@ fn context_effective_config_policy(
         ("memory_scope", options.memory_scope.as_str()),
         ("redaction.level", options.redaction_level.as_str()),
         ("rerank.mode", search.rerank_configured_mode.as_str()),
+        (
+            "policy.trust_version",
+            crate::pack::PACK_TRUST_POLICY_VERSION_V1,
+        ),
+        (
+            "policy.redaction_version",
+            crate::pack::PACK_REDACTION_POLICY_VERSION_V1,
+        ),
+        ("policy.security_epoch", crate::pack::PACK_SECURITY_EPOCH_V1),
+        ("execution.domain", exec_domain.as_str()),
+        (
+            "tokenizer.identity",
+            crate::pack::PACK_TOKENIZER_IDENTITY_V1,
+        ),
+        (
+            "unicode.query_policy",
+            crate::pack::PACK_QUERY_UNICODE_POLICY_V1,
+        ),
+        (
+            "unicode.content_policy",
+            crate::pack::PACK_CONTENT_UNICODE_POLICY_V1,
+        ),
+        ("locale.policy", crate::pack::PACK_LOCALE_POLICY_V1),
     ] {
         hash_labeled_bytes(&mut hasher, label, value.as_bytes());
     }

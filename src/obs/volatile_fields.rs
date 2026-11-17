@@ -615,6 +615,248 @@ fn log_volatile_strip(report: &VolatileStripReport) {
     log_event(event);
 }
 
+/// Specification of one intentionally state-creating command surface (ADR 0087
+/// §1a, `bd-state-creating-spec-8hjtj`).
+///
+/// State-creating commands mint new durable entity IDs, audit sequence/IDs,
+/// index-queue job IDs, and creation timestamps on purpose. Two consecutive
+/// invocations of the same command with identical arguments against equivalent
+/// workspace state must differ ONLY in these declared state-creating fields
+/// (plus registered operational-telemetry fields from [`VOLATILE_FIELD_NAMES`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StateCreatingCommandSpec {
+    pub command_id: &'static str,
+    pub description: &'static str,
+    pub minted_id_fields: &'static [&'static str],
+    pub minted_timestamp_fields: &'static [&'static str],
+    pub derived_integrity_fields: &'static [&'static str],
+}
+
+impl StateCreatingCommandSpec {
+    #[must_use]
+    pub fn declares_state_creating_field(&self, field_name: &str) -> bool {
+        self.minted_id_fields.contains(&field_name)
+            || self.minted_timestamp_fields.contains(&field_name)
+            || self.derived_integrity_fields.contains(&field_name)
+    }
+}
+
+/// Canonical registry of intentionally state-creating command surfaces
+/// (`bd-state-creating-spec-8hjtj`, ADR 0087 §1a).
+pub const STATE_CREATING_COMMAND_SPECS: &[StateCreatingCommandSpec] = &[
+    StateCreatingCommandSpec {
+        command_id: "remember",
+        description: "Mints a durable memory row, audit record, and index queue job.",
+        minted_id_fields: &[
+            "id",
+            "memoryId",
+            "memory_id",
+            "auditId",
+            "audit_id",
+            "indexJobId",
+            "index_job_id",
+            "logicalId",
+            "logical_id",
+        ],
+        minted_timestamp_fields: &["createdAt", "created_at", "updatedAt", "updated_at"],
+        derived_integrity_fields: &["provenanceChainHash", "provenance_chain_hash"],
+    },
+    StateCreatingCommandSpec {
+        command_id: "pack",
+        description: "Persisted context-pack assembly mints a pack ledger record and audit row while keeping pack.hash and snapshotIdentity deterministic.",
+        minted_id_fields: &[
+            "packRecordId",
+            "pack_record_id",
+            "recordId",
+            "record_id",
+            "auditId",
+            "audit_id",
+        ],
+        minted_timestamp_fields: &["persistedAt", "persisted_at", "createdAt", "created_at"],
+        derived_integrity_fields: &[],
+    },
+    StateCreatingCommandSpec {
+        command_id: "handoff",
+        description: "Mints a handoff capsule ID, creation timestamp, and capsule integrity digest.",
+        minted_id_fields: &["capsuleId", "capsule_id", "auditId", "audit_id"],
+        minted_timestamp_fields: &["createdAt", "created_at", "generatedAt", "generated_at"],
+        derived_integrity_fields: &["integrity", "capsuleHash", "capsule_hash"],
+    },
+    StateCreatingCommandSpec {
+        command_id: "journal",
+        description: "Mints a journal session/entry record, optional promoted memory, audit row, and index job.",
+        minted_id_fields: &[
+            "id",
+            "entryId",
+            "entry_id",
+            "sessionId",
+            "session_id",
+            "memoryId",
+            "memory_id",
+            "auditId",
+            "audit_id",
+            "indexJobId",
+            "index_job_id",
+        ],
+        minted_timestamp_fields: &[
+            "createdAt",
+            "created_at",
+            "updatedAt",
+            "updated_at",
+            "recordedAt",
+        ],
+        derived_integrity_fields: &["provenanceChainHash", "provenance_chain_hash"],
+    },
+    StateCreatingCommandSpec {
+        command_id: "decide",
+        description: "Mints a decision record, companion decision memory, audit row, and index job.",
+        minted_id_fields: &[
+            "id",
+            "decisionId",
+            "decision_id",
+            "memoryId",
+            "memory_id",
+            "auditId",
+            "audit_id",
+            "indexJobId",
+            "index_job_id",
+        ],
+        minted_timestamp_fields: &[
+            "decidedAt",
+            "createdAt",
+            "created_at",
+            "updatedAt",
+            "updated_at",
+        ],
+        derived_integrity_fields: &["provenanceChainHash", "provenance_chain_hash"],
+    },
+    StateCreatingCommandSpec {
+        command_id: "curate",
+        description: "Mints or transitions curation candidates, review decisions, and audit rows.",
+        minted_id_fields: &[
+            "candidateId",
+            "candidate_id",
+            "auditId",
+            "audit_id",
+            "indexJobId",
+            "index_job_id",
+        ],
+        minted_timestamp_fields: &[
+            "createdAt",
+            "created_at",
+            "updatedAt",
+            "updated_at",
+            "reviewedAt",
+            "reviewed_at",
+            "appliedAt",
+            "applied_at",
+            "ttlExpiresAt",
+            "ttl_expires_at",
+        ],
+        derived_integrity_fields: &[],
+    },
+    StateCreatingCommandSpec {
+        command_id: "backup",
+        description: "Mints a backup archive/manifest identity, creation timestamp, and audit row.",
+        minted_id_fields: &["backupId", "backup_id", "auditId", "audit_id"],
+        minted_timestamp_fields: &["createdAt", "created_at", "completedAt"],
+        derived_integrity_fields: &["archivePath", "manifestPath"],
+    },
+];
+
+/// Look up the [`StateCreatingCommandSpec`] for `command_id`.
+#[must_use]
+pub fn state_creating_spec_for_command(
+    command_id: &str,
+) -> Option<&'static StateCreatingCommandSpec> {
+    let normalized = command_id.trim();
+    STATE_CREATING_COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.command_id == normalized)
+}
+
+/// Strip both operational volatile fields ([`strip_volatile_fields`]) and the
+/// declared state-creating fields for `command_id` from `value`, returning the
+/// sorted list of state-creating field names removed.
+pub fn strip_state_creating_fields_for_command(
+    command_id: &str,
+    value: &mut Value,
+) -> Result<Vec<&'static str>, String> {
+    let spec = state_creating_spec_for_command(command_id).ok_or_else(|| {
+        format!("unknown state-creating command '{command_id}'; register it in STATE_CREATING_COMMAND_SPECS")
+    })?;
+    let _ = strip_volatile_fields(value);
+    let mut removed = BTreeSet::new();
+    strip_state_creating_inner(value, spec, &mut removed);
+    Ok(removed.into_iter().collect())
+}
+
+fn strip_state_creating_inner(
+    value: &mut Value,
+    spec: &'static StateCreatingCommandSpec,
+    removed: &mut BTreeSet<&'static str>,
+) {
+    match value {
+        Value::Object(object) => {
+            let matching_keys = object
+                .keys()
+                .filter_map(|key| {
+                    spec.minted_id_fields
+                        .iter()
+                        .chain(spec.minted_timestamp_fields.iter())
+                        .chain(spec.derived_integrity_fields.iter())
+                        .copied()
+                        .find(|declared| *declared == key)
+                })
+                .collect::<Vec<_>>();
+            for key in matching_keys {
+                object.remove(key);
+                removed.insert(key);
+            }
+            for child in object.values_mut() {
+                strip_state_creating_inner(child, spec, removed);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_state_creating_inner(item, spec, removed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Verify that two consecutive runs of a state-creating command (`run_a` and
+/// `run_b`) differ in at least one declared state-creating field and are
+/// byte-identical once their declared state-creating and operational-telemetry
+/// fields are stripped (`bd-state-creating-spec-8hjtj`).
+pub fn assert_consecutive_state_creating_runs_converge(
+    command_id: &str,
+    run_a: &Value,
+    run_b: &Value,
+) -> Result<Vec<&'static str>, String> {
+    if run_a == run_b {
+        return Err(format!(
+            "state-creating command '{command_id}' produced identical raw responses; expected minted IDs/timestamps to differ between consecutive runs"
+        ));
+    }
+    let mut norm_a = run_a.clone();
+    let mut norm_b = run_b.clone();
+    let stripped_a = strip_state_creating_fields_for_command(command_id, &mut norm_a)?;
+    let stripped_b = strip_state_creating_fields_for_command(command_id, &mut norm_b)?;
+    if stripped_a.is_empty() || stripped_b.is_empty() {
+        return Err(format!(
+            "state-creating command '{command_id}' did not strip any declared state-creating fields"
+        ));
+    }
+    if norm_a != norm_b {
+        return Err(format!(
+            "consecutive runs of '{command_id}' differed outside declared state-creating fields:\nleft={norm_a}\nright={norm_b}"
+        ));
+    }
+    Ok(stripped_a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1405,6 +1647,235 @@ mod tests {
         );
         assert!(!is_volatile_field_name("status"));
         assert!(!is_volatile_field_name("elapsedStatus"));
+        Ok(())
+    }
+
+    #[test]
+    fn state_creating_command_registry_covers_all_mutating_surfaces_and_converges_bd_state_creating_spec_8hjtj()
+    -> TestResult {
+        use super::{
+            STATE_CREATING_COMMAND_SPECS, assert_consecutive_state_creating_runs_converge,
+            state_creating_spec_for_command,
+        };
+
+        let expected_commands = [
+            "remember", "pack", "handoff", "journal", "decide", "curate", "backup",
+        ];
+        assert_eq!(STATE_CREATING_COMMAND_SPECS.len(), expected_commands.len());
+        for cmd in expected_commands {
+            assert!(
+                state_creating_spec_for_command(cmd).is_some(),
+                "missing state-creating command spec for {cmd}"
+            );
+        }
+
+        let golden_pairs: [(&str, serde_json::Value, serde_json::Value); 7] = [
+            (
+                "remember",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "success": true,
+                    "data": {
+                        "memoryId": "mem_01980000000070008000000001",
+                        "audit_id": "aud_01980000000070008000000001",
+                        "index_job_id": "job_01980000000070008000000001",
+                        "index_status": "indexed",
+                        "content": "Use cargo fmt --check locally.",
+                        "kind": "rule",
+                        "level": "working",
+                        "trustClass": "human_explicit",
+                        "createdAt": "2026-11-16T20:00:00.100Z",
+                        "updatedAt": "2026-11-16T20:00:00.100Z",
+                        "provenanceChainHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                    },
+                    "degraded": []
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "success": true,
+                    "data": {
+                        "memoryId": "mem_01980000000070008000000002",
+                        "audit_id": "aud_01980000000070008000000002",
+                        "index_job_id": "job_01980000000070008000000002",
+                        "index_status": "indexed",
+                        "content": "Use cargo fmt --check locally.",
+                        "kind": "rule",
+                        "level": "working",
+                        "trustClass": "human_explicit",
+                        "createdAt": "2026-11-16T20:00:01.250Z",
+                        "updatedAt": "2026-11-16T20:00:01.250Z",
+                        "provenanceChainHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222"
+                    },
+                    "degraded": []
+                }),
+            ),
+            (
+                "pack",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "success": true,
+                    "data": {
+                        "packRecordId": "pack_01980000000070008000000010",
+                        "auditId": "aud_01980000000070008000000010",
+                        "persistedAt": "2026-11-16T20:00:00.100Z",
+                        "pack": {
+                            "schema": "ee.pack.v2",
+                            "hash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "items": [{"memoryId": "mem_fixed", "rank": 1}]
+                        }
+                    }
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "success": true,
+                    "data": {
+                        "packRecordId": "pack_01980000000070008000000011",
+                        "auditId": "aud_01980000000070008000000011",
+                        "persistedAt": "2026-11-16T20:00:02.400Z",
+                        "pack": {
+                            "schema": "ee.pack.v2",
+                            "hash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "items": [{"memoryId": "mem_fixed", "rank": 1}]
+                        }
+                    }
+                }),
+            ),
+            (
+                "handoff",
+                serde_json::json!({
+                    "schema": "ee.handoff.v1",
+                    "capsuleId": "cap_01980000000070008000000020",
+                    "createdAt": "2026-11-16T20:00:00Z",
+                    "integrity": "blake3:cap1",
+                    "summary": "Ready for next agent"
+                }),
+                serde_json::json!({
+                    "schema": "ee.handoff.v1",
+                    "capsuleId": "cap_01980000000070008000000021",
+                    "createdAt": "2026-11-16T20:00:05Z",
+                    "integrity": "blake3:cap2",
+                    "summary": "Ready for next agent"
+                }),
+            ),
+            (
+                "journal",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "entryId": "jrn_01980000000070008000000030",
+                        "sessionId": "ses_01980000000070008000000030",
+                        "auditId": "aud_01980000000070008000000030",
+                        "createdAt": "2026-11-16T20:00:00Z",
+                        "summary": "Completed verification run"
+                    }
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "entryId": "jrn_01980000000070008000000031",
+                        "sessionId": "ses_01980000000070008000000031",
+                        "auditId": "aud_01980000000070008000000031",
+                        "createdAt": "2026-11-16T20:00:03Z",
+                        "summary": "Completed verification run"
+                    }
+                }),
+            ),
+            (
+                "decide",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "decisionId": "dec_01980000000070008000000040",
+                        "memoryId": "mem_01980000000070008000000040",
+                        "auditId": "aud_01980000000070008000000040",
+                        "decidedAt": "2026-11-16T20:00:00Z",
+                        "topic": "runtime",
+                        "chosen": "asupersync"
+                    }
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "decisionId": "dec_01980000000070008000000041",
+                        "memoryId": "mem_01980000000070008000000041",
+                        "auditId": "aud_01980000000070008000000041",
+                        "decidedAt": "2026-11-16T20:00:04Z",
+                        "topic": "runtime",
+                        "chosen": "asupersync"
+                    }
+                }),
+            ),
+            (
+                "curate",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "candidateId": "curate_01980000000070008000000050",
+                        "auditId": "aud_01980000000070008000000050",
+                        "createdAt": "2026-11-16T20:00:00Z",
+                        "candidateType": "tombstone",
+                        "status": "pending"
+                    }
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "candidateId": "curate_01980000000070008000000051",
+                        "auditId": "aud_01980000000070008000000051",
+                        "createdAt": "2026-11-16T20:00:06Z",
+                        "candidateType": "tombstone",
+                        "status": "pending"
+                    }
+                }),
+            ),
+            (
+                "backup",
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "backupId": "bkp_01980000000070008000000060",
+                        "auditId": "aud_01980000000070008000000060",
+                        "createdAt": "2026-11-16T20:00:00Z",
+                        "archivePath": "/data/backups/bkp_01.tar.zst",
+                        "verified": true
+                    }
+                }),
+                serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "data": {
+                        "backupId": "bkp_01980000000070008000000061",
+                        "auditId": "aud_01980000000070008000000061",
+                        "createdAt": "2026-11-16T20:00:07Z",
+                        "archivePath": "/data/backups/bkp_02.tar.zst",
+                        "verified": true
+                    }
+                }),
+            ),
+        ];
+
+        for (command_id, run_a, run_b) in &golden_pairs {
+            let stripped =
+                assert_consecutive_state_creating_runs_converge(command_id, run_a, run_b)?;
+            assert!(
+                !stripped.is_empty(),
+                "{command_id} must strip at least one declared state-creating field"
+            );
+        }
+
+        // Negative control: if canonical content differs (e.g. `content` on remember),
+        // convergence MUST fail.
+        let mut drifted = golden_pairs[0].2.clone();
+        drifted["data"]["content"] = serde_json::json!("Different canonical content.");
+        assert!(
+            assert_consecutive_state_creating_runs_converge(
+                "remember",
+                &golden_pairs[0].1,
+                &drifted
+            )
+            .is_err(),
+            "canonical content drift must be rejected by state-creating convergence check"
+        );
+
         Ok(())
     }
 }

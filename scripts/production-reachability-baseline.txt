@@ -85,9 +85,38 @@
 # is still listed below, still has no dispatch arm, and its non-definition
 # references are all in the test module.
 # ---------------------------------------------------------------------------
+# 2026-11-16 (bd-6czxg, bd-nwzbb): Widened check-production-reachability.py to
+# audit ALL non-#[cfg(test)] module declarations across src/**.rs (`module:<name>`),
+# and fixed test_line_ranges() to mask char/string literals and comments before
+# brace-matching (closing the `'{'` char-literal bug that previously swallowed
+# src/cli/mod.rs:58799..73654).
+#
+# Recorded dispositions for the 14 modules in the bd-6czxg census:
+#   1. ownership_snapshot          WIRED -> src/core/swarm_brief.rs, src/cli/mod.rs (bd-nwzbb)
+#   2. swarm_brief_delta           WIRED -> src/core/swarm_brief.rs, src/cli/mod.rs (bd-1zb7k.17.2)
+#   3. duplicate_work_detector     WIRED -> src/core/swarm_brief.rs, src/cli/mod.rs (bd-1zb7k.17.4)
+#   4. explanation_latency_budget  WIRED -> src/core/why.rs, src/core/context.rs, src/cli/mod.rs (bd-2fb6u.5)
+#   5. adaptive_scheduler          WIRED -> src/daemon/adaptive_scheduler.rs, src/core/swarm_brief.rs (bd-16pwc)
+#   6. contradiction_resolution    WIRED -> src/core/contradiction_detect.rs (bd-1n0np.7.4 / bd-6czxg)
+#   7. bead_affinity_loader        WIRED -> src/core/context_bead_affinity.rs
+#   8. bloom_prefilter             WIRED -> src/search/tag_bitmaps.rs, src/search/hot_path.rs
+#   9. bm25_simd                   TEST-GATED (#[cfg(test)] in src/search/mod.rs:15; differential reference only)
+#  10. scale_policy                STAGED (bd-bife.17; consumer: future `ee insights` scale admission; covered by tests/graph_scale_policy.rs)
+#  11. minhash_rank                STAGED (bd-3usjw.46; consumer: deterministic top-K graph reads; covered by tests/graph_minhash_rank.rs)
+#  12. remote_evidence             STAGED (SRR6.36; consumer: mesh evidence fetch adapter; covered by tests/mesh_remote_evidence.rs)
+#  13. tailscale_transport         STAGED (SRR6.9; consumer: optional Tailscale mesh transport)
+#  14. hot_path                    STAGED (SRR4; consumer: tag-bitmap + counting-bloom search hot path)
+#  15. pack_compression            STAGED (zstd dictionary training for context-pack compression; covered by tests/contracts/pack_compression_manifest_schema.rs; previously hidden by a `'{'` char-literal in src/db/mod.rs test module unbalancing test_line_ranges)
+# ---------------------------------------------------------------------------
 fix_agent_coordination_stale_lease
 fix_beads_jsonl_drift
 fix_policy_safety_inconsistent
 fix_snapshot_backup_owed
 fix_state_file_permission_drift
 fix_workspace_config_atomic_rewrite
+module:hot_path
+module:minhash_rank
+module:pack_compression
+module:remote_evidence
+module:scale_policy
+module:tailscale_transport
