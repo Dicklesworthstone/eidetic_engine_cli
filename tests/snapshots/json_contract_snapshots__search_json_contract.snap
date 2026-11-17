@@ -65,6 +65,7 @@ expression: canonical_json_text(value)
     "elapsedMs": 0,
     "embed_backend": "hash_fallback",
     "errors": [],
+    "fallbackReason": null,
     "metrics": {
       "candidatesAboveFloor": 1,
       "candidatesBelowFloor": 0,
@@ -199,6 +200,7 @@ expression: canonical_json_text(value)
           "level": "procedural",
           "memory_scope": "swarm",
           "provenanceChainHash": "[HASH]",
+          "provenanceChainHashVersion": "[HASH]",
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "components": {
@@ -313,6 +315,7 @@ expression: canonical_json_text(value)
         "why": "Selected by lexical retrieval with relevance 1.0000 from score 1.0000 (query_relative_pool_minmax)."
       }
     ],
+    "retrievalPath": "in_process",
     "scopeStats": {
       "candidatesExcludedByScope": 0,
       "candidatesInScope": 1,
@@ -324,6 +327,7 @@ expression: canonical_json_text(value)
       "strictViolations": 0,
       "teamSize": 0
     },
+    "servingPath": "in_process",
     "status": "success"
   },
   "degraded": [

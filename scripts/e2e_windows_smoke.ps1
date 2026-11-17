@@ -39,7 +39,8 @@ function Write-TestEvent {
 function Invoke-Ee {
     param(
         [string] $Name,
-        [string[]] $Arguments
+        [string[]] $Arguments,
+        [string] $ExpectedSchema = "ee.response.v2"
     )
     $artifactDir = Join-Path $WorkspaceRoot "artifacts"
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
@@ -75,8 +76,14 @@ function Invoke-Ee {
         Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout was not valid JSON"
         throw
     }
-    if ($json.schema -ne "ee.response.v2" -or $json.success -ne $true) {
-        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout was not a successful ee.response.v2 envelope"
+    if ($ExpectedSchema -eq "ee.response.v2") {
+        if ($json.schema -ne "ee.response.v2" -or $json.success -ne $true) {
+            Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout was not a successful ee.response.v2 envelope"
+            throw "ee command returned an unexpected response envelope: $commandText"
+        }
+    }
+    elseif ($json.schema -ne $ExpectedSchema) {
+        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout schema $($json.schema) did not match expected $ExpectedSchema"
         throw "ee command returned an unexpected response envelope: $commandText"
     }
     Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath
@@ -136,6 +143,7 @@ $backup = Invoke-Ee -Name "09-backup-create" -Arguments @(
     "--label",
     "windows-msvc-cli-smoke"
 )
+$RestoreSidePath = "$WorkspaceRoot-restore-side-path"
 Invoke-Ee -Name "10-backup-restore" -Arguments @(
     "backup",
     "restore",
@@ -143,10 +151,10 @@ Invoke-Ee -Name "10-backup-restore" -Arguments @(
     "--output-dir",
     (Join-Path $WorkspaceRoot "backups"),
     "--side-path",
-    (Join-Path $WorkspaceRoot "restore-side-path")
+    $RestoreSidePath
 ) | Out-Null
 $capsule = Join-Path $WorkspaceRoot "handoff-capsule.json"
-Invoke-Ee -Name "11-handoff-create" -Arguments @("handoff", "create", "--out", $capsule, "--profile", "resume") | Out-Null
-Invoke-Ee -Name "12-handoff-resume" -Arguments @("handoff", "resume", $capsule) | Out-Null
+Invoke-Ee -Name "11-handoff-create" -ExpectedSchema "ee.handoff.create.v1" -Arguments @("handoff", "create", "--out", $capsule, "--profile", "resume") | Out-Null
+Invoke-Ee -Name "12-handoff-resume" -ExpectedSchema "ee.handoff.resume.v1" -Arguments @("handoff", "resume", $capsule) | Out-Null
 
 Write-Host "Windows MSVC CLI smoke passed. Log: $LogPath"

@@ -136,7 +136,7 @@ expression: canonical_json_text(value)
       ],
       "thisOperation": {
         "degradationsApplied": [
-          "search_lexical_only",
+          "embed_model_unavailable",
           "graph_skyline_disabled"
         ],
         "status": "ok",
@@ -350,11 +350,52 @@ expression: canonical_json_text(value)
   },
   "degraded": [
     {
-      "code": "search_lexical_only",
-      "message": "Search index is healthy but semantic retrieval is unavailable: the embedder is the deterministic-hash fallback, so every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content. Memory still works; this does not degrade the overall posture.",
-      "repair": "Run `ee model fetch`, then `ee index rebuild --workspace .`.",
+      "code": "embed_model_unavailable",
+      "details": {
+        "recovery": [
+          {
+            "command": "ee index reembed --workspace .",
+            "evidence": [
+              "derived_asset_refresh_command"
+            ],
+            "kind": "rebuild",
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "preconditions": [
+              "workspace_must_be_explicit",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "priority": 1,
+            "privacyClass": "bounded_command_no_raw_state",
+            "rationale": "The embedder model is unloadable; re-embed forces a fresh initialization.",
+            "requiresHumanApproval": false,
+            "resultsIn": "Rebuilds the embedding index against the current embed-fast feature and model configuration.",
+            "riskClass": "idempotent_refresh"
+          },
+          {
+            "command": "cargo build --features embed-fast",
+            "evidence": [
+              "local_toolchain_or_install_command"
+            ],
+            "kind": "rebuild",
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "preconditions": [
+              "use_rch_for_cargo_when_applicable",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "priority": 2,
+            "privacyClass": "bounded_command_no_raw_state",
+            "rationale": "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature.",
+            "requiresHumanApproval": false,
+            "riskClass": "mutating_local_repair"
+          }
+        ]
+      },
+      "message": "Embedding model unavailable: semantic retrieval is unavailable on the deterministic-hash fallback, so results use the lexical fallback. The search index remains healthy and memory retrieval continues to work.",
+      "repair": "Inspect the active backend with `ee model status`; restore a configured remote endpoint or run `ee model fetch`, then `ee index rebuild --workspace .`.",
       "repairKind": "unknown",
-      "severity": "medium",
+      "severity": "warning",
       "sources": [
         "status"
       ]

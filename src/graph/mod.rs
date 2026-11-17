@@ -300,7 +300,6 @@ impl GraphError {
         }
     }
 
-    #[cfg(any(feature = "graph", test))]
     fn numeric_overflow(field: &'static str, value: impl fmt::Display) -> Self {
         Self::NumericOverflow {
             field,
@@ -4677,7 +4676,6 @@ fn graph_snapshot_content_hash(graph_type: GraphSnapshotType, metrics_json: &str
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
-#[cfg(any(feature = "graph", test))]
 fn next_graph_snapshot_version(
     conn: &DbConnection,
     workspace_id: &str,
@@ -4695,7 +4693,6 @@ fn next_graph_snapshot_version(
     }
 }
 
-#[cfg(any(feature = "graph", test))]
 fn generate_graph_snapshot_id() -> String {
     let memory_id = MemoryId::now().to_string();
     let payload = memory_id.trim_start_matches("mem_");

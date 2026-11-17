@@ -37664,7 +37664,6 @@ impl GraphAlgorithmInput {
     }
 }
 
-#[cfg(feature = "graph")]
 fn handle_graph_suggest_links<W, E>(
     cli: &Cli,
     args: &GraphSuggestLinksArgs,
@@ -38102,6 +38101,7 @@ where
     }
 }
 
+#[cfg(feature = "graph")]
 fn graph_algorithm_input(
     cli: &Cli,
     options: GraphReadOptions<'_>,
@@ -38317,7 +38317,6 @@ fn graph_filter_tombstoned_links(
     Ok((filtered, tombstoned.into_iter().collect()))
 }
 
-#[cfg(feature = "graph")]
 fn graph_database_path(
     cli: &Cli,
     explicit_database: Option<&Path>,
@@ -39415,6 +39414,7 @@ fn graph_centrality_read_degraded_json(
     }))
 }
 
+#[cfg(feature = "graph")]
 fn graph_hits_degraded_json(
     degraded: &[crate::graph::hits::HitsDegradation],
 ) -> Vec<serde_json::Value> {
@@ -58372,6 +58372,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
     crate::output::render_why_json(report)
 }
 
+#[cfg(feature = "graph")]
 fn score_json_value(value: f32) -> serde_json::Value {
     let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)

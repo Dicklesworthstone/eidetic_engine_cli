@@ -71,6 +71,7 @@ expression: canonical_json_text(value)
       }
     ],
     "embed_backend": "hash_fallback",
+    "fallbackReason": null,
     "pack": {
       "advisoryBanner": {
         "advisoryCount": 0,
@@ -336,6 +337,7 @@ expression: canonical_json_text(value)
       "scoreKind": "rrf_fused",
       "topK": 50
     },
+    "retrievalPath": "in_process",
     "scopeStats": {
       "candidatesExcludedByScope": 0,
       "candidatesInScope": 1,
@@ -346,7 +348,8 @@ expression: canonical_json_text(value)
       "strictScope": false,
       "strictViolations": 0,
       "teamSize": 0
-    }
+    },
+    "servingPath": "in_process"
   },
   "degraded": [
     {

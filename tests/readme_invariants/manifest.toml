@@ -40,12 +40,129 @@ denylist_regexes = [
   '^- \*\*The CLI is primary; MCP sits on top of it',
   '^On a typical multi-project developer machine',
   '^\[`docs/adr/`\]\(docs/adr/\)\. Every major subsystem has an ADR',
+  '^Always verifies the release binary.s SHA-256 che',
+  '^provenance but never indexed, and instruction-ri',
+  '^`relevanceScore` is the only cross-source compar',
+  '^Optional reranking has a 20-second inference bud',
+  '^detect those duplicates \(\[#41\]\(https://github\.co',
+  '^per request defeats the CDN and forces an origin',
+  '^confusing shell error from running a file that w',
+  '^This downloads the latest release binary for you',
+  '^a file that was never written, which reads like ',
+  '^enforce Sigstore signature verification\.',
+  '^Remember-time curation remains enabled and uses ',
+  '^cannot be represented by a simple CLI replay\. In',
+  '^produce an advisory on explanation surfaces inst',
+  '^replay ledger\. Use `ee pack replay <pack-id> --j',
+  '^small deterministic ranking boosts, but cold ite',
+  '^metadata, plus a compact attestation status and ',
+  '^need a deterministic brief:',
+  '^Use the complete output when a harness needs eve',
+  '^file-surface risks and resource-pressure hints\. ',
+  '^looks live, but `ee` still needs an explicit red',
+  '^that must agree before an agent uses a BV copy-p',
+  '^loopback `TeamJoinLocalApi` when every enrolled ',
+  '^surface so it is not stored in a shell variable:',
+  '^Ordinary previews remain deterministic and conta',
+  '^arguments\. They expire after 15 minutes and beco',
+  '^Revocation stops future serving but cannot erase',
+  '^attempt cannot finish, `curate_apply_index_publi',
+  '^change again or creating duplicate rules, proced',
+  '^Feedback verifies that every native target exist',
+  '^Scores stay within 0–1\. The native counter, feed',
+  '^bounded deterministic clustering and quotes sour',
+  '^and detected conflicts prevent a cluster from be',
+  '^its result must include confidence limits, open ',
+  '^pair from the actionable surface, and re-running',
+  '^so approval cannot overwrite a later resolution ',
+  '^summary, rationale, source retirement, audits, c',
+  '^in a non-recoverable rejected quarantine\. See \[`',
+  '^live proposal or its evidence, restore records a',
+  '^can detect changed evidence\. Curation recovery a',
+  '^audits the change and clears its validation and ',
+  '^files referenced by evidence URIs must still be ',
+  '^feedback remains reviewable through `ee outcome ',
+  '^and redacted data with an audit linking the orig',
+  '^recordings become abandoned with an audit entry ',
+  '^valid snippet hashes follow redaction with an au',
+  '^retained in that audit and cleared from changed ',
+  '^harness must use the restored identity to retrie',
+  '^Use ask-quality evaluation for direct answers th',
+  '^in every layer, even when a higher-precedence va',
+  '^4,096 candidates\. If that budget prevents fillin',
+  '^heads, and `revisit` surfaces due or near-due de',
+  '^every row belongs to the workspace whose `\.ee` s',
+  '^hard-won anti-patterns, cross-project playbooks\.',
+  '^origin workspace keeps its row and audit history',
+  '^stale proposals, so intervening edits cannot be ',
+  '^pack/recall/primer/search sections as workspace ',
+  '^hours\. The default is `max\(CASS subprocess timeo',
+  '^provenance, and never receive a synthetic `memor',
+  '^Every source row is checked against its live CAS',
+  '^records prevent completion\. Tool bodies remain e',
+  '^filtering surface\. The canonical v2 field table ',
+  '^Shadow policy surfaces are side-effect-free by d',
+  '^Unsupported decision surfaces must abstain inste',
+  '^Use `--no-persist` to evaluate without saving fi',
+  '^audit intent precedes atomic config publication,',
+  '^prior bytes exactly\. Older reports without evalu',
+  '^a daemon retaining a neural model can use more t',
+  '^daemon must be restarted to provide the v2 contr',
+  '^as the pre-edit surface and preview managed hook',
+  '^also be omitted\. Ordinary command-risk notes rem',
+  '^memory links, attempt-family lineage, and audit ',
+  '^lossless recovery of every durable table\. Each c',
+  '^migrated schema with an exact row count and disp',
+  '^New backups include authenticated audit-history ',
+  '^after recovery\. The portable JSONL importer alon',
+  '^Backups created before audit-history capture mus',
+  '^redaction policy\. Archives missing this metadata',
+  '^from the store you intend to recover; they must ',
+  '^key material\. The command never creates missing ',
+  '^an audit record\. It preserves the workspace ID, ',
+  '^selected source key; it does not freshly authent',
+  '^destination-specific cache identity prevents reu',
+  '^history\), source quarantine and release history,',
+  '^Source quarantines retain their diagnostic and r',
+  '^degraded entry\. Stored instructions have unknown',
+  '^and its audit record together and never runs the',
+  '^transition, and audit commit together; replay re',
+  '^authenticates the complete manifest and checks e',
+  '^The selected workspace supplies the trusted keys',
+  '^`\.ee` only after every restore phase succeeds\. A',
+  '^Unsigned manifests, including older backups, can',
+  '^signed by a new key\. It cannot recover keys alre',
+  '^corresponding restored memory IDs\. A revision ar',
+  '^on a 9-memory workspace, because every process r',
+  '^reproducible RCH benchmark profiles below until ',
+  '^\*\*One row needs more than that blanket caveat, b',
+  '^4,919 spans — which extrapolates to roughly \*\*15',
+  '^reproducible at the documented scale — NOT that ',
+  '^are excluded on purpose, so that a writable HOME',
+  '^smaller models reduce the model assets that must',
+  '^indexes are retained\. Model selection and its au',
+  '^\(Model2Vec static embeddings, 256-d, revision `a',
+  '^above is \*read\* \(and preferred when it already v',
+  '^`ee model fetch`, so a fresh machine always ends',
+  '^selects the fetched model in its registry and re',
+  '^registration\. Consumers must check for registrat',
+  '^loads skip re-hashing the 512 MB weights while s',
+  '^`model\.safetensors` and `tokenizer\.json` are byt',
+  '^files\. If you must hand-provision, copy \*only\* t',
+  '^`<root>/potion-multilingual-128M/`; they verify ',
+  '^directory triggers a fresh ~531 MB download, and',
+  '^`ee` does guarantee is that the space cannot be ',
+  '^endpoint is unreachable, retrieval degrades to t',
+  '^both surfaces say so — it never silently pretend',
+  '^`deterministic=false` for this backend\.',
+  '^not widened to this command-only surface\. This r',
+  '^from the latest GitHub release, always verifies ',
 ]
 
 [[invariant]]
 id = "rfm-001-no-silent-mutation-audit"
 readme_section = "Design Philosophy"
-readme_line_anchor = 192
+readme_line_anchor = 302
 sentence_hash = "blake3:0c8920c5e3f6c5219ab74334c3ab54da27e2c6a4e6538760c37b022443d1ba48"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
@@ -53,15 +170,15 @@ verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
 [[invariant]]
 id = "rfm-002-asupersync-cancellation-contract"
 readme_section = "Architecture"
-readme_line_anchor = 723
-sentence_hash = "blake3:373e2d7b3532f3f87c2db117c0442e64685b00dd481eff87e1d11084686901a5"
+readme_line_anchor = 2183
+sentence_hash = "blake3:c05d0af84098e260b86cad6624db408d40ddc6adf39c35630714912378d7a2ba"
 classification = "invariant"
-verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+verify = { type = "test", path = "tests/cancellation_graph.rs" }
 
 [[invariant]]
 id = "rfm-003-concurrent-writer-performance-row"
 readme_section = "Performance"
-readme_line_anchor = 935
+readme_line_anchor = 3122
 sentence_hash = "blake3:b9bdf07e2ed0c10b141a3f35a7530f674158aa9f04a4ad00d8b9fad997277b62"
 classification = "quantitative"
 verify = { type = "test", path = "tests/readme_perf_sync.rs" }
@@ -69,15 +186,15 @@ verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 [[invariant]]
 id = "rfm-004-no-silent-memory-rewrite-faq"
 readme_section = "FAQ"
-readme_line_anchor = 1088
-sentence_hash = "blake3:cc497f768084ccbf702302d4b862d92e584bad8d9cf2ae3808655ed97dac3dac"
+readme_line_anchor = 3664
+sentence_hash = "blake3:935a24556f4d3cffd019528aae7efa59e2c4dba3abd93112a8f0e8f8e85ec4b2"
 classification = "promise"
 verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
 
 [[invariant]]
 id = "rfm-005-frankensearch-model-delegation"
 readme_section = "Design Philosophy"
-readme_line_anchor = 201
+readme_line_anchor = 226
 sentence_hash = "blake3:bfb5f29bd851663f02637d57d9188bbdb93db58c739481bea954e0e5761b19e5"
 classification = "invariant"
 verify = { type = "test", path = "tests/model_bundled_embedding_cli_e2e.rs" }
@@ -85,23 +202,23 @@ verify = { type = "test", path = "tests/model_bundled_embedding_cli_e2e.rs" }
 [[invariant]]
 id = "rfm-006-harness-loop-non-control"
 readme_section = "Design Philosophy"
-readme_line_anchor = 150
-sentence_hash = "blake3:8b603c155e60489ed20e92bd6ecc58c252c149458da3318d4cfbdac088271497"
+readme_line_anchor = 219
+sentence_hash = "blake3:59709d2f4ffbaf7dde75a6bf69a06856fdf017c1363e7e547bd4edba7715cd09"
 classification = "invariant"
-verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
 
 [[invariant]]
 id = "rfm-007-cli-first-one-shot"
 readme_section = "Design Philosophy"
-readme_line_anchor = 154
-sentence_hash = "blake3:64059079a4cedb3f9ac0a94acfffb0b513609e25db09b7eba739bcaa5258397b"
+readme_line_anchor = 236
+sentence_hash = "blake3:19e6f866214e27a16b9dac88785ab6a2c6679eb838538041bb3daa84de7d0838"
 classification = "promise"
 verify = { type = "test", path = "tests/smoke.rs" }
 
 [[invariant]]
 id = "rfm-008-deterministic-byte-stable-json"
 readme_section = "Design Philosophy"
-readme_line_anchor = 158
+readme_line_anchor = 242
 sentence_hash = "blake3:565a444df0f5c785833f39e4231cffa67d9fb576f389b9999acf567c999e126d"
 classification = "invariant"
 verify = { type = "test", path = "tests/determinism_unit.rs" }
@@ -109,7 +226,7 @@ verify = { type = "test", path = "tests/determinism_unit.rs" }
 [[invariant]]
 id = "rfm-009-degradation-surfaces"
 readme_section = "Design Philosophy"
-readme_line_anchor = 184
+readme_line_anchor = 294
 sentence_hash = "blake3:66d74e8bfb8094fc71fccf252c920842a52c91147cc7f3a4417f1b0bebbcfcf8"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/no_silent_fallback.rs" }
@@ -117,7 +234,7 @@ verify = { type = "test", path = "tests/contracts/no_silent_fallback.rs" }
 [[invariant]]
 id = "rfm-010-stable-json-output"
 readme_section = "Hard Requirements"
-readme_line_anchor = 228
+readme_line_anchor = 338
 sentence_hash = "blake3:3d9473797c8e77803a31ffffacba27c7e40186863c92ef476a8960b819c3421c"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
@@ -125,7 +242,7 @@ verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
 [[invariant]]
 id = "rfm-011-generated-context-provenance"
 readme_section = "Hard Requirements"
-readme_line_anchor = 229
+readme_line_anchor = 339
 sentence_hash = "blake3:690dbbd8001edd684096fc8da34318fa11e6e5fb82ec709579ec7a8459a7fe2f"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/repro_packs.rs" }
@@ -133,15 +250,15 @@ verify = { type = "test", path = "tests/contracts/repro_packs.rs" }
 [[invariant]]
 id = "rfm-012-forbidden-dependency-audit-gate"
 readme_section = "Development & Verification"
-readme_line_anchor = 348
-sentence_hash = "blake3:277c260f91b485f5a7868eb99ed6b50a861e199816a0acff179e6ba6de8c6933"
+readme_line_anchor = 589
+sentence_hash = "blake3:fb83f1d389251b8ee7126aef63b3247ae47cc884171860f3a0d657b2fe9a545e"
 classification = "constraint"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
 
 [[invariant]]
 id = "rfm-013-swarm-brief-readonly-write-side"
 readme_section = "Swarm brief workflow"
-readme_line_anchor = 480
+readme_line_anchor = 1252
 sentence_hash = "blake3:ac52155d63e39cb46e3ae62baefd75f774357e801506df558be3239beb1d6c8b"
 classification = "promise"
 verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
@@ -149,7 +266,7 @@ verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
 [[invariant]]
 id = "rfm-014-swarm-brief-readonly-mail-build-edit"
 readme_section = "Swarm brief workflow"
-readme_line_anchor = 481
+readme_line_anchor = 1253
 sentence_hash = "blake3:b0af280214216e68649833bdf166b0aea328831f25a7bd5ceca466a1b71b9f66"
 classification = "promise"
 verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
@@ -157,7 +274,7 @@ verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
 [[invariant]]
 id = "rfm-015-swarm-brief-readonly-store-git-schedule"
 readme_section = "Swarm brief workflow"
-readme_line_anchor = 482
+readme_line_anchor = 1254
 sentence_hash = "blake3:d3927881bc4f25ea6144805263c8ebd542a80e84698097a731a52036199cf372"
 classification = "promise"
 verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
@@ -165,7 +282,7 @@ verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
 [[invariant]]
 id = "rfm-016-schema-x-ee-status-marker"
 readme_section = "Swarm schema contracts"
-readme_line_anchor = 501
+readme_line_anchor = 1352
 sentence_hash = "blake3:99b1f388c6ee2d74e246666c8a135b4383b32bfb36f236eac8ac5443ba2fed3b"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
@@ -173,15 +290,15 @@ verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
 [[invariant]]
 id = "rfm-017-source-of-truth-derived-assets"
 readme_section = "Architecture"
-readme_line_anchor = 719
+readme_line_anchor = 2179
 sentence_hash = "blake3:0cd1c6fd5565f696b91a5f01127930c6ccb1943b0447c88c403081073ce2791e"
 classification = "invariant"
-verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
 
 [[invariant]]
 id = "rfm-018-strict-dependency-direction"
 readme_section = "Architecture"
-readme_line_anchor = 721
+readme_line_anchor = 2181
 sentence_hash = "blake3:f89e8c39222c1bfc3a4ece47fc4ac261202508a6d77beebf0a6e97e12cd06563"
 classification = "invariant"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -189,31 +306,31 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-019-secret-redaction-never-on-disk"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 865
-sentence_hash = "blake3:5b49f4981b0e04d2232cd20f5f12d66dbc9e5dcfb09e305d945752e31451b85f"
+readme_line_anchor = 2758
+sentence_hash = "blake3:eebb6a8aaa842756b7e3ff0aeea595201c28631b3bbb68e6247e1a1358ce99fd"
 classification = "promise"
 verify = { type = "test", path = "tests/redaction_fuzz.rs" }
 
 [[invariant]]
 id = "rfm-020-prompt-injection-quarantine"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 890
-sentence_hash = "blake3:82dc911f82daacc04e1bd7b34a7f5f44cc13c69bdd0c9707b9ed345ec2871950"
+readme_line_anchor = 2793
+sentence_hash = "blake3:e4d1857af79753026cbd737ed2948623dd8ba0a79e3415a09df0e2146c4dbb73"
 classification = "promise"
 verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs" }
 
 [[invariant]]
 id = "rfm-021-migration-atomicity"
 readme_section = "Troubleshooting"
-readme_line_anchor = 1017
-sentence_hash = "blake3:541c2ad36bc0f007d05cec74cf3a8187487eba463ef28a0706b5b08604dcc3df"
+readme_line_anchor = 3263
+sentence_hash = "blake3:d2dc20f433b4ffa3639fb7ace57d4fc947841a76bef53ca8b7c03c2d4f2d6efe"
 classification = "promise"
 verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
 
 [[invariant]]
 id = "rfm-022-tokio-forbidden-ci-audit"
 readme_section = "FAQ"
-readme_line_anchor = 1064
+readme_line_anchor = 3596
 sentence_hash = "blake3:2e498161dfcffd18f603f9839f366494f4bd887bf162d2cd6b74d9bbed78a371"
 classification = "constraint"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -221,10 +338,10 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-023-indexes-derived-from-db"
 readme_section = "FAQ"
-readme_line_anchor = 1076
-sentence_hash = "blake3:5a77dd01c5678024833ce701ea9d22408cc6e82b8734fc4029c93c1af6acad36"
+readme_line_anchor = 3622
+sentence_hash = "blake3:d57134fa7080b09c3954a8ff2e9055da2d5e70472f26c8bde42805d6164fbb9c"
 classification = "promise"
-verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
 
 # Measured in bd-5oa5m (M6, on an RCH worker, 67830206d): warm-daemon read-only pack
 # median 708 ms vs 3155 ms local, identical pack hash. bd-snkcp re-measures the
@@ -232,17 +349,17 @@ verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
 [[invariant]]
 id = "rfm-024-warm-daemon-read-only-pack-latency"
 readme_section = "Claude Code"
-readme_line_anchor = 2292
+readme_line_anchor = 2665
 sentence_hash = "blake3:6430dcca283570b80337493089515e35f85a2cb1d1b93e508096550aba9f04ad"
 classification = "quantitative"
-verify = { type = "defer_bead", id = "bd-snkcp", defer_until = "2026-10-09" }
+verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 
 # GH#80: handoff reservation evidence is bound to the checkout, and evidence
 # that cannot be verified is reported without a count instead of as zero.
 [[invariant]]
 id = "rfm-025-handoff-snapshot-canonical-binding"
 readme_section = "Handoff and resume"
-readme_line_anchor = 1250
+readme_line_anchor = 1329
 sentence_hash = "blake3:debe9998b56acaaa7e7db02783867f0d37e3a7b7682358847295e789f233f1cb"
 classification = "constraint"
 verify = { type = "test", path = "tests/handoff_agent_mail_snapshot.rs" }
@@ -250,7 +367,47 @@ verify = { type = "test", path = "tests/handoff_agent_mail_snapshot.rs" }
 [[invariant]]
 id = "rfm-026-handoff-unverified-reservations-are-not-zero"
 readme_section = "Handoff and resume"
-readme_line_anchor = 1254
+readme_line_anchor = 1333
 sentence_hash = "blake3:1dd163789f606f66d07443c65004f69a5ed586fdc92f014f1a267ff6631c6af8"
 classification = "promise"
 verify = { type = "test", path = "tests/handoff_agent_mail_snapshot.rs" }
+
+[[invariant]]
+id = "rfm-027-dsr-only-no-github-actions"
+readme_section = "Verification"
+readme_line_anchor = 613
+sentence_hash = "blake3:84c7ecaeaa4dbe3effd355dfe92ae0f4a390e136472cf3746259c199bd79b4b2"
+classification = "constraint"
+verify = { type = "test", path = "tests/verification_drift_guard.rs" }
+
+[[invariant]]
+id = "rfm-028-index-intake-immutable-generation"
+readme_section = "Curation"
+readme_line_anchor = 1745
+sentence_hash = "blake3:be15142d4e1a7298721a7de17a62171979728d727b644e1fb3ed245dde931ec3"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/index_intake_schema.rs" }
+
+[[invariant]]
+id = "rfm-029-hooks-never-deny-shell-commands"
+readme_section = "Harness Hooks"
+readme_line_anchor = 2644
+sentence_hash = "blake3:ed7d8aae70ef924a7449e8fb4b4d10157f00e9e273d1ff00996346df24b41def"
+classification = "invariant"
+verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
+
+[[invariant]]
+id = "rfm-030-restore-never-replaces-existing-store"
+readme_section = "Backup & Restore"
+readme_line_anchor = 2997
+sentence_hash = "blake3:be1b159840a5834e0d875000389fdbfd8a7d5b769ffa6fd982e86b96ed36aff6"
+classification = "invariant"
+verify = { type = "test", path = "tests/e2e_backup_restore_roundtrip.rs" }
+
+[[invariant]]
+id = "rfm-031-cass-binary-path-validation"
+readme_section = "CASS Integration"
+readme_line_anchor = 3245
+sentence_hash = "blake3:f9bcb3cf3d3d2214558cdaa706c7d0dbf96a6c162ab155bafafaf6bbe96aab18"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/cass_robot.rs" }

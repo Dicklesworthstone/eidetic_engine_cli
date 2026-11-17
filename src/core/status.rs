@@ -95,11 +95,13 @@ const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --work
 const SEARCH_INDEX_REBUILD_COMMAND: &str = "ee index rebuild --workspace .";
 const SEARCH_INDEX_STATUS_COMMAND: &str = "ee index status --workspace . --json";
 const PACK_L2_CACHE_REPAIR_COMMAND: &str = "ee pack \"<task>\" --workspace . --json";
+#[cfg(feature = "graph")]
 const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
 #[cfg(not(feature = "graph"))]
 const GRAPH_LIVE_COMPUTE_UNAVAILABLE: &str = "live_compute_unavailable";
 const SKYLINE_MIN_COMMUNITY_COUNT: usize = 3;
 const FNX_RUNTIME_VERSION: &str = "0.1.0";
+#[cfg(feature = "graph")]
 const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
     "pagerank",
     "betweenness",
@@ -5295,6 +5297,7 @@ fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
     gather_graph_compute_with_connection(workspace_path, None)
 }
 
+#[cfg_attr(not(feature = "graph"), allow(unused_variables))]
 fn gather_graph_compute_with_connection(
     workspace_path: Option<&Path>,
     connection: Option<&DbConnection>,
