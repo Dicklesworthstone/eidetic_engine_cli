@@ -29,8 +29,12 @@
 #
 # Usage:
 #   scripts/release_binary_probe.sh --archive <url|path> [--sha256 <hex>]
+#       [--expected-target <triple>] [--output <file>]
 #       [--model-cache <models-dir>] [--workdir <dir>] [--json]
-#   scripts/release_binary_probe.sh --replay <capture-dir> [--json]
+#   scripts/release_binary_probe.sh --replay <capture-dir>
+#       [--expected-target <triple>] [--output <file>] [--json]
+#   scripts/release_binary_probe.sh --verify-release-dir <dir>
+#       [--allow-compile-only <triple>]...
 #   scripts/release_binary_probe.sh --self-test
 #
 # Output (--json): one `ee.release_probe.v1` object on stdout, keyed by the
@@ -453,6 +457,23 @@ grade() {
     row concurrent_writes_intact check \
         "$CONCURRENT_WRITERS simultaneous remembers (with 3 read-only packs running) all succeed with distinct ids, all listed afterwards" \
         "failed=[${w_failed% }] distinctIds=$w_distinct listed=$w_listed" "$w_ok"
+
+    # 13. Target triple binding (when --expected-target is supplied or inferred
+    # from ee-<target>.tar.*): one target's capture cannot stand in for another's.
+    local want_target="${EXPECTED_TARGET:-}"
+    if [ -z "$want_target" ] && [ -f "$CAP/expected_target" ]; then
+        want_target="$(cat "$CAP/expected_target" 2>/dev/null || true)"
+    fi
+    if [ -n "$want_target" ]; then
+        local got_target target_ok=false
+        got_target="$(q version '.data.build.targetTriple // empty')"
+        if ok_response version && [ "$got_target" = "$want_target" ]; then
+            target_ok=true
+        fi
+        row target_triple_matches check \
+            "binary self-reported targetTriple matches archive target $want_target" \
+            "targetTriple=${got_target:-<absent>} expected=$want_target" "$target_ok"
+    fi
 }
 
 # Assemble the verdict object from ROWS. Precondition false -> incomplete.
@@ -489,13 +510,18 @@ print_human() {
 }
 
 emit() {
-    local verdict_obj="$1"
+    local verdict_obj="$1" verdict
+    verdict="$(printf '%s' "$verdict_obj" | jq -r .verdict)"
+    if [ -n "${OUTPUT_FILE:-}" ] && [ "$verdict" = "pass" ]; then
+        mkdir -p "$(dirname "$OUTPUT_FILE")" || die_env "cannot create parent directory for $OUTPUT_FILE"
+        printf '%s\n' "$verdict_obj" >"$OUTPUT_FILE" || die_env "cannot write $OUTPUT_FILE"
+    fi
     if [ "$JSON" = 1 ]; then
         printf '%s\n' "$verdict_obj"
     else
         print_human "$verdict_obj"
     fi
-    case "$(printf '%s' "$verdict_obj" | jq -r .verdict)" in
+    case "$verdict" in
         pass) exit 0 ;;
         fail) exit 1 ;;
         *) exit 3 ;;
@@ -697,6 +723,76 @@ self_test() {
     d="$(case_dir cwrite_pack_failed)"; printf '1\n' >"$d/cwrite_pack_2.exit"
     expect "a pack beside the writers exits 1" "$d" fail "concurrent_writes_intact"
 
+    d="$(case_dir target_match)"; printf 't\n' >"$d/expected_target"
+    expect "matching target triple" "$d" pass ""
+
+    d="$(case_dir target_mismatch)"; printf 'aarch64-apple-darwin\n' >"$d/expected_target"
+    expect "mismatched target triple rejected" "$d" fail "target_triple_matches"
+
+    # --output writes only on pass, never on fail.
+    local out_pass="$root/out-pass.json" out_fail="$root/out-fail.json" rc_out
+    d="$(case_dir out_good)"
+    ( "$0" --replay "$d" --output "$out_pass" --json >/dev/null ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 0 ] && [ -s "$out_pass" ] && [ "$(jq -r .verdict "$out_pass")" = "pass" ]; then
+        printf '  ok    %-40s -> exit 0 + file written\n' "--output written on pass" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s file=%s\n' "--output written on pass" "$rc_out" "$out_pass" >&2
+        failures=$((failures + 1))
+    fi
+    d="$(case_dir out_bad)"; printf '1\n' >"$d/index_status.exit"
+    ( "$0" --replay "$d" --output "$out_fail" --json >/dev/null ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ] && [ ! -e "$out_fail" ]; then
+        printf '  ok    %-40s -> exit 1 + no file\n' "--output suppressed on fail" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s file_exists=%s\n' "--output suppressed on fail" "$rc_out" "$([ -e "$out_fail" ] && echo yes || echo no)" >&2
+        failures=$((failures + 1))
+    fi
+
+    # --verify-release-dir positive and negative controls.
+    local rdir="$root/rel-good" rsha
+    mkdir -p "$rdir"
+    printf 'fake archive bytes' >"$rdir/ee-aarch64-apple-darwin.tar.xz"
+    rsha="$(sha256_of "$rdir/ee-aarch64-apple-darwin.tar.xz")"
+    d="$(case_dir rel_cap)"
+    mutate "$d" version '.data.build.targetTriple = "aarch64-apple-darwin"'
+    printf 'aarch64-apple-darwin\n' >"$d/expected_target"
+    printf '%s\n' "$rsha" >"$d/archive.sha256"
+    ( "$0" --replay "$d" --output "$rdir/release-probe-aarch64-apple-darwin.json" --json >/dev/null ) 2>/dev/null
+    ( "$0" --verify-release-dir "$rdir" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 0 ]; then
+        printf '  ok    %-40s -> exit 0\n' "verify-release-dir valid capture" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 0\n' "verify-release-dir valid capture" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+    local rdir_wrong_triple="$root/rel-wrong-triple"
+    mkdir -p "$rdir_wrong_triple"
+    cp "$rdir/ee-aarch64-apple-darwin.tar.xz" "$rdir_wrong_triple/"
+    jq '.binary.targetTriple = "x86_64-unknown-linux-gnu"' "$rdir/release-probe-aarch64-apple-darwin.json" \
+        >"$rdir_wrong_triple/release-probe-aarch64-apple-darwin.json"
+    ( "$0" --verify-release-dir "$rdir_wrong_triple" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir wrong targetTriple" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir wrong targetTriple" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+    local rdir_missing="$root/rel-missing"
+    mkdir -p "$rdir_missing"
+    cp "$rdir/ee-aarch64-apple-darwin.tar.xz" "$rdir_missing/"
+    ( "$0" --verify-release-dir "$rdir_missing" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir missing capture" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir missing capture" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
     # Checksum refusal: a mismatched digest must stop before anything executes.
     local blob="$root/archive.tar.xz" rc
     printf 'not an archive' >"$blob"
@@ -736,20 +832,103 @@ verify_checksum() {
     fi
 }
 
+infer_target_from_archive() {
+    local base
+    base="$(basename "$1")"
+    case "$base" in
+        ee-*.tar.xz)
+            base="${base#ee-}"
+            base="${base%.tar.xz}"
+            printf '%s' "$base"
+            ;;
+        ee-*.tar.gz)
+            base="${base#ee-}"
+            base="${base%.tar.gz}"
+            printf '%s' "$base"
+            ;;
+    esac
+}
+
+verify_release_dir() {
+    local dir="$1"
+    shift
+    local allow_compile_only=" $* "
+    [ -d "$dir" ] || die_env "--verify-release-dir directory not found: $dir"
+    local found=0 failures=0 archive target probe_file sha got_sha got_verdict got_target got_schema got_checks
+    for archive in "$dir"/ee-*.tar.xz; do
+        [ -f "$archive" ] || continue
+        found=$((found + 1))
+        target="$(infer_target_from_archive "$archive")"
+        probe_file="$dir/release-probe-$target.json"
+        if [ ! -s "$probe_file" ]; then
+            printf 'release_binary_probe: missing release probe capture %s for %s\n' "$probe_file" "$archive" >&2
+            failures=$((failures + 1))
+            continue
+        fi
+        sha="$(sha256_of "$archive")"
+        got_schema="$(jq -r '.schema // empty' "$probe_file" 2>/dev/null)"
+        got_sha="$(jq -r '.archive.sha256 // empty' "$probe_file" 2>/dev/null)"
+        got_verdict="$(jq -r '.verdict // empty' "$probe_file" 2>/dev/null)"
+        got_target="$(jq -r '.binary.targetTriple // empty' "$probe_file" 2>/dev/null)"
+        got_checks="$(jq -r '(.checks // []) | length' "$probe_file" 2>/dev/null || echo 0)"
+        if [ "$got_schema" != "$SCHEMA" ]; then
+            printf 'release_binary_probe: %s has schema %s (want %s)\n' "$probe_file" "${got_schema:-<absent>}" "$SCHEMA" >&2
+            failures=$((failures + 1))
+        fi
+        if [ "$got_sha" != "$sha" ]; then
+            printf 'release_binary_probe: %s archive.sha256 %s does not match %s (%s)\n' "$probe_file" "${got_sha:-<absent>}" "$archive" "$sha" >&2
+            failures=$((failures + 1))
+        fi
+        if [ "$got_target" != "$target" ]; then
+            printf 'release_binary_probe: %s binary.targetTriple %s does not match archive target %s\n' "$probe_file" "${got_target:-<absent>}" "$target" >&2
+            failures=$((failures + 1))
+        fi
+        case "$allow_compile_only" in
+            *" $target "*)
+                if [ "$got_verdict" != "pass" ] && [ "$got_verdict" != "compile_only" ]; then
+                    printf 'release_binary_probe: %s verdict is %s (want pass or compile_only)\n' "$probe_file" "${got_verdict:-<absent>}" >&2
+                    failures=$((failures + 1))
+                fi
+                ;;
+            *)
+                if [ "$got_verdict" != "pass" ] || [ "${got_checks:-0}" -lt 12 ] 2>/dev/null; then
+                    printf 'release_binary_probe: %s verdict=%s checks=%s (want pass with >=12 checks)\n' "$probe_file" "${got_verdict:-<absent>}" "${got_checks:-0}" >&2
+                    failures=$((failures + 1))
+                fi
+                ;;
+        esac
+    done
+    if [ "$found" -eq 0 ]; then
+        printf 'release_binary_probe: no ee-*.tar.xz archives found in %s\n' "$dir" >&2
+        exit 1
+    fi
+    if [ "$failures" -gt 0 ]; then
+        printf 'release_binary_probe: %s release-probe capture check(s) failed in %s\n' "$failures" "$dir" >&2
+        exit 1
+    fi
+    printf 'release_binary_probe: verified %s release-probe capture(s) in %s\n' "$found" "$dir" >&2
+    exit 0
+}
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
-ARCHIVE="" SHA="" MODEL_CACHE="" WORKDIR="" REPLAY="" JSON=0 SELF_TEST=0
+ARCHIVE="" SHA="" EXPECTED_TARGET="" OUTPUT_FILE="" VERIFY_RELEASE_DIR=""
+ALLOW_COMPILE_ONLY=() MODEL_CACHE="" WORKDIR="" REPLAY="" JSON=0 SELF_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --archive) ARCHIVE="${2:-}"; shift 2 ;;
         --sha256) SHA="${2:-}"; shift 2 ;;
+        --expected-target) EXPECTED_TARGET="${2:-}"; shift 2 ;;
+        --output) OUTPUT_FILE="${2:-}"; shift 2 ;;
+        --verify-release-dir) VERIFY_RELEASE_DIR="${2:-}"; shift 2 ;;
+        --allow-compile-only) ALLOW_COMPILE_ONLY+=("${2:-}"); shift 2 ;;
         --model-cache) MODEL_CACHE="${2:-}"; shift 2 ;;
         --workdir) WORKDIR="${2:-}"; shift 2 ;;
         --replay) REPLAY="${2:-}"; shift 2 ;;
         --json) JSON=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
-        -h | --help) sed -n '2,45p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,48p' "$0"; exit 0 ;;
         *) die_env "unknown argument: $1 (see --help)" ;;
     esac
 done
@@ -757,6 +936,9 @@ done
 [ "$SELF_TEST" = 1 ] && self_test
 
 need jq
+if [ -n "$VERIFY_RELEASE_DIR" ]; then
+    verify_release_dir "$VERIFY_RELEASE_DIR" "${ALLOW_COMPILE_ONLY[@]+"${ALLOW_COMPILE_ONLY[@]}"}"
+fi
 if [ -n "$REPLAY" ]; then
     [ -d "$REPLAY" ] || die_env "--replay directory not found: $REPLAY"
     CAP="$REPLAY"
@@ -800,6 +982,12 @@ esac
 verify_checksum "$archive_file" "$SHA"
 ARCHIVE_SHA="$(sha256_of "$archive_file")"
 printf '%s\n' "$ARCHIVE_SHA" >"$CAP/archive.sha256"
+if [ -z "$EXPECTED_TARGET" ]; then
+    EXPECTED_TARGET="$(infer_target_from_archive "$ARCHIVE")"
+fi
+if [ -n "$EXPECTED_TARGET" ]; then
+    printf '%s\n' "$EXPECTED_TARGET" >"$CAP/expected_target"
+fi
 
 tar -xf "$archive_file" -C "$WORK/unpacked" || die_env "could not unpack $archive_file"
 EE_BIN="$(command find "$WORK/unpacked" -type f -name ee | head -n 1)"

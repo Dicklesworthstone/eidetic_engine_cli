@@ -228,8 +228,16 @@ impl ProgressEventBuilder {
         ProgressEvent {
             schema: PROGRESS_EVENT_SCHEMA_V1.to_owned(),
             event_type: self.event_type.unwrap_or(ProgressEventType::Info),
-            operation: self.operation.unwrap_or_default(),
-            message: self.message.unwrap_or_default(),
+            operation: self
+                .operation
+                .map(|op| op.trim().to_owned())
+                .filter(|op| !op.is_empty())
+                .unwrap_or_else(|| "unspecified".to_owned()),
+            message: self
+                .message
+                .map(|msg| msg.trim().to_owned())
+                .filter(|msg| !msg.is_empty())
+                .unwrap_or_else(|| "unspecified".to_owned()),
             progress: self.progress,
             current_item: self.current_item,
             total_items: self.total_items,

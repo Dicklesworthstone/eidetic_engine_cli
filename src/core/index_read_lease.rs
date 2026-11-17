@@ -190,9 +190,11 @@ impl IndexGenerationLease {
     ) -> Result<PathBuf, IndexGenerationSelectionError> {
         let mut inspection = InspectionBudget::new();
         inspection.checkpoint(cx)?;
+        let structural_identity = if selected.is_some() { None } else { identity };
         let validate = |candidate: &Path| -> Result<u64, IndexGenerationSelectionError> {
-            let generation = super::validated_index_generation_with_identity(candidate, identity)
-                .map_err(IndexRebuildError::Index)?;
+            let generation =
+                super::validated_index_generation_with_identity(candidate, structural_identity)
+                    .map_err(IndexRebuildError::Index)?;
             if let Some(selected) = selected {
                 // Reuse canonical native producer admission and its verified-
                 // empty exception after validating every persisted tier. The
@@ -200,6 +202,21 @@ impl IndexGenerationLease {
                 let empty = super::index_generation_is_verified_empty(candidate)
                     .map_err(IndexRebuildError::Index)?;
                 if !empty {
+                    if let Some(identity_err) = super::parse_index_metadata(candidate)
+                        .ok()
+                        .flatten()
+                        .and_then(|metadata| {
+                            super::embedding_space_compatibility_error(
+                                &candidate.join(super::INDEX_METADATA_FILE),
+                                super::stored_semantic_identity(&metadata),
+                                identity,
+                            )
+                        })
+                    {
+                        return Err(IndexGenerationSelectionError::ProducerIncompatible(
+                            identity_err,
+                        ));
+                    }
                     super::verify_index_vector_producers(candidate, selected)
                         .map_err(IndexGenerationSelectionError::ProducerIncompatible)?;
                 }
@@ -226,7 +243,7 @@ impl IndexGenerationLease {
             Ok(Some(metadata)) => match super::index_metadata_compatibility_error_with_identity(
                 &metadata_path,
                 &metadata,
-                identity,
+                structural_identity,
             ) {
                 Some(reason) => {
                     live_rejection = Some(reason);
@@ -315,7 +332,7 @@ impl IndexGenerationLease {
                     super::index_metadata_compatibility_error_with_identity(
                         &metadata_path,
                         metadata,
-                        identity,
+                        structural_identity,
                     )
                     .is_none()
                 })

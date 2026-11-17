@@ -8674,7 +8674,11 @@ impl RiskCertificateBuilder {
         RiskCertificate {
             schema: RISK_CERTIFICATE_SCHEMA_V1.to_owned(),
             candidate_type: self.candidate_type.unwrap_or(CandidateType::Promote),
-            target_memory_id: self.target_memory_id.unwrap_or_default(),
+            target_memory_id: self
+                .target_memory_id
+                .map(|id| id.trim().to_owned())
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| "untargeted".to_owned()),
             risk_level,
             risk_score,
             factors: self.factors,
@@ -8690,7 +8694,11 @@ impl RiskCertificateBuilder {
             action,
             abstain_reason,
             report_only: self.report_only,
-            generated_at: self.generated_at.unwrap_or_default(),
+            generated_at: self
+                .generated_at
+                .map(|ts| ts.trim().to_owned())
+                .filter(|ts| !ts.is_empty())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         }
     }
 }

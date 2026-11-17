@@ -107,6 +107,13 @@ impl AdaptiveScheduler {
         self.agents.get(agent_id)
     }
 
+    #[must_use]
+    pub fn agents(&self) -> impl Iterator<Item = (&str, &AgentAdaptiveState)> {
+        self.agents
+            .iter()
+            .map(|(agent_id, state)| (agent_id.as_str(), state))
+    }
+
     /// Release a runtime-evicted identity without retaining its latency window.
     #[cfg(unix)]
     pub(crate) fn forget_agent(&mut self, agent_id: &str) {

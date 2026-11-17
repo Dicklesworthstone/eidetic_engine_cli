@@ -1340,19 +1340,17 @@ regression_factor = 1.5
 
 [[stage]]
 name = "ee doctor Safety Harness (bd-21joy)"
-# TRACKED RED since bd-2oh15 strand 4 (orchestrator ruling, option a,
-# 2026-09-23). This stage passes no ee binary to run-safety-harness.sh, and
-# until then every sub-harness printed "skipping (advisory)" and exited 0: the
-# stage reported success having run nothing. Each sub-harness now exits 3
-# SKIPPED without a binary, so the stage is red for that true reason, and it
-# fails in ~0s before any work. bd-5l8yh owns wiring the verified binary in
-# and the budget question it raises (a real run measured ~400s remotely against
-# the 8s below, with the p50 total at its 600s ceiling). When the stage is
-# green for real, delete `requirement`/`tracked_red_bead` in the SAME commit
-# and drop the count in `no_stage_is_declared_non_required_without_a_bead`.
-requirement = "tracked_red"
-tracked_red_bead = "bd-5l8yh"
-expected_seconds_p50 = 8
+# MEASURED 2026-11-16 on worker-01 against release ee 0.18.0 (bd-5l8yh):
+#   verify-undo.sh:           32s (11 COVERAGE passed, 0 failed)
+#   verify-idempotence.sh:    98s (11 COVERAGE passed, 0 failed)
+#   verify-crash-recovery.sh:  0s (1 fixture passed, 0 failed)
+#   verify-concurrency.sh:   105s (11 COVERAGE passed, 0 failed)
+#   verify-metamorphic.sh:   185s (19 fixtures passed, 0 failed)
+#   total = 420s across all five sub-harnesses + assertion_contract.py (13s).
+# Gated behind --include-safety-harness (and included in --swarm-heavy) so it is
+# excluded from the 608s default-path readiness ceiling via bd-2di61, while
+# retiring requirement = "tracked_red" (non_required 1 -> 0).
+expected_seconds_p50 = 420
 regression_factor = 1.5
 
 [[stage]]

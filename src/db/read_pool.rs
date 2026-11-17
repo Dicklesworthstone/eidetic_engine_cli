@@ -144,6 +144,17 @@ pub struct AcquireWaitStats {
     pub p99_ns: u128,
 }
 
+/// Bounded FIFO wait-queue and fairness telemetry for read-pool saturation (bd-d67os.15).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadPoolFairnessStats {
+    pub wait_queue_depth: usize,
+    pub max_wait_queue_depth: usize,
+    pub fifo_ticket_grants: u64,
+    pub late_arrival_yields: u64,
+}
+
+pub const READ_POOL_MAX_WAIT_QUEUE_DEPTH: usize = 256;
+
 pub struct ReadConnectionPool {
     database: DatabaseConfig,
     database_identity: ReadPoolDatabaseIdentity,
@@ -265,6 +276,11 @@ struct PoolState {
     acquire_wait_ns: Vec<u128>,
     next_slot_id: u64,
     next_pin_id: u64,
+    next_wait_ticket: u64,
+    wait_queue: std::collections::VecDeque<u64>,
+    max_wait_queue_depth: usize,
+    fifo_ticket_grants: u64,
+    late_arrival_yields: u64,
     active_pins: BTreeMap<u64, ActivePinRecord>,
     max_seen: usize,
     drops: u64,
@@ -416,6 +432,11 @@ impl ReadConnectionPool {
                 acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
                 next_slot_id: 1,
                 next_pin_id: 1,
+                next_wait_ticket: 1,
+                wait_queue: std::collections::VecDeque::new(),
+                max_wait_queue_depth: 0,
+                fifo_ticket_grants: 0,
+                late_arrival_yields: 0,
                 active_pins: BTreeMap::new(),
                 max_seen: 0,
                 drops: 0,
@@ -448,6 +469,7 @@ impl ReadConnectionPool {
     pub fn acquire(&self) -> Result<PooledReadConnection<'_>> {
         let max_size = self.config.max_size();
         let started = Instant::now();
+        let mut wait_ticket: Option<u64> = None;
 
         loop {
             let mut state = self.lock_state();
@@ -455,17 +477,35 @@ impl ReadConnectionPool {
             let occupancy = match pool_occupancy(&state) {
                 Ok(occupancy) => occupancy,
                 Err(error) => {
+                    if let Some(ticket) = wait_ticket.take() {
+                        state.wait_queue.retain(|&queued| queued != ticket);
+                    }
                     drop(state);
                     drop_idle_connections(stale);
                     return Err(error);
                 }
             };
 
-            if let Some(idle) = state.idle.pop() {
+            let is_queue_front = match state.wait_queue.front() {
+                None => true,
+                Some(&front) => wait_ticket == Some(front),
+            };
+            if !is_queue_front && (!state.idle.is_empty() || occupancy < max_size) {
+                state.late_arrival_yields = state.late_arrival_yields.saturating_add(1);
+            }
+
+            if is_queue_front && let Some(idle) = state.idle.pop() {
                 if let Err(error) = increment_pool_active(&mut state) {
+                    if let Some(ticket) = wait_ticket.take() {
+                        state.wait_queue.retain(|&queued| queued != ticket);
+                    }
                     drop(state);
                     drop_idle_connections(stale);
                     return Err(error);
+                }
+                if let Some(ticket) = wait_ticket.take() {
+                    state.wait_queue.retain(|&queued| queued != ticket);
+                    state.fifo_ticket_grants = state.fifo_ticket_grants.saturating_add(1);
                 }
                 state.max_seen = state.max_seen.max(occupancy);
                 record_acquire_wait(&mut state, started.elapsed());
@@ -478,12 +518,19 @@ impl ReadConnectionPool {
                 });
             }
 
-            if occupancy < max_size {
+            if is_queue_front && occupancy < max_size {
                 let slot_id = allocate_next_read_pool_id(&mut state.next_slot_id, "slot");
                 if let Err(error) = increment_pool_active(&mut state) {
+                    if let Some(ticket) = wait_ticket.take() {
+                        state.wait_queue.retain(|&queued| queued != ticket);
+                    }
                     drop(state);
                     drop_idle_connections(stale);
                     return Err(error);
+                }
+                if let Some(ticket) = wait_ticket.take() {
+                    state.wait_queue.retain(|&queued| queued != ticket);
+                    state.fifo_ticket_grants = state.fifo_ticket_grants.saturating_add(1);
                 }
                 state.max_seen = state.max_seen.max(occupancy + 1);
                 record_acquire_wait(&mut state, started.elapsed());
@@ -506,6 +553,9 @@ impl ReadConnectionPool {
 
             let elapsed = started.elapsed();
             if elapsed >= self.config.acquire_timeout() {
+                if let Some(ticket) = wait_ticket.take() {
+                    state.wait_queue.retain(|&queued| queued != ticket);
+                }
                 state.ad_hoc_bypass_count = checked_increment_pool_counter(
                     state.ad_hoc_bypass_count,
                     "ad_hoc_bypass_count",
@@ -520,6 +570,13 @@ impl ReadConnectionPool {
                         connection: Some(connection),
                     }
                 });
+            }
+
+            if wait_ticket.is_none() && state.wait_queue.len() < READ_POOL_MAX_WAIT_QUEUE_DEPTH {
+                let ticket = allocate_next_read_pool_id(&mut state.next_wait_ticket, "wait_ticket");
+                state.wait_queue.push_back(ticket);
+                state.max_wait_queue_depth = state.max_wait_queue_depth.max(state.wait_queue.len());
+                wait_ticket = Some(ticket);
             }
 
             drop(state);
@@ -623,6 +680,17 @@ impl ReadConnectionPool {
             acquire_wait: acquire_wait_stats(&state.acquire_wait_ns),
             size_was_zero: self.config.size_was_zero(),
             checkpoint_blocked_by,
+        }
+    }
+
+    #[must_use]
+    pub fn fairness_stats(&self) -> ReadPoolFairnessStats {
+        let state = self.lock_state();
+        ReadPoolFairnessStats {
+            wait_queue_depth: state.wait_queue.len(),
+            max_wait_queue_depth: state.max_wait_queue_depth,
+            fifo_ticket_grants: state.fifo_ticket_grants,
+            late_arrival_yields: state.late_arrival_yields,
         }
     }
 
@@ -1448,6 +1516,11 @@ mod tests {
             acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
             next_slot_id: 1,
             next_pin_id: 1,
+            next_wait_ticket: 1,
+            wait_queue: std::collections::VecDeque::new(),
+            max_wait_queue_depth: 0,
+            fifo_ticket_grants: 0,
+            late_arrival_yields: 0,
             active_pins: BTreeMap::new(),
             max_seen: 0,
             drops: 0,
@@ -3568,18 +3641,7 @@ mod tests {
 
     #[test]
     fn metrics_acquire_wait_window_keeps_latest_1024_samples() {
-        let mut state = PoolState {
-            active: 0,
-            idle: Vec::new(),
-            acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
-            next_slot_id: 1,
-            next_pin_id: 1,
-            active_pins: BTreeMap::new(),
-            max_seen: 0,
-            drops: 0,
-            release_failures: 0,
-            ad_hoc_bypass_count: 0,
-        };
+        let mut state = empty_pool_state();
 
         for sample in 0..=ACQUIRE_WAIT_SAMPLE_CAP {
             record_acquire_wait(&mut state, Duration::from_nanos(sample as u64));
@@ -3762,5 +3824,45 @@ mod tests {
             "admission does not leave a transaction or create application tables",
         );
         assert_eq!(pool.stats().release_failures, 0);
+    }
+
+    #[test]
+    fn fifo_wait_queue_serves_waiters_in_ticket_order_and_tracks_fairness_telemetry() {
+        let pool = Arc::new(memory_pool(1, Duration::from_secs(30)));
+        let holder = must(pool.acquire(), "initial slot holder");
+
+        let served_order = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let mut handles = Vec::new();
+        for waiter_idx in 1..=3 {
+            let pool_clone = Arc::clone(&pool);
+            let served_clone = Arc::clone(&served_order);
+            let handle = std::thread::spawn(move || {
+                let conn = must(pool_clone.acquire(), "queued waiter acquire");
+                served_clone.lock().unwrap().push(waiter_idx);
+                std::thread::sleep(Duration::from_millis(5));
+                drop(conn);
+            });
+            // Wait until this thread has joined the FIFO wait queue before spawning the next
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while pool.fairness_stats().wait_queue_depth < waiter_idx && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            handles.push(handle);
+        }
+
+        assert_eq!(pool.fairness_stats().wait_queue_depth, 3);
+        assert_eq!(pool.fairness_stats().max_wait_queue_depth, 3);
+        drop(holder);
+
+        for handle in handles {
+            handle.join().expect("waiter thread join");
+        }
+
+        let order = served_order.lock().unwrap().clone();
+        assert_eq!(order, vec![1, 2, 3]);
+        let fairness = pool.fairness_stats();
+        assert_eq!(fairness.wait_queue_depth, 0);
+        assert_eq!(fairness.max_wait_queue_depth, 3);
+        assert_eq!(fairness.fifo_ticket_grants, 3);
     }
 }

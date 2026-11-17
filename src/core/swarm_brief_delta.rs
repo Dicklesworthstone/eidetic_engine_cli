@@ -1,19 +1,14 @@
 //! IW2 (bd-1zb7k.17.2): redaction-safe swarm brief delta capsules.
 //!
-//! THIS MODULE HAS NO CALLER. Verified 2026-10-12 and re-verified 2026-10-13
-//! against its own public symbols, not its name: the only mention of it
-//! anywhere in `src/` outside this file is its `pub mod` line in
-//! `src/core/mod.rs`. The differ below is complete and tested, but nothing
-//! invokes it, so none of it can reach a response. bd-1zb7k.17.2 is open for
-//! the consumer wiring; its acceptance is consumer-level ("a post-compaction
-//! agent can consume...") and a pure differ with inline tests cannot satisfy
-//! it. Do not take the tests passing as evidence the capability is live.
-//!
 //! Pure differ that takes two pre-collected swarm-brief snapshots
 //! (`before` and `after`) and returns a compact capsule describing what
 //! changed: agents whose status moved, reservations acquired / released /
 //! expired, Beads whose state changed, verification posture deltas, RCH
 //! fleet deltas, plus a deterministic next-actions recommendation list.
+//!
+//! Live consumer surface: `ee swarm brief --since <PATH> [--after-snapshot <PATH>] --json`
+//! attaches `delta: SwarmBriefDeltaCapsule` (`schema = "ee.swarm_brief.delta.v1"`)
+//! to the swarm brief response.
 //!
 //! Acceptance shape (from bead body):
 //! - `changedAgents[]` with status/lastSeen deltas.
@@ -31,8 +26,16 @@
 //! intentionally don't carry those fields.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
+
+use crate::core::swarm_brief::{SwarmBriefReport, redact_brief_text};
+
+/// Maximum snapshot file size accepted by `--since` / `--after-snapshot` (8 MiB).
+pub const SWARM_BRIEF_DELTA_MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Public schema identifier for the delta capsule.
 pub const SWARM_BRIEF_DELTA_SCHEMA_V1: &str = "ee.swarm_brief.delta.v1";
@@ -71,7 +74,8 @@ impl Serialize for DeltaSeverity {
 /// One reservation row in the swarm-brief input. Closed and
 /// pre-redacted: `path_pattern` and `holder_agent` are caller-curated;
 /// no raw mail bodies or secret-bearing strings.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefReservation {
     pub reservation_id: String,
     pub path_pattern: String,
@@ -80,7 +84,8 @@ pub struct SwarmBriefReservation {
 }
 
 /// One bead snapshot row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefBead {
     pub bead_id: String,
     pub status: String,
@@ -89,7 +94,8 @@ pub struct SwarmBriefBead {
 }
 
 /// One agent snapshot row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefAgent {
     pub agent_alias: String,
     pub status: String,
@@ -97,7 +103,8 @@ pub struct SwarmBriefAgent {
 }
 
 /// One known-blocker / verification-evidence row visible to the brief.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefVerificationEvidence {
     pub command_fingerprint: String,
     pub status: String,
@@ -105,7 +112,8 @@ pub struct SwarmBriefVerificationEvidence {
 }
 
 /// RCH fleet posture row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefRchPosture {
     pub worker_alias: String,
     pub posture: String,
@@ -115,13 +123,561 @@ pub struct SwarmBriefRchPosture {
 /// Snapshot the differ consumes. Two of these (before, after) produce
 /// the capsule. Everything is sorted internally so identical content
 /// always diffs to the same capsule.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefSnapshot {
+    #[serde(default)]
     pub agents: Vec<SwarmBriefAgent>,
+    #[serde(default)]
     pub reservations: Vec<SwarmBriefReservation>,
+    #[serde(default)]
     pub beads: Vec<SwarmBriefBead>,
+    #[serde(default)]
     pub verification_evidence: Vec<SwarmBriefVerificationEvidence>,
+    #[serde(default)]
     pub rch_postures: Vec<SwarmBriefRchPosture>,
+}
+
+impl SwarmBriefSnapshot {
+    /// Extract a redaction-safe delta snapshot from a collected [`SwarmBriefReport`].
+    #[must_use]
+    pub fn from_report(report: &SwarmBriefReport) -> Self {
+        let mut stalled_posture_by_agent = BTreeMap::<String, String>::new();
+        for stalled in &report.stalled_bead_liveness {
+            if let Some(assignee) = stalled.assignee.as_deref() {
+                let alias = redact_brief_text(assignee);
+                if !alias.is_empty() && !stalled.posture.trim().is_empty() {
+                    stalled_posture_by_agent
+                        .entry(alias)
+                        .or_insert_with(|| redact_brief_text(&stalled.posture));
+                }
+            }
+        }
+
+        let mut agents_by_alias = BTreeMap::<String, SwarmBriefAgent>::new();
+        for agent in &report.agent_mail_agents {
+            let alias = redact_brief_text(&agent.name);
+            if alias.is_empty() {
+                continue;
+            }
+            let status = stalled_posture_by_agent
+                .get(&alias)
+                .cloned()
+                .unwrap_or_else(|| "active".to_string());
+            let last_seen = agent.last_active_at.as_deref().map(redact_brief_text);
+            agents_by_alias.insert(
+                alias.clone(),
+                SwarmBriefAgent {
+                    agent_alias: alias,
+                    status,
+                    last_seen_at_rfc3339: last_seen,
+                },
+            );
+        }
+
+        let mut reservations_by_id = BTreeMap::<String, SwarmBriefReservation>::new();
+        for reservation in &report.file_reservations {
+            let holder_agent = redact_brief_text(&reservation.holder);
+            let path_pattern = redact_brief_text(&reservation.path_pattern);
+            if holder_agent.is_empty() && path_pattern.is_empty() {
+                continue;
+            }
+            let reservation_id = format!("{holder_agent}:{path_pattern}");
+            reservations_by_id.insert(
+                reservation_id.clone(),
+                SwarmBriefReservation {
+                    reservation_id,
+                    path_pattern,
+                    holder_agent,
+                    expires_at_rfc3339: reservation.expires_at.as_deref().map(redact_brief_text),
+                },
+            );
+        }
+
+        let mut beads_by_id = BTreeMap::<String, SwarmBriefBead>::new();
+        for bead in report
+            .beads
+            .ready
+            .iter()
+            .chain(report.beads.in_progress.iter())
+            .chain(report.beads.blocked.iter())
+            .chain(report.beads.deferred.iter())
+        {
+            let bead_id = redact_brief_text(&bead.id);
+            if bead_id.is_empty() {
+                continue;
+            }
+            let comment_count = u32::try_from(bead.comment_count).unwrap_or(u32::MAX);
+            beads_by_id.insert(
+                bead_id.clone(),
+                SwarmBriefBead {
+                    bead_id,
+                    status: redact_brief_text(&bead.status),
+                    assignee: bead.assignee.as_deref().map(redact_brief_text),
+                    comment_count,
+                },
+            );
+        }
+
+        let mut verification_by_fp = BTreeMap::<String, SwarmBriefVerificationEvidence>::new();
+        if let Some(broker) = &report.verification_broker {
+            if broker.recent_reusable_run_count > 0 {
+                let fp = "broker:reusable_runs".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "reusable".to_string(),
+                        evidence_hash: format!("reusable:{}", broker.recent_reusable_run_count),
+                    },
+                );
+            }
+            if broker.stale_run_count > 0 {
+                let fp = "broker:stale_runs".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "stale".to_string(),
+                        evidence_hash: format!("stale:{}", broker.stale_run_count),
+                    },
+                );
+            }
+            if broker.in_flight_equivalent_command_count > 0 {
+                let fp = "broker:in_flight".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "in_flight".to_string(),
+                        evidence_hash: format!(
+                            "in_flight:{}",
+                            broker.in_flight_equivalent_command_count
+                        ),
+                    },
+                );
+            }
+        }
+
+        let mut rch_by_alias = BTreeMap::<String, SwarmBriefRchPosture>::new();
+        if let Some(rch) = &report.rch_local_capability {
+            for worker in &rch.worker_pressure.workers {
+                let worker_alias = redact_brief_text(&worker.worker_id);
+                if worker_alias.is_empty() {
+                    continue;
+                }
+                rch_by_alias.insert(
+                    worker_alias.clone(),
+                    SwarmBriefRchPosture {
+                        worker_alias,
+                        posture: redact_brief_text(&worker.pressure_state),
+                        admission_status: redact_brief_text(&worker.admission_impact),
+                    },
+                );
+            }
+            if rch_by_alias.is_empty()
+                && !rch.worker_probe_summary.status.trim().is_empty()
+                && rch.worker_probe_summary.status != "not_collected"
+            {
+                rch_by_alias.insert(
+                    "rch_fleet".to_string(),
+                    SwarmBriefRchPosture {
+                        worker_alias: "rch_fleet".to_string(),
+                        posture: redact_brief_text(&rch.worker_probe_summary.status),
+                        admission_status: redact_brief_text(&rch.worker_pressure.status),
+                    },
+                );
+            }
+        }
+
+        Self {
+            agents: agents_by_alias.into_values().collect(),
+            reservations: reservations_by_id.into_values().collect(),
+            beads: beads_by_id.into_values().collect(),
+            verification_evidence: verification_by_fp.into_values().collect(),
+            rch_postures: rch_by_alias.into_values().collect(),
+        }
+    }
+
+    /// Parse a [`SwarmBriefSnapshot`] from a JSON file path (`SwarmBriefSnapshot`,
+    /// `SwarmBriefReport`, `ee.response.v2` envelope, or support-bundle wrapper).
+    pub fn from_json_path(path: &Path) -> Result<Self, String> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            format!(
+                "Failed to read swarm brief snapshot metadata {}: {error}",
+                redact_brief_text(&path.display().to_string())
+            )
+        })?;
+        if metadata.len() > SWARM_BRIEF_DELTA_MAX_SNAPSHOT_BYTES {
+            return Err(format!(
+                "Swarm brief snapshot {} exceeds maximum size ({} > {} bytes)",
+                redact_brief_text(&path.display().to_string()),
+                metadata.len(),
+                SWARM_BRIEF_DELTA_MAX_SNAPSHOT_BYTES
+            ));
+        }
+        let raw = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read swarm brief snapshot {}: {error}",
+                redact_brief_text(&path.display().to_string())
+            )
+        })?;
+        Self::from_json_str(&raw)
+    }
+
+    /// Parse a [`SwarmBriefSnapshot`] from a JSON string.
+    pub fn from_json_str(raw: &str) -> Result<Self, String> {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|error| format!("Invalid swarm brief snapshot JSON: {error}"))?;
+        Self::from_json_value(&value)
+    }
+
+    /// Parse a [`SwarmBriefSnapshot`] from a JSON [`Value`], accepting direct
+    /// [`SwarmBriefSnapshot`] payloads, [`SwarmBriefReport`] payloads,
+    /// `ee.response.v2` envelopes (`.data`), or support-bundle objects (`.swarmBrief`).
+    pub fn from_json_value(value: &Value) -> Result<Self, String> {
+        let root = value
+            .get("data")
+            .filter(|inner| inner.is_object())
+            .or_else(|| value.get("swarmBrief").filter(|inner| inner.is_object()))
+            .unwrap_or(value);
+        let obj = root
+            .as_object()
+            .ok_or_else(|| "Swarm brief snapshot must be a JSON object".to_string())?;
+
+        let mut stalled_posture_by_agent = BTreeMap::<String, String>::new();
+        if let Some(stalled_items) = obj.get("stalledBeadLiveness").and_then(Value::as_array) {
+            for item in stalled_items {
+                if let (Some(assignee), Some(posture)) = (
+                    item.get("assignee").and_then(Value::as_str),
+                    item.get("posture").and_then(Value::as_str),
+                ) {
+                    let alias = redact_brief_text(assignee);
+                    let posture = redact_brief_text(posture);
+                    if !alias.is_empty() && !posture.is_empty() {
+                        stalled_posture_by_agent.entry(alias).or_insert(posture);
+                    }
+                }
+            }
+        }
+
+        let mut agents_by_alias = BTreeMap::<String, SwarmBriefAgent>::new();
+        for key in ["agents", "agentMailAgents"] {
+            if let Some(items) = obj.get(key).and_then(Value::as_array) {
+                for item in items {
+                    let Some(raw_alias) = item
+                        .get("agentAlias")
+                        .or_else(|| item.get("name"))
+                        .and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let agent_alias = redact_brief_text(raw_alias);
+                    if agent_alias.is_empty() {
+                        continue;
+                    }
+                    let status = item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| stalled_posture_by_agent.get(&agent_alias).cloned())
+                        .unwrap_or_else(|| "active".to_string());
+                    let last_seen_at_rfc3339 = item
+                        .get("lastSeenAtRfc3339")
+                        .or_else(|| item.get("lastActiveAt"))
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text);
+                    agents_by_alias.insert(
+                        agent_alias.clone(),
+                        SwarmBriefAgent {
+                            agent_alias,
+                            status,
+                            last_seen_at_rfc3339,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut reservations_by_id = BTreeMap::<String, SwarmBriefReservation>::new();
+        for key in ["reservations", "fileReservations"] {
+            if let Some(items) = obj.get(key).and_then(Value::as_array) {
+                for item in items {
+                    let holder_agent = item
+                        .get("holderAgent")
+                        .or_else(|| item.get("holder"))
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .unwrap_or_default();
+                    let path_pattern = item
+                        .get("pathPattern")
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .unwrap_or_default();
+                    let reservation_id = item
+                        .get("reservationId")
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("{holder_agent}:{path_pattern}"));
+                    if reservation_id.is_empty() || reservation_id == ":" {
+                        continue;
+                    }
+                    let expires_at_rfc3339 = item
+                        .get("expiresAtRfc3339")
+                        .or_else(|| item.get("expiresAt"))
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text);
+                    reservations_by_id.insert(
+                        reservation_id.clone(),
+                        SwarmBriefReservation {
+                            reservation_id,
+                            path_pattern,
+                            holder_agent,
+                            expires_at_rfc3339,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut beads_by_id = BTreeMap::<String, SwarmBriefBead>::new();
+        let mut insert_bead_item = |item: &Value| {
+            let Some(raw_id) = item
+                .get("beadId")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let bead_id = redact_brief_text(raw_id);
+            if bead_id.is_empty() {
+                return;
+            }
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .map(redact_brief_text)
+                .unwrap_or_else(|| "open".to_string());
+            let assignee = item
+                .get("assignee")
+                .and_then(Value::as_str)
+                .map(redact_brief_text);
+            let comment_count = item
+                .get("commentCount")
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0);
+            beads_by_id.insert(
+                bead_id.clone(),
+                SwarmBriefBead {
+                    bead_id,
+                    status,
+                    assignee,
+                    comment_count,
+                },
+            );
+        };
+        if let Some(beads_val) = obj.get("beads") {
+            if let Some(items) = beads_val.as_array() {
+                for item in items {
+                    insert_bead_item(item);
+                }
+            } else if let Some(beads_obj) = beads_val.as_object() {
+                for bucket in ["ready", "inProgress", "blocked", "deferred"] {
+                    if let Some(items) = beads_obj.get(bucket).and_then(Value::as_array) {
+                        for item in items {
+                            insert_bead_item(item);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut verification_by_fp = BTreeMap::<String, SwarmBriefVerificationEvidence>::new();
+        if let Some(items) = obj.get("verificationEvidence").and_then(Value::as_array) {
+            for item in items {
+                let Some(raw_fp) = item.get("commandFingerprint").and_then(Value::as_str) else {
+                    continue;
+                };
+                let command_fingerprint = redact_brief_text(raw_fp);
+                if command_fingerprint.is_empty() {
+                    continue;
+                }
+                let status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(redact_brief_text)
+                    .unwrap_or_else(|| "unknown".to_string());
+                let evidence_hash = item
+                    .get("evidenceHash")
+                    .and_then(Value::as_str)
+                    .map(redact_brief_text)
+                    .unwrap_or_default();
+                verification_by_fp.insert(
+                    command_fingerprint.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint,
+                        status,
+                        evidence_hash,
+                    },
+                );
+            }
+        }
+        if let Some(broker) = obj.get("verificationBroker").and_then(Value::as_object) {
+            let reusable = broker
+                .get("recentReusableRunCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if reusable > 0 {
+                let fp = "broker:reusable_runs".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "reusable".to_string(),
+                        evidence_hash: format!("reusable:{reusable}"),
+                    },
+                );
+            }
+            let stale = broker
+                .get("staleRunCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if stale > 0 {
+                let fp = "broker:stale_runs".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "stale".to_string(),
+                        evidence_hash: format!("stale:{stale}"),
+                    },
+                );
+            }
+            let in_flight = broker
+                .get("inFlightEquivalentCommandCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if in_flight > 0 {
+                let fp = "broker:in_flight".to_string();
+                verification_by_fp.insert(
+                    fp.clone(),
+                    SwarmBriefVerificationEvidence {
+                        command_fingerprint: fp,
+                        status: "in_flight".to_string(),
+                        evidence_hash: format!("in_flight:{in_flight}"),
+                    },
+                );
+            }
+        }
+
+        let mut rch_by_alias = BTreeMap::<String, SwarmBriefRchPosture>::new();
+        if let Some(items) = obj.get("rchPostures").and_then(Value::as_array) {
+            for item in items {
+                let Some(raw_alias) = item
+                    .get("workerAlias")
+                    .or_else(|| item.get("workerId"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let worker_alias = redact_brief_text(raw_alias);
+                if worker_alias.is_empty() {
+                    continue;
+                }
+                let posture = item
+                    .get("posture")
+                    .or_else(|| item.get("pressureState"))
+                    .and_then(Value::as_str)
+                    .map(redact_brief_text)
+                    .unwrap_or_else(|| "unknown".to_string());
+                let admission_status = item
+                    .get("admissionStatus")
+                    .or_else(|| item.get("admissionImpact"))
+                    .and_then(Value::as_str)
+                    .map(redact_brief_text)
+                    .unwrap_or_else(|| "unknown".to_string());
+                rch_by_alias.insert(
+                    worker_alias.clone(),
+                    SwarmBriefRchPosture {
+                        worker_alias,
+                        posture,
+                        admission_status,
+                    },
+                );
+            }
+        }
+        if let Some(rch) = obj.get("rchLocalCapability").and_then(Value::as_object) {
+            if let Some(workers) = rch
+                .get("workerPressure")
+                .and_then(Value::as_object)
+                .and_then(|wp| wp.get("workers"))
+                .and_then(Value::as_array)
+            {
+                for worker in workers {
+                    let Some(raw_alias) = worker.get("workerId").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let worker_alias = redact_brief_text(raw_alias);
+                    if worker_alias.is_empty() {
+                        continue;
+                    }
+                    let posture = worker
+                        .get("pressureState")
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let admission_status = worker
+                        .get("admissionImpact")
+                        .and_then(Value::as_str)
+                        .map(redact_brief_text)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    rch_by_alias.insert(
+                        worker_alias.clone(),
+                        SwarmBriefRchPosture {
+                            worker_alias,
+                            posture,
+                            admission_status,
+                        },
+                    );
+                }
+            }
+            if rch_by_alias.is_empty()
+                && let Some(probe_status) = rch
+                    .get("workerProbeSummary")
+                    .and_then(Value::as_object)
+                    .and_then(|s| s.get("status"))
+                    .and_then(Value::as_str)
+                && !probe_status.trim().is_empty()
+                && probe_status != "not_collected"
+            {
+                let pressure_status = rch
+                    .get("workerPressure")
+                    .and_then(Value::as_object)
+                    .and_then(|wp| wp.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                rch_by_alias.insert(
+                    "rch_fleet".to_string(),
+                    SwarmBriefRchPosture {
+                        worker_alias: "rch_fleet".to_string(),
+                        posture: redact_brief_text(probe_status),
+                        admission_status: redact_brief_text(pressure_status),
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            agents: agents_by_alias.into_values().collect(),
+            reservations: reservations_by_id.into_values().collect(),
+            beads: beads_by_id.into_values().collect(),
+            verification_evidence: verification_by_fp.into_values().collect(),
+            rch_postures: rch_by_alias.into_values().collect(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -832,5 +1388,265 @@ mod tests {
                 "capsule must not surface {forbidden}: {serialized}"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_from_report_and_response_v2_envelope_are_isomorphic() {
+        let mut report = SwarmBriefReport::empty(Path::new("/workspace"));
+        report
+            .agent_mail_agents
+            .push(crate::core::swarm_brief::SwarmBriefAgentMailAgent {
+                name: "peer_alpha".to_string(),
+                last_active_at: rfc("2026-05-20T01:00:00Z"),
+            });
+        report
+            .file_reservations
+            .push(crate::core::swarm_brief::SwarmBriefFileReservation {
+                path_pattern: "src/core/**".to_string(),
+                holder: "peer_alpha".to_string(),
+                exclusive: true,
+                expires_at: rfc("2026-05-20T02:00:00Z"),
+            });
+        report
+            .beads
+            .in_progress
+            .push(crate::core::swarm_brief::SwarmBriefBead {
+                id: "bd-1zb7k.17.2".to_string(),
+                title: "Swarm brief delta capsules".to_string(),
+                status: "in_progress".to_string(),
+                priority: Some(2),
+                assignee: Some("peer_alpha".to_string()),
+                issue_type: None,
+                created_at: None,
+                updated_at: None,
+                latest_comment_at: None,
+                comment_count: 5,
+                source_bucket: "in_progress".to_string(),
+            });
+
+        let from_report = SwarmBriefSnapshot::from_report(&report);
+        let envelope = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": report,
+            "degraded": []
+        });
+        let from_envelope =
+            SwarmBriefSnapshot::from_json_value(&envelope).expect("parse response.v2 envelope");
+        assert_eq!(from_report, from_envelope);
+        assert_eq!(from_report.agents.len(), 1);
+        assert_eq!(from_report.reservations.len(), 1);
+        assert_eq!(from_report.beads.len(), 1);
+    }
+
+    #[test]
+    fn agent_mail_unavailable_fallback_surfaces_disappeared_agents_and_released_reservations() {
+        let before_json = serde_json::json!({
+            "schema": "ee.swarm.brief.v1",
+            "agentMailAgents": [
+                {"name": "peer_alpha", "lastActiveAt": "2026-05-20T01:00:00Z"}
+            ],
+            "fileReservations": [
+                {
+                    "pathPattern": "src/core/**",
+                    "holder": "peer_alpha",
+                    "exclusive": true,
+                    "expiresAt": "2026-05-20T02:00:00Z"
+                }
+            ]
+        });
+        let after_json = serde_json::json!({
+            "schema": "ee.swarm.brief.v1",
+            "sources": [
+                {"source": "agent_mail", "status": "unavailable"}
+            ],
+            "agentMailAgents": [],
+            "fileReservations": []
+        });
+        let before = SwarmBriefSnapshot::from_json_value(&before_json).expect("parse before");
+        let after = SwarmBriefSnapshot::from_json_value(&after_json).expect("parse after");
+        let capsule = compute_swarm_brief_delta(&before, &after);
+        assert_eq!(capsule.changed_agents.len(), 1);
+        assert_eq!(capsule.changed_agents[0].kind, "disappeared");
+        assert_eq!(capsule.changed_agents[0].agent_alias, "peer_alpha");
+        assert_eq!(capsule.changed_reservations.len(), 1);
+        assert_eq!(capsule.changed_reservations[0].kind, "released_or_expired");
+        assert!(
+            capsule
+                .recommended_next_actions
+                .iter()
+                .any(|action| action.code == "reservation_released")
+        );
+        assert!(
+            capsule
+                .recommended_next_actions
+                .iter()
+                .any(|action| action.code == "agent_disappeared")
+        );
+    }
+
+    #[test]
+    fn snapshot_json_parser_redacts_secrets_paths_and_ignores_raw_mail_or_stderr_fields() {
+        let before = SwarmBriefSnapshot::default();
+        let after_raw = serde_json::json!({
+            "rawMailBody": "super secret mail body sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ",
+            "rawCommandStderr": "fatal: password=topsecret token=ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD",
+            "agentMailAgents": [
+                {
+                    "name": "agent:sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ",
+                    "lastActiveAt": "2026-05-20T01:00:00Z"
+                }
+            ],
+            "fileReservations": [
+                {
+                    "pathPattern": "/private/var/folders/secret/workspace/src/core/**",
+                    "holder": "peer_alpha",
+                    "exclusive": true,
+                    "expiresAt": "2026-05-20T02:00:00Z"
+                }
+            ]
+        });
+        let after = SwarmBriefSnapshot::from_json_value(&after_raw).expect("parse after_raw");
+        let capsule = compute_swarm_brief_delta(&before, &after);
+        let serialized = serde_json::to_string(&capsule).expect("serialize capsule");
+        assert!(!serialized.contains("sk-proj-abcdefghijklmnopqrstuvwxyz"));
+        assert!(!serialized.contains("ghp_1234567890"));
+        assert!(!serialized.contains("super secret mail body"));
+        assert!(!serialized.contains("password=topsecret"));
+        assert!(!serialized.contains("/private/var/folders/secret"));
+    }
+
+    #[test]
+    fn golden_capsule_json_matches_deterministic_contract() {
+        let before = SwarmBriefSnapshot {
+            agents: vec![SwarmBriefAgent {
+                agent_alias: "peer_a".to_string(),
+                status: "active".to_string(),
+                last_seen_at_rfc3339: rfc("2026-05-20T01:00:00Z"),
+            }],
+            reservations: vec![SwarmBriefReservation {
+                reservation_id: "res-1".to_string(),
+                path_pattern: "src/core/**".to_string(),
+                holder_agent: "peer_a".to_string(),
+                expires_at_rfc3339: rfc("2026-05-20T02:00:00Z"),
+            }],
+            beads: vec![SwarmBriefBead {
+                bead_id: "bd-1zb7k.17.2".to_string(),
+                status: "open".to_string(),
+                assignee: None,
+                comment_count: 1,
+            }],
+            verification_evidence: vec![SwarmBriefVerificationEvidence {
+                command_fingerprint: "broker:reusable_runs".to_string(),
+                status: "reusable".to_string(),
+                evidence_hash: "reusable:2".to_string(),
+            }],
+            rch_postures: vec![SwarmBriefRchPosture {
+                worker_alias: "worker-01".to_string(),
+                posture: "healthy".to_string(),
+                admission_status: "available".to_string(),
+            }],
+        };
+        let after = SwarmBriefSnapshot {
+            agents: Vec::new(),
+            reservations: Vec::new(),
+            beads: vec![SwarmBriefBead {
+                bead_id: "bd-1zb7k.17.2".to_string(),
+                status: "in_progress".to_string(),
+                assignee: Some("peer_b".to_string()),
+                comment_count: 3,
+            }],
+            verification_evidence: Vec::new(),
+            rch_postures: vec![SwarmBriefRchPosture {
+                worker_alias: "worker-01".to_string(),
+                posture: "critical".to_string(),
+                admission_status: "pressure_blocked".to_string(),
+            }],
+        };
+        let capsule = compute_swarm_brief_delta(&before, &after);
+        let value = serde_json::to_value(&capsule).expect("serialize capsule");
+        let expected = serde_json::json!({
+            "schema": "ee.swarm_brief.delta.v1",
+            "sideEffectFree": true,
+            "changedAgents": [
+                {
+                    "agentAlias": "peer_a",
+                    "kind": "disappeared",
+                    "previousStatus": "active",
+                    "currentStatus": null,
+                    "previousLastSeen": "2026-05-20T01:00:00Z",
+                    "currentLastSeen": null
+                }
+            ],
+            "changedReservations": [
+                {
+                    "reservationId": "res-1",
+                    "kind": "released_or_expired",
+                    "pathPattern": "src/core/**",
+                    "holderAgent": "peer_a",
+                    "previousExpiresAt": "2026-05-20T02:00:00Z",
+                    "currentExpiresAt": null
+                }
+            ],
+            "changedBeads": [
+                {
+                    "beadId": "bd-1zb7k.17.2",
+                    "kind": "status_changed",
+                    "previousStatus": "open",
+                    "currentStatus": "in_progress",
+                    "previousAssignee": null,
+                    "currentAssignee": "peer_b",
+                    "commentCountDelta": 2
+                }
+            ],
+            "changedVerification": [
+                {
+                    "commandFingerprint": "broker:reusable_runs",
+                    "kind": "cleared",
+                    "previousStatus": "reusable",
+                    "currentStatus": null,
+                    "previousEvidenceHash": "reusable:2",
+                    "currentEvidenceHash": null
+                }
+            ],
+            "changedRch": [
+                {
+                    "workerAlias": "worker-01",
+                    "kind": "changed",
+                    "previousPosture": "healthy",
+                    "currentPosture": "critical",
+                    "previousAdmissionStatus": "available",
+                    "currentAdmissionStatus": "pressure_blocked"
+                }
+            ],
+            "recommendedNextActions": [
+                {
+                    "severity": "critical",
+                    "code": "rch_posture_regressed",
+                    "rationale": "RCH worker pressure is present in the latest snapshot; verify topology before launching new remote builds."
+                },
+                {
+                    "severity": "warning",
+                    "code": "reservation_released",
+                    "rationale": "Reservations cleared since the prior snapshot; recheck for orphan WIP before claiming the freed paths."
+                },
+                {
+                    "severity": "notice",
+                    "code": "verification_evidence_cleared",
+                    "rationale": "Verification evidence cleared since the prior snapshot; consider re-running gated proofs."
+                },
+                {
+                    "severity": "notice",
+                    "code": "bead_status_changed",
+                    "rationale": "Bead status changed since the prior snapshot; reread the affected bead comments before resuming work."
+                },
+                {
+                    "severity": "info",
+                    "code": "agent_disappeared",
+                    "rationale": "An agent vanished from the brief; surface the absence to the orchestrator before reclaiming its lanes."
+                }
+            ]
+        });
+        assert_eq!(value, expected);
     }
 }

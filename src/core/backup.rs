@@ -3588,25 +3588,33 @@ fn verify_backup_manifest(
     if !issues.iter().any(backup_verification_issue_is_blocking)
         && let Some(summary) = evidence_admission
     {
-        let workspace_id = manifest
+        if let Some(workspace_id) = manifest
             .pointer("/workspace/id")
             .and_then(JsonValue::as_str)
-            .unwrap_or_default();
-        match evidence_export::verify_summary_assets(
-            backup_path,
-            workspace_id,
-            &inspect.derived,
-            &summary,
-        ) {
-            Ok(()) => {
-                if let Some(loss) = summary.degradation() {
-                    issues.push(BackupVerificationIssue::warning(loss.code, loss.message));
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            match evidence_export::verify_summary_assets(
+                backup_path,
+                workspace_id,
+                &inspect.derived,
+                &summary,
+            ) {
+                Ok(()) => {
+                    if let Some(loss) = summary.degradation() {
+                        issues.push(BackupVerificationIssue::warning(loss.code, loss.message));
+                    }
                 }
+                Err(message) => issues.push(BackupVerificationIssue::error(
+                    "manifest_evidence_admission_invalid",
+                    message,
+                )),
             }
-            Err(message) => issues.push(BackupVerificationIssue::error(
-                "manifest_evidence_admission_invalid",
-                message,
-            )),
+        } else {
+            issues.push(BackupVerificationIssue::error(
+                "manifest_workspace_id_missing",
+                "backup manifest is missing a non-empty /workspace/id required to verify evidence admission assets",
+            ));
         }
     }
     let status = if issues.iter().any(backup_verification_issue_is_blocking) {
@@ -5490,8 +5498,9 @@ fn degradation_reports(manifest: &JsonValue) -> Vec<BackupDegradation> {
         .map(|item| BackupDegradation {
             code: json_string(item, "code").unwrap_or_else(|| "unknown".to_owned()),
             severity: json_string(item, "severity").unwrap_or_else(|| "warning".to_owned()),
-            message: json_string(item, "message").unwrap_or_default(),
-            next_action: json_string(item, "nextAction").unwrap_or_default(),
+            message: json_string(item, "message").unwrap_or_else(|| "unspecified".to_owned()),
+            next_action: json_string(item, "nextAction")
+                .unwrap_or_else(|| "unspecified".to_owned()),
         })
         .collect::<Vec<_>>();
     if let Ok(Some(summary)) = evidence_export::summary_from_manifest(manifest) {
@@ -5898,7 +5907,7 @@ fn render_records(
                 .code_anchors_by_memory
                 .get(&memory.id)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(Vec::new);
             record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
             // bd-tmv70: write the supersession fact the exporter already knows.
             // Without this the archive records no headship at all post-V123,
@@ -7344,9 +7353,15 @@ fn redact_curation_json(
                 .as_array()
                 .ok_or_else(|| work_history_error("invalid curation source refs"))?;
             for (index, source) in sources.iter().enumerate() {
-                let kind = source["kind"].as_str().unwrap_or_default();
-                let id = source["id"].as_str().unwrap_or_default();
-                let hash = source["contentHash"].as_str().unwrap_or_default();
+                let kind = source["kind"].as_str().ok_or_else(|| {
+                    work_history_error("invalid curation source ref identity or hash")
+                })?;
+                let id = source["id"].as_str().ok_or_else(|| {
+                    work_history_error("invalid curation source ref identity or hash")
+                })?;
+                let hash = source["contentHash"].as_str().ok_or_else(|| {
+                    work_history_error("invalid curation source ref identity or hash")
+                })?;
                 let valid_id = match kind {
                     "memory" => id.parse::<crate::models::MemoryId>().is_ok(),
                     "evidence_span" => id.parse::<crate::models::EvidenceId>().is_ok(),
@@ -7392,7 +7407,9 @@ fn redact_curation_json(
                     "curation link endpoint outside the recovered workspace"
                 ))?);
             }
-            let relation = original["relation"].as_str().unwrap_or_default();
+            let relation = original["relation"]
+                .as_str()
+                .ok_or_else(|| work_history_error("invalid curation link relation"))?;
             if !matches!(relation, "related" | "supports" | "contradicts") {
                 return Err(work_history_error("invalid curation link relation"));
             }
@@ -7509,8 +7526,11 @@ fn collect_curation_history_payloads(
                     }
                 }
                 if source["kind"] == "evidence_span" {
+                    let span_id = source["id"].as_str().ok_or_else(|| {
+                        work_history_error("invalid curation source ref identity or hash")
+                    })?;
                     let span = connection
-                        .get_evidence_span(source["id"].as_str().unwrap_or_default())
+                        .get_evidence_span(span_id)
                         .map_err(work_history_error)?;
                     requires_fresh_review |= span.is_some_and(|span| {
                         redact_content(&span.excerpt, redaction) != span.excerpt
@@ -7984,12 +8004,16 @@ fn collect_audit_history_payloads(
                 .as_deref()
                 .and_then(|id| candidates.get(id))
         {
+            let source_details = original.details.as_deref().ok_or_else(|| {
+                work_history_error("missing curation candidate creation audit details")
+            })?;
+            let row_details = row.details.as_deref().ok_or_else(|| {
+                work_history_error("missing curation candidate creation audit details")
+            })?;
             let source: JsonValue =
-                serde_json::from_str(original.details.as_deref().unwrap_or_default())
-                    .map_err(work_history_error)?;
+                serde_json::from_str(source_details).map_err(work_history_error)?;
             let mut details: JsonValue =
-                serde_json::from_str(row.details.as_deref().unwrap_or_default())
-                    .map_err(work_history_error)?;
+                serde_json::from_str(row_details).map_err(work_history_error)?;
             details["schema"] = json!("ee.audit.curation_candidate_create.v1");
             details["proposalSource"] = json!("learn.experiment.propose");
             details["workspaceId"] = json!(workspace_id);
@@ -8003,8 +8027,7 @@ fn collect_audit_history_payloads(
                     candidate
                         .proposed_content
                         .as_deref()
-                        .unwrap_or_default()
-                        .as_bytes()
+                        .map_or(&[][..], str::as_bytes)
                 )
                 .to_hex()
                 .to_string()
@@ -9948,9 +9971,18 @@ fn collect_maintenance_history_payloads(
             // The database contract trims these fields and permits historical
             // source IDs. Use that same interpretation when remapping links;
             // a no-redaction backup still preserves the original JSON bytes.
-            let kind = source["kind"].as_str().unwrap_or_default().trim();
-            let id = source["id"].as_str().unwrap_or_default().trim();
-            let hash = source["contentHash"].as_str().unwrap_or_default().trim();
+            let kind = source["kind"]
+                .as_str()
+                .ok_or_else(|| work_history_error("invalid reflection source ref kind"))?
+                .trim();
+            let id = source["id"]
+                .as_str()
+                .ok_or_else(|| work_history_error("invalid reflection source ref id"))?
+                .trim();
+            let hash = source["contentHash"]
+                .as_str()
+                .ok_or_else(|| work_history_error("invalid reflection source ref hash"))?
+                .trim();
             redacted[index]["kind"] = json!(kind);
             redacted[index]["id"] = json!(redact_learning_reference(
                 id,

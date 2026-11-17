@@ -4748,7 +4748,13 @@ pub(crate) fn index_source_upper_bound_fits(
     if !database_path.is_file() {
         return Ok(None);
     }
-    let db = DbConnection::open_file_read_only(&database_path)?;
+    let pool = crate::db::read_pool::registered_process_read_pool(
+        crate::db::DatabaseConfig::file(database_path),
+        crate::db::read_pool::PoolConfig::default_single(),
+    );
+    let db = pool
+        .acquire()
+        .map_err(|error| IndexStatusError::Io(std::io::Error::other(error.to_string())))?;
     let Some(workspace_id) = workspace_id_for_index_status(&db, &options.workspace_path)? else {
         return Ok(None);
     };
@@ -4771,7 +4777,8 @@ fn workspace_index_source_rows_fit(
     let request = asupersync::Cx::current();
     let mut total = 0_u64;
     for table in [
-        "memories",
+        "memories_workspace",
+        "memories_global_tags",
         "sessions",
         "artifacts",
         "procedural_rules",
@@ -4780,9 +4787,15 @@ fn workspace_index_source_rows_fit(
         if let Some(cx) = &request {
             index_checkpoint(cx)?;
         }
-        let (selection, mut parameters) = if table == "memories" {
+        let (selection, mut parameters) = if table == "memories_workspace" {
             (
-                "SELECT 1 FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))) AND m.tombstoned_at IS NULL".to_owned(),
+                "SELECT 1 FROM memories m WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL"
+                    .to_owned(),
+                vec![SqlValue::Text(workspace_id.to_owned())],
+            )
+        } else if table == "memories_global_tags" {
+            (
+                "SELECT 1 FROM memories m WHERE m.workspace_id != ?1 AND m.tombstoned_at IS NULL AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))".to_owned(),
                 vec![
                     SqlValue::Text(workspace_id.to_owned()),
                     SqlValue::Text(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()),

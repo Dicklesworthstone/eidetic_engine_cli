@@ -128,6 +128,7 @@ INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
 INCLUDE_REAL_SHAPE_FIXTURE=false
 INCLUDE_REACH_E2E=false
+INCLUDE_SAFETY_HARNESS=false
 INCLUDE_E2E_ORPHANS=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
@@ -186,6 +187,9 @@ for arg in "$@"; do
         --include-reach-e2e)
             INCLUDE_REACH_E2E=true
             ;;
+        --include-safety-harness)
+            INCLUDE_SAFETY_HARNESS=true
+            ;;
         --include-bench)
             INCLUDE_BENCH=true
             ;;
@@ -203,6 +207,7 @@ for arg in "$@"; do
             INCLUDE_BENCH=true
             INCLUDE_EVAL=true
             INCLUDE_FUZZ_SMOKE=true
+            INCLUDE_SAFETY_HARNESS=true
             INCLUDE_E2E_ORPHANS=true
             PLAN_DOC_SMOKE=true
             ;;
@@ -2885,13 +2890,18 @@ if [ "$CI_SMOKE" != "true" ]; then
     # Gate 8: Boundary Migration
     run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
-    # Gate 8.5: ee doctor safety harness (bd-21joy)
+    # Gate 8.5: ee doctor safety harness (bd-21joy / bd-5l8yh)
     # Wraps verify-undo.sh, verify-idempotence.sh, verify-crash-recovery.sh,
     # verify-concurrency.sh, verify-metamorphic.sh against the per-FM
-    # fixture suite under tests/doctor_fixtures/ (owned by bd-2oh15).
-    # Advisory while fixtures or sub-scripts are missing; set
-    # EE_SAFETY_HARNESS_STRICT=1 to fail closed.
-    run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
+    # fixture suite under tests/doctor_fixtures/ (owned by bd-2oh15), pinned
+    # to CURRENT_SOURCE_EE_BINARY. Gated behind --include-safety-harness
+    # (and included in --swarm-heavy) because all five sub-harnesses run ~420s
+    # end-to-end against release ee.
+    if [ "$INCLUDE_SAFETY_HARNESS" = "true" ]; then
+        run_stage "ee doctor Safety Harness (bd-21joy)" "EE_DOCTOR_FIXTURE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_SAFETY_HARNESS_STRICT=1 ./scripts/run-safety-harness.sh"
+    else
+        record_gated_off "ee doctor Safety Harness (bd-21joy)" "--include-safety-harness not set"
+    fi
 else
     record_gated_off "Agent Ergonomics E2E (F1-F5)" "ci-smoke"
     record_gated_off "Overhaul Integration E2E (J4)" "ci-smoke"

@@ -90,7 +90,12 @@ STRICT="${EE_SAFETY_HARNESS_STRICT:-0}"
 # measured 2812s, so budget the honest run in hours. That tradeoff is bd-5l8yh's
 # and bd-2di61's to settle; it is not a reason to leave four checks unable to
 # run.
-SAFETY_FIXTURE_ROOT_BASE="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures}"
+if [ -n "${EE_DOCTOR_FIXTURE_ROOT:-}" ]; then
+    SAFETY_FIXTURE_ROOT_BASE="$EE_DOCTOR_FIXTURE_ROOT"
+else
+    mkdir -p "${TMPDIR:-/tmp}" 2>/dev/null || true
+    SAFETY_FIXTURE_ROOT_BASE="$(mktemp -d "${TMPDIR:-/tmp}/ee-doctor-fixtures.XXXXXX")"
+fi
 
 SUB_HARNESSES=(
     "verify-undo.sh"

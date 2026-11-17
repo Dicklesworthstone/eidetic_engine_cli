@@ -23,6 +23,8 @@ and actual test results are recorded in
    through DSR, then exercise init, remember, search, pack and why against a new
    workspace using that installed binary.
 6. Build the six supported binaries through DSR, run their platform workflows,
+   generate `release-probe-{target}.json` captures via `scripts/release_binary_probe.sh`
+   and gate the staging directory with `scripts/release_binary_probe.sh --verify-release-dir <dir>`,
    publish the GitHub release without Actions/dispatch, and verify every public
    asset before updating the four Homebrew archive URLs and hashes.
 

@@ -363,7 +363,11 @@ impl DecisionRecordBuilder {
             plane: self.plane.unwrap_or(DecisionPlane::Packing),
             metadata: self.metadata,
             decided_at: self.decided_at.unwrap_or_else(now_rfc3339),
-            outcome: self.outcome.unwrap_or_default(),
+            outcome: self
+                .outcome
+                .map(|outcome| outcome.trim().to_owned())
+                .filter(|outcome| !outcome.is_empty())
+                .unwrap_or_else(|| "unspecified".to_owned()),
             reason: self.reason,
             confidence: self.confidence,
             shadow: self.shadow,

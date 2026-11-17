@@ -307,6 +307,124 @@ arm_auto_index_rebuild_request() {
 }
 
 # ---------------------------------------------------------------------------
+# Arm: bd-z83nl — Auto-index-rebuild arm for the model-PRESENT case
+# ---------------------------------------------------------------------------
+arm_auto_index_rebuild_when_index_missing() {
+    local bead="bd-z83nl"
+    local ws ws_fail started marker fail_marker empty_index fail_index pack1_json pack2_json fail_pack1_json fail_pack2_json model_path
+    ws="$(arm_workspace "$bead" auto_index_rebuild_when_index_missing)"
+    ws_fail="$(arm_workspace "$bead" auto_index_rebuild_forced_failure)"
+    started="$(now_ms)"
+
+    model_path="${EE_EMBED_MODEL_PATH:-}"
+    if [ -z "$model_path" ]; then
+        for candidate in \
+            "/root/.local/share/frankensearch/models/potion-multilingual-128M" \
+            "${HOME:-}/.local/share/frankensearch/models/potion-multilingual-128M" \
+            "/Users/jemanuel/.local/share/frankensearch/models/potion-multilingual-128M"; do
+            if [ -d "$candidate" ]; then
+                model_path="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$model_path" ]; then
+        for target_ws in "$ws" "$ws_fail"; do
+            local iso="${target_ws}.ee-data"
+            mkdir -p \
+                "$iso/xdg-data/frankensearch/models" \
+                "$iso/xdg-data/ee/models" \
+                "$iso/home/.local/share/frankensearch/models" \
+                "$iso/home/.local/share/ee/models"
+            ln -sfn "$model_path" "$iso/xdg-data/frankensearch/models/potion-multilingual-128M"
+            ln -sfn "$model_path" "$iso/xdg-data/ee/models/potion-multilingual-128M"
+            ln -sfn "$model_path" "$iso/home/.local/share/frankensearch/models/potion-multilingual-128M"
+            ln -sfn "$model_path" "$iso/home/.local/share/ee/models/potion-multilingual-128M"
+        done
+    fi
+
+    ee_in_model() {
+        local target_ws="$1"
+        shift
+        if [ -n "$model_path" ]; then
+            local iso="${target_ws}.ee-data"
+            mkdir -p "$iso/home" "$iso/xdg-data" "$iso/xdg-config" "$iso/xdg-cache" "$iso/xdg-state"
+            env -u EE_WORKSPACE -u EE_WORKSPACE_REGISTRY \
+                -u EE_EMBED_BACKEND -u EE_EMBED_MODEL_DIR \
+                -u EE_EMBED_MODEL_FIXTURE_DIR -u EE_EMBED_REMOTE_URL -u EE_EMBED_REMOTE_API_KEY \
+                -u EE_EMBED_REMOTE_MODEL -u EE_EMBED_REMOTE_DIMENSION \
+                HOME="$iso/home" XDG_DATA_HOME="$iso/xdg-data" XDG_CONFIG_HOME="$iso/xdg-config" \
+                XDG_CACHE_HOME="$iso/xdg-cache" XDG_STATE_HOME="$iso/xdg-state" \
+                EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_PATH="$model_path" \
+                "$EE_BIN" --workspace "$target_ws" "$@"
+        else
+            ee_in "$target_ws" "$@"
+        fi
+    }
+
+    step "[$bead] model-present pack #1 records rebuild request, pack #2 auto-rebuilds and serves semantically, and forced rebuild failure retains repair hint"
+    ee_in_model "$ws" init --json >/dev/null
+    ee_in_model "$ws" remember "Run cargo fmt --check before cutting a release." \
+        --level procedural --kind rule --json >/dev/null
+    ee_in_model "$ws" remember "A prior release failed because clippy was skipped." \
+        --level episodic --kind failure --json >/dev/null
+
+    empty_index="$ws/empty-index"
+    mkdir -p "$empty_index"
+    marker="$ws/.ee/index-rebuild-request.json"
+
+    pack1_json="$(ee_in_model "$ws" pack "release checklist" --index-dir "$empty_index" --max-tokens 2000 --json)"
+    assert_jq "$pack1_json" \
+        '[(.degraded // .data.degraded // [])[]? | select(.code == "search_live_snapshot_lexical" or .code == "context_lexical_fallback")] | length >= 1' \
+        "$bead: pack #1 against an empty index directory degrades to lexical retrieval"
+    assert_eq "$( [ -f "$marker" ] && echo present || echo missing )" "present" \
+        "$bead: pack #1 records .ee/index-rebuild-request.json"
+    if [ -f "$marker" ]; then
+        assert_jq "$(cat "$marker")" \
+            '.schema == "ee.index.rebuild_request.v1" and .trigger == "index_missing" and .requestCount == 1 and .satisfiedAt == null and ((.degraded_code // .degradedCode) == "search_live_snapshot_lexical" or (.degraded_code // .degradedCode) == "context_lexical_fallback")' \
+            "$bead: rebuild request marker records schema, trigger=index_missing, and pending state"
+    fi
+
+    pack2_json="$(ee_in_model "$ws" pack "release checklist" --index-dir "$empty_index" --max-tokens 2000 --json)"
+    if [ -n "$model_path" ]; then
+        if [ -f "$marker" ]; then
+            assert_jq "$(cat "$marker")" \
+                '.satisfiedAt != null' \
+                "$bead: pack #2 auto-rebuilds the index and marks the pending rebuild request satisfied"
+        fi
+        assert_jq "$pack2_json" \
+            '.data.embed_backend == "neural_local" and ([(.degraded // .data.degraded // [])[]? | select(.code == "context_lexical_fallback" or .code == "search_live_snapshot_lexical" or .code == "index_missing")] | length == 0)' \
+            "$bead: pack #2 serves semantically (neural_local) without lexical-fallback degradation"
+    fi
+
+    # Forced rebuild failure twin: make .ee/index-rebuild-attempt a directory so
+    # Pack #2's synchronous auto-rebuild fails closed while Pack #2 still serves
+    # with honest degradation and retained repair hint.
+    ee_in_model "$ws_fail" init --json >/dev/null
+    ee_in_model "$ws_fail" remember "Run cargo fmt --check before cutting a release." \
+        --level procedural --kind rule --json >/dev/null
+    fail_index="$ws_fail/fail-index"
+    mkdir -p "$fail_index"
+    fail_marker="$ws_fail/.ee/index-rebuild-request.json"
+    fail_pack1_json="$(ee_in_model "$ws_fail" pack "release checklist" --index-dir "$fail_index" --max-tokens 2000 --json)"
+    mkdir -p "$ws_fail/.ee/index-rebuild-attempt"
+    fail_pack2_json="$(ee_in_model "$ws_fail" pack "release checklist" --index-dir "$fail_index" --max-tokens 2000 --json)"
+    if [ -f "$fail_marker" ]; then
+        assert_jq "$(cat "$fail_marker")" \
+            '.satisfiedAt == null' \
+            "$bead: forced rebuild failure leaves .ee/index-rebuild-request.json unsatisfied"
+    fi
+    assert_jq "$fail_pack2_json" \
+        '[(.degraded // .data.degraded // [])[]? | select((.code == "context_lexical_fallback" or .code == "search_live_snapshot_lexical") and ((.repair // "") | contains("ee index rebuild")))] | length >= 1' \
+        "$bead: forced rebuild failure pack emits honest degradation with retained ee index rebuild repair hint"
+
+    log_event arm_done bead_id "$bead" phase assert check auto_index_rebuild_when_index_missing \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
+# ---------------------------------------------------------------------------
 # Arm: bd-fallback-relevance-floor-labeling-dlr6a
 #
 # Field report: an ADBE underwrite note surfaced at relevance 0.60 under
@@ -989,6 +1107,7 @@ suite_environment_line
 
 arm_status_lexical_honesty
 arm_auto_index_rebuild_request
+arm_auto_index_rebuild_when_index_missing
 arm_fallback_relevance_floor
 arm_ns_gate_first_open_race
 arm_tag_case_roundtrip

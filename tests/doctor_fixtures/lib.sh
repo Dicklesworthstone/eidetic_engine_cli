@@ -86,6 +86,8 @@ doctor_fixture_content_manifest() {
         -not -path '*/.fixture_baseline/*' \
         -not -path '*/.ee/doctor-fixtures/*' \
         -not -path '*/.ee/ee.db-shm' \
+        -not -path '*/.ee/ee.db-fsqlite-ns-use' \
+        -not -path '*/.ee/ee.db-fsqlite-ns-gate' \
         -not -path '*/.ee/ee.write.lock' \
         -not -path '*/.ee/.doctor.lock' \
         -not -name '.assert.stdout' \

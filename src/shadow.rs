@@ -1637,6 +1637,445 @@ fn replay_reason(posture: ResourceReplayPosture) -> &'static str {
     }
 }
 
+pub const RESOURCE_PROFILE_THERMOSTAT_SCHEMA_V1: &str =
+    "ee.resource_admission.profile_thermostat.v1";
+pub const RESOURCE_ADMISSION_SUPPORT_EVIDENCE_SCHEMA_V1: &str =
+    "ee.support_bundle.resource_admission_evidence.v1";
+pub const RESOURCE_ADMISSION_SUPPORT_REDACTION_STATUS: &str =
+    "hashes_codes_counts_only_no_raw_env_no_paths_no_mail_bodies";
+
+/// One bounded observation consumed by the replay-calibrated profile thermostat (bd-u7f9q.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceProfileThermostatObservation {
+    pub admission_decision: ResourceAdmissionDecision,
+    pub recommended_profile: ResourceOperatingProfile,
+    pub output_budget_exceeded: bool,
+    pub replay_slo_healthy: bool,
+    pub rch_pressure_blocked: bool,
+}
+
+/// Input shape for the replay-calibrated profile thermostat with hysteresis (bd-u7f9q.2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceProfileThermostatInput {
+    pub current_profile: ResourceOperatingProfile,
+    pub host_recommended_profile: ResourceOperatingProfile,
+    pub host_calibration: ResourceHostCalibrationPosture,
+    pub replay_posture: ResourceReplayPosture,
+    pub rch_posture: ResourceRchPosture,
+    pub observations: Vec<ResourceProfileThermostatObservation>,
+    pub downshift_threshold: usize,
+    pub upshift_cooldown_observations: usize,
+    pub provenance_preview: String,
+}
+
+impl Default for ResourceProfileThermostatInput {
+    fn default() -> Self {
+        Self {
+            current_profile: ResourceOperatingProfile::Workstation,
+            host_recommended_profile: ResourceOperatingProfile::Workstation,
+            host_calibration: ResourceHostCalibrationPosture::Fresh,
+            replay_posture: ResourceReplayPosture::Healthy,
+            rch_posture: ResourceRchPosture::RemoteReady,
+            observations: Vec::new(),
+            downshift_threshold: 2,
+            upshift_cooldown_observations: 3,
+            provenance_preview: "default_thermostat_window".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceProfileThermostatWindow {
+    pub observation_count: usize,
+    pub output_budget_pressure_count: usize,
+    pub slo_healthy_streak: usize,
+    pub rch_blocked_count: usize,
+    pub downshift_threshold: usize,
+    pub upshift_cooldown_observations: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceProfileThermostatReport {
+    pub schema: &'static str,
+    pub side_effect_free: bool,
+    pub advisory_only: bool,
+    pub can_authorize_claim: bool,
+    pub current_profile: &'static str,
+    pub recommended_profile: &'static str,
+    pub transition: &'static str,
+    pub hysteresis_state: &'static str,
+    pub confidence: &'static str,
+    pub freshness: &'static str,
+    pub abstained: bool,
+    pub explanation: String,
+    pub reason_codes: Vec<String>,
+    pub evidence_window: ResourceProfileThermostatWindow,
+    pub provenance_hash: String,
+}
+
+fn profile_ordinal(profile: ResourceOperatingProfile) -> u8 {
+    match profile {
+        ResourceOperatingProfile::Constrained => 0,
+        ResourceOperatingProfile::Portable => 1,
+        ResourceOperatingProfile::Workstation => 2,
+        ResourceOperatingProfile::Swarm => 3,
+    }
+}
+
+/// Evaluate the replay-calibrated profile thermostat with hysteresis (bd-u7f9q.2).
+#[must_use]
+pub fn evaluate_resource_profile_thermostat(
+    input: &ResourceProfileThermostatInput,
+) -> ResourceProfileThermostatReport {
+    let downshift_threshold = input.downshift_threshold.max(1);
+    let upshift_cooldown = input.upshift_cooldown_observations.max(1);
+    let output_budget_pressure_count = input
+        .observations
+        .iter()
+        .filter(|obs| {
+            obs.output_budget_exceeded
+                || obs.admission_decision == ResourceAdmissionDecision::DegradeToLean
+        })
+        .count();
+    let rch_blocked_count = input
+        .observations
+        .iter()
+        .filter(|obs| {
+            obs.rch_pressure_blocked
+                || obs.admission_decision == ResourceAdmissionDecision::WaitForRch
+        })
+        .count();
+    let slo_healthy_streak = input
+        .observations
+        .iter()
+        .rev()
+        .take_while(|obs| {
+            obs.replay_slo_healthy
+                && !obs.output_budget_exceeded
+                && !obs.rch_pressure_blocked
+                && obs.admission_decision == ResourceAdmissionDecision::Admit
+        })
+        .count();
+
+    let contradictory = input.host_calibration == ResourceHostCalibrationPosture::Contradictory
+        || (input.host_recommended_profile == ResourceOperatingProfile::Swarm
+            && matches!(
+                input.rch_posture,
+                ResourceRchPosture::Blocked | ResourceRchPosture::ProgressStale
+            ));
+    let stale = input.host_calibration == ResourceHostCalibrationPosture::Stale
+        || input.replay_posture == ResourceReplayPosture::Stale;
+    let synthetic_only = input.host_calibration == ResourceHostCalibrationPosture::SyntheticOnly;
+    let missing = matches!(
+        input.host_calibration,
+        ResourceHostCalibrationPosture::Missing | ResourceHostCalibrationPosture::Unavailable
+    );
+
+    let freshness = if contradictory {
+        "contradictory"
+    } else if missing {
+        "missing"
+    } else if stale {
+        "stale"
+    } else if synthetic_only {
+        "synthetic_only"
+    } else {
+        "fresh"
+    };
+
+    let mut reason_codes = Vec::<String>::new();
+    let (recommended, transition, hysteresis_state, confidence, abstained, explanation) =
+        if contradictory {
+            reason_codes.push("contradictory_host_rch_signals".to_string());
+            (
+                input.current_profile,
+                "abstain",
+                "abstained",
+                "low",
+                true,
+                "Abstained: contradictory host calibration and RCH posture signals prevent a trustworthy profile shift."
+                    .to_string(),
+            )
+        } else if missing || stale {
+            reason_codes.push(if stale {
+                "stale_replay_or_calibration_evidence".to_string()
+            } else {
+                "missing_calibration_evidence".to_string()
+            });
+            (
+                input.current_profile,
+                "abstain",
+                "abstained",
+                "low",
+                true,
+                "Abstained: replay or host calibration evidence is stale or missing; holding current profile with low confidence."
+                    .to_string(),
+            )
+        } else if synthetic_only {
+            reason_codes.push("synthetic_only_calibration".to_string());
+            (
+                ResourceOperatingProfile::Constrained,
+                if input.current_profile == ResourceOperatingProfile::Constrained {
+                    "hold"
+                } else {
+                    "downshift_to_constrained"
+                },
+                "downshift_triggered",
+                "low",
+                false,
+                "Synthetic-only calibration evidence requires a conservative constrained profile recommendation."
+                    .to_string(),
+            )
+        } else if output_budget_pressure_count >= downshift_threshold
+            || input.replay_posture == ResourceReplayPosture::Regression
+        {
+            if output_budget_pressure_count >= downshift_threshold {
+                reason_codes.push("repeated_output_budget_pressure".to_string());
+            }
+            if input.replay_posture == ResourceReplayPosture::Regression {
+                reason_codes.push("replay_slo_regression".to_string());
+            }
+            (
+                ResourceOperatingProfile::Constrained,
+                if input.current_profile == ResourceOperatingProfile::Constrained {
+                    "hold"
+                } else {
+                    "downshift_to_constrained"
+                },
+                "downshift_triggered",
+                "high",
+                false,
+                format!(
+                    "Repeated output-budget or replay SLO pressure ({output_budget_pressure_count}/{downshift_threshold}) triggered a downshift to constrained."
+                ),
+            )
+        } else if output_budget_pressure_count > 0 {
+            reason_codes.push("transient_pressure_held_by_hysteresis".to_string());
+            (
+                input.current_profile,
+                "hold",
+                "cooldown_holding",
+                "medium",
+                false,
+                format!(
+                    "Borderline pressure ({output_budget_pressure_count}/{downshift_threshold}) held by hysteresis to prevent profile flapping."
+                ),
+            )
+        } else if profile_ordinal(input.host_recommended_profile)
+            > profile_ordinal(input.current_profile)
+        {
+            if slo_healthy_streak >= upshift_cooldown {
+                reason_codes.push("sustained_slo_recovery_upshift".to_string());
+                (
+                    input.host_recommended_profile,
+                    "upshift",
+                    "stable",
+                    "high",
+                    false,
+                    format!(
+                        "Sustained healthy replay SLO streak ({slo_healthy_streak}/{upshift_cooldown}) supports upshifting to {}.",
+                        input.host_recommended_profile.as_str()
+                    ),
+                )
+            } else {
+                reason_codes.push("slo_recovered_cooldown_holding".to_string());
+                let conf = if slo_healthy_streak > 0 {
+                    "medium"
+                } else {
+                    "low"
+                };
+                (
+                    input.current_profile,
+                    "hold",
+                    "cooldown_holding",
+                    conf,
+                    false,
+                    format!(
+                        "Recovered SLOs raised confidence to {conf}, but hysteresis holds {} until {upshift_cooldown} consecutive healthy observations complete ({slo_healthy_streak}/{upshift_cooldown}).",
+                        input.current_profile.as_str()
+                    ),
+                )
+            }
+        } else {
+            reason_codes.push("stable_admit_within_profile".to_string());
+            (
+                input.current_profile,
+                "hold",
+                "stable",
+                "high",
+                false,
+                format!(
+                    "Profile {} is stable with fresh calibration and healthy replay SLO posture.",
+                    input.current_profile.as_str()
+                ),
+            )
+        };
+
+    reason_codes.sort();
+    reason_codes.dedup();
+
+    let digest = blake3::hash(
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            input.current_profile.as_str(),
+            recommended.as_str(),
+            transition,
+            freshness,
+            input.observations.len(),
+            input.provenance_preview
+        )
+        .as_bytes(),
+    )
+    .to_hex();
+
+    ResourceProfileThermostatReport {
+        schema: RESOURCE_PROFILE_THERMOSTAT_SCHEMA_V1,
+        side_effect_free: true,
+        advisory_only: true,
+        can_authorize_claim: false,
+        current_profile: input.current_profile.as_str(),
+        recommended_profile: recommended.as_str(),
+        transition,
+        hysteresis_state,
+        confidence,
+        freshness,
+        abstained,
+        explanation,
+        reason_codes,
+        evidence_window: ResourceProfileThermostatWindow {
+            observation_count: input.observations.len(),
+            output_budget_pressure_count,
+            slo_healthy_streak,
+            rch_blocked_count,
+            downshift_threshold,
+            upshift_cooldown_observations: upshift_cooldown,
+        },
+        provenance_hash: format!("blake3:{}", &digest[..16]),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceAdmissionCoordinationTemplates {
+    pub beads_note: String,
+    pub agent_mail_subject: String,
+    pub agent_mail_body: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceAdmissionSupportBundleEvidence {
+    pub schema: &'static str,
+    pub redaction_status: &'static str,
+    pub decision: &'static str,
+    pub current_profile: &'static str,
+    pub recommended_profile: &'static str,
+    pub confidence: &'static str,
+    pub source_freshness: &'static str,
+    pub can_authorize_claim: bool,
+    pub top_reasons: Vec<String>,
+    pub abstention_reasons: Vec<String>,
+    pub evidence_hashes: std::collections::BTreeMap<String, String>,
+    pub thermostat: ResourceProfileThermostatReport,
+    pub coordination_templates: ResourceAdmissionCoordinationTemplates,
+    pub raw_env_included: bool,
+    pub raw_paths_included: bool,
+    pub raw_mail_bodies_included: bool,
+}
+
+/// Build a compact, redaction-safe support-bundle and handoff evidence block
+/// for the latest resource-admission decision (bd-2sw3h).
+#[must_use]
+pub fn build_resource_admission_support_evidence(
+    input: ResourceAdmissionInput,
+    thermostat_input: &ResourceProfileThermostatInput,
+) -> ResourceAdmissionSupportBundleEvidence {
+    let report = evaluate_resource_profile_budget_admission(input);
+    let thermostat = evaluate_resource_profile_thermostat(thermostat_input);
+    let top_reasons: Vec<String> = report.reason_codes.iter().take(6).cloned().collect();
+
+    let rch_hash = blake3::hash(format!("rch:{:?}", input.rch).as_bytes()).to_hex();
+    let lane_hash = blake3::hash(
+        format!(
+            "lane:{:?}:workload:{:?}",
+            input.lane_pressure, input.workload_pressure
+        )
+        .as_bytes(),
+    )
+    .to_hex();
+    let mut evidence_hashes = std::collections::BTreeMap::new();
+    evidence_hashes.insert(
+        "rchPostureHash".to_string(),
+        format!("blake3:{}", &rch_hash[..16]),
+    );
+    evidence_hashes.insert(
+        "lanePressureHash".to_string(),
+        format!("blake3:{}", &lane_hash[..16]),
+    );
+    evidence_hashes.insert(
+        "thermostatHash".to_string(),
+        thermostat.provenance_hash.clone(),
+    );
+
+    let decision_str = report.decision.as_str();
+    let primary_reason = top_reasons.first().map(String::as_str).unwrap_or("none");
+    let coordination_templates = ResourceAdmissionCoordinationTemplates {
+        beads_note: format!(
+            "[resource-admission] decision={} profile={}->{} freshness={} reason={} (advisory only; claim authority unchanged)",
+            decision_str,
+            report.effective_profile.as_str(),
+            thermostat.recommended_profile,
+            thermostat.freshness,
+            primary_reason
+        ),
+        agent_mail_subject: format!(
+            "[resource-admission] {} ({} -> {})",
+            decision_str,
+            report.effective_profile.as_str(),
+            thermostat.recommended_profile
+        ),
+        agent_mail_body: format!(
+            "Resource-admission advisory reported decision=`{}` (currentProfile=`{}`, recommendedProfile=`{}`, confidence=`{}`, freshness=`{}`). Top reasons: {}. Next commands: {}.",
+            decision_str,
+            report.effective_profile.as_str(),
+            thermostat.recommended_profile,
+            thermostat.confidence,
+            thermostat.freshness,
+            if top_reasons.is_empty() {
+                "none".to_string()
+            } else {
+                top_reasons.join(", ")
+            },
+            if report.next_commands.is_empty() {
+                "none".to_string()
+            } else {
+                report.next_commands.join("; ")
+            }
+        ),
+    };
+
+    ResourceAdmissionSupportBundleEvidence {
+        schema: RESOURCE_ADMISSION_SUPPORT_EVIDENCE_SCHEMA_V1,
+        redaction_status: RESOURCE_ADMISSION_SUPPORT_REDACTION_STATUS,
+        decision: decision_str,
+        current_profile: report.effective_profile.as_str(),
+        recommended_profile: thermostat.recommended_profile,
+        confidence: thermostat.confidence,
+        source_freshness: thermostat.freshness,
+        can_authorize_claim: false,
+        top_reasons,
+        abstention_reasons: report.abstention_reasons,
+        evidence_hashes,
+        thermostat,
+        coordination_templates,
+        raw_env_included: false,
+        raw_paths_included: false,
+        raw_mail_bodies_included: false,
+    }
+}
+
 /// Verdict from comparing incumbent and candidate outputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShadowVerdict {
@@ -3699,6 +4138,185 @@ mod tests {
 
             assert!(metrics.candidate_quality > metrics.incumbent_quality);
             assert_eq!(verdict, ShadowVerdict::CandidateBetter);
+        }
+    }
+
+    mod thermostat_and_support_evidence_tests {
+        use super::*;
+
+        fn healthy_obs(profile: ResourceOperatingProfile) -> ResourceProfileThermostatObservation {
+            ResourceProfileThermostatObservation {
+                admission_decision: ResourceAdmissionDecision::Admit,
+                recommended_profile: profile,
+                output_budget_exceeded: false,
+                replay_slo_healthy: true,
+                rch_pressure_blocked: false,
+            }
+        }
+
+        fn budget_pressure_obs() -> ResourceProfileThermostatObservation {
+            ResourceProfileThermostatObservation {
+                admission_decision: ResourceAdmissionDecision::DegradeToLean,
+                recommended_profile: ResourceOperatingProfile::Constrained,
+                output_budget_exceeded: true,
+                replay_slo_healthy: true,
+                rch_pressure_blocked: false,
+            }
+        }
+
+        #[test]
+        fn thermostat_covers_stable_admit_downshift_cooldown_stale_and_contradictory_cases() {
+            // 1. Stable admit
+            let stable_input = ResourceProfileThermostatInput {
+                current_profile: ResourceOperatingProfile::Workstation,
+                host_recommended_profile: ResourceOperatingProfile::Workstation,
+                observations: vec![healthy_obs(ResourceOperatingProfile::Workstation); 2],
+                ..ResourceProfileThermostatInput::default()
+            };
+            let stable = evaluate_resource_profile_thermostat(&stable_input);
+            assert_eq!(stable.recommended_profile, "workstation");
+            assert_eq!(stable.transition, "hold");
+            assert_eq!(stable.hysteresis_state, "stable");
+            assert_eq!(stable.confidence, "high");
+            assert!(!stable.abstained);
+            assert!(!stable.can_authorize_claim);
+
+            // 2. Single budget pressure spike is held by hysteresis (no flapping)
+            let single_spike =
+                evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                    observations: vec![
+                        budget_pressure_obs(),
+                        healthy_obs(ResourceOperatingProfile::Workstation),
+                    ],
+                    downshift_threshold: 2,
+                    ..ResourceProfileThermostatInput::default()
+                });
+            assert_eq!(single_spike.recommended_profile, "workstation");
+            assert_eq!(single_spike.transition, "hold");
+            assert_eq!(single_spike.hysteresis_state, "cooldown_holding");
+            assert_eq!(single_spike.confidence, "medium");
+
+            // 3. Repeated output-budget pressure triggers constrained downshift
+            let repeated_pressure =
+                evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                    observations: vec![budget_pressure_obs(), budget_pressure_obs()],
+                    downshift_threshold: 2,
+                    ..ResourceProfileThermostatInput::default()
+                });
+            assert_eq!(repeated_pressure.recommended_profile, "constrained");
+            assert_eq!(repeated_pressure.transition, "downshift_to_constrained");
+            assert_eq!(repeated_pressure.hysteresis_state, "downshift_triggered");
+            assert_eq!(repeated_pressure.confidence, "high");
+            assert!(
+                repeated_pressure
+                    .reason_codes
+                    .contains(&"repeated_output_budget_pressure".to_string())
+            );
+
+            // 4. Recovered SLOs raise confidence to medium but hold profile until cooldown completes
+            let recovering =
+                evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                    current_profile: ResourceOperatingProfile::Constrained,
+                    host_recommended_profile: ResourceOperatingProfile::Workstation,
+                    observations: vec![
+                        budget_pressure_obs(),
+                        healthy_obs(ResourceOperatingProfile::Workstation),
+                        healthy_obs(ResourceOperatingProfile::Workstation),
+                    ],
+                    upshift_cooldown_observations: 3,
+                    ..ResourceProfileThermostatInput::default()
+                });
+            assert_eq!(recovering.recommended_profile, "constrained");
+            assert_eq!(recovering.transition, "hold");
+            assert_eq!(recovering.hysteresis_state, "cooldown_holding");
+            assert_eq!(recovering.confidence, "medium");
+
+            // Once 3 consecutive healthy observations complete, upshift succeeds
+            let upshifted = evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                current_profile: ResourceOperatingProfile::Constrained,
+                host_recommended_profile: ResourceOperatingProfile::Workstation,
+                observations: vec![
+                    healthy_obs(ResourceOperatingProfile::Workstation),
+                    healthy_obs(ResourceOperatingProfile::Workstation),
+                    healthy_obs(ResourceOperatingProfile::Workstation),
+                ],
+                upshift_cooldown_observations: 3,
+                ..ResourceProfileThermostatInput::default()
+            });
+            assert_eq!(upshifted.recommended_profile, "workstation");
+            assert_eq!(upshifted.transition, "upshift");
+            assert_eq!(upshifted.confidence, "high");
+
+            // 5. Stale replay evidence causes abstain with low confidence
+            let stale = evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                replay_posture: ResourceReplayPosture::Stale,
+                ..ResourceProfileThermostatInput::default()
+            });
+            assert!(stale.abstained);
+            assert_eq!(stale.transition, "abstain");
+            assert_eq!(stale.confidence, "low");
+            assert_eq!(stale.freshness, "stale");
+
+            // 6. Contradictory host/RCH signals cause abstain
+            let contradictory =
+                evaluate_resource_profile_thermostat(&ResourceProfileThermostatInput {
+                    host_recommended_profile: ResourceOperatingProfile::Swarm,
+                    rch_posture: ResourceRchPosture::Blocked,
+                    ..ResourceProfileThermostatInput::default()
+                });
+            assert!(contradictory.abstained);
+            assert_eq!(contradictory.freshness, "contradictory");
+            assert_eq!(contradictory.confidence, "low");
+        }
+
+        #[test]
+        fn support_bundle_evidence_is_stable_redacted_and_provides_coordination_templates() {
+            let mut input = ResourceAdmissionInput::default();
+            input.rch = ResourceRchPosture::ActiveProjectExclusion;
+            let thermostat_input = ResourceProfileThermostatInput {
+                current_profile: ResourceOperatingProfile::Workstation,
+                host_recommended_profile: ResourceOperatingProfile::Workstation,
+                rch_posture: ResourceRchPosture::ActiveProjectExclusion,
+                observations: vec![ResourceProfileThermostatObservation {
+                    admission_decision: ResourceAdmissionDecision::WaitForRch,
+                    recommended_profile: ResourceOperatingProfile::Workstation,
+                    output_budget_exceeded: false,
+                    replay_slo_healthy: true,
+                    rch_pressure_blocked: true,
+                }],
+                ..ResourceProfileThermostatInput::default()
+            };
+            let evidence = build_resource_admission_support_evidence(input, &thermostat_input);
+            assert_eq!(
+                evidence.schema,
+                RESOURCE_ADMISSION_SUPPORT_EVIDENCE_SCHEMA_V1
+            );
+            assert_eq!(evidence.decision, "wait_for_rch");
+            assert!(!evidence.can_authorize_claim);
+            assert!(!evidence.raw_env_included);
+            assert!(!evidence.raw_paths_included);
+            assert!(!evidence.raw_mail_bodies_included);
+            assert!(
+                evidence
+                    .coordination_templates
+                    .beads_note
+                    .contains("decision=wait_for_rch")
+            );
+            assert!(
+                evidence
+                    .coordination_templates
+                    .agent_mail_subject
+                    .contains("wait_for_rch")
+            );
+            let json = serde_json::to_string(&evidence).expect("serialize evidence");
+            let json_repeat = serde_json::to_string(&build_resource_admission_support_evidence(
+                input,
+                &thermostat_input,
+            ))
+            .expect("serialize repeat");
+            assert_eq!(json, json_repeat);
+            assert!(!json.contains("/Users/"));
+            assert!(!json.contains("/home/"));
         }
     }
 }

@@ -15,11 +15,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::config::{EnvVar, SwarmAdaptiveConfig, read_env_var_or_default};
+use crate::core::adaptive_scheduler::{
+    ADAPTIVE_SCHEDULER_SCHEMA_V1, AdaptiveScheduler, AdaptiveSchedulerConfig,
+    AdaptiveSchedulerOutcome, DEFAULT_ADAPTIVE_BACKOFF_MS, DEFAULT_ADAPTIVE_NOISY_P99_MS,
+    DEFAULT_ADAPTIVE_SAMPLE_WINDOW,
+};
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
 use crate::core::beads_integrity::{
     BeadsIntegrityHealth, compose_integrity_report_from_br_doctor_json,
 };
 use crate::core::budget_delta_recommender::build_host_calibration_posture;
+use crate::core::cass_prefetch::{
+    ADAPTIVE_BACKOFF_APPLIED_CODE, CASS_PREFETCH_BUDGET_EXCEEDED_CODE,
+    CASS_PREFETCH_HISTORY_OVERSIZED_CODE, CASS_PREFETCH_METRICS_SCHEMA_V1,
+    CASS_PREFETCH_STALE_CORPUS_REVISION_CODE, CASS_PREFETCH_STALE_GENERATION_CODE,
+    CassPrefetchMetrics, DEFAULT_PREFETCH_BUDGET, DEFAULT_PREFETCH_MIN_SCORE,
+    DEFAULT_PREFETCH_TOP_K, MAX_PREFETCH_HISTORY,
+};
 use crate::core::git_ahead::{
     GIT_AHEAD_LOG_FORMAT, GitAheadLogState, GitAheadSnapshot, summarize_git_ahead,
     summarize_git_ahead_with_log_state,
@@ -47,6 +60,8 @@ use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
 use crate::policy::redact_secret_like_content;
 
 pub const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
+pub const SWARM_BRIEF_ADAPTIVE_SCHEMA_V1: &str = "ee.swarm_adaptive.report.v1";
+pub const SWARM_BRIEF_ADAPTIVE_HIT_SEMANTICS: &str = "topic_warmed_before_later_context_request";
 pub const SWARM_BRIEF_REDACTION_STATUS: &str = "paths_counts_subjects_only_no_content";
 pub const SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_brief_summary.v1";
 pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
@@ -151,6 +166,7 @@ pub struct SwarmBriefCollectOptions {
     pub workspace: PathBuf,
     pub max_recent_commits: usize,
     pub include_rch: bool,
+    pub include_adaptive: bool,
     pub enabled_sources: BTreeSet<SwarmBriefSourceKind>,
     pub agent_mail_snapshot_path: Option<PathBuf>,
     pub agent_inventory_only_connectors: Option<Vec<String>>,
@@ -164,6 +180,7 @@ impl SwarmBriefCollectOptions {
             workspace: workspace.into(),
             max_recent_commits: 8,
             include_rch: false,
+            include_adaptive: false,
             enabled_sources: default_swarm_brief_sources(),
             agent_mail_snapshot_path: None,
             agent_inventory_only_connectors: None,
@@ -262,6 +279,21 @@ pub struct SwarmBriefReport {
     /// empty so briefs without repeated misses keep their existing shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub knowledge_gaps: Vec<SwarmBriefKnowledgeGap>,
+    /// Optional SRR5 adaptive scheduling and speculative CASS pre-fetch report
+    /// (bd-16pwc.5). Included only when `--include-adaptive` is requested so
+    /// ordinary brief payloads keep their compact shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<SwarmBriefAdaptiveReport>,
+    /// Optional IW2 redaction-safe delta capsule summarizing what changed since
+    /// a prior swarm brief or support-bundle snapshot (bd-1zb7k.17.2). Included
+    /// only when `--since <PATH>` is supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<crate::core::swarm_brief_delta::SwarmBriefDeltaCapsule>,
+    /// Optional IW4 duplicate-work advisory joining pending verifications,
+    /// file reservations, and Beads claims (bd-1zb7k.17.4). Included when
+    /// `--fields full` or `--duplicate-work-input <PATH>` is supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_work: Option<crate::core::duplicate_work_detector::DuplicateWorkVerdict>,
 }
 
 /// Maximum query-miss audit rows scanned when assembling knowledge gaps. Bounds
@@ -278,6 +310,263 @@ pub struct SwarmBriefKnowledgeGap {
     pub query_hash: String,
     pub miss_count: u32,
     pub reasons: Vec<String>,
+}
+
+/// Compact SRR5 adaptive scheduling and speculative CASS pre-fetch report
+/// surfaced by `ee swarm brief --include-adaptive --json` (bd-16pwc.5).
+///
+/// Raw query histories, raw task text, and raw latency sample vectors are never
+/// included; agent identifiers are redacted with `redact_brief_text` before
+/// serialization.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAdaptiveReport {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub env_disabled: bool,
+    pub posture: &'static str,
+    pub config: SwarmBriefAdaptiveConfigSnapshot,
+    pub scheduler: SwarmBriefAdaptiveSchedulerSummary,
+    pub prefetch: SwarmBriefAdaptivePrefetchSummary,
+    pub degraded_codes: Vec<String>,
+    pub raw_history_included: bool,
+    pub raw_query_text_included: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAdaptiveConfigSnapshot {
+    pub enabled: bool,
+    pub sample_window: usize,
+    pub noisy_neighbor_p99_ms: u64,
+    pub noisy_neighbor_release_p99_ms: u64,
+    pub noisy_neighbor_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub prefetch_top_k: usize,
+    pub prefetch_similarity_threshold_bps: u32,
+    pub prefetch_budget_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAdaptiveSchedulerSummary {
+    pub schema: &'static str,
+    pub tracked_agent_count: usize,
+    pub active_backoff_count: usize,
+    pub agents: Vec<SwarmBriefAdaptiveAgentReport>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAdaptiveAgentReport {
+    pub agent_id: String,
+    pub outcome: AdaptiveSchedulerOutcome,
+    pub backoff_active: bool,
+    pub backoff_ms: u64,
+    pub sample_count: usize,
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub p99_ms: u64,
+    pub threshold_p99_ms: u64,
+    pub release_p99_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_code: Option<&'static str>,
+}
+
+/// Speculative CASS pre-fetch metrics rollup for `ee swarm brief --include-adaptive`
+/// (bd-16pwc.5 / bd-16pwc.7).
+///
+/// `hits` counts later context requests whose topic had been warmed by a prior
+/// speculative batch (`hit_semantics = "topic_warmed_before_later_context_request"`),
+/// not direct cache-served authority. `hits`, `misses`, and `budget_exceeded`
+/// depend on wall-clock warming completion and are listed in
+/// `volatile_counter_fields` so snapshot graders do not pin them to literals.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAdaptivePrefetchSummary {
+    pub schema: &'static str,
+    pub measured_against_revision: String,
+    pub hits: u64,
+    pub misses: u64,
+    pub attempts: u64,
+    pub hit_rate: f64,
+    pub hit_semantics: &'static str,
+    pub volatile_counter_fields: Vec<&'static str>,
+    pub candidates_emitted: u64,
+    pub budget_exceeded: u64,
+    pub history_too_short: u64,
+    pub stale_generation_drop: u64,
+    pub history_oversized: u64,
+    pub stale_corpus_revision_drop: u64,
+}
+
+impl Eq for SwarmBriefAdaptivePrefetchSummary {}
+
+impl SwarmBriefAdaptiveReport {
+    #[must_use]
+    pub fn from_models(
+        config: &SwarmAdaptiveConfig,
+        env_disabled: bool,
+        scheduler: &AdaptiveScheduler,
+        prefetch: &CassPrefetchMetrics,
+    ) -> Self {
+        let configured_enabled = config.enabled.unwrap_or(false);
+        let enabled = configured_enabled && !env_disabled && scheduler.config().enabled;
+        let scheduler_config = scheduler.config();
+        let prefetch_top_k = config
+            .prefetch_top_k
+            .unwrap_or(DEFAULT_PREFETCH_TOP_K as u64)
+            .clamp(1, MAX_PREFETCH_HISTORY as u64) as usize;
+        let similarity_threshold = config
+            .similarity_threshold
+            .filter(|score| score.is_finite())
+            .unwrap_or(DEFAULT_PREFETCH_MIN_SCORE)
+            .clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let prefetch_similarity_threshold_bps = (similarity_threshold * 10_000.0).round() as u32;
+        let prefetch_budget_ms = config
+            .prefetch_budget_ms
+            .unwrap_or(DEFAULT_PREFETCH_BUDGET.as_millis() as u64);
+
+        let mut agents = Vec::with_capacity(scheduler.agent_count());
+        let mut active_backoff_count = 0usize;
+        for (raw_agent_id, _state) in scheduler.agents() {
+            let decision = scheduler.decision_for(raw_agent_id);
+            let outcome = if enabled {
+                decision.outcome
+            } else {
+                AdaptiveSchedulerOutcome::Disabled
+            };
+            let backoff_active = outcome == AdaptiveSchedulerOutcome::Backoff;
+            if backoff_active {
+                active_backoff_count += 1;
+            }
+            agents.push(SwarmBriefAdaptiveAgentReport {
+                agent_id: redact_brief_text(raw_agent_id),
+                outcome,
+                backoff_active,
+                backoff_ms: if backoff_active {
+                    decision.backoff_ms
+                } else {
+                    0
+                },
+                sample_count: decision.percentiles.sample_count,
+                p50_ms: decision.percentiles.p50_ms,
+                p95_ms: decision.percentiles.p95_ms,
+                p99_ms: decision.percentiles.p99_ms,
+                threshold_p99_ms: decision.threshold_p99_ms,
+                release_p99_ms: decision.release_p99_ms,
+                degraded_code: if backoff_active {
+                    Some(ADAPTIVE_BACKOFF_APPLIED_CODE)
+                } else {
+                    None
+                },
+            });
+        }
+        agents.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+
+        let mut degraded_codes = Vec::new();
+        if active_backoff_count > 0 {
+            degraded_codes.push(ADAPTIVE_BACKOFF_APPLIED_CODE.to_owned());
+        }
+        if prefetch.budget_exceeded > 0 {
+            degraded_codes.push(CASS_PREFETCH_BUDGET_EXCEEDED_CODE.to_owned());
+        }
+        if prefetch.stale_generation_drop > 0 {
+            degraded_codes.push(CASS_PREFETCH_STALE_GENERATION_CODE.to_owned());
+        }
+        if prefetch.history_oversized > 0 {
+            degraded_codes.push(CASS_PREFETCH_HISTORY_OVERSIZED_CODE.to_owned());
+        }
+        if prefetch.stale_corpus_revision_drop > 0 {
+            degraded_codes.push(CASS_PREFETCH_STALE_CORPUS_REVISION_CODE.to_owned());
+        }
+        degraded_codes.sort();
+        degraded_codes.dedup();
+
+        let posture = if !enabled {
+            "disabled"
+        } else if active_backoff_count > 0 {
+            "backoff_active"
+        } else if !agents.is_empty() || prefetch.attempts() > 0 || prefetch.candidates_emitted > 0 {
+            "active"
+        } else {
+            "idle"
+        };
+
+        Self {
+            schema: SWARM_BRIEF_ADAPTIVE_SCHEMA_V1,
+            enabled,
+            env_disabled,
+            posture,
+            config: SwarmBriefAdaptiveConfigSnapshot {
+                enabled,
+                sample_window: scheduler_config.sample_window,
+                noisy_neighbor_p99_ms: scheduler_config.noisy_neighbor_p99_ms,
+                noisy_neighbor_release_p99_ms: scheduler_config.noisy_neighbor_release_p99_ms,
+                noisy_neighbor_backoff_ms: scheduler_config.noisy_neighbor_backoff_ms,
+                max_backoff_ms: scheduler_config.max_backoff_ms,
+                prefetch_top_k,
+                prefetch_similarity_threshold_bps,
+                prefetch_budget_ms,
+            },
+            scheduler: SwarmBriefAdaptiveSchedulerSummary {
+                schema: ADAPTIVE_SCHEDULER_SCHEMA_V1,
+                tracked_agent_count: agents.len(),
+                active_backoff_count,
+                agents,
+            },
+            prefetch: SwarmBriefAdaptivePrefetchSummary {
+                schema: CASS_PREFETCH_METRICS_SCHEMA_V1,
+                measured_against_revision: redact_brief_text(
+                    prefetch.measured_against_revision.as_str(),
+                ),
+                hits: prefetch.hits,
+                misses: prefetch.misses,
+                attempts: prefetch.attempts(),
+                hit_rate: (prefetch.hit_rate() * 10_000.0).round() / 10_000.0,
+                hit_semantics: SWARM_BRIEF_ADAPTIVE_HIT_SEMANTICS,
+                volatile_counter_fields: vec!["hits", "misses", "budgetExceeded"],
+                candidates_emitted: prefetch.candidates_emitted,
+                budget_exceeded: prefetch.budget_exceeded,
+                history_too_short: prefetch.history_too_short,
+                stale_generation_drop: prefetch.stale_generation_drop,
+                history_oversized: prefetch.history_oversized,
+                stale_corpus_revision_drop: prefetch.stale_corpus_revision_drop,
+            },
+            degraded_codes,
+            raw_history_included: false,
+            raw_query_text_included: false,
+        }
+    }
+
+    #[must_use]
+    pub fn for_workspace(workspace: &Path) -> Self {
+        let config = match crate::core::config_surface::merged_workspace_config(workspace) {
+            Ok(merged) => merged.values.swarm.adaptive,
+            Err(_) => SwarmAdaptiveConfig::default(),
+        };
+        let env_disabled = read_env_var_or_default(EnvVar::DisableAdaptive).is_some_and(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+        let effective_enabled = config.enabled.unwrap_or(false) && !env_disabled;
+        let scheduler_config = AdaptiveSchedulerConfig::new(
+            effective_enabled,
+            DEFAULT_ADAPTIVE_SAMPLE_WINDOW,
+            config
+                .noisy_neighbor_p99_ms
+                .unwrap_or(DEFAULT_ADAPTIVE_NOISY_P99_MS),
+            config
+                .noisy_neighbor_backoff_ms
+                .unwrap_or(DEFAULT_ADAPTIVE_BACKOFF_MS),
+        );
+        let scheduler = AdaptiveScheduler::new(scheduler_config);
+        let prefetch = CassPrefetchMetrics::new();
+        Self::from_models(&config, env_disabled, &scheduler, &prefetch)
+    }
 }
 
 impl SwarmBriefReport {
@@ -313,6 +602,9 @@ impl SwarmBriefReport {
             degraded: Vec::new(),
             workspace_hygiene: None,
             knowledge_gaps: Vec::new(),
+            adaptive: None,
+            delta: None,
+            duplicate_work: None,
         }
     }
 
@@ -3181,6 +3473,12 @@ pub(crate) fn collect_swarm_brief_with_agent_mail_binding_and_connection(
         || ToolchainSourceAdapter { runner }.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
+    if options.include_adaptive {
+        attach_adaptive_report(
+            &mut report,
+            SwarmBriefAdaptiveReport::for_workspace(&options.workspace),
+        );
+    }
     attach_knowledge_gaps(&mut report, &options.workspace, shared_connection);
     // bd-1eq3l.6: embed the compact workspace-hygiene summary so the swarm
     // brief surfaces counts/dirtyPathCount/needsHumanReviewTop/coordination
@@ -3323,6 +3621,34 @@ fn attach_qos_resource_pressure(report: &mut SwarmBriefReport, workspace: &Path)
                 Some(degradation.repair.clone()),
             )
         }));
+}
+
+pub fn attach_adaptive_report(report: &mut SwarmBriefReport, adaptive: SwarmBriefAdaptiveReport) {
+    if adaptive.scheduler.active_backoff_count > 0 {
+        report.degraded.push(SwarmBriefDegradation::info(
+            SwarmBriefSourceKind::Qos,
+            ADAPTIVE_BACKOFF_APPLIED_CODE,
+            format!(
+                "Adaptive noisy-neighbor backoff is active for {} agent(s) above threshold {}ms p99.",
+                adaptive.scheduler.active_backoff_count,
+                adaptive.config.noisy_neighbor_p99_ms
+            ),
+            Some("ee swarm brief --include-adaptive --json".to_string()),
+        ));
+    }
+    if adaptive.prefetch.budget_exceeded > 0 {
+        report.degraded.push(SwarmBriefDegradation::info(
+            SwarmBriefSourceKind::Qos,
+            CASS_PREFETCH_BUDGET_EXCEEDED_CODE,
+            format!(
+                "Speculative CASS pre-fetch exceeded its {}ms slot budget {} time(s); retrieval correctness is unaffected.",
+                adaptive.config.prefetch_budget_ms,
+                adaptive.prefetch.budget_exceeded
+            ),
+            Some("ee swarm brief --include-adaptive --json".to_string()),
+        ));
+    }
+    report.adaptive = Some(adaptive);
 }
 
 #[cfg(test)]
@@ -10413,7 +10739,7 @@ fn ratio_bps_field(value: &Value, keys: &[&str], percent_units: bool) -> Option<
     })
 }
 
-fn redact_brief_text(input: &str) -> String {
+pub(crate) fn redact_brief_text(input: &str) -> String {
     let secret_redacted = redact_secret_like_content(input).content;
     redact_absolute_path_like_segments(&secret_redacted)
 }
@@ -15478,6 +15804,177 @@ mod source_run_adapter_tests {
         assert_eq!(
             request.tail_bytes_max,
             SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn swarm_brief_adaptive_report_disabled_and_enabled_empty_contracts() {
+        let mut default_report = SwarmBriefReport::empty(Path::new("/tmp/ws"));
+        default_report.finalize();
+        let default_json = serde_json::to_value(&default_report).expect("serialize default brief");
+        assert!(
+            default_json.get("adaptive").is_none(),
+            "adaptive block must be omitted unless --include-adaptive is requested"
+        );
+
+        let disabled_cfg = SwarmAdaptiveConfig {
+            enabled: Some(false),
+            prefetch_top_k: Some(3),
+            prefetch_budget_ms: Some(50),
+            similarity_threshold: Some(0.10),
+            noisy_neighbor_p99_ms: Some(200),
+            noisy_neighbor_backoff_ms: Some(25),
+        };
+        let disabled_scheduler = AdaptiveScheduler::new(AdaptiveSchedulerConfig::new(
+            false,
+            DEFAULT_ADAPTIVE_SAMPLE_WINDOW,
+            200,
+            25,
+        ));
+        let empty_prefetch = CassPrefetchMetrics::new();
+        let disabled_adaptive = SwarmBriefAdaptiveReport::from_models(
+            &disabled_cfg,
+            false,
+            &disabled_scheduler,
+            &empty_prefetch,
+        );
+        assert_eq!(disabled_adaptive.schema, SWARM_BRIEF_ADAPTIVE_SCHEMA_V1);
+        assert!(!disabled_adaptive.enabled);
+        assert!(!disabled_adaptive.env_disabled);
+        assert_eq!(disabled_adaptive.posture, "disabled");
+        assert_eq!(disabled_adaptive.scheduler.tracked_agent_count, 0);
+        assert_eq!(disabled_adaptive.scheduler.active_backoff_count, 0);
+        assert!(disabled_adaptive.degraded_codes.is_empty());
+
+        let enabled_cfg = SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..disabled_cfg
+        };
+        let enabled_scheduler = AdaptiveScheduler::new(AdaptiveSchedulerConfig::new(
+            true,
+            DEFAULT_ADAPTIVE_SAMPLE_WINDOW,
+            200,
+            25,
+        ));
+        let enabled_empty = SwarmBriefAdaptiveReport::from_models(
+            &enabled_cfg,
+            false,
+            &enabled_scheduler,
+            &empty_prefetch,
+        );
+        assert!(enabled_empty.enabled);
+        assert_eq!(enabled_empty.posture, "idle");
+        assert_eq!(enabled_empty.prefetch.attempts, 0);
+        assert_eq!(
+            enabled_empty.prefetch.hit_semantics,
+            SWARM_BRIEF_ADAPTIVE_HIT_SEMANTICS
+        );
+        assert_eq!(
+            enabled_empty.prefetch.volatile_counter_fields,
+            vec!["hits", "misses", "budgetExceeded"]
+        );
+
+        let env_disabled = SwarmBriefAdaptiveReport::from_models(
+            &enabled_cfg,
+            true,
+            &enabled_scheduler,
+            &empty_prefetch,
+        );
+        assert!(!env_disabled.enabled);
+        assert!(env_disabled.env_disabled);
+        assert_eq!(env_disabled.posture, "disabled");
+    }
+
+    #[test]
+    fn swarm_brief_adaptive_report_surfaces_prefetch_and_active_backoff_metrics() {
+        let cfg = SwarmAdaptiveConfig {
+            enabled: Some(true),
+            prefetch_top_k: Some(4),
+            prefetch_budget_ms: Some(40),
+            similarity_threshold: Some(0.25),
+            noisy_neighbor_p99_ms: Some(200),
+            noisy_neighbor_backoff_ms: Some(25),
+        };
+        let mut scheduler = AdaptiveScheduler::new(AdaptiveSchedulerConfig::new(true, 8, 200, 25));
+        for ms in [18u64, 22, 24, 30] {
+            scheduler.observe_latency_ms("agent-fast", ms);
+        }
+        for ms in [210u64, 240, 320, 410] {
+            scheduler.observe_latency_ms("agent-noisy", ms);
+        }
+
+        let mut prefetch = CassPrefetchMetrics::new();
+        prefetch.set_measured_against_revision(crate::models::CorpusRevision::new("rev_v42"));
+        prefetch.record_candidate();
+        prefetch.record_candidate();
+        prefetch.record_candidate();
+        prefetch.record_hit();
+        prefetch.record_hit();
+        prefetch.record_miss();
+        prefetch.record_budget_exceeded();
+        prefetch.record_stale_generation_drop();
+
+        let adaptive = SwarmBriefAdaptiveReport::from_models(&cfg, false, &scheduler, &prefetch);
+        assert_eq!(adaptive.posture, "backoff_active");
+        assert_eq!(adaptive.config.prefetch_top_k, 4);
+        assert_eq!(adaptive.config.prefetch_similarity_threshold_bps, 2500);
+        assert_eq!(adaptive.config.prefetch_budget_ms, 40);
+        assert_eq!(adaptive.scheduler.tracked_agent_count, 2);
+        assert_eq!(adaptive.scheduler.active_backoff_count, 1);
+        assert_eq!(adaptive.scheduler.agents[0].agent_id, "agent-fast");
+        assert!(!adaptive.scheduler.agents[0].backoff_active);
+        assert_eq!(adaptive.scheduler.agents[1].agent_id, "agent-noisy");
+        assert!(adaptive.scheduler.agents[1].backoff_active);
+        assert!(adaptive.scheduler.agents[1].backoff_ms >= 25);
+        assert_eq!(adaptive.scheduler.agents[1].p99_ms, 410);
+        assert_eq!(
+            adaptive.scheduler.agents[1].degraded_code,
+            Some(ADAPTIVE_BACKOFF_APPLIED_CODE)
+        );
+        assert_eq!(adaptive.prefetch.measured_against_revision, "rev_v42");
+        assert_eq!(adaptive.prefetch.candidates_emitted, 3);
+        assert_eq!(adaptive.prefetch.attempts, 3);
+        assert_eq!(adaptive.prefetch.stale_generation_drop, 1);
+        assert!(
+            adaptive
+                .degraded_codes
+                .contains(&ADAPTIVE_BACKOFF_APPLIED_CODE.to_owned())
+        );
+        assert!(
+            adaptive
+                .degraded_codes
+                .contains(&CASS_PREFETCH_BUDGET_EXCEEDED_CODE.to_owned())
+        );
+
+        let mut report = SwarmBriefReport::empty(Path::new("/tmp/ws"));
+        attach_adaptive_report(&mut report, adaptive);
+        report.finalize();
+        let codes: Vec<&str> = report.degraded.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&ADAPTIVE_BACKOFF_APPLIED_CODE));
+        assert!(codes.contains(&CASS_PREFETCH_BUDGET_EXCEEDED_CODE));
+    }
+
+    #[test]
+    fn swarm_brief_adaptive_report_redacts_secret_bearing_agent_ids_and_excludes_raw_history() {
+        let cfg = SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..SwarmAdaptiveConfig::default()
+        };
+        let mut scheduler = AdaptiveScheduler::new(AdaptiveSchedulerConfig::new(true, 4, 200, 25));
+        let secret_agent = "agent:sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
+        scheduler.observe_latency_ms(secret_agent, 55);
+        let prefetch = CassPrefetchMetrics::new();
+        let adaptive = SwarmBriefAdaptiveReport::from_models(&cfg, false, &scheduler, &prefetch);
+        let serialized = serde_json::to_string(&adaptive).expect("serialize adaptive report");
+        assert!(!adaptive.raw_history_included);
+        assert!(!adaptive.raw_query_text_included);
+        assert!(
+            !serialized.contains("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"),
+            "secret token in agent id must be redacted: {serialized}"
+        );
+        assert!(
+            !serialized.contains("latenciesMs"),
+            "raw latency vector must not be dumped in adaptive JSON: {serialized}"
         );
     }
 }

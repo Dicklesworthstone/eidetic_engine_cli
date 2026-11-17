@@ -674,16 +674,12 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     }
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    // 1 remaining after bd-iqg34 and bd-reality-core-convergence-1azkt.11
-    // restored "Lexical Relevance Contract Harness Guard" and
-    // "Lexical Relevance Contract (tracked red)" to REQUIRED:
-    //   "ee doctor Safety Harness (bd-21joy)" -> bd-5l8yh
-    //       red because the stage passes no ee binary, and every sub-harness
-    //       now exits 3 SKIPPED instead of passing having run nothing
-    //       (bd-2oh15 strand 4, option a). Drops back by one when bd-5l8yh
-    //       wires the verified binary in and the stage is green for real.
+    // 0 remaining after bd-iqg34, bd-reality-core-convergence-1azkt.11, and
+    // bd-5l8yh restored "Lexical Relevance Contract Harness Guard",
+    // "Lexical Relevance Contract (tracked red)", and
+    // "ee doctor Safety Harness (bd-21joy)" to REQUIRED.
     assert_eq!(
-        non_required, 1,
+        non_required, 0,
         "stages are declared non-required. That may be correct, but it is a \
          deliberate act: update this count in the same commit so the excused \
          population stays visible in review."

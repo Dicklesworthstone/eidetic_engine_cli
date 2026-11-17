@@ -3827,7 +3827,24 @@ fn assess_memory_evidence_freshness_inner(
             };
             let source_text = match read_result {
                 Ok(Some(contents)) => match span {
-                    Some(_) => extract_line_span(&contents, *span).unwrap_or_default(),
+                    Some(span_val) => match extract_line_span(&contents, Some(*span_val)) {
+                        Some(excerpt) => excerpt,
+                        None => {
+                            return EvidenceFreshness {
+                                status: EvidenceFreshnessStatus::ChangedSource,
+                                provenance_uri: Some(canonical_uri),
+                                detail: format!(
+                                    "Referenced provenance file {} does not contain line span #{}.",
+                                    source_path.display(),
+                                    span_val.fragment()
+                                ),
+                                repair: Some(
+                                    "Inspect the source, then re-remember or revise this memory if needed; rebuild the index if the remembered content changes."
+                                        .to_owned(),
+                                ),
+                            };
+                        }
+                    },
                     None => contents,
                 },
                 Ok(None) => {
@@ -15479,6 +15496,26 @@ mod tests {
             changed.status,
             EvidenceFreshnessStatus::ChangedSource,
             "changed file span",
+        )?;
+
+        let out_of_bounds_span = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://source.md#L10-L12".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            out_of_bounds_span.status,
+            EvidenceFreshnessStatus::ChangedSource,
+            "out-of-bounds file span status",
+        )?;
+        ensure(
+            out_of_bounds_span
+                .detail
+                .contains("does not contain line span #L10-12"),
+            true,
+            "out-of-bounds file span detail",
         )?;
 
         let missing = assess_memory_evidence_freshness(

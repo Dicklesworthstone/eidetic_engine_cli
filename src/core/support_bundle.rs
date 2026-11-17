@@ -2288,6 +2288,37 @@ fn profile_evidence_json(workspace: &Path) -> String {
     } else {
         "host resource probe recommendation"
     };
+    let map_resource_profile = |name: &str| match name {
+        "constrained" => crate::shadow::ResourceOperatingProfile::Constrained,
+        "portable" => crate::shadow::ResourceOperatingProfile::Portable,
+        "swarm" => crate::shadow::ResourceOperatingProfile::Swarm,
+        _ => crate::shadow::ResourceOperatingProfile::Workstation,
+    };
+    let active_resource_profile = map_resource_profile(active_profile.as_str());
+    let recommended_resource_profile = map_resource_profile(recommendation.recommended.as_str());
+    let calibration_posture = match host_calibration.calibration_freshness.as_str() {
+        "fresh" => crate::shadow::ResourceHostCalibrationPosture::Fresh,
+        "stale" => crate::shadow::ResourceHostCalibrationPosture::Stale,
+        "partial" => crate::shadow::ResourceHostCalibrationPosture::Partial,
+        "synthetic_only" => crate::shadow::ResourceHostCalibrationPosture::SyntheticOnly,
+        "contradictory" => crate::shadow::ResourceHostCalibrationPosture::Contradictory,
+        "missing" => crate::shadow::ResourceHostCalibrationPosture::Missing,
+        _ => crate::shadow::ResourceHostCalibrationPosture::Fresh,
+    };
+    let mut admission_input = crate::shadow::ResourceAdmissionInput::default();
+    admission_input.requested_profile = Some(active_resource_profile);
+    admission_input.effective_profile = active_resource_profile;
+    admission_input.host_calibration = calibration_posture;
+    let thermostat_input = crate::shadow::ResourceProfileThermostatInput {
+        current_profile: active_resource_profile,
+        host_recommended_profile: recommended_resource_profile,
+        host_calibration: calibration_posture,
+        ..crate::shadow::ResourceProfileThermostatInput::default()
+    };
+    let resource_admission = crate::shadow::build_resource_admission_support_evidence(
+        admission_input,
+        &thermostat_input,
+    );
 
     stable_json(&json!({
         "schema": "ee.support_bundle.profile_evidence.v1",
@@ -2301,6 +2332,7 @@ fn profile_evidence_json(workspace: &Path) -> String {
             "reasons": recommendation.reasons,
         },
         "hostCalibration": host_calibration,
+        "resourceAdmission": resource_admission,
         "probe": probe,
         "budgets": budgets,
         "verificationRecipe": verification_recipe,
@@ -2326,6 +2358,12 @@ fn profile_evidence_json(workspace: &Path) -> String {
                 "sourceKind": "host_calibration",
                 "source": super::budget_delta_recommender::HOST_CALIBRATION_POSTURE_SCHEMA_V1,
                 "redaction": "label_only_paths_presence_only_env_no_raw_values",
+            },
+            {
+                "field": "resourceAdmission",
+                "sourceKind": "resource_admission",
+                "source": crate::shadow::RESOURCE_ADMISSION_SUPPORT_EVIDENCE_SCHEMA_V1,
+                "redaction": crate::shadow::RESOURCE_ADMISSION_SUPPORT_REDACTION_STATUS,
             },
             {
                 "field": "probe",
@@ -12751,6 +12789,7 @@ mod tests {
         for required in [
             "profile.activeProfile",
             "profile.recommendedProfile",
+            "resourceAdmission",
             "probe",
             "budgets",
             "verificationRecipe",
@@ -12763,6 +12802,16 @@ mod tests {
                 "profile evidence provenance must include {required}"
             );
         }
+        assert_eq!(
+            value.pointer("/resourceAdmission/schema"),
+            Some(&json!(
+                crate::shadow::RESOURCE_ADMISSION_SUPPORT_EVIDENCE_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            value.pointer("/resourceAdmission/thermostat/schema"),
+            Some(&json!(crate::shadow::RESOURCE_PROFILE_THERMOSTAT_SCHEMA_V1))
+        );
 
         Ok(())
     }

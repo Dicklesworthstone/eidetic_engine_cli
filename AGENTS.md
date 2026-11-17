@@ -1051,6 +1051,15 @@ release:
 - `ee-{target}.tar.xz.minisig` — **this is the signature that actually ships.**
   v0.18.0 and v0.17.0 each carry 7 (one per target archive, plus
   `SHA256SUMS.minisig`); v0.16.0 carries none.
+- `release-probe-{target}.json` — **`ee.release_probe.v1` black-box execution
+  capture (`scripts/release_binary_probe.sh`)**, one per target where the probe
+  runs natively (or labelled `compile_only` where cross-compiled/Windows). Before
+  uploading release assets, generate each native target capture with
+  `./scripts/release_binary_probe.sh --archive <dir>/ee-{target}.tar.xz --output <dir>/release-probe-{target}.json --json`
+  and gate the staging directory with
+  `./scripts/release_binary_probe.sh --verify-release-dir <dir>` so a missing,
+  failing, checksum-mismatched, or target-triple-mismatched capture fails the
+  hand-cut release flow before `gh release upload` (`bd-reality-core-convergence-1azkt.68`).
 - `SHA256SUMS`, and `SHA256SUMS.minisig` since v0.17.0
 - `install.sh`, `install.ps1`
 
@@ -1307,6 +1316,34 @@ Only a matching `safeToClaim=true` / `verdict=safe_to_claim` claim gate may
 unlock the Beads claim. Treat every other verdict, tracker-integrity downgrade,
 Agent Mail semantic-readiness failure, or RCH verification blocker as a stop
 condition for auto-claiming.
+
+When invoking `bv --robot-next --format json` directly on a large tracker, check
+its liveness/degraded-output envelope (`actionable`, `claim_command`,
+`degraded[]`, `phase2_ready`) and distinguish five postures:
+- **No safe actionable queue**: `actionable: false`, `claim_command: null`, and
+  `degraded[].code == "no_actionable_recommendation"`; confirm with
+  `scripts/br_retry.sh actionable --json` before stopping or escalating.
+- **Partial graph analysis**: `--robot-insights` may report `status.Cycles.state
+  == "skipped"` (`reason: "graph too large (>2000 nodes)"`) while `phase2_ready`
+  remains `true`; treat cycle-sensitive rankings as partial and verify leaves
+  against `scripts/br_retry.sh actionable --json`.
+- **Command timeout or empty stdout**: an exit `124` or 0-byte output from an
+  older or wedged `bv` binary is never a claimable-work signal; fall back to
+  `scripts/br_retry.sh actionable --json` and guarded wrappers (`ee swarm brief`
+  / `ee swarm work-packet`).
+- **Stale source projection**: when `bv` recommends an ID that is absent from
+  `scripts/br_retry.sh actionable --json` (e.g., unflushed DB vs JSONL drift),
+  suppress `claim_command` and treat `scripts/br_retry.sh actionable --json` as
+  authoritative.
+- **Genuine safe recommendation**: `actionable: true`, `degraded: null`, the
+  candidate appears in `scripts/br_retry.sh actionable --json`, the work-packet
+  `--claim-gate` returns `safeToClaim=true`, and Agent Mail file reservations
+  succeed before any edit.
+
+When reporting BV liveness degradation in Beads or Agent Mail, record: resolved
+`bv` path, `bv --version`, SHA-256 digest, `actionable`, `claim_command`
+presence, `degraded[].code`, `phase2_ready`, and the `scripts/br_retry.sh
+actionable --json` count.
 
 If the installed `ee` binary rejects `--claim-gate` or `--candidate`, it is
 stale relative to this source contract. Stop and coordinate instead of running

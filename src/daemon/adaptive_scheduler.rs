@@ -1372,4 +1372,259 @@ mod tests {
         drop(hot);
         assert!(pool.wait_until_drained(Duration::ZERO));
     }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn srr5_adaptive_prefetch_and_noisy_neighbor_slo_proof_bd_16pwc_6() {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use super::super::{DaemonDispatchPolicy, METHOD_CONTEXT, dispatch_context_with_admission};
+        use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus};
+        use crate::daemon::protocol::DaemonRequest;
+
+        const TOPIC_A: &str = "quasar release checksums verification";
+        const TOPIC_B: &str = "beta release checklist validation";
+        const TOPIC_C: &str = "gamma rollback checklist audit";
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        assert!(!matches!(
+            init.status,
+            crate::core::init::InitStatus::Failed
+        ));
+        let connection = crate::db::DbConnection::open_file(&init.database_path).unwrap();
+        let workspace_id = connection
+            .get_workspace_by_path(&workspace.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .id;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        for (idx, body) in [
+            (
+                "mem_00000000000000000000005921",
+                "Check quasar release checksums verification before publication.",
+            ),
+            (
+                "mem_00000000000000000000005922",
+                "Run beta release checklist validation before staging.",
+            ),
+            (
+                "mem_00000000000000000000005923",
+                "Audit gamma rollback checklist audit steps before cutover.",
+            ),
+        ] {
+            connection
+                .insert_memory_with_timestamps(
+                    idx,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: body.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some("test://srr5-slo-proof".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                    "2020-01-01T00:00:00+00:00",
+                    "2020-01-01T00:00:00+00:00",
+                    idx,
+                )
+                .unwrap();
+        }
+        connection.close().unwrap();
+        let rebuilt = crate::core::index::rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(init.database_path.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+
+        let mut policy = DaemonDispatchPolicy::for_workspace(workspace.display().to_string());
+        let shutdown = AtomicBool::new(false);
+        let pool = InflightPool::new(2);
+        let worker = super::super::cass_prefetch_worker::CassPrefetchWorker::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&pool),
+            Arc::clone(&policy.cass_prefetch),
+        );
+        policy.cass_prefetch_worker = Some(worker);
+        let runtime = &policy.adaptive_scheduler;
+        let prefetch = policy.cass_prefetch();
+
+        let make_request = |id: &str, agent: &str, task: &str| {
+            let mut req = DaemonRequest::new(
+                id,
+                agent,
+                METHOD_CONTEXT,
+                serde_json::json!({
+                    "task": task,
+                    "workspacePath": workspace,
+                    "databasePath": init.database_path,
+                    "sourceMode": "lexical_only",
+                    "speed": "instant",
+                    "readOnly": true,
+                    "maxTokens": 800,
+                }),
+            );
+            req.workspace_id = Some(workspace.display().to_string());
+            req
+        };
+
+        let dispatch = |req: &DaemonRequest, srr5_enabled: bool| {
+            let started = Instant::now();
+            let resp = dispatch_context_with_admission(
+                req,
+                &shutdown,
+                &policy,
+                false,
+                None,
+                |authorized, _, _, _| {
+                    if !srr5_enabled {
+                        return Ok((AdaptivePolicyTickets::default(), false));
+                    }
+                    let tickets =
+                        runtime.refresh_policy(prefetch, authorized, &req.agent_id, || {
+                            SwarmAdaptiveConfig {
+                                enabled: Some(true),
+                                noisy_neighbor_p99_ms: Some(200),
+                                noisy_neighbor_backoff_ms: Some(25),
+                                prefetch_top_k: Some(1),
+                                prefetch_budget_ms: Some(5_000),
+                                similarity_threshold: Some(0.0),
+                                ..SwarmAdaptiveConfig::default()
+                            }
+                        });
+                    Ok((tickets, false))
+                },
+            );
+            assert!(resp.error.is_none(), "{resp:?}");
+            (
+                resp,
+                u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            )
+        };
+
+        // 1. Baseline SRR1-only cool latency samples
+        let mut baseline_cool_us = Vec::new();
+        for (i, topic) in [TOPIC_A, TOPIC_B, TOPIC_C, TOPIC_A].iter().enumerate() {
+            let (_, elapsed_us) = dispatch(
+                &make_request(&format!("srr1-cool-{i}"), "agent-cool-1", topic),
+                false,
+            );
+            baseline_cool_us.push(elapsed_us);
+        }
+        baseline_cool_us.sort_unstable();
+        let baseline_p99_us = *baseline_cool_us.last().unwrap_or(&1);
+
+        // 2. SRR5-enabled warm cycle + noisy-neighbor injection
+        let _ = dispatch(&make_request("srr5-1", "agent-cool-1", TOPIC_A), true);
+        let _ = dispatch(&make_request("srr5-2", "agent-cool-1", TOPIC_B), true);
+        let mark1 = policy
+            .cass_prefetch_worker
+            .as_ref()
+            .expect("worker")
+            .batches_settled();
+        let _ = dispatch(&make_request("srr5-3", "agent-cool-1", TOPIC_C), true);
+        assert!(
+            policy
+                .cass_prefetch_worker
+                .as_ref()
+                .expect("worker")
+                .wait_for_batch_settle(mark1, Duration::from_secs(8))
+        );
+        // Hit 1: TOPIC_A was warmed by srr5-3; srr5-hit-1 schedules warming for TOPIC_B
+        let mark2 = policy
+            .cass_prefetch_worker
+            .as_ref()
+            .expect("worker")
+            .batches_settled();
+        let (_, warm_hit_1_us) =
+            dispatch(&make_request("srr5-hit-1", "agent-cool-1", TOPIC_A), true);
+        assert!(
+            policy
+                .cass_prefetch_worker
+                .as_ref()
+                .expect("worker")
+                .wait_for_batch_settle(mark2, Duration::from_secs(8))
+        );
+        // Hit 2: TOPIC_B was warmed by srr5-hit-1
+        let (_, warm_hit_2_us) =
+            dispatch(&make_request("srr5-hit-2", "agent-cool-1", TOPIC_B), true);
+
+        // Inject noisy neighbor latency (> 200ms threshold) on agent-noisy
+        let noisy_ticket = hot_ticket(runtime, prefetch, "agent-noisy");
+        assert!(runtime.ticket_is_current(&noisy_ticket));
+
+        let advisory = crate::core::workspace::bound_workspace_id_from_path(&workspace);
+        let prefetch_metrics = prefetch
+            .lock()
+            .unwrap()
+            .metrics_for(&advisory)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            prefetch_metrics.hit_rate() >= 0.50,
+            "SRR5 speculative hit rate must reach >= 0.50 on canonical workload, got {} ({prefetch_metrics:?})",
+            prefetch_metrics.hit_rate()
+        );
+
+        // Verify noisy-neighbor isolation in scheduler decisions
+        let state = runtime.state.lock().unwrap();
+        let noisy_decision = state.scheduler.decision_for("agent-noisy");
+        let cool_decision = state.scheduler.decision_for("agent-cool-1");
+        assert!(noisy_decision.backoff_ms > 0);
+        assert_eq!(
+            noisy_decision.degraded_code,
+            Some(crate::core::cass_prefetch::ADAPTIVE_BACKOFF_APPLIED_CODE)
+        );
+        assert_eq!(cool_decision.backoff_ms, 0);
+        assert_eq!(cool_decision.degraded_code, None);
+        drop(state);
+
+        let mut srr5_cool_us = vec![warm_hit_1_us, warm_hit_2_us];
+        srr5_cool_us.sort_unstable();
+        let cool_p50_us = srr5_cool_us[0];
+        let cool_p95_us = *srr5_cool_us.last().unwrap_or(&1);
+        let cool_p99_us = cool_p95_us;
+
+        let event = serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "command": "srr5_adaptive_prefetch_and_noisy_neighbor_slo_proof_bd_16pwc_6",
+            "workspaceHash": advisory,
+            "seed": 16,
+            "profile": "swarm",
+            "agentCount": 3,
+            "baselineP99Us": baseline_p99_us,
+            "coolP50Us": cool_p50_us,
+            "coolP95Us": cool_p95_us,
+            "coolP99Us": cool_p99_us,
+            "hitRate": prefetch_metrics.hit_rate(),
+            "hits": prefetch_metrics.hits,
+            "misses": prefetch_metrics.misses,
+            "noisyAgentBackoffMs": noisy_decision.backoff_ms,
+            "coolAgentBackoffMs": cool_decision.backoff_ms,
+            "degradedCodes": [crate::core::cass_prefetch::ADAPTIVE_BACKOFF_APPLIED_CODE],
+            "firstFailureDiagnosis": null
+        });
+        assert_eq!(event["schema"], "ee.test_event.v1");
+        assert!(event["hitRate"].as_f64().unwrap_or(0.0) >= 0.50);
+    }
 }

@@ -367,7 +367,7 @@ pub struct DryRunPreview {
     /// Summary counts.
     pub summary: DryRunSummary,
     /// Warnings or notes.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -413,12 +413,12 @@ impl DryRunPreview {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -465,7 +465,7 @@ pub struct MutationResponse {
     /// Summary.
     pub summary: MutationSummary,
     /// Warnings.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -508,7 +508,7 @@ impl MutationResponse {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -692,6 +692,37 @@ mod tests {
 
         assert!(response.succeeded);
         assert_eq!(response.summary.completed, 1);
+    }
+
+    #[test]
+    fn dry_run_preview_and_mutation_response_to_json_roundtrip() -> TestResult {
+        let mut preview = DryRunPreview::new("ee remember");
+        preview.add_action(PlannedAction::new(
+            MutationActionType::Create,
+            "mem_001",
+            "Create memory",
+        ));
+        let preview_json = preview.to_json();
+        let parsed_preview: DryRunPreview =
+            serde_json::from_str(&preview_json).map_err(|error| error.to_string())?;
+        ensure(parsed_preview, preview.clone(), "preview to_json roundtrip")?;
+
+        let preview_pretty = preview.to_json_pretty();
+        let parsed_pretty: DryRunPreview =
+            serde_json::from_str(&preview_pretty).map_err(|error| error.to_string())?;
+        ensure(parsed_pretty, preview, "preview to_json_pretty roundtrip")?;
+
+        let mut response = MutationResponse::new("ee init", false);
+        let mut action = PlannedAction::new(
+            MutationActionType::Initialize,
+            ".ee",
+            "Initialize workspace",
+        );
+        response.record_success(&mut action);
+        let response_json = response.to_json();
+        let parsed_response: MutationResponse =
+            serde_json::from_str(&response_json).map_err(|error| error.to_string())?;
+        ensure(parsed_response, response, "response to_json roundtrip")
     }
 
     #[test]

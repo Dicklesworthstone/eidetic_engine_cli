@@ -519,7 +519,12 @@ fn convert_raw_claim(
             "missing claim title at claims[{claim_index}]"
         )));
     }
-    let description = raw_claim.description.or(statement).unwrap_or_default();
+    let description = raw_claim
+        .description
+        .or(statement)
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| title.trim().to_owned());
     let status = parse_claim_status(raw_claim.status.as_deref(), claim_index)?;
     let frequency = parse_verification_frequency(raw_claim.frequency.as_deref(), claim_index)?;
     let policy_id = parse_optional_policy_id(raw_claim.policy_id.as_deref(), claim_index)?;
@@ -766,8 +771,10 @@ fn parse_claim_manifest_json(input: &str) -> Result<ParsedManifest, ClaimParseEr
 
     let mut seen_paths = HashSet::new();
     let mut artifacts = Vec::new();
-    for (artifact_index, raw_artifact) in raw.artifacts.unwrap_or_default().into_iter().enumerate()
-    {
+    let raw_artifacts = raw
+        .artifacts
+        .ok_or_else(|| ClaimParseError::new("manifest.json must have an artifacts array"))?;
+    for (artifact_index, raw_artifact) in raw_artifacts.into_iter().enumerate() {
         let artifact = convert_raw_manifest_artifact(artifact_index, raw_artifact)?;
         validate_artifact_entry(&artifact.path, &artifact.blake3_hash, &mut seen_paths)
             .map_err(|error| ClaimParseError::new(error.to_string()))?;

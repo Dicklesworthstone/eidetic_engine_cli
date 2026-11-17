@@ -9329,6 +9329,7 @@ fn lexical_generation_after_producer_change(
 
 fn producer_change_lexical_degradations(
     error: &SearchError,
+    fast_embedder: Option<&dyn crate::search::Embedder>,
     degraded: &mut Vec<SearchDegradation>,
 ) {
     degraded.push(SearchDegradation::incompatible_index(&error.to_string()));
@@ -9337,6 +9338,15 @@ fn producer_change_lexical_degradations(
         SearchSourceMode::LexicalOnly,
         "stored vectors use a different embedding producer; the complete lexical generation was independently verified against the source snapshot",
     ));
+    if fast_embedder.is_some_and(|embedder| !embedder.is_semantic())
+        && !degraded
+            .iter()
+            .any(|existing| existing.code == "embed_model_unavailable")
+    {
+        let reason = embed_model_unavailable_reason_from_env()
+            .unwrap_or_else(|| HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON.to_owned());
+        degraded.push(SearchDegradation::embed_model_unavailable(&reason));
+    }
 }
 
 fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
@@ -11141,7 +11151,11 @@ async fn run_search_inner_with_performance(
             source_snapshot.is_some(),
         );
     if let Some(error) = &producer_fallback {
-        producer_change_lexical_degradations(error, &mut degraded);
+        producer_change_lexical_degradations(
+            error,
+            fast_embedder_override.as_deref(),
+            &mut degraded,
+        );
     }
     if producer_selection_error.is_some() {
         // The stale advisory promises lexical fallback results. A refused
@@ -12143,7 +12157,11 @@ async fn run_diag_search_in_snapshot(
             read_connection.is_some(),
         );
     if let Some(error) = &producer_fallback {
-        producer_change_lexical_degradations(error, &mut degraded);
+        producer_change_lexical_degradations(
+            error,
+            fast_embedder_override.as_deref(),
+            &mut degraded,
+        );
     }
     // Ordinary search only needs an explicit freshness object when degraded.
     // Diagnostics must also identify the healthy generation actually selected,

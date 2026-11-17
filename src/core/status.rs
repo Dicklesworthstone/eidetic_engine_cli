@@ -5757,14 +5757,27 @@ fn gather_memory_health_with_connection(
             );
         }
     };
-    let access_times = connection
-        .list_audit_entries(Some(&workspace_id), None)
-        .map(|entries| memory_access_timestamp_map(&entries))
-        .unwrap_or_default();
+    let mut degradations = Vec::new();
+    let access_times = if memories.is_empty() {
+        BTreeMap::new()
+    } else {
+        match connection.list_audit_entries(Some(&workspace_id), None) {
+            Ok(entries) => memory_access_timestamp_map(&entries),
+            Err(_) => {
+                degradations.push(DegradationReport {
+                    code: "memory_health_unavailable",
+                    severity: "medium",
+                    message: "Memory health access history is unavailable because audit rows could not be read.",
+                    repair: "Run `ee migrate run --workspace .` and `ee doctor --json`.",
+                });
+                BTreeMap::new()
+            }
+        }
+    };
 
     (
         memory_health_from_rows_with_accesses(&memories, Utc::now(), &access_times),
-        Vec::new(),
+        degradations,
     )
 }
 
@@ -8730,6 +8743,37 @@ mod tests {
         ensure(report.average_confidence, Some(0.6), "average confidence")?;
         ensure(report.provenance_coverage, Some(1.0), "provenance coverage")?;
         ensure(report.health_score, Some(0.6), "conservative score")
+    }
+
+    #[test]
+    fn gather_memory_health_surfaces_audit_access_read_failure() -> TestResult {
+        let fixture = StatusBenchFixture::prepare(StatusBenchScale {
+            name: "memory_health_audit_drop_test",
+            memory_count: 1,
+        })?;
+        let database_path = fixture.workspace_path().join(".ee").join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .execute("DROP TABLE audit_log;", &[])
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let (report, degradations) = gather_memory_health(Some(fixture.workspace_path()));
+        ensure(report.total_count, 1, "total count preserved")?;
+        ensure(degradations.len(), 1, "one degradation emitted")?;
+        ensure(
+            degradations[0].code,
+            "memory_health_unavailable",
+            "audit access failure degradation code",
+        )?;
+        ensure(
+            degradations[0]
+                .message
+                .contains("audit rows could not be read"),
+            true,
+            "audit access failure degradation message",
+        )
     }
 
     #[test]

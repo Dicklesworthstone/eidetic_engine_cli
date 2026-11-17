@@ -17977,13 +17977,19 @@ impl ShadowRunComparison {
         if !record.shadow {
             return None;
         }
+        let incumbent_outcome = record
+            .incumbent_outcome
+            .as_deref()
+            .map(str::trim)
+            .filter(|outcome| !outcome.is_empty())?
+            .to_owned();
         Some(Self {
             plane: record.plane,
             metadata: record.metadata.clone(),
             decided_at: record.decided_at.clone(),
             shadow_outcome: record.outcome.clone(),
-            incumbent_outcome: record.incumbent_outcome.clone().unwrap_or_default(),
-            diverged: record.incumbent_outcome.as_deref() != Some(&record.outcome),
+            diverged: incumbent_outcome != record.outcome,
+            incumbent_outcome,
             confidence: record.confidence,
             reason: record.reason.clone(),
         })

@@ -13582,11 +13582,27 @@ pub struct SwarmBriefArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_rch: bool,
 
+    /// Include the optional SRR5 per-agent adaptive scheduling and speculative CASS pre-fetch report.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_adaptive: bool,
+
     /// Redacted Agent Mail snapshot JSON to include. Defaults to
     /// <workspace>/.ee/agent-mail-snapshot.json when that file exists. No live
     /// Agent Mail mutation is performed.
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Compute a redaction-safe delta capsule against a prior swarm brief or support-bundle snapshot JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub since: Option<PathBuf>,
+
+    /// Optional explicit target snapshot JSON file for offline/fixture delta comparison (requires `--since`).
+    #[arg(long, value_name = "PATH")]
+    pub after_snapshot: Option<PathBuf>,
+
+    /// Optional duplicate-work detector input JSON file to evaluate and attach as `duplicateWork`.
+    #[arg(long, value_name = "PATH")]
+    pub duplicate_work_input: Option<PathBuf>,
 
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
@@ -40916,9 +40932,9 @@ where
 
     let report = get_memory_details(&options);
 
-    if report.error.is_some() {
+    if let Some(error) = report.error.as_ref() {
         let domain_error = DomainError::Storage {
-            message: report.error.clone().unwrap_or_default(),
+            message: error.clone(),
             repair: Some("ee doctor".to_string()),
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
@@ -40979,9 +40995,9 @@ where
 
     let report = get_memory_history(&options);
 
-    if report.error.is_some() {
+    if let Some(error) = report.error.as_ref() {
         let domain_error = DomainError::Storage {
-            message: report.error.clone().unwrap_or_default(),
+            message: error.clone(),
             repair: Some("ee doctor".to_string()),
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
@@ -49004,9 +49020,11 @@ fn collect_pack_diff(
 
         let relevance_delta = score_delta(new_item.relevance, old_item.relevance);
         let utility_delta = score_delta(new_item.utility, old_item.utility);
-        let old_rank = old_item.rank.unwrap_or_default();
-        let new_rank = new_item.rank.unwrap_or_default();
-        let rank_delta = i64::from(new_rank) - i64::from(old_rank);
+        let rank_delta = match (old_item.rank, new_item.rank) {
+            (Some(old_rank), Some(new_rank)) => Some(i64::from(new_rank) - i64::from(old_rank)),
+            _ => None,
+        };
+        let rank_changed = old_item.rank != new_item.rank;
         let section_changed = old_item.section != new_item.section;
         let trust_changed = old_item.trust_class != new_item.trust_class
             || old_item.trust_subclass != new_item.trust_subclass;
@@ -49022,7 +49040,7 @@ fn collect_pack_diff(
             }));
         }
 
-        if rank_delta != 0
+        if rank_changed
             || score_delta_changed(relevance_delta)
             || score_delta_changed(utility_delta)
             || section_changed
@@ -69848,6 +69866,7 @@ where
     let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.include_adaptive = args.include_adaptive;
     options.enabled_sources = enabled_sources;
     options.agent_mail_snapshot_path = args
         .agent_mail_snapshot
@@ -69859,8 +69878,75 @@ where
         .map(parse_comma_separated_values);
     options.command_timeout_ms = args.command_timeout_ms;
 
+    if args.after_snapshot.is_some() && args.since.is_none() {
+        let error = DomainError::Usage {
+            message: "--after-snapshot requires --since <PATH>.".to_string(),
+            repair: Some(
+                "Pass --since <before.json> alongside --after-snapshot <after.json>.".to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+    }
+
     let runner = SystemSwarmBriefCommandRunner;
-    let report = collect_swarm_brief(&options, &runner);
+    let mut report = collect_swarm_brief(&options, &runner);
+    if let Some(since_path) = &args.since {
+        let before_snapshot =
+            match crate::core::swarm_brief_delta::SwarmBriefSnapshot::from_json_path(since_path) {
+                Ok(snapshot) => snapshot,
+                Err(message) => {
+                    let error = DomainError::Usage {
+                        message,
+                        repair: Some(
+                            "Pass a readable swarm brief or snapshot JSON file to --since."
+                                .to_string(),
+                        ),
+                    };
+                    return write_domain_error(&error, cli.renderer(), stdout, stderr);
+                }
+            };
+        let after_snapshot = match &args.after_snapshot {
+            Some(after_path) => {
+                match crate::core::swarm_brief_delta::SwarmBriefSnapshot::from_json_path(after_path)
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(message) => {
+                        let error = DomainError::Usage {
+                            message,
+                            repair: Some(
+                                "Pass a readable swarm brief or snapshot JSON file to --after-snapshot."
+                                    .to_string(),
+                            ),
+                        };
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+                    }
+                }
+            }
+            None => crate::core::swarm_brief_delta::SwarmBriefSnapshot::from_report(&report),
+        };
+        report.delta = Some(crate::core::swarm_brief_delta::compute_swarm_brief_delta(
+            &before_snapshot,
+            &after_snapshot,
+        ));
+    }
+    if let Some(dw_path) = &args.duplicate_work_input {
+        match crate::core::duplicate_work_detector::DuplicateWorkVerdict::from_json_path(
+            dw_path,
+            Some(&report),
+        ) {
+            Ok(verdict) => report.duplicate_work = Some(verdict),
+            Err(message) => {
+                let error = DomainError::Usage {
+                    message,
+                    repair: Some(
+                        "Pass a readable duplicate-work input JSON file to --duplicate-work-input."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
+            }
+        }
+    }
     let unavailable_sources = swarm_brief_unavailable_sources(&report);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {
@@ -70918,6 +71004,25 @@ fn render_swarm_brief_json(
                     "degraded".to_string(),
                     serde_json::Value::Array(aggregate_swarm_brief_degraded_json(&report.degraded)),
                 );
+                if matches!(profile, output::FieldProfile::Full) && report.duplicate_work.is_none()
+                {
+                    let duplicate_work =
+                        crate::core::duplicate_work_detector::DuplicateWorkVerdict::from_report(
+                            report,
+                        );
+                    let dw_value = serde_json::to_value(duplicate_work).map_err(|error| {
+                        DomainError::Storage {
+                            message: format!(
+                                "Failed to serialize swarm brief duplicate-work verdict: {error}."
+                            ),
+                            repair: Some(
+                                "Fix the duplicate-work serializer before emitting JSON."
+                                    .to_string(),
+                            ),
+                        }
+                    })?;
+                    object.insert("duplicateWork".to_string(), dw_value);
+                }
             }
             data
         }
@@ -70929,7 +71034,7 @@ fn render_swarm_brief_json(
 }
 
 fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Value, DomainError> {
-    Ok(serde_json::json!({
+    let mut summary = serde_json::json!({
         "schema": report.schema,
         "workspace": &report.workspace,
         "redactionStatus": report.redaction_status,
@@ -70974,7 +71079,39 @@ fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Val
         "toolchainProvenance": &report.toolchain_provenance,
         "recommendations": swarm_brief_summary_array(&report.recommendations, 5, "recommendations")?,
         "degraded": aggregate_swarm_brief_degraded_json(&report.degraded),
-    }))
+    });
+    if let (Some(adaptive), Some(object)) = (&report.adaptive, summary.as_object_mut()) {
+        let adaptive_value =
+            serde_json::to_value(adaptive).map_err(|error| DomainError::Storage {
+                message: format!("Failed to serialize swarm brief adaptive report: {error}."),
+                repair: Some(
+                    "Fix the swarm brief adaptive serializer before emitting JSON.".to_string(),
+                ),
+            })?;
+        object.insert("adaptive".to_string(), adaptive_value);
+    }
+    if let (Some(delta), Some(object)) = (&report.delta, summary.as_object_mut()) {
+        let delta_value = serde_json::to_value(delta).map_err(|error| DomainError::Storage {
+            message: format!("Failed to serialize swarm brief delta capsule: {error}."),
+            repair: Some("Fix the swarm brief delta serializer before emitting JSON.".to_string()),
+        })?;
+        object.insert("delta".to_string(), delta_value);
+    }
+    if let (Some(duplicate_work), Some(object)) = (&report.duplicate_work, summary.as_object_mut())
+    {
+        let dw_value =
+            serde_json::to_value(duplicate_work).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to serialize swarm brief duplicate-work verdict: {error}."
+                ),
+                repair: Some(
+                    "Fix the swarm brief duplicate-work serializer before emitting JSON."
+                        .to_string(),
+                ),
+            })?;
+        object.insert("duplicateWork".to_string(), dw_value);
+    }
+    Ok(summary)
 }
 
 fn swarm_brief_summary_array<T>(
@@ -71074,6 +71211,73 @@ fn render_swarm_brief_markdown(report: &SwarmBriefReport) -> String {
                 degradation.message
             );
         }
+    }
+
+    if let Some(adaptive) = &report.adaptive {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Adaptive Scheduling & Prefetch");
+        let _ = writeln!(
+            output,
+            "- Posture: `{}` (enabled=`{}`, envDisabled=`{}`)",
+            adaptive.posture, adaptive.enabled, adaptive.env_disabled
+        );
+        let _ = writeln!(
+            output,
+            "- Scheduler: `{}` tracked agent(s), `{}` active backoff(s), threshold `{}`ms p99",
+            adaptive.scheduler.tracked_agent_count,
+            adaptive.scheduler.active_backoff_count,
+            adaptive.config.noisy_neighbor_p99_ms
+        );
+        let _ = writeln!(
+            output,
+            "- Prefetch: hits=`{}` misses=`{}` hitRate=`{:.4}` candidates=`{}` budgetExceeded=`{}`",
+            adaptive.prefetch.hits,
+            adaptive.prefetch.misses,
+            adaptive.prefetch.hit_rate,
+            adaptive.prefetch.candidates_emitted,
+            adaptive.prefetch.budget_exceeded
+        );
+    }
+
+    if let Some(delta) = &report.delta {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Delta Since Prior Snapshot");
+        let _ = writeln!(output, "- Schema: `{}`", delta.schema);
+        let _ = writeln!(
+            output,
+            "- Changes: agents=`{}` reservations=`{}` beads=`{}` verification=`{}` rch=`{}`",
+            delta.changed_agents.len(),
+            delta.changed_reservations.len(),
+            delta.changed_beads.len(),
+            delta.changed_verification.len(),
+            delta.changed_rch.len()
+        );
+        if delta.recommended_next_actions.is_empty() {
+            let _ = writeln!(output, "- Recommended next actions: none");
+        } else {
+            for action in &delta.recommended_next_actions {
+                let _ = writeln!(
+                    output,
+                    "- `{}` `{}`: {}",
+                    action.severity.as_str(),
+                    action.code,
+                    action.rationale
+                );
+            }
+        }
+    }
+
+    if let Some(duplicate_work) = &report.duplicate_work {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Duplicate Work Advisory");
+        let _ = writeln!(output, "- Schema: `{}`", duplicate_work.schema);
+        let _ = writeln!(
+            output,
+            "- Suggested action: `{}` (`{}` confidence)",
+            duplicate_work.suggested_action.as_str(),
+            duplicate_work.confidence.as_str()
+        );
+        let _ = writeln!(output, "- Rationale: {}", duplicate_work.rationale);
     }
 
     output
@@ -76777,7 +76981,11 @@ mod tests {
             Some(Command::Swarm(SwarmCommand::Brief(SwarmBriefArgs {
                 sources,
                 include_rch,
+                include_adaptive,
                 agent_mail_snapshot,
+                since,
+                after_snapshot,
+                duplicate_work_input,
                 agent_inventory_only,
                 max_recent_commits,
                 command_timeout_ms,
@@ -76785,11 +76993,15 @@ mod tests {
             }))) => {
                 ensure_equal(&sources, &"git,beads".to_string(), "sources")?;
                 ensure_equal(&include_rch, &true, "include rch")?;
+                ensure_equal(&include_adaptive, &false, "include adaptive default")?;
                 ensure_equal(
                     &agent_mail_snapshot,
                     &Some(PathBuf::from("agent-mail-snapshot.json")),
                     "agent mail snapshot path",
                 )?;
+                ensure_equal(&since, &None, "since snapshot default")?;
+                ensure_equal(&after_snapshot, &None, "after snapshot default")?;
+                ensure_equal(&duplicate_work_input, &None, "duplicate work input default")?;
                 ensure_equal(
                     &agent_inventory_only,
                     &None,
@@ -76801,6 +77013,227 @@ mod tests {
             }
             other => Err(format!("expected swarm brief command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn swarm_brief_since_snapshot_emits_delta_capsule_without_live_services() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let before_path = temp.path().join("before.json");
+        let after_path = temp.path().join("after.json");
+        std::fs::write(
+            &before_path,
+            serde_json::json!({
+                "schema": "ee.swarm.brief.v1",
+                "agentMailAgents": [{"name": "peer_a", "lastActiveAt": "2026-05-20T01:00:00Z"}],
+                "fileReservations": [{
+                    "pathPattern": "src/core/**",
+                    "holder": "peer_a",
+                    "exclusive": true,
+                    "expiresAt": "2026-05-20T02:00:00Z"
+                }],
+                "beads": {
+                    "ready": [{"id": "bd-1zb7k.17.2", "status": "open", "commentCount": 1}]
+                }
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("write before.json: {error}"))?;
+        std::fs::write(
+            &after_path,
+            serde_json::json!({
+                "schema": "ee.swarm.brief.v1",
+                "agentMailAgents": [],
+                "fileReservations": [],
+                "beads": {
+                    "inProgress": [{
+                        "id": "bd-1zb7k.17.2",
+                        "status": "in_progress",
+                        "assignee": "peer_b",
+                        "commentCount": 3
+                    }]
+                },
+                "rchLocalCapability": {
+                    "workerPressure": {
+                        "workers": [{
+                            "workerId": "worker-01",
+                            "pressureState": "critical",
+                            "admissionImpact": "pressure_blocked"
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("write after.json: {error}"))?;
+
+        let workspace_arg = temp.path().display().to_string();
+        let before_arg = before_path.display().to_string();
+        let after_arg = after_path.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "swarm",
+                "brief",
+                "--sources",
+                "none",
+                "--since",
+                &before_arg,
+                "--after-snapshot",
+                &after_arg,
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure_equal(&exit, &ProcessExitCode::Success, "swarm brief --since exit")?;
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("parse swarm brief --since json: {error}"))?;
+        ensure_equal(
+            &response["data"]["delta"]["schema"],
+            &serde_json::json!("ee.swarm_brief.delta.v1"),
+            "delta schema",
+        )?;
+        ensure_equal(
+            &response["data"]["delta"]["changedBeads"][0]["beadId"],
+            &serde_json::json!("bd-1zb7k.17.2"),
+            "changed bead id",
+        )?;
+        ensure_equal(
+            &response["data"]["delta"]["changedRch"][0]["workerAlias"],
+            &serde_json::json!("worker-01"),
+            "changed rch worker alias",
+        )?;
+
+        let mut bad_stdout = Vec::new();
+        let mut bad_stderr = Vec::new();
+        let bad_exit = run(
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "swarm",
+                "brief",
+                "--sources",
+                "none",
+                "--after-snapshot",
+                &after_arg,
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut bad_stdout,
+            &mut bad_stderr,
+        );
+        ensure_equal(
+            &bad_exit,
+            &ProcessExitCode::Usage,
+            "after-snapshot without since must fail with usage error",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_duplicate_work_advisory_and_fields_full_contract() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let dw_path = temp.path().join("duplicate-work.json");
+        std::fs::write(
+            &dw_path,
+            serde_json::json!({
+                "selfAgent": "GrayForest",
+                "editPaths": ["src/core/foo.rs"],
+                "beadClaim": "bd-mine",
+                "activeReservations": [{
+                    "pathPattern": "src/core/**",
+                    "holderAgent": "OtherAgent",
+                    "beadId": "bd-other",
+                    "threadId": "thread-1"
+                }],
+                "activeBeadClaims": [{
+                    "beadId": "bd-other",
+                    "holderAgent": "OtherAgent"
+                }]
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("write duplicate-work.json: {error}"))?;
+
+        let workspace_arg = temp.path().display().to_string();
+        let dw_arg = dw_path.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "swarm",
+                "brief",
+                "--sources",
+                "none",
+                "--duplicate-work-input",
+                &dw_arg,
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "swarm brief --duplicate-work-input exit",
+        )?;
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("parse swarm brief duplicate-work json: {error}"))?;
+        ensure_equal(
+            &response["data"]["duplicateWork"]["schema"],
+            &serde_json::json!("ee.swarm.duplicate_work.v1"),
+            "duplicate work schema",
+        )?;
+        ensure_equal(
+            &response["data"]["duplicateWork"]["suggestedAction"],
+            &serde_json::json!("coordinate_with_owner"),
+            "suggested action",
+        )?;
+
+        let mut full_stdout = Vec::new();
+        let mut full_stderr = Vec::new();
+        let full_exit = run(
+            [
+                "ee",
+                "--json",
+                "--fields",
+                "full",
+                "--workspace",
+                &workspace_arg,
+                "swarm",
+                "brief",
+                "--sources",
+                "none",
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut full_stdout,
+            &mut full_stderr,
+        );
+        ensure_equal(
+            &full_exit,
+            &ProcessExitCode::Success,
+            "swarm brief --fields full exit",
+        )?;
+        let full_response: serde_json::Value = serde_json::from_slice(&full_stdout)
+            .map_err(|error| format!("parse swarm brief --fields full json: {error}"))?;
+        ensure_equal(
+            &full_response["data"]["duplicateWork"]["schema"],
+            &serde_json::json!("ee.swarm.duplicate_work.v1"),
+            "fields full duplicate work schema",
+        )
     }
 
     #[test]

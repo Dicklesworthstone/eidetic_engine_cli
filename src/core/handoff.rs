@@ -5175,61 +5175,48 @@ fn stale_threshold_breach(
     thresholds: &HandoffStaleThresholds,
 ) -> Option<StaleThresholdBreach> {
     let mut breaches = Vec::new();
-    if snapshot
-        .memories_added_since
-        .is_some_and(|observed| observed > thresholds.memories_added)
+    if let Some(observed) = snapshot.memories_added_since
+        && observed > thresholds.memories_added
     {
         breaches.push(StaleThresholdBreach {
             severity: "medium",
             threshold_field: "memories_added",
             threshold_value: thresholds.memories_added.to_string(),
-            observed_value: snapshot
-                .memories_added_since
-                .unwrap_or_default()
-                .to_string(),
+            observed_value: observed.to_string(),
             repair_hint: "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
         });
     }
     if thresholds.any_expired_in_pack
-        && snapshot
-            .memories_expired_since
-            .is_some_and(|observed| observed > 0)
+        && let Some(observed) = snapshot.memories_expired_since
+        && observed > 0
     {
         breaches.push(StaleThresholdBreach {
             severity: "high",
             threshold_field: "any_expired_in_pack",
             threshold_value: thresholds.any_expired_in_pack.to_string(),
-            observed_value: snapshot
-                .memories_expired_since
-                .unwrap_or_default()
-                .to_string(),
+            observed_value: observed.to_string(),
             repair_hint: "Expired memories likely misleading; rebuild: ee handoff create --workspace . --refresh-evidence",
         });
     }
-    if snapshot
-        .content_drift_score
-        .is_some_and(|observed| observed > thresholds.content_drift_score)
+    if let Some(observed) = snapshot.content_drift_score
+        && observed > thresholds.content_drift_score
     {
         breaches.push(StaleThresholdBreach {
             severity: "medium",
             threshold_field: "content_drift_score",
             threshold_value: thresholds.content_drift_score.to_string(),
-            observed_value: format!("{:.6}", snapshot.content_drift_score.unwrap_or_default()),
+            observed_value: format!("{observed:.6}"),
             repair_hint: "Significant drift; consider rebuilding: ee handoff create --workspace .",
         });
     }
-    if snapshot
-        .memories_revised_since
-        .is_some_and(|observed| observed > thresholds.memories_revised)
+    if let Some(observed) = snapshot.memories_revised_since
+        && observed > thresholds.memories_revised
     {
         breaches.push(StaleThresholdBreach {
             severity: "low",
             threshold_field: "memories_revised",
             threshold_value: thresholds.memories_revised.to_string(),
-            observed_value: snapshot
-                .memories_revised_since
-                .unwrap_or_default()
-                .to_string(),
+            observed_value: observed.to_string(),
             repair_hint: "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
         });
     }

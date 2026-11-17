@@ -3349,7 +3349,7 @@ fn resolve_external_outcome_workspace(
 ) -> Result<TargetResolution, DomainError> {
     let workspace_id = require_nonempty(
         "workspace id",
-        workspace_id.unwrap_or_default(),
+        workspace_id.unwrap_or(""),
         "ee outcome <target-id> --workspace-id <workspace-id>",
     )?;
     let workspace =

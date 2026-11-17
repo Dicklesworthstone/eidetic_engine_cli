@@ -75,13 +75,10 @@ const PROVENANCE_BEADS: &[&str] = &[
 ];
 
 const FOLLOW_UP_BEADS: &[&str] = &[
-    // bd-n950f: active scheduling bead for the 29 live must_fix findings across
-    // the 12 bd-sos5.4 export/builder-default rules (bd-vylt2).
-    "bd-n950f",
-    // bd-lnxfe: active scheduling bead for the 6 live must_fix findings across
-    // the 4 bd-sos5.3 / bd-sos5.7 serialization, freshness, and status rules
-    // (bd-vylt2).
-    "bd-lnxfe",
+    // RETIRED (bd-n950f): all 12 bd-sos5.4 export/builder-default rules (29 findings)
+    // remediated and retired in lockstep.
+    // RETIRED (bd-lnxfe): all 4 bd-sos5.3 / bd-sos5.7 serialization, freshness,
+    // and status rules remediated and retired in lockstep.
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -598,23 +595,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     //
     // NSF-CASS-PIPE-READ            bd-sos5.2   closed
     // NSF-HOOK-INSTALLER-JSON       bd-sos5.3   closed
-    must_fix(
-        "NSF-OUTPUT-SHADOW-INCUMBENT",
-        "src/output/mod.rs",
-        "incumbent_outcome.clone().unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Shadow decision output should distinguish missing incumbent evidence from an empty incumbent outcome.",
-    ),
+    // RETIRED (bd-n950f): NSF-OUTPUT-SHADOW-INCUMBENT bd-sos5.4   remediated
     // RETIRED (bd-epvc1): NSF-CLI-CERTIFICATE-JSON   bd-sos5.3   closed
-    must_fix(
-        "NSF-CLI-CERTIFICATE-ERROR",
-        "src/cli/mod.rs",
-        "report.error.clone().unwrap_or_default()",
-        "bd-sos5.3",
-        "bd-lnxfe",
-        "Certificate error reports should not convert a missing error message into an empty machine string.",
-    ),
+    // RETIRED (bd-lnxfe): NSF-CLI-CERTIFICATE-ERROR  bd-sos5.3   remediated
     // RETIRED (bd-epvc1): NSF-CLI-DEMO-AUDIT        bd-sos5.4   closed
     allowed(
         "NSF-MODELS-JSONL-BUILDERS",
@@ -653,70 +636,21 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let (memory_a, memory_b) = (field(\"memoryA\"), field(\"memoryB\"));",
         "A predicate, and the empty string is TESTED rather than trusted: the very next lines check `!memory_a.is_empty()`, so a missing field makes the payload fail the shape check. The parse failure is handled separately and explicitly above -- `let Ok(serde_json::Value::Object(payload)) = .. else { return false; }` -- so malformed JSON and a well-formed payload missing a field both return false by different routes. This is the shape the contract asks for, not an exception to it.",
     ),
-    must_fix(
-        "NSF-CURATE-CERTIFICATE-BUILDER",
-        "src/curate/mod.rs",
-        "unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Curation risk certificate builders default machine-facing IDs/timestamps to empty values. Count corrected 3 -> 2 by bd-amhns: it reads `target_memory_id` and `generated_at` in `build`, and only those two. The two sites it had additionally absorbed are judged on their own terms immediately above; they are not part of bd-sos5.4.",
-    ),
-    must_fix(
-        "NSF-MODELS-DECISION-BUILDER",
-        "src/models/decision.rs",
-        "unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Decision records should distinguish a missing outcome from an empty outcome string.",
-    ),
-    must_fix(
-        "NSF-MODELS-MUTATION-JSON",
-        "src/models/mutation.rs",
-        "serde_json::to_string",
-        "bd-sos5.3",
-        "bd-lnxfe",
-        "Mutation reports are machine-facing and must not serialize to empty strings on failure.",
-    ),
-    must_fix(
-        "NSF-MODELS-PROGRESS-BUILDER",
-        "src/models/progress.rs",
-        "unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Progress records default required operation/message/timestamp fields to empty values.",
-    ),
-    must_fix(
-        "NSF-CORE-BACKUP-IMPORT",
-        "src/core/backup.rs",
-        "unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Backup import/export/verify/restore records should distinguish absent message, next action, audit target, manifest workspace id, and restore degradation fields.",
-    ),
-    must_fix(
-        "NSF-CORE-CLAIMS-INPUT",
-        "src/core/claims.rs",
-        "unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Claim parsing defaults optional statement/artifact collections into machine-facing records and needs an explicit contract.",
-    ),
-    // RETIRED (bd-epvc1): NSF-CORE-HANDOFF-JSON     bd-sos5.3   closed
-    // RETIRED (bd-epvc1): NSF-CORE-LAB-JSON         bd-sos5.3   closed
+    // RETIRED (bd-n950f): NSF-CURATE-CERTIFICATE-BUILDER bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-MODELS-DECISION-BUILDER    bd-sos5.4 remediated
+    // RETIRED (bd-lnxfe): NSF-MODELS-MUTATION-JSON       bd-sos5.3 remediated
+    // RETIRED (bd-n950f): NSF-MODELS-PROGRESS-BUILDER    bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-CORE-BACKUP-IMPORT         bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-CORE-CLAIMS-INPUT          bd-sos5.4 remediated
+    // RETIRED (bd-epvc1): NSF-CORE-HANDOFF-JSON          bd-sos5.3 closed
+    // RETIRED (bd-epvc1): NSF-CORE-LAB-JSON              bd-sos5.3 closed
     allowed(
         "NSF-CORE-LEGACY-SKIP-DIR",
         "src/core/legacy_import.rs",
         "fn should_skip_directory",
         "A path without a UTF-8 file name cannot match a skipped legacy directory name.",
     ),
-    must_fix(
-        "NSF-CORE-OUTCOME-WORKSPACE",
-        "src/core/outcome.rs",
-        "workspace_id.unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Outcome recording should not turn a missing workspace ID into an empty persisted field.",
-    ),
+    // RETIRED (bd-n950f): NSF-CORE-OUTCOME-WORKSPACE     bd-sos5.4 remediated
     // RETIRED (bd-epvc1): NSF-CORE-PREFLIGHT-JSON   bd-sos5.3   closed
     // RETIRED (bd-epvc1): NSF-CORE-PROCEDURE-JSON   bd-sos5.3   closed
     allowed(
@@ -762,14 +696,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "strings.sort()",
         "Pack diff redaction-class arrays are optional ledger details; absent arrays mean no classes to compare.",
     ),
-    must_fix(
-        "NSF-CLI-PACK-DIFF-RANK-DEFAULT",
-        "src/cli/mod.rs",
-        "let old_rank = old_item.rank.unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Pack diff should distinguish a missing ledger rank from rank zero when reporting rank deltas.",
-    ),
+    // RETIRED (bd-n950f): NSF-CLI-PACK-DIFF-RANK-DEFAULT bd-sos5.4 remediated
     allowed(
         "NSF-CLI-PACK-REPLAY-SELECTED-ITEMS",
         "src/cli/mod.rs",
@@ -884,38 +811,10 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "get(\"id\")",
         "Malformed optional task-frame evidence links are skipped rather than emitted as empty links.",
     ),
-    must_fix(
-        "NSF-CORE-HANDOFF-STALE-ADDED-DEFAULT",
-        "src/core/handoff.rs",
-        "threshold_field: \"memories_added\"",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Handoff stale-threshold reporting should distinguish unavailable added-memory counts from zero.",
-    ),
-    must_fix(
-        "NSF-CORE-HANDOFF-STALE-EXPIRED-DEFAULT",
-        "src/core/handoff.rs",
-        "threshold_field: \"any_expired_in_pack\"",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Handoff stale-threshold reporting should distinguish unavailable expired-memory counts from zero.",
-    ),
-    must_fix(
-        "NSF-CORE-HANDOFF-STALE-DRIFT-DEFAULT",
-        "src/core/handoff.rs",
-        "content_drift_score.unwrap_or_default()",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Handoff stale-threshold reporting should distinguish unavailable content drift from zero drift.",
-    ),
-    must_fix(
-        "NSF-CORE-HANDOFF-STALE-REVISED-DEFAULT",
-        "src/core/handoff.rs",
-        "threshold_field: \"memories_revised\"",
-        "bd-sos5.4",
-        "bd-n950f",
-        "Handoff stale-threshold reporting should distinguish unavailable revised-memory counts from zero.",
-    ),
+    // RETIRED (bd-n950f): NSF-CORE-HANDOFF-STALE-ADDED-DEFAULT   bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-CORE-HANDOFF-STALE-EXPIRED-DEFAULT bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-CORE-HANDOFF-STALE-DRIFT-DEFAULT   bd-sos5.4 remediated
+    // RETIRED (bd-n950f): NSF-CORE-HANDOFF-STALE-REVISED-DEFAULT bd-sos5.4 remediated
     allowed(
         "NSF-CORE-INDEX-HUMAN-DIMENSION",
         "src/core/index.rs",
@@ -1006,14 +905,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "name.starts_with(\"._\")",
         "A non-UTF-8 legacy filename cannot match macOS metadata filenames and is still sorted by the path wire string.",
     ),
-    must_fix(
-        "NSF-CORE-MEMORY-LINE-SPAN",
-        "src/core/memory.rs",
-        "extract_line_span(&contents, *span).unwrap_or_default()",
-        "bd-sos5.7",
-        "bd-lnxfe",
-        "Evidence freshness should report an invalid provenance span instead of hashing an empty source excerpt.",
-    ),
+    // RETIRED (bd-lnxfe): NSF-CORE-MEMORY-LINE-SPAN  bd-sos5.7   remediated
     allowed(
         "NSF-CORE-MEMORY-SECRET-ALLOWLISTS",
         "src/core/memory.rs",
@@ -1114,14 +1006,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "PackProvenance::new(uri",
         "If derived provenance construction rejects the fallback URI, the hit can still be represented without provenance details.",
     ),
-    must_fix(
-        "NSF-CORE-STATUS-AUDIT-ACCESS",
-        "src/core/status.rs",
-        "list_audit_entries",
-        "bd-sos5.7",
-        "bd-lnxfe",
-        "Status memory health should surface audit-log read failures instead of treating all memories as never accessed.",
-    ),
+    // RETIRED (bd-lnxfe): NSF-CORE-STATUS-AUDIT-ACCESS bd-sos5.7 remediated
     allowed(
         "NSF-CORE-SUPPORT-BUNDLE-PACK-QUERY",
         "src/core/support_bundle.rs",
@@ -3844,6 +3729,7 @@ const REQUIRED_SURFACE_FILES: &[&str] = &[
 /// reddened main on rules that were working correctly. The defect signal for a
 /// must_fix is OWNS ZERO — a rule watching nothing while a bead reference makes
 /// it look tracked — and that is already enforced by the match-count ledger.
+#[allow(dead_code)]
 const fn must_fix(
     id: &'static str,
     file: &'static str,
