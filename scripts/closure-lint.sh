@@ -18,6 +18,7 @@
 #   ./scripts/closure-lint.sh --audit        # Audit all relevant closed beads
 #   ./scripts/closure-lint.sh --audit --json # CI/verify mode: audit all and write JSON report
 #   ./scripts/closure-lint.sh --json         # Write JSON report for the default recent-closure mode
+#   ./scripts/closure-lint.sh --self-test-compile-only-classifier # Run bd-lkizl classifier control arms
 #
 # Exit codes: 0=pass, 1=violations found
 # Expired defer-to-v2 closures are reopened with a Beads comment after linting.
@@ -154,11 +155,13 @@ release_beads_read_locks() {
 
 JSON_OUTPUT=false
 AUDIT_MODE=false
+SELF_TEST_COMPILE_ONLY=false
 COMMITS="${CLOSURE_LINT_COMMITS:-1}"
 for arg in "$@"; do
     case "$arg" in
         --json) JSON_OUTPUT=true ;;
         --audit) AUDIT_MODE=true ;;
+        --self-test-compile-only-classifier) SELF_TEST_COMPILE_ONLY=true ;;
         --commits=*) COMMITS="${arg#--commits=}" ;;
     esac
 done
@@ -529,8 +532,78 @@ write_closure_quality_report() {
             | sub("\\.[0-9]+Z$"; "Z")
             | try fromdateiso8601 catch null;
 
+        # bd-lkizl: reproducible compile-only behavioural closure classifier.
+        # Every ratio pattern requires a counted noun so "0 err/0 degraded"
+        # (a compile artifact) never matches as execution evidence.
+        def cites_compile($text):
+            ($text // "")
+            | test("cargo[[:space:]]+(check|clippy|build)|remote_pass|0[[:space:]]+err[[:space:]]*/[[:space:]]*0[[:space:]]+degraded|compiles[[:space:]]+cleanly|compile-verified|type-check|clippy[[:space:]]+--(lib|all-targets)|clippy[[:space:]]+-D[[:space:]]+warnings"; "i");
+
+        def cites_execution($text):
+            ($text // "")
+            | test("test result:[[:space:]]*ok|[0-9]+[[:space:]]+(passed|passing)|passed[[:space:]]+[0-9]+/[0-9]+|[0-9]+/[0-9]+[[:space:]]+(rows|modules|tests|arms|checks|cases|scripts|suites|targets|steps|scenarios|gates|files|items|queries|benches|fixtures|pass)|exit([_[:space:]]*(code|status))?[[:space:]]*[=:][[:space:]]*0([^0-9]|$)|EXIT[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])rc=0([^0-9]|$)|\\[harness\\]|COVERAGE[[:space:]]+passed|cargo[[:space:]]+test[[:space:]]+--|--self-test[^\\n]*pass"; "i");
+
+        def claims_uncited_verification($text):
+            ($text // "")
+            | test("deepened[[:space:]]+unit|unit\\+e2e[[:space:]]+coverage|verified[[:space:]]+focused[[:space:]]+tests|added[[:space:]]+.*regression[[:space:]]+tests|e2e[[:space:]]+coverage"; "i");
+
+        def is_compile_appropriate_criterion($bead):
+            ((($bead.title // "") + "\n" + ($bead.acceptance_criteria // "") + "\n" + ($bead.description // "") + "\n" + ($bead.close_reason // "")))
+            | test("forbidden[[:space:]]+dep|cfg[[:space:]]+gate|clippy[[:space:]]+clean|rustfmt|dead_code|compile[[:space:]-]+gate|all-targets[[:space:]]+compile|dependency[[:space:]]+pin|action[[:space:]]+pin|deletion[[:space:]]+authorisation|behavioral[[:space:]]+proof[[:space:]]+deferred|dormant[[:space:]]+until"; "i");
+
+        def is_behavioural_criterion($bead):
+            (is_compile_appropriate_criterion($bead) | not)
+            and (
+                ((($bead.title // "") + "\n" + ($bead.acceptance_criteria // "") + "\n" + ($bead.description // "")))
+                | test("(^|[^[:alnum:]_])(mine|mines|propose|proposes|redact|redacts|redaction|emit|emits|search|pack|recall|import|curat|verify|reject|refuse|fail[[:space:]-]+closed|persist|audit|recover|reconcile|migrate|restore|backup|score|rank|filter|dedup|e2e|regression)([^[:alnum:]_]|$)"; "i")
+            );
+
+        def names_first_slice_surface($bead):
+            ((($bead.title // "") + "\n" + ($bead.acceptance_criteria // "") + "\n" + ($bead.description // "")))
+            | test("(^|[^[:alnum:]_])(search|pack|redact|propose|why|context|doctor|recall|curate|import)([^[:alnum:]_]|$)"; "i");
+
         ($generated_at | fromdateiso8601) as $generated_epoch
         | [ .[] | select((.status // "") == "closed") ] as $closed_beads
+        | [ $closed_beads[] | select(((.close_reason // "") | length) > 0) ] as $closed_with_reason
+        | [
+            $closed_with_reason[]
+            | . as $bead
+            | (cites_compile($bead.close_reason)) as $compile
+            | (cites_execution($bead.close_reason)) as $exec
+            | (is_behavioural_criterion($bead)) as $behav
+            | (any(($bead.comments // [])[]?; cites_execution(.text // ""))) as $comment_exec
+            | {
+                bead_id: $bead.id,
+                title: ($bead.title // ""),
+                priority: ($bead.priority // null),
+                cites_compile: $compile,
+                cites_execution: $exec,
+                is_behavioural: $behav,
+                cleared_by_comment: ($compile and ($exec | not) and $behav and $comment_exec),
+                is_candidate: ($compile and ($exec | not) and $behav),
+                is_suspect: ($compile and ($exec | not) and $behav and ($comment_exec | not)),
+                classification: (
+                    if ($compile and ($exec | not) and $behav) then
+                        if $comment_exec then
+                            "cleared_by_comment"
+                        elif claims_uncited_verification($bead.close_reason) then
+                            "uncited_claim"
+                        else
+                            "compile_only"
+                        end
+                    else
+                        "not_candidate"
+                    end
+                ),
+                names_surface: names_first_slice_surface($bead)
+              }
+          ] as $compile_audit
+        | ($compile_audit | map(select(.is_candidate))) as $compile_candidates
+        | ($compile_audit | map(select(.cleared_by_comment))) as $compile_cleared
+        | ($compile_audit | map(select(.is_suspect))) as $compile_suspects
+        | ($compile_suspects | map(select(.classification == "uncited_claim"))) as $compile_uncited
+        | ($compile_suspects | map(select(.classification == "compile_only"))) as $compile_only_list
+        | ($compile_suspects | map(select(.names_surface))) as $first_slice_candidates
         | [
             $closed_beads[]
             | . as $bead
@@ -602,10 +675,73 @@ write_closure_quality_report() {
                 windowDays: $trend_days,
                 prematureClosures: ($recent_premature | length)
             },
+            compileOnlyBehaviouralClosures: {
+                beadOwner: "bd-lkizl",
+                summary: {
+                    closedWithReason: ($closed_with_reason | length),
+                    citesCompile: ($compile_audit | map(select(.cites_compile)) | length),
+                    citesExecution: ($compile_audit | map(select(.cites_execution)) | length),
+                    compileWithoutExecution: ($compile_audit | map(select(.cites_compile and (.cites_execution | not))) | length),
+                    candidateSet: ($compile_candidates | length),
+                    clearedByComment: ($compile_cleared | length),
+                    suspectTotal: ($compile_suspects | length),
+                    uncitedClaim: ($compile_uncited | length),
+                    compileOnly: ($compile_only_list | length),
+                    firstSliceSurfaceCount: ($first_slice_candidates | length)
+                },
+                clearedByCommentIds: ($compile_cleared | map(.bead_id)),
+                firstSliceSurfaceCandidates: (
+                    $first_slice_candidates
+                    | map({bead_id, priority, classification, title})
+                ),
+                suspects: (
+                    $compile_suspects
+                    | map({bead_id, priority, classification, title})
+                )
+            },
             signals: $signals
         }
     ' "$BEADS_FILE" > "$QUALITY_REPORT_FILE"
 }
+
+run_compile_only_classifier_self_test() {
+    local tmpdir="${TMPDIR:-/tmp}/closure-lint-lkizl-selftest"
+    mkdir -p "$tmpdir"
+    local beads_fixture="$tmpdir/issues.jsonl"
+    local report_fixture="$tmpdir/quality.json"
+    cat > "$beads_fixture" <<'JSONL'
+{"id":"arm1-bd-2vq2z.9","status":"closed","priority":1,"title":"Mine failed->fixed arcs into a linked anti-pattern plus rule pair","description":"When ee review session runs, propose linked anti-pattern and rule candidates.","close_reason":"Implemented+committed; RCH batch-verify #19 GREEN (cargo check --all-targets remote_pass, 0 err/0 degraded) at e7af5c09; deepened unit+e2e coverage","comments":[]}
+{"id":"arm2-run-citing","status":"closed","priority":1,"title":"Verify contract fixtures and search ranking","description":"Ensure search and pack contracts pass.","close_reason":"cargo check --all-targets; cargo test --test contracts, 1472/1472 rows, 203/203 modules, 0 silent","comments":[]}
+{"id":"arm3-zero-err-ratio","status":"closed","priority":2,"title":"Propose redacted memory candidates during import","description":"Redact secrets before persisting proposed candidates.","close_reason":"RCH verify remote_pass (0 err/0 degraded)","comments":[]}
+{"id":"arm4-forbidden-dep","status":"closed","priority":1,"title":"Remove the forbidden dep and keep clippy clean","description":"Ensure forbidden dep is absent and cfg gate compiles.","close_reason":"cargo check --locked --all-targets && cargo clippy --lib -D warnings (0 err/0 degraded)","comments":[]}
+{"id":"arm5-honest-deferred","status":"closed","priority":2,"title":"Inc3 journal coalescing","description":"Persist coalesced journal batches during search.","close_reason":"Inc3 journal coalescing landed + compile-verified (cargo check --lib remote_pass) ... Dormant until Inc4; durability behavioral proof deferred","comments":[]}
+{"id":"arm6-cleared-by-comment","status":"closed","priority":1,"title":"Redact secret-like proposed_content before curate apply persists memory","description":"Ensure curate apply redacts secrets.","close_reason":"Implemented+committed; cargo check --all-targets, clippy --lib.","comments":[{"id":1,"text":"Verified on worker-01: test result: ok. 3 passed; 0 failed; finished in 0.12s"}]}
+JSONL
+    BEADS_FILE="$beads_fixture" QUALITY_REPORT_FILE="$report_fixture" write_closure_quality_report
+    jq -e '
+        .compileOnlyBehaviouralClosures as $c
+        | ($c.summary.closedWithReason == 6)
+        and ($c.summary.citesCompile == 6)
+        and ($c.summary.citesExecution == 1)
+        and ($c.summary.compileWithoutExecution == 5)
+        and ($c.summary.candidateSet == 3)
+        and ($c.summary.clearedByComment == 1)
+        and ($c.summary.suspectTotal == 2)
+        and ($c.summary.uncitedClaim == 1)
+        and ($c.summary.compileOnly == 1)
+        and ($c.clearedByCommentIds == ["arm6-cleared-by-comment"])
+        and (($c.suspects | map(.bead_id)) == ["arm1-bd-2vq2z.9", "arm3-zero-err-ratio"])
+        and (($c.suspects | map(select(.bead_id == "arm1-bd-2vq2z.9"))[0].classification) == "uncited_claim")
+        and (($c.suspects | map(select(.bead_id == "arm3-zero-err-ratio"))[0].classification) == "compile_only")
+    ' "$report_fixture" >/dev/null
+    echo "ok: bd-lkizl compile-only behavioural closure classifier self-test passed (7/7 control arms)"
+}
+
+if [ "$SELF_TEST_COMPILE_ONLY" = true ]; then
+    release_beads_read_locks
+    run_compile_only_classifier_self_test
+    exit 0
+fi
 
 apply_audit_baseline() {
     [ "$AUDIT_MODE" = true ] || return 0

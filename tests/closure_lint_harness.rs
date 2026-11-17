@@ -22,18 +22,31 @@ type TestResult = Result<(), String>;
 /// (bd-3usjw.62, bd-3usjw.61) use the same helper so they survive the
 /// Mac→Linux RCH round-trip.
 fn closure_lint_worker_local_tempdir(prefix: &str) -> Result<TempDir, String> {
-    let tmp_root = Path::new("/tmp");
-    if tmp_root.is_dir() {
-        TempDirBuilder::new()
-            .prefix(prefix)
-            .tempdir_in(tmp_root)
-            .map_err(|error| format!("tempdir: {error}"))
-    } else {
-        TempDirBuilder::new()
-            .prefix(prefix)
-            .tempdir()
-            .map_err(|error| format!("tempdir: {error}"))
+    let mut candidates = Vec::new();
+    if let Ok(env_tmp) = std::env::var("TMPDIR")
+        && !env_tmp.trim().is_empty()
+    {
+        candidates.push(PathBuf::from(env_tmp));
     }
+    candidates.push(PathBuf::from("/data/tmp"));
+    candidates.push(PathBuf::from("/tmp"));
+
+    for root in candidates {
+        if !cfg!(target_os = "macos") && root.starts_with("/Volumes") {
+            continue;
+        }
+        if !root.is_dir() {
+            continue;
+        }
+        if let Ok(dir) = TempDirBuilder::new().prefix(prefix).tempdir_in(&root) {
+            return Ok(dir);
+        }
+    }
+
+    TempDirBuilder::new()
+        .prefix(prefix)
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))
 }
 
 const GRAPH_SCHEMA_DOCS: &[&str] = &[
@@ -1640,5 +1653,81 @@ fn closure_lint_abstention_scrub_is_portable_across_sed_dialects() -> TestResult
         abstention[0].0.as_str(),
         "closed-genuine-abstention",
         "the genuine abstention must be the one flagged",
+    )
+}
+
+#[test]
+fn closure_lint_compile_only_behavioural_classifier_self_test_and_quality_report_bd_lkizl()
+-> TestResult {
+    let self_test = Command::new("bash")
+        .arg(script_path())
+        .arg("--self-test-compile-only-classifier")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .map_err(|error| {
+            format!("run closure-lint.sh --self-test-compile-only-classifier: {error}")
+        })?;
+    ensure(
+        self_test.status.success(),
+        format!(
+            "closure-lint.sh --self-test-compile-only-classifier failed:\n{}",
+            output_excerpt(&self_test)
+        ),
+    )?;
+    let stdout = String::from_utf8_lossy(&self_test.stdout);
+    ensure(
+        stdout.contains("7/7 control arms"),
+        format!("expected 7/7 control arms in stdout, got: {stdout}"),
+    )?;
+
+    let temp = closure_lint_worker_local_tempdir("closure-lint-lkizl-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"bd-2vq2z.9-twin","title":"Mine failed->fixed arcs into a linked anti-pattern plus rule pair","description":"When ee review session runs, propose linked anti-pattern and rule candidates.","status":"closed","priority":1,"close_reason":"Implemented+committed; RCH batch-verify #19 GREEN (cargo check --all-targets remote_pass, 0 err/0 degraded) at e7af5c09; deepened unit+e2e coverage","labels":["implements-surface:clean-surface"],"comments":[]}"#,
+            r#"{"id":"bd-cleared-twin","title":"Redact secret-like proposed_content before curate apply","description":"Ensure curate apply redacts secrets.","status":"closed","priority":1,"close_reason":"cargo check --all-targets, clippy --lib.","labels":["implements-surface:clean-surface"],"comments":[{"id":1,"text":"Verified on worker-01: test result: ok. 3 passed; 0 failed; finished in 0.12s"}]}"#,
+        ],
+        "",
+        &["clean-surface"],
+    )?;
+    let _ = run_linter(temp.path())?;
+    let quality_raw = fs::read_to_string(temp.path().join(".closure-quality-report.json"))
+        .map_err(|error| format!("read .closure-quality-report.json: {error}"))?;
+    let quality: Value = serde_json::from_str(&quality_raw)
+        .map_err(|error| format!("parse .closure-quality-report.json: {error}"))?;
+    ensure_eq(
+        quality
+            .pointer("/compileOnlyBehaviouralClosures/summary/candidateSet")
+            .and_then(Value::as_u64),
+        Some(2),
+        "candidateSet must include both compile-only behavioural closures",
+    )?;
+    ensure_eq(
+        quality
+            .pointer("/compileOnlyBehaviouralClosures/summary/clearedByComment")
+            .and_then(Value::as_u64),
+        Some(1),
+        "clearedByComment must credit the comment-verified closure",
+    )?;
+    ensure_eq(
+        quality
+            .pointer("/compileOnlyBehaviouralClosures/summary/suspectTotal")
+            .and_then(Value::as_u64),
+        Some(1),
+        "suspectTotal must retain only the unverified closure",
+    )?;
+    ensure_eq(
+        quality
+            .pointer("/compileOnlyBehaviouralClosures/suspects/0/bead_id")
+            .and_then(Value::as_str),
+        Some("bd-2vq2z.9-twin"),
+        "suspect entry must identify bd-2vq2z.9-twin",
+    )?;
+    ensure_eq(
+        quality
+            .pointer("/compileOnlyBehaviouralClosures/suspects/0/classification")
+            .and_then(Value::as_str),
+        Some("uncited_claim"),
+        "bd-2vq2z.9-twin must be classified as uncited_claim",
     )
 }

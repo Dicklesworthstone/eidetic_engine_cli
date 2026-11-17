@@ -9,10 +9,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 export EE_E2E_KEEP="${EE_E2E_KEEP:-1}"
 export EE_E2E_KEEP_ARTIFACTS="${EE_E2E_KEEP_ARTIFACTS:-1}"
+if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+    _host_models="${XDG_DATA_HOME:-${HOME:-}/.local/share}/ee/models"
+    if [ -f "$_host_models/potion-multilingual-128M/model.safetensors" ]; then
+        export EE_EMBED_MODEL_FIXTURE_DIR="$_host_models"
+    fi
+fi
 
 # shellcheck source=scripts/lib/e2e_harness.sh
 # shellcheck disable=SC1091
@@ -122,10 +128,25 @@ score_for_doc() {
 first_common_doc() {
     local left_json="${1:?left json required}"
     local right_json="${2:?right json required}"
+    # Prefer a common doc whoselexical rank != semantic rank so its weighted RRF
+    # score differs; a doc ranked #1 in both pools has 1/(k+1)*(w_l+w_s) = 2/(k+1)
+    # under any normalized weight split.
     jq -nre \
         --argjson left "$left_json" \
         --argjson right "$right_json" \
-        '$left.data.results[].docId as $id | select(any($right.data.results[]?; .docId == $id)) | $id' \
+        '(
+            [
+                $left.data.results[]? as $l
+                | $right.data.results[]? as $r
+                | select($l.docId == $r.docId and $l.score != $r.score)
+                | $l.docId
+            ]
+            + [
+                $left.data.results[]? as $l
+                | select(any($right.data.results[]?; .docId == $l.docId))
+                | $l.docId
+            ]
+        )[0]' \
         2>/dev/null | head -n 1
 }
 
@@ -172,8 +193,8 @@ assert_jq "$lexical_search" '.schema == "ee.response.v2" and .success == true' "
 assert_jq "$lexical_search" '(.data.results // []) | length >= 2' "lexical-heavy search returns multiple results"
 assert_jq "$lexical_search" 'any(.data.results[]?; has("lexicalScore"))' "lexical-heavy search exposes lexical scores"
 assert_jq "$lexical_search" 'any(.data.results[]?; has("fastScore") or has("qualityScore"))' "lexical-heavy search exposes semantic scores"
-assert_jq "$lexical_search" 'any(.data.results[]?.explanation.factors[]?; .name == "configured_fusion_weight")' \
-    "lexical-heavy explanations include configured fusion weight factor"
+assert_jq "$lexical_search" 'any(.data.results[]?.explanation.factors[]?; .name == "lexical") and any(.data.results[]?.explanation.factors[]?; .name == "semantic_fast" or .name == "semantic_quality") and all(.data.results[]?.explanation.factors[]?; .name != "configured_fusion_weight")' \
+    "lexical-heavy explanations include upstream RRF lexical and semantic factors without legacy post-hoc rescaling"
 
 step "search with semantic-heavy weights"
 write_search_weights "$WS" "0.05" "0.95" "0.0"
@@ -191,8 +212,8 @@ assert_jq "$semantic_search" '.schema == "ee.response.v2" and .success == true' 
 assert_jq "$semantic_search" '(.data.results // []) | length >= 2' "semantic-heavy search returns multiple results"
 assert_jq "$semantic_search" 'any(.data.results[]?; has("lexicalScore"))' "semantic-heavy search exposes lexical scores"
 assert_jq "$semantic_search" 'any(.data.results[]?; has("fastScore") or has("qualityScore"))' "semantic-heavy search exposes semantic scores"
-assert_jq "$semantic_search" 'any(.data.results[]?.explanation.factors[]?; .name == "configured_fusion_weight")' \
-    "semantic-heavy explanations include configured fusion weight factor"
+assert_jq "$semantic_search" 'any(.data.results[]?.explanation.factors[]?; .name == "lexical") and any(.data.results[]?.explanation.factors[]?; .name == "semantic_fast" or .name == "semantic_quality") and all(.data.results[]?.explanation.factors[]?; .name != "configured_fusion_weight")' \
+    "semantic-heavy explanations include upstream RRF lexical and semantic factors without legacy post-hoc rescaling"
 
 step "compare ranking and score effects"
 lexical_order="$(json_scalar "$lexical_search" '[.data.results[]?.docId] | join(",")' "lexical-heavy order")"

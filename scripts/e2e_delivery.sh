@@ -19,6 +19,12 @@ LOG="$LOG_DIR/e2e_delivery.jsonl"
 HOOK_STATE_DIR="$ROOT/hook-state"
 
 mkdir -p "$WORKSPACE" "$LOG_DIR" "$HOOK_STATE_DIR"
+if [ -z "${EE_EMBED_MODEL_DIR:-}" ] && [ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]; then
+  _host_models="${XDG_DATA_HOME:-${HOME:-}/.local/share}/ee/models"
+  if [ -f "$_host_models/potion-multilingual-128M/model.safetensors" ]; then
+    export EE_EMBED_MODEL_FIXTURE_DIR="$_host_models"
+  fi
+fi
 ee_isolate_data_dirs "$ROOT"
 
 resolve_ee_bin_path() {

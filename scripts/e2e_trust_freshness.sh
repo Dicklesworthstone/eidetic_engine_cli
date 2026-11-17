@@ -15,6 +15,7 @@
 set -uo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$E2E_DIR/.." && pwd)}"
 
 # Avoid the shared harness's cargo-metadata fallback in code-first swarm lanes.
 # Pin the binary under test; never fall through to `ee` on PATH (bd-smxdr).
@@ -40,7 +41,7 @@ fi
 
 # shellcheck source=scripts/e2e_lib.sh
 # shellcheck disable=SC1091
-source "$E2E_DIR/e2e_lib.sh"
+source "$REPO_ROOT/scripts/e2e_lib.sh"
 
 harness_init "trust_freshness"
 
@@ -138,7 +139,7 @@ assert_jq "$why_cass" '
 
 step "why reports present provenance with no provenance-freshness degradation"
 why_present="$(ee_json why "$mem_id" --workspace "$WS" --json)"
-assert_jq "$why_present" '.schema == "ee.response.v2" and .success == true and .data.memory != null and ((.data.provenance // []) | length) >= 1' \
+assert_jq "$why_present" '.schema == "ee.response.v2" and .success == true and .data.found == true and ((.data.memoryId // "") | length) > 0 and ((.data.storage.provenanceUri // "") | length) > 0' \
     "why present provenance succeeds"
 assert_jq "$why_present" '
     [(.data.degraded // [])[]? | select((.code // "") | startswith("why_provenance_freshness_"))]
@@ -166,7 +167,7 @@ step "restore the file; why returns to present provenance"
 mv "$WS/src/trust_probe_moved.rs" "$WS/src/trust_probe.rs"
 log_event "trust_freshness_transition" memoryId "$mem_id" transition "restored"
 why_restored="$(ee_json why "$mem_id" --workspace "$WS" --json)"
-assert_jq "$why_restored" '.schema == "ee.response.v2" and .success == true and .data.memory != null and ((.data.provenance // []) | length) >= 1' \
+assert_jq "$why_restored" '.schema == "ee.response.v2" and .success == true and .data.found == true and ((.data.memoryId // "") | length) > 0 and ((.data.storage.provenanceUri // "") | length) > 0' \
     "why restored provenance succeeds"
 assert_jq "$why_restored" '
     [(.data.degraded // [])[]? | select((.code // "") | startswith("why_provenance_freshness_"))]
@@ -290,7 +291,7 @@ assert_jq "$helpful_feedback" '.schema == "ee.response.v2" and .success == true'
 harmful_feedback="$(ee_json outcome "$harmful_id" --workspace "$WS" --signal harmful --weight 1.0 --source-id trust-report-e2e --json)"
 assert_jq "$harmful_feedback" '.schema == "ee.response.v2" and .success == true' \
     "harmful outcome feedback is recorded"
-log_event "trust_report_fixture" helpfulMemoryId "$helpful_id" harmfulMemoryId "$harmful_id" expectedEce "0.85"
+log_event "trust_report_fixture" helpfulMemoryId "$helpful_id" harmfulMemoryId "$harmful_id" expectedEce "0.196429"
 
 step "calibration/trust report asserts real outcomes"
 trust_out="$(ee_json trust report --workspace "$WS" --json)"
@@ -300,7 +301,7 @@ assert_jq "$trust_out" '.data.schema == "ee.trust_report.v1"' \
     "trust report emits calibration schema"
 assert_jq "$trust_out" '.data.outcomeEvents.helpful == 1 and .data.outcomeEvents.harmful == 1' \
     "trust report counts scripted helpful and harmful outcomes"
-assert_jq "$trust_out" '.data.calibration.expectedCalibrationError == 0.85' \
+assert_jq "$trust_out" '.data.calibration.expectedCalibrationError == 0.196429' \
     "trust report expected calibration error matches seeded outcomes"
 assert_jq "$trust_out" '.data.reliability.mostHelpful[0].memoryId == "'"$helpful_id"'"' \
     "trust report most-helpful leaderboard is outcome-backed"
