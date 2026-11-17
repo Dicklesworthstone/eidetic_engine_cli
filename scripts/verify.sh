@@ -142,7 +142,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
-DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
+DEFAULT_AGENT_BUILD_ROOT="${EE_AGENT_BUILD_ROOT:-/Volumes/USBNVME16TB/temp_agent_space}"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 BEADS_LOCK_SKIP_CODE=75
 # bd-3ghvw: "this ENVIRONMENT cannot run this stage" is a THIRD state, distinct

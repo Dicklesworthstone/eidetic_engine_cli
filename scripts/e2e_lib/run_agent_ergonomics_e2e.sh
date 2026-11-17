@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
+DEFAULT_AGENT_BUILD_ROOT="${EE_AGENT_BUILD_ROOT:-/Volumes/USBNVME16TB/temp_agent_space}"
 
 if [ "${VERIFY_AGENT_ERGONOMICS_E2E:-1}" = "0" ]; then
     echo "agent-ergonomics e2e: VERIFY_AGENT_ERGONOMICS_E2E=0, skipping"
     exit 0
 fi
 
-if [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
+if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
     mkdir -p "$DEFAULT_AGENT_BUILD_ROOT/cargo-target" "$DEFAULT_AGENT_BUILD_ROOT/tmp" 2>/dev/null || true
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_AGENT_BUILD_ROOT/cargo-target}"
     export TMPDIR="${EE_AGENT_TMPDIR:-$DEFAULT_AGENT_BUILD_ROOT/tmp}"

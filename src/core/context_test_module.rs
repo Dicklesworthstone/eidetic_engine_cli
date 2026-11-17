@@ -2566,7 +2566,7 @@ mod tests {
             MemoryLinkSource,
         };
 
-        let temp_root = PathBuf::from("/tmp");
+        let temp_root = std::env::temp_dir();
         let tempdir = tempfile::Builder::new()
             .prefix("ee-context-ppr-")
             .tempdir_in(&temp_root)
@@ -7127,7 +7127,7 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn context_pack_dna_feature_disabled_skips_graph_open() -> Result<(), String> {
-        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join(".ee").join("ee.db");
         let mut response =
@@ -7369,7 +7369,7 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn context_pack_dna_timeout_emits_cataloged_degradation() -> Result<(), String> {
-        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join(".ee").join("ee.db");
         write_context_graph_config(workspace_path, "[graph.feature.pack_dna]\nenabled = true\n")?;

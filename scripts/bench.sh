@@ -72,17 +72,17 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
+DEFAULT_AGENT_BUILD_ROOT="${EE_AGENT_BUILD_ROOT:-/Volumes/USBNVME16TB/temp_agent_space}"
 BUDGETS_FILE="$PROJECT_ROOT/benches/budgets.toml"
 BASELINE_FILE="${EE_BENCH_BASELINE_FILE:-$PROJECT_ROOT/benches/baselines/v0.1.json}"
 WORKLOAD_FILE="$PROJECT_ROOT/tests/fixtures/swarm_scale/workloads.json"
-if [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
+if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
     mkdir -p "$DEFAULT_AGENT_BUILD_ROOT/cargo-target" "$DEFAULT_AGENT_BUILD_ROOT/tmp" 2>/dev/null || true
     export TMPDIR="${EE_AGENT_TMPDIR:-$DEFAULT_AGENT_BUILD_ROOT/tmp}"
 fi
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then
     TARGET_ROOT="$CARGO_TARGET_DIR"
-elif [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
+elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
     TARGET_ROOT="$DEFAULT_AGENT_BUILD_ROOT/cargo-target"
 else
     TARGET_ROOT="${TMPDIR:-/tmp}/rch_target_ee_bench"

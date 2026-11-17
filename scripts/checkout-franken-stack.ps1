@@ -72,7 +72,7 @@ function Test-CleanCheckout {
     }
 
     $actualUrl = Invoke-GitCaptureResult -Arguments @(
-        "-C", $Destination, "remote", "get-url", "origin"
+        "-C", $Destination, "config", "--local", "--get", "remote.origin.url"
     )
     $acceptedUrls = @(
         $ExpectedUrl,

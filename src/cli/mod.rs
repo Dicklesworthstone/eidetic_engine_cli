@@ -37855,53 +37855,12 @@ where
         };
         let candidates = generate_candidate_pairs(&prepared);
 
-        const PPR_SEED_CAP: usize = 64;
-        let mut seeds: BTreeSet<String> = BTreeSet::new();
-        for (left, right) in &candidates {
-            if seeds.len() >= PPR_SEED_CAP {
-                break;
-            }
-            seeds.insert(left.clone());
-            if seeds.len() < PPR_SEED_CAP {
-                seeds.insert(right.clone());
-            }
-        }
-        let mut ppr_scores: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-        for seed in &seeds {
-            let Ok(seed_id) = seed.parse::<crate::models::MemoryId>() else {
-                continue;
-            };
-            let mut seed_map = BTreeMap::new();
-            seed_map.insert(seed_id, 1.0);
-            if let Ok(scores) =
-                crate::graph::ppr::compute_personalized_pagerank(&input.directed, &seed_map)
-            {
-                ppr_scores.insert(
-                    seed.clone(),
-                    scores
-                        .into_iter()
-                        .map(|(memory_id, score)| (memory_id.to_string(), score))
-                        .collect(),
-                );
-            }
-        }
-        for (left, right) in &candidates {
-            let forward = ppr_scores
-                .get(left)
-                .and_then(|scores| scores.get(right))
-                .copied()
-                .unwrap_or(0.0);
-            let backward = ppr_scores
-                .get(right)
-                .and_then(|scores| scores.get(left))
-                .copied()
-                .unwrap_or(0.0);
-            if forward + backward > 0.0 {
-                prepared
-                    .ppr
-                    .insert((left.clone(), right.clone()), forward + backward);
-            }
-        }
+        // bd-reality-core-convergence-1azkt.15 / .4: pinned FrankenNetworkX
+        // does not expose deterministic personalized PageRank. Production
+        // link suggestions must not run the local ACL-push kernel; prepared.ppr
+        // remains empty (signals.ppr = 0.0) and the missing upstream signal is
+        // reported in degraded[].
+        let ppr_upstream_unavailable = !candidates.is_empty();
 
         // Content for typed relations, bounded to candidate endpoints.
         const CONTENT_FETCH_CAP: usize = 512;
@@ -37935,6 +37894,14 @@ where
         let report = suggest_links(&prepared);
 
         let mut degraded: Vec<serde_json::Value> = Vec::new();
+        if ppr_upstream_unavailable {
+            degraded.push(serde_json::json!({
+                "code": "graph_ppr_upstream_unavailable",
+                "severity": "info",
+                "message": "Personalized PageRank link-suggestion signal is disabled because pinned FrankenNetworkX does not expose deterministic personalized PageRank; suggestions use Adamic-Adar, tag overlap, retrieval affinity, and preferential attachment.",
+                "repair": "Upgrade FrankenNetworkX when deterministic personalized PageRank is available.",
+            }));
+        }
         if report.affinity_cold {
             degraded.push(serde_json::json!({
                 "code": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_COLD_CODE,
@@ -83806,9 +83773,20 @@ mod tests {
                 &serde_json::json!(if cold { 0.0 } else { 2.5 }),
                 "stored affinity weight",
             )?;
+            ensure_equal(
+                &suggestions[0]["signals"]["ppr"],
+                &serde_json::json!(0.0),
+                "local PPR disabled in suggest-links while upstream fnx PPR is unavailable",
+            )?;
             let degraded = response["degraded"]
                 .as_array()
                 .ok_or("missing degraded array")?;
+            ensure(
+                degraded
+                    .iter()
+                    .any(|entry| entry["code"] == "graph_ppr_upstream_unavailable"),
+                "suggest-links reports graph_ppr_upstream_unavailable in degraded",
+            )?;
             ensure_equal(
                 &degraded
                     .iter()

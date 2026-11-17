@@ -300,7 +300,7 @@ run_self_test() {
     local script_path
     script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     local tmp_base="${TMPDIR:-/tmp}"
-    if [ -d /Volumes/USBNVME16TB/temp_agent_space ]; then
+    if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d /Volumes/USBNVME16TB/temp_agent_space ]; then
         tmp_base="/Volumes/USBNVME16TB/temp_agent_space"
     fi
     local scratch

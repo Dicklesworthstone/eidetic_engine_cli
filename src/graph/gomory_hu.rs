@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -284,30 +284,14 @@ fn finite_path_min_cut(min_cut: f64) -> f64 {
 
 fn graph_components(graph: &Graph) -> HashMap<String, usize> {
     let mut components = HashMap::new();
-    let mut component_index = 0;
-    for node in graph.nodes_ordered() {
-        if components.contains_key(node) {
-            continue;
+    for (component_index, component) in fnx_algorithms::connected_components(graph)
+        .components
+        .into_iter()
+        .enumerate()
+    {
+        for node in component {
+            components.insert(node, component_index);
         }
-
-        let mut queue = VecDeque::from([node.to_owned()]);
-        while let Some(current) = queue.pop_front() {
-            if components
-                .insert(current.clone(), component_index)
-                .is_some()
-            {
-                continue;
-            }
-            let Some(neighbors) = graph.neighbors_iter(&current) else {
-                continue;
-            };
-            for neighbor in neighbors {
-                if !components.contains_key(neighbor) {
-                    queue.push_back(neighbor.to_owned());
-                }
-            }
-        }
-        component_index += 1;
     }
     components
 }
@@ -349,48 +333,7 @@ fn tree_path_nodes(tree: &Graph, left: &str, right: &str) -> Option<Vec<String>>
     if !tree.has_node(left) || !tree.has_node(right) {
         return None;
     }
-    if left == right {
-        return Some(vec![left.to_owned()]);
-    }
-
-    let mut queue = VecDeque::from([left.to_owned()]);
-    let mut predecessor: BTreeMap<String, Option<String>> =
-        BTreeMap::from([(left.to_owned(), None)]);
-
-    while let Some(node) = queue.pop_front() {
-        let Some(neighbors) = tree.neighbors_iter(&node) else {
-            continue;
-        };
-        for neighbor in neighbors {
-            if predecessor.contains_key(neighbor) {
-                continue;
-            }
-            predecessor.insert(neighbor.to_owned(), Some(node.clone()));
-            if neighbor == right {
-                return reconstruct_tree_path(&predecessor, right);
-            }
-            queue.push_back(neighbor.to_owned());
-        }
-    }
-
-    None
-}
-
-fn reconstruct_tree_path(
-    predecessor: &BTreeMap<String, Option<String>>,
-    right: &str,
-) -> Option<Vec<String>> {
-    let mut path = Vec::new();
-    let mut current = right.to_owned();
-    loop {
-        path.push(current.clone());
-        match predecessor.get(&current)? {
-            Some(parent) => current = parent.clone(),
-            None => break,
-        }
-    }
-    path.reverse();
-    Some(path)
+    fnx_algorithms::shortest_path_unweighted(tree, left, right).path
 }
 
 fn gomory_tree_edge_weight(tree: &Graph, left: &str, right: &str) -> f64 {

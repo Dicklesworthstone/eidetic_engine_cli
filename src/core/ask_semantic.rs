@@ -338,16 +338,41 @@ fn append_batch<'a>(
     Ok(())
 }
 
+fn power_of_two_scale_for_vector(vector: &[f32]) -> Option<(Vec<f32>, f64)> {
+    let mut max_abs = 0.0_f32;
+    for &value in vector {
+        if !value.is_finite() {
+            return None;
+        }
+        max_abs = max_abs.max(value.abs());
+    }
+    if max_abs == 0.0 {
+        return Some((vector.to_vec(), 1.0));
+    }
+    // Shift exponent by an exact power of two so extreme finite values
+    // (f32::MAX or subnormal f32::from_bits(1)) preserve their 24-bit
+    // significand losslessly while staying well inside normal f32 range for
+    // frankensearch's SIMD dot_product_f32_f32.
+    let exp = f64::from(max_abs).log2().floor() as i32 + 1;
+    let scale = 2.0_f64.powi(-exp);
+    let scaled = vector
+        .iter()
+        .map(|&value| (f64::from(value) * scale) as f32)
+        .collect();
+    Some((scaled, scale))
+}
+
 fn vector_norm_squared(vector: &[f32], dimension: usize) -> Option<f64> {
-    if dimension == 0 || vector.len() != dimension || !vector.iter().all(|v| v.is_finite()) {
+    if dimension == 0 || vector.len() != dimension {
         return None;
     }
-    // f64 intermediates keep even finite f32::MAX components from overflowing.
-    Some(vector.iter().map(|v| f64::from(*v).powi(2)).sum())
+    let (scaled, scale) = power_of_two_scale_for_vector(vector)?;
+    let scaled_dot = f64::from(frankensearch::index::dot_product_f32_f32(&scaled, &scaled).ok()?);
+    Some(scaled_dot / (scale * scale))
 }
 
 fn cosine(query: &[f32], query_norm: f64, vector: &[f32]) -> Option<f32> {
-    if !query_norm.is_finite() || query_norm <= 0.0 {
+    if !query_norm.is_finite() || query_norm <= 0.0 || vector.len() != query.len() {
         return None;
     }
     let norm = vector_norm_squared(vector, query.len())?;
@@ -356,12 +381,12 @@ fn cosine(query: &[f32], query_norm: f64, vector: &[f32]) -> Option<f32> {
         // support from shifting the cosine range to [0, 1].
         return Some(0.0);
     }
-    let dot: f64 = query
-        .iter()
-        .zip(vector)
-        .map(|(left, right)| f64::from(*left) * f64::from(*right))
-        .sum();
-    let similarity = dot / (query_norm.sqrt() * norm.sqrt());
+    let (query_scaled, query_scale) = power_of_two_scale_for_vector(query)?;
+    let (vector_scaled, vector_scale) = power_of_two_scale_for_vector(vector)?;
+    let scaled_dot =
+        f64::from(frankensearch::index::dot_product_f32_f32(&query_scaled, &vector_scaled).ok()?);
+    let denom = (query_norm.sqrt() * query_scale) * (norm.sqrt() * vector_scale);
+    let similarity = scaled_dot / denom;
     similarity
         .is_finite()
         .then(|| similarity.clamp(0.0, 1.0) as f32)

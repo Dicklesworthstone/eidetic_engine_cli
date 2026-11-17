@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 run_self_test() {
     local st_root
-    st_root="$(mktemp -d "${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space}/ee-artifact-relocation-selftest.XXXXXX")"
+    st_root="$(mktemp -d "${TMPDIR:-/tmp}/ee-artifact-relocation-selftest.XXXXXX")"
     local stub_bin="${st_root}/ee-stub"
     cat > "${stub_bin}" <<'STUB'
 #!/usr/bin/env bash

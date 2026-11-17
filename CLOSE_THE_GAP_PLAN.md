@@ -1406,8 +1406,11 @@ remaining performance claim has reproducible evidence or has been demoted.
    its blocker or is demoted; one canonical agent journey remains.
 2. Build the hermetic private draft/staging pipeline `.7` from the exact `.19`
    candidate and `.18` effective inputs.
-3. Verify packages/installers/signatures/provenance/SBOM posture and native or
-   explicitly emulated platform behavior before any public mutation.
+3. Verify packages/installers/signatures/provenance posture (no SBOM is claimed
+   or generated; DSR release manifests bind git SHA, Cargo.lock hash, and full
+   registry package checksums alongside SHA-256/BLAKE3 digests and minisign
+   signatures) and native or explicitly emulated platform behavior before any
+   public mutation.
 4. Keep the release private on every failure; draft asset mismatch fails rather
    than clobbers.
 
@@ -1454,7 +1457,7 @@ matrix/coverage/CHANGELOG, release page, and Beads describe one coherent state.
 | Native packaged behavior | Every advertised archive runs on its native target or is labeled compile/emulated; packaged walking skeleton, model claim, glibc/musl, Windows stdout, macOS targets, and installer modes pass before publish. |
 | Performance and first-agent journey | Correct-output raw samples + sufficient count + host/power/thermal/workload/source identity + variance/RSS/disk/backlog; stable core journey meets declared SLO without daemon or claim is demoted. |
 | Documentation preflight | Executed snippets/schema selectors, explicit maturity, one primary journey, no contradictions/historical proof theater/ownerless promise, generated release copy. |
-| Post-public audit | Exact tag/checks/assets/hashes/signatures/provenance/SBOM/install/channel/link state matches the candidate and generated public docs. |
+| Post-public audit | Exact tag/checks/assets/hashes/signatures/provenance/manifest/install/channel/link state (no SBOM claimed or produced) matches the candidate and generated public docs. |
 
 Every E2E emits structured `ee.test_event.v1` logs, preserves stdout/stderr
 separation, uses no mocks where the acceptance is a live integration, and runs

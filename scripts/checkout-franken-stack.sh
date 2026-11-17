@@ -69,7 +69,7 @@ verify_clean_checkout() {
   actual_revision=$(git -C "$destination" rev-parse HEAD 2>/dev/null || true)
   [ "$actual_revision" = "$revision" ] || return 1
 
-  actual_url=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
+  actual_url=$(git -C "$destination" config --local --get remote.origin.url 2>/dev/null || true)
   case "$actual_url" in
     "$expected_url"|"${expected_url%.git}"|"git@github.com:Dicklesworthstone/${repository}.git")
       ;;

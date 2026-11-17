@@ -9510,3 +9510,129 @@ fn pinned_lane_refuses_build_admission_without_a_verdict() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn franken_stack_origin_check_ignores_global_insteadof_and_still_rejects_bad_local_origin_bd_fcuvh()
+-> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-insteadof", None, None)?;
+    let global_config_dir = unique_tmp_path("rch-franken-global-gitconfig");
+    fs::create_dir_all(&global_config_dir)
+        .map_err(|error| format!("create global gitconfig dir: {error}"))?;
+    let global_config = global_config_dir.join("gitconfig");
+    write_fixture_file(
+        &global_config,
+        "gitconfig",
+        "[url \"https://rewrite-mirror.example.invalid/\"]\n\tinsteadOf = https://github.com/\n",
+    )?;
+    let global_config_file = global_config.join("gitconfig");
+    let global_config_arg = global_config_file
+        .to_str()
+        .ok_or_else(|| "global gitconfig path is not utf-8".to_owned())?;
+
+    // Positive arm: a global url.*.insteadOf rewrite in GIT_CONFIG_GLOBAL must
+    // not cause the configured local remote.origin.url check to fail or leak.
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "franken_insteadof_smoke",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("GIT_CONFIG_GLOBAL", global_config_arg),
+        ],
+        &fixture.project,
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "global url.*.insteadOf should not break configured local origin check\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if stdout.contains("rewrite-mirror.example.invalid") {
+        return Err(format!(
+            "franken_stack report must never echo global insteadOf URL: {stdout}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse positive insteadOf report: {error}"))?;
+    for repository in report["franken_stack"]["repositories"]
+        .as_array()
+        .ok_or_else(|| format!("missing repositories in positive report: {report}"))?
+    {
+        if repository["origin_matches"] != true || repository["state"] != "clean" {
+            return Err(format!(
+                "expected clean origin_matches=true under global insteadOf: {repository}"
+            ));
+        }
+    }
+
+    // Negative arm: a genuinely unexpected local remote.origin.url in the
+    // repository's own .git/config must still refuse with
+    // rch_verify_franken_stack_origin_mismatch and redact origin to "<unexpected>".
+    let asupersync_repo = fixture
+        .repositories
+        .get("asupersync")
+        .ok_or_else(|| "missing asupersync fixture repository".to_owned())?;
+    git(
+        asupersync_repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://unexpected-origin.example.invalid/asupersync.git",
+        ],
+    )?;
+    let (neg_status, neg_stdout, neg_stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "franken_insteadof_negative_smoke",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("GIT_CONFIG_GLOBAL", global_config_arg),
+        ],
+        &fixture.project,
+    )?;
+    if neg_status.success() {
+        return Err(format!(
+            "mismatched local remote.origin.url must refuse\nstdout:\n{neg_stdout}\nstderr:\n{neg_stderr}"
+        ));
+    }
+    if neg_stdout.contains("unexpected-origin.example.invalid") {
+        return Err(format!(
+            "mismatched local origin URL must be redacted from report: {neg_stdout}"
+        ));
+    }
+    let neg_report: Value = serde_json::from_str(&neg_stdout)
+        .map_err(|error| format!("parse negative origin report: {error}"))?;
+    if neg_report["status"] != "source_state_refused"
+        || !degraded_contains(&neg_report, "rch_verify_franken_stack_origin_mismatch")?
+    {
+        return Err(format!(
+            "expected rch_verify_franken_stack_origin_mismatch on bad local origin: {neg_report}"
+        ));
+    }
+    let bad_row = neg_report["franken_stack"]["repositories"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "asupersync"))
+        .ok_or_else(|| format!("missing asupersync row in negative report: {neg_report}"))?;
+    if bad_row["origin"] != "<unexpected>" || bad_row["origin_matches"] != false {
+        return Err(format!(
+            "expected redacted <unexpected> origin on mismatched row: {bad_row}"
+        ));
+    }
+    Ok(())
+}

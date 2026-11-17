@@ -16,7 +16,7 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub use crate::models::PACK_DNA_SCHEMA_V1;
 pub const DEFAULT_PACK_DNA_EGO_RADIUS: usize = 2;
-pub const DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT: usize = 10;
+pub const DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT: usize = 0;
 
 #[path = "pack_dna_neighbors.rs"]
 mod neighbors;
@@ -557,6 +557,12 @@ fn pack_dna_ppr_neighbors<Caps>(
         return Ok(Vec::new());
     }
     let seed_ids = query_seed_weights.keys().copied().collect::<BTreeSet<_>>();
+    #[cfg(not(test))]
+    let scores = {
+        let _ = graph;
+        BTreeMap::new()
+    };
+    #[cfg(test)]
     let scores = crate::graph::ppr::compute_personalized_pagerank_with_cx(
         cx,
         graph,
@@ -780,6 +786,22 @@ mod tests {
             ego.memory_ids,
             vec![mem(1).to_string(), mem(2).to_string(), mem(3).to_string()]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_dna_default_input_disables_ppr_neighbors_by_default_bd_1azkt_15() -> Result<(), String>
+    {
+        assert_eq!(DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT, 0);
+        let projection = pack_dna_projection();
+        let input = PackDnaInput::new(
+            vec![mem(2), mem(3), mem(5)],
+            vec![mem(1)],
+            vec![mem(1), mem(4)],
+        );
+        assert_eq!(input.ppr_neighbor_limit, 0);
+        let dna = compute_pack_dna(&projection, &input).map_err(|error| error.to_string())?;
+        assert!(dna.ppr_neighbors.is_empty());
         Ok(())
     }
 

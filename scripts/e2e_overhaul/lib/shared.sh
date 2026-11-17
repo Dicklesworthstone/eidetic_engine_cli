@@ -20,9 +20,9 @@ SHARED_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SHARED_SH_DIR/../../.." && pwd)"
 export REPO_ROOT
 
-DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
+DEFAULT_AGENT_BUILD_ROOT="${EE_AGENT_BUILD_ROOT:-/Volumes/USBNVME16TB/temp_agent_space}"
 
-if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
+if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
     mkdir -p "${DEFAULT_AGENT_BUILD_ROOT}/cargo-target" "${DEFAULT_AGENT_BUILD_ROOT}/tmp" 2>/dev/null || true
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${DEFAULT_AGENT_BUILD_ROOT}/cargo-target}"
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"

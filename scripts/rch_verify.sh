@@ -3716,7 +3716,7 @@ for repository in known:
         git_status = "ok"
         actual_head = git_text(checkout, ["rev-parse", "HEAD"])
         actual_tree = git_text(checkout, ["rev-parse", "HEAD^{tree}"])
-        actual_origin = git_text(checkout, ["remote", "get-url", "origin"])
+        actual_origin = git_text(checkout, ["config", "--local", "--get", "remote.origin.url"])
         status_result = run_git(
             checkout,
             ["status", "--porcelain=v1", "--untracked-files=normal"],
@@ -4281,7 +4281,7 @@ materialize_pinned_franken_stack() {
 
         if [ -d "$source_repository/.git" ]; then
             local source_origin
-            source_origin="$(git -C "$source_repository" remote get-url origin 2>/dev/null || true)"
+            source_origin="$(git -C "$source_repository" config --local --get remote.origin.url 2>/dev/null || true)"
             case "$source_origin" in
                 "$expected_origin"|"${expected_origin%.git}"|"git@github.com:Dicklesworthstone/${repository}.git")
                     if git -C "$source_repository" cat-file -e "$revision^{commit}" 2>/dev/null; then
@@ -4310,7 +4310,7 @@ materialize_pinned_franken_stack() {
                 git -C "$cache_repository" remote add origin "$expected_origin"
                 printf '%s\t%s\n' "$repository" "$expected_origin" > "$marker"
             fi
-            cache_origin="$(git -C "$cache_repository" remote get-url origin 2>/dev/null || true)"
+            cache_origin="$(git -C "$cache_repository" config --local --get remote.origin.url 2>/dev/null || true)"
             case "$cache_origin" in
                 "$expected_origin"|"${expected_origin%.git}"|"git@github.com:Dicklesworthstone/${repository}.git")
                     ;;

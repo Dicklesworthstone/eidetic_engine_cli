@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
-use fnx_algorithms::{find_cycle_directed, min_cost_flow};
+use fnx_algorithms::{
+    find_cycle_directed, min_cost_flow, single_source_shortest_path_length_directed,
+};
 use fnx_runtime::CgseValue;
 use serde::{Deserialize, Serialize};
 
@@ -386,24 +388,9 @@ fn explanation_step(graph: &DiGraph, source: &str, target: &str) -> Option<Causa
 }
 
 fn shortest_path_lengths(graph: &DiGraph, source: &str) -> BTreeMap<String, usize> {
-    let mut lengths: BTreeMap<String, usize> = BTreeMap::new();
-    let mut queue = VecDeque::new();
-    lengths.insert(source.to_owned(), 0_usize);
-    queue.push_back(source.to_owned());
-
-    while let Some(current) = queue.pop_front() {
-        let next_length = lengths[&current].saturating_add(1);
-        let mut successors: Vec<_> = graph.successors(&current).unwrap_or_default();
-        sort_by_ulid_payload_or_lexical(&mut successors, |successor| *successor);
-        for successor in successors {
-            if !lengths.contains_key(successor) {
-                lengths.insert(successor.to_owned(), next_length);
-                queue.push_back(successor.to_owned());
-            }
-        }
-    }
-
-    lengths
+    single_source_shortest_path_length_directed(graph, source, None)
+        .into_iter()
+        .collect()
 }
 
 /// Copy only evidence reachable in the failure-to-cause direction. In
@@ -416,28 +403,23 @@ fn reachable_causal_subgraph(graph: &DiGraph, source: &str) -> GraphResult<DiGra
         return Ok(scoped);
     }
 
-    let mut visited = BTreeSet::new();
-    let mut queue = VecDeque::new();
-    visited.insert(source.to_owned());
-    queue.push_back(source.to_owned());
-    scoped.add_node_with_attrs(
-        source.to_owned(),
-        graph.node_attrs(source).cloned().unwrap_or_default(),
-    );
+    let reachable = shortest_path_lengths(graph, source);
+    let mut ordered_nodes: Vec<(String, usize)> = reachable.into_iter().collect();
+    sort_by_ulid_payload_or_lexical(&mut ordered_nodes, |(node, _)| node.as_str());
+    ordered_nodes.sort_by_key(|(_, distance)| *distance);
+    for (node, _) in &ordered_nodes {
+        scoped.add_node_with_attrs(
+            node.clone(),
+            graph.node_attrs(node).cloned().unwrap_or_default(),
+        );
+    }
 
-    while let Some(current) = queue.pop_front() {
-        let mut successors = graph.successors(&current).unwrap_or_default();
+    for (current, _) in &ordered_nodes {
+        let mut successors = graph.successors(current).unwrap_or_default();
         sort_by_ulid_payload_or_lexical(&mut successors, |successor| *successor);
         for successor in successors {
-            if visited.insert(successor.to_owned()) {
-                scoped.add_node_with_attrs(
-                    successor.to_owned(),
-                    graph.node_attrs(successor).cloned().unwrap_or_default(),
-                );
-                queue.push_back(successor.to_owned());
-            }
             let attrs = graph
-                .edge_attrs(&current, successor)
+                .edge_attrs(current, successor)
                 .cloned()
                 .ok_or_else(|| GraphError::GraphEngine {
                     operation: "project reachable causal evidence",
