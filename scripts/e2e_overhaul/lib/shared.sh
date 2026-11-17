@@ -227,7 +227,7 @@ _epic_create_workspace_with_timeout() {
 
     if [ -z "${EPIC_WORKSPACE_META:-}" ]; then
         local meta_root
-        meta_root="${EE_E2E_SETUP_META_DIR:-/tmp}"
+        meta_root="${EE_E2E_SETUP_META_DIR:-${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}}"
         mkdir -p "$meta_root"
         # Predictable PID-suffixed meta path is a symlink-attack surface on
         # a shared /tmp: an attacker who pre-stages a symlink at the
@@ -554,7 +554,7 @@ epic_setup() {
     EPIC_TMP_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
     e2e_log_note "epic_setup_tmp_root tmp_root=$EPIC_TMP_ROOT"
     local workspace_meta_root
-    workspace_meta_root="${EE_E2E_SETUP_META_DIR:-/tmp}"
+    workspace_meta_root="${EE_E2E_SETUP_META_DIR:-$EPIC_TMP_ROOT}"
     mkdir -p "$workspace_meta_root"
     EPIC_WORKSPACE_META="$workspace_meta_root/ee-e2e-${EPIC_NAME}-workspace-create-${EPIC_SETUP_BASHPID:-$$}.json"
     EPIC_RETENTION_MANIFEST="${EE_E2E_RETENTION_MANIFEST:-$workspace_meta_root/ee-e2e-${EPIC_NAME}-retention-${EPIC_SETUP_BASHPID:-$$}.json}"
