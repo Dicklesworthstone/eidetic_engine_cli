@@ -27,12 +27,22 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ee-orphan-selftest-XXXXXX")" || exit 64
 PLANTED="$ROOT/scripts"
 mkdir -p "$PLANTED/sub"
 
-# A stand-in `ee` that satisfies ee_require_current_binary: the gate compares
-# `ee --version` against Cargo.toml's version, and this self-test grades the
-# CLASSIFIER, not the product.
+# A stand-in `ee` that satisfies ee_require_current_binary (including
+# ee_require_binary_source_identity): this self-test grades the CLASSIFIER,
+# not the product, and must remain hermetic even when the developer's checkout
+# has uncommitted changes.
 SRC_VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO_ROOT/Cargo.toml" | sed -n '1p')"
+FAKE_COMMIT="0123456789abcdef0123456789abcdef01234567"
+cp "$REPO_ROOT/Cargo.toml" "$ROOT/Cargo.toml"
 FAKE_EE="$ROOT/ee"
-printf '#!/bin/sh\necho "ee %s"\n' "$SRC_VERSION" > "$FAKE_EE"
+cat > "$FAKE_EE" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "version" ] && [ "\${2:-}" = "--json" ]; then
+    printf '{"schema":"ee.response.v2","success":true,"data":{"schema":"ee.version.provenance.v1","command":"version","version":"%s","source":{"gitCommit":"%s","gitDirty":false,"state":"clean"}}}\n' "$SRC_VERSION" "$FAKE_COMMIT"
+    exit 0
+fi
+echo "ee $SRC_VERSION"
+EOF
 chmod +x "$FAKE_EE"
 
 # PASS: harness summary, assertions ran, none failed.
@@ -79,7 +89,8 @@ p_never_written.sh
 EOF
 
 OUT="$ROOT/out"
-EE_BINARY="$FAKE_EE" EE_ORPHAN_OUT="$OUT" \
+EE_BINARY="$FAKE_EE" EE_ORPHAN_OUT="$OUT" EE_ORPHAN_REPO_ROOT="$ROOT" \
+    EE_VERIFICATION_SOURCE_COMMIT="$FAKE_COMMIT" \
     "$PARTITION" --baseline "$BASELINE" --scripts-root "$PLANTED" --timeout 2 \
     > "$ROOT/run.stdout" 2> "$ROOT/run.stderr"
 run_rc=$?

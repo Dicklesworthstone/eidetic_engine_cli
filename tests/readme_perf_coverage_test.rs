@@ -143,7 +143,7 @@ fn coverage_for_operation(operation: &str) -> Option<Coverage> {
             bench_path: "benches/search.rs",
         });
     }
-    if normalized.contains("ee context") {
+    if normalized.contains("ee context") || normalized.contains("ee pack") {
         return Some(Coverage {
             operation_key: "ee_context",
             bench_name: "context",
@@ -360,7 +360,7 @@ fn readme_perf_table_contains_the_expected_current_rows() -> TestResult {
     for expected in [
         "ee remember",
         "ee search",
-        "ee context",
+        "ee pack",
         "ee why",
         "ee init",
         "ee audit timeline",

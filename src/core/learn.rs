@@ -741,9 +741,9 @@ pub fn show_gaps_with_connection(
     } else {
         None
     };
-    let connection = shared_connection
-        .or(owned_connection.as_ref())
-        .expect("learning connection available");
+    let Some(connection) = shared_connection.or(owned_connection.as_ref()) else {
+        return Err(learning_snapshot_error("open learning connection"));
+    };
     let read_snapshot = LearningReadSnapshot::begin(connection)?;
     if connection
         .needs_migration()

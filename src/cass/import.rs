@@ -2052,6 +2052,7 @@ mod ingestion;
 // suggests -- would therefore go UNFULFILLED in that target and raise a fresh
 // `unfulfilled_lint_expectation`, trading six lib errors for a new test-target
 // one. Scoped to this module so anything else that dies still reds the gate.
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "backfill.rs"]
 mod backfill;

@@ -30,6 +30,8 @@ set -euo pipefail
 #                                       # bd-2dgn0 swarm SLO evidence trail.
 #                                       # Documented in docs/operator-swarm-slo.md.
 #   ./scripts/verify.sh --plan-doc-smoke # Run plan-sweep verify_cmd smoke checks
+#   ./scripts/verify.sh --compile-gate-only # Run only the all-targets cargo check compile gate
+#   ./scripts/verify.sh --include-compile-gate # Include the all-targets cargo check compile gate
 #   ./scripts/verify.sh --fuzz-target-audit-self-test # Run only the no-Cargo fuzz audit matcher self-test
 #   ./scripts/verify.sh --fuzz-smoke   # Include 30s cargo-fuzz query parser smoke
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
@@ -132,6 +134,8 @@ INCLUDE_SAFETY_HARNESS=false
 INCLUDE_E2E_ORPHANS=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
+COMPILE_GATE_ONLY=false
+INCLUDE_COMPILE_GATE=false
 CI_SMOKE=false
 SWARM_HEAVY=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -175,6 +179,13 @@ for arg in "$@"; do
         --plan-doc-smoke)
             PLAN_DOC_SMOKE=true
             ;;
+        --compile-gate-only)
+            COMPILE_GATE_ONLY=true
+            INCLUDE_COMPILE_GATE=true
+            ;;
+        --include-compile-gate)
+            INCLUDE_COMPILE_GATE=true
+            ;;
         --fuzz-target-audit-self-test)
             FUZZ_TARGET_AUDIT_SELF_TEST=true
             ;;
@@ -207,6 +218,7 @@ for arg in "$@"; do
             INCLUDE_BENCH=true
             INCLUDE_EVAL=true
             INCLUDE_FUZZ_SMOKE=true
+            INCLUDE_COMPILE_GATE=true
             INCLUDE_SAFETY_HARNESS=true
             INCLUDE_E2E_ORPHANS=true
             PLAN_DOC_SMOKE=true
@@ -236,7 +248,7 @@ else
 fi
 echo ""
 
-if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
+if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
     mkdir -p "${DEFAULT_AGENT_BUILD_ROOT}/cargo-target" "${DEFAULT_AGENT_BUILD_ROOT}/tmp" 2>/dev/null || true
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${DEFAULT_AGENT_BUILD_ROOT}/cargo-target}"
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
@@ -481,6 +493,7 @@ fi
 # Contention E2E" at :1923 runs `cargo build --locked --bin ee` -- or it compares
 # the binary to itself and cannot fail. Recording the hash here is also what lets
 # the proof capsule bind the binary that produced a verdict.
+if [ "$FUZZ_TARGET_AUDIT_SELF_TEST" != "true" ] && [ "$PLAN_DOC_SMOKE" != "true" ] && [ "$COMPILE_GATE_ONLY" != "true" ]; then
 if ! ee_require_current_binary "${EE_BINARY}" "verify"; then
     printf 'verify: refusing to run stages against an unverified binary.\n' >&2
     printf 'verify: build it first (cargo build --locked --bin ee) or export\n' >&2
@@ -693,6 +706,7 @@ if ! ee_assert_target_os_supported "${EE_ACTUAL_OS}" "${EE_SUPPORTED_OS}" "verif
     exit 1
 fi
 export EE_BINARY_TARGET_OS="${EE_ACTUAL_OS}"
+fi
 
 # E2E TEMP ROOT: DERIVED PER HOST, AND PROVEN WRITABLE BEFORE ANY STAGE RUNS
 # (bd-13y74).
@@ -1242,7 +1256,12 @@ stage_budget_summary() {
     read -r p50 advisory fail <<< "$thresholds"
 
     if [ "$duration" -gt "$fail" ]; then
-        printf "budget=fail elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+        local exempt_reason
+        if exempt_reason="$(stage_budget_value "$stage_name" hard_fail_exempt_reason)" && [ -n "$exempt_reason" ]; then
+            printf "budget=hard_fail_exempt elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+        else
+            printf "budget=fail elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+        fi
     elif [ "$duration" -gt "$advisory" ]; then
         printf "budget=advisory elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
     else
@@ -1263,6 +1282,11 @@ enforce_stage_budget() {
     read -r p50 advisory fail <<< "$thresholds"
 
     if [ "$duration" -gt "$fail" ]; then
+        local exempt_reason
+        if exempt_reason="$(stage_budget_value "$stage_name" hard_fail_exempt_reason)" && [ -n "$exempt_reason" ]; then
+            echo "[!] BUDGET: $stage_name exceeded hard-fail aspiration (${duration}s > ${fail}s; p50=${p50}s; hard_fail_exempt_reason=${exempt_reason})" >&2
+            return 0
+        fi
         echo "error: verification stage exceeded hard budget: $stage_name" >&2
         echo "       elapsed=${duration}s p50=${p50}s hard_fail=${fail}s" >&2
         echo "       update scripts/verify-budget.toml only after validating the regression is expected" >&2
@@ -1853,6 +1877,13 @@ else
     record_gated_off "Plan Doc Smoke (bd-3usjw.23)" "--plan-doc-smoke not set"
 fi
 
+if [ "$COMPILE_GATE_ONLY" = "true" ]; then
+    run_stage "All-Targets Compile Gate (bd-qdxc0)" "cargo check --locked --all-targets"
+    verification_summary_banner
+    printf "%b" "$STAGE_RESULTS"
+    exit "$(verification_exit_status)"
+fi
+
 # Gate 0.835: rustfmt conformance (bd-g3obb). ~7s, no compilation.
 #
 # This was gated ONLY in .github/workflows/ci.yml:309, and hosted Actions are
@@ -2363,6 +2394,17 @@ if [ "$CI_SMOKE" != "true" ]; then
     run_stage "Proof Verification (bd-nnfq4)" "./scripts/e2e_overhaul/proof_verify.sh"
 else
     record_gated_off "Proof Verification (bd-nnfq4)" "ci-smoke"
+fi
+
+# Gate 4.95: All-Targets Compile Gate (bd-no-compile-gate-before-a-commit-lands-qdxc0).
+# Typechecks --lib, --bins, --tests, --benches, and --examples (including #[cfg(test)]
+# blocks and all 46 declared [[test]] targets) using .rmeta metadata only (~MBs rather
+# than ~96 GB of linked debug test ELF binaries), catching any unbuildable lib or test
+# target before Gate 5 executes. Also runnable standalone via --compile-gate-only.
+if [ "$INCLUDE_COMPILE_GATE" = "true" ]; then
+    run_stage "All-Targets Compile Gate (bd-qdxc0)" "cargo check --locked --all-targets"
+else
+    record_gated_off "All-Targets Compile Gate (bd-qdxc0)" "--include-compile-gate not set"
 fi
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are

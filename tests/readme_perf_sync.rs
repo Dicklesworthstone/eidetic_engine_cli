@@ -8,10 +8,7 @@ const PERF_SYNC_GOLDEN: &str = include_str!("golden/perf_table_sync.snap");
 const CANONICAL_ROWS: [(&str, &str); 10] = [
     ("ee_remember", "`ee remember` (single record)"),
     ("ee_search", "`ee search \"<q>\"` (hybrid)"),
-    (
-        "ee_context",
-        "`ee context \"<task>\"` (markdown, 4k tokens)",
-    ),
+    ("ee_context", "`ee pack \"<task>\"` (markdown, 4k tokens)"),
     ("ee_why", "`ee why <id>`"),
     ("ee_workspace_init", "`ee init --workspace <dir>` (clean)"),
     ("ee_audit_query", "`ee audit timeline --limit 1000`"),

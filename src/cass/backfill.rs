@@ -5,52 +5,15 @@
 //! existing session. Keep old evidence identities, linkage and security posture
 //! exactly intact; publication work and redaction audits commit with new rows.
 //!
-//! # IF `cargo clippy --lib` SENT YOU HERE, IT IS NOT YOUR CHANGE
+//! # Historical Supersession Note (`bd-tld2l`)
 //!
-//! This module is DECLARED AND UNCALLED, so `-D warnings` turns six `dead_code`
-//! lints into errors and the library refuses to compile:
-//!
-//! ```text
-//! error: struct `BackfillResult` is never constructed          backfill.rs:21
-//! error: function `backfill_session` is never used             backfill.rs:28
-//! error: function `same_upstream_reference` is never used       backfill.rs:187
-//! error: function `snapshot_hash` is never used                 backfill.rs:193
-//! error: function `digest` is never used                        backfill.rs:206
-//! error: function `backfill_error` is never used                backfill.rs:210
-//! error: could not compile `eidetic-engine` (lib) due to 6 previous errors
-//! ```
-//!
-//! Tracked as **bd-4aw2d** (the red-main condition) and caused by **bd-5uym0**
-//! (the public importer never invokes the backfill it ships). It predates any
-//! change you are making; confirmed by execution on a clean committed base at
-//! 164e86d77.
-//!
-//! WHY IT IS STILL HERE. 6a425cf69 added `#[path = "backfill.rs"] mod backfill;`
-//! at src/cass/import.rs:1529 to clear a MODULE REACHABILITY red — the file
-//! existed and had never compiled. Declaring an unused module is exactly what
-//! makes `dead_code` fire, so the two gates are in opposition and cannot both be
-//! green while this module exists unused. The commit introduced no defect; it
-//! moved a true statement from one gate to another.
-//!
-//! WHY IT IS DEAD IS NOW SETTLED, AND THE EARLIER ANSWER HERE WAS WRONG. This
-//! module used to say the repair was to wire the importer to call it. That is
-//! WITHDRAWN. bd-5uym0 established by a passing run of the real public importer
-//! that `src/cass/import.rs:715` already calls `refresh::refresh_session`, and
-//! `refresh.rs` is this module's SUCCESSOR, not its sibling: same five
-//! parameters in the same order, same `with_import_session_transaction`, and
-//! `RefreshReport` is a strict superset of `BackfillResult`. 5374d5563 added
-//! this file at 2026-09-20 22:25 UTC; 33a9e157c wired refresh four hours later.
-//!
-//! So this is not an unwired feature waiting to be connected -- wiring it would
-//! DUPLICATE refresh.rs. These six symbols are dead because something replaced
-//! them.
-//!
-//! The `#[allow(dead_code)]` now sits on the module declaration at
-//! src/cass/import.rs, with the reasoning, under bd-4aw2d. It is an interim.
-//! Retirement is the likely end state and needs explicit written authorisation
-//! that nobody currently holds, so nothing here has been deleted.
-//!
-//! Do not spend time attributing this to your own diff.
+//! `src/cass/import.rs` already calls `refresh::refresh_session`, which is this
+//! module's successor (`RefreshReport` is a strict superset of `BackfillResult`).
+//! To preserve the file and its 7 unit tests without deleting any tracked file
+//! (`AGENTS.md` RULE 1) while keeping non-test library builds (`cargo clippy
+//! --locked --lib -- -D warnings`) and `scripts/check-production-reachability.py`
+//! / `scripts/lib/mod_reachability.py` clean, `mod backfill;` in
+//! `src/cass/import.rs` is gated with `#[cfg(test)]`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

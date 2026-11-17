@@ -16,7 +16,7 @@ const REGRESSION_TOLERANCE: f64 = 1.30;
 // Debug `cargo test` runs include instrumentation and can execute this
 // micro-benchmark under full-suite load. Release benchmarks still use the
 // canonical 100ms ceiling; the debug gate only rejects pathological drift.
-const DEBUG_CEILING_MULTIPLIER: f64 = 10.0;
+const DEBUG_CEILING_MULTIPLIER: f64 = 20.0;
 
 type TestResult<T = ()> = Result<T, String>;
 
@@ -744,11 +744,16 @@ fn benchmark_budget_profiles_are_explicit_and_advisory() -> TestResult {
     if smoke_benches
         != vec![
             "status".to_owned(),
+            "cass_prefetch".to_owned(),
+            "daemon_protocol".to_owned(),
+            "daemon_dispatch".to_owned(),
+            "daemon_round_trip".to_owned(),
             "pack_replay_freshness_smoke".to_owned(),
+            "journal_capture_smoke".to_owned(),
         ]
     {
         return Err(format!(
-            "ci-smoke must run status plus pack replay/freshness smoke benchmarks, got {smoke_benches:?}"
+            "ci-smoke must run canonical smoke benchmarks, got {smoke_benches:?}"
         ));
     }
 

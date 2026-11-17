@@ -171,6 +171,19 @@ artifact_timestamp() {
         printf '%s\n' "$json_timestamp"
         return
     fi
+    current_hash="$(artifact_hash)"
+    existing_timestamp="$(awk -v hash="sha256:$current_hash" '
+        /<!-- perf:begin/ { in_block = 1 }
+        in_block && /^Last synced: / && $0 ~ hash {
+            print $3
+            exit
+        }
+        /<!-- perf:end -->/ && in_block { exit }
+    ' "$README")"
+    if [ -n "$existing_timestamp" ]; then
+        printf '%s\n' "$existing_timestamp"
+        return
+    fi
     if stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$INPUT" >/dev/null 2>&1; then
         TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$INPUT"
         return
@@ -223,7 +236,7 @@ generated_block() {
     done <<'ROWS'
 ee_remember|`ee remember` (single record)
 ee_search|`ee search "<q>"` (hybrid)
-ee_context|`ee context "<task>"` (markdown, 4k tokens)
+ee_context|`ee pack "<task>"` (markdown, 4k tokens)
 ee_why|`ee why <id>`
 ee_workspace_init|`ee init --workspace <dir>` (clean)
 ee_audit_query|`ee audit timeline --limit 1000`

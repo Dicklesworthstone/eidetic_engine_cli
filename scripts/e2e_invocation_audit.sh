@@ -71,9 +71,16 @@ RETIRED="${REPO_ROOT}/tests/fixtures/e2e_invocation/retired.txt"
 # bare-name scheme would silently merge a future collision into one entry.
 e2e_audit_paths() {
     local script_dir="$1"
-    local path
+    local path base
     for path in "$script_dir"/e2e_*.sh; do
-        [ -e "$path" ] && printf '%s\n' "${path##*/}"
+        [ -e "$path" ] || continue
+        base="${path##*/}"
+        case "$base" in
+            e2e_invocation_audit.sh | e2e_orphan_partition.sh | e2e_orphan_partition_selftest.sh)
+                continue
+                ;;
+        esac
+        printf '%s\n' "$base"
     done
     for path in "$script_dir"/e2e_overhaul/*.sh "$script_dir"/e2e_overhaul/lib/*.sh; do
         [ -e "$path" ] && printf 'e2e_overhaul/%s\n' "${path#"$script_dir"/e2e_overhaul/}"
@@ -259,7 +266,7 @@ e2e_orphans() {
         #     `--self-test` without traversing nested checkouts outside those trees.
         if ! (
             cd "$root" && rg --hidden --no-require-git --no-heading -N \
-                "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" . \
+                "^[^#]*(^|[^[:alnum:]_-])$(printf '%s' "$needle" | sed 's/\./\\./g')" . \
                 --glob 'scripts/**' \
                 --glob 'tests/**' \
                 --glob '.github/**' \
@@ -483,6 +490,18 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # bd-1ult2: a prefix-named sibling (`audit_e2e_prefixed.sh`) must NOT
+    # false-credit `e2e_prefixed.sh` by substring containment.
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_prefixed.sh"
+    printf '#!/bin/sh\n./scripts/audit_e2e_prefixed.sh\n' >"$tmp/fixture/scripts/audit_e2e_prefixed.sh"
+    got_prefix="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_prefix" == *"e2e_prefixed.sh"* ]]; then
+        echo "ok   - a prefix-named audit_e2e_*.sh reference does not false-credit e2e_*.sh"
+    else
+        echo "FAIL - substring containment in audit_e2e_prefixed.sh false-credited e2e_prefixed.sh, got '$got_prefix'"
+        failures=$((failures + 1))
+    fi
+
     # Direction 1: a new orphan against an empty baseline must fail.
     printf '# empty\n' >"$tmp/baseline_empty.txt"
     new_orphans="$(comm -23 <(printf 'e2e_lonely.sh\n') <(read_baseline "$tmp/baseline_empty.txt"))"
@@ -559,7 +578,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((19 - failures))/19 passed"
+    echo "self-test: $((20 - failures))/20 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
@@ -624,7 +643,7 @@ fi
 # the reported denominator cannot drift from the population actually examined.
 # It used to be an independent `ls` of one directory, which is how the gate came
 # to report "of 92 e2e scripts" while 115 more sat outside it (bd-1cn5o).
-TOTAL=$(( $(e2e_audit_paths "$REPO_ROOT/scripts" | grep -vc '^$') - 1 ))
+TOTAL=$(e2e_audit_paths "$REPO_ROOT/scripts" | grep -vc '^$')
 echo "e2e_invocation_audit: $(printf '%s\n' "$CURRENT_UNRETIRED" | grep -vc '^$') orphaned of ${TOTAL} e2e scripts; baseline holds $(printf '%s\n' "$BASE" | grep -vc '^$'); retired $(printf '%s\n' "$RETIRED_NAMES" | grep -vc '^$')" >&2
 
 exit "$rc"

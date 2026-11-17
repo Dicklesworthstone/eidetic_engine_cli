@@ -3084,8 +3084,9 @@ the Model2Vec model before answering. That probe ran on an Apple M4 host,
 which is **not** the `mac-m3-pro` class the table above was measured on, so
 it does not refute those numbers on their own hardware; it does show the
 per-command fixed cost the table omits. Treat the table as a
-target until `bd-reality-core-convergence-1azkt.6` regenerates it from
-attested raw samples.
+historical/advisory reference on the `mac-m3-pro` class; release gating uses the
+reproducible RCH benchmark profiles below until fresh attested raw `mac-m3-pro`
+samples are collected.
 
 **One row needs more than that blanket caveat, because hardware class cannot
 explain it.** `ee import cass --limit 50` is listed below at a 4.1 s p50, and
@@ -3119,7 +3120,7 @@ and use `--limit 3` first to measure your own rate.
 | `ee graph centrality-refresh` (PageRank, 5k links) | `mac-m3-pro` | 350 ms | 2.0 s |
 | `ee index rebuild` (full) | `mac-m3-pro` | 18 s | 41 s |
 | 4 concurrent audited memory writers | `mac-m3-pro` | 120 ms | 350 ms |
-Last synced: 2026-05-13T12:52:12Z from sha256:84433f76b5ae84ba96bb3546a75d432175c2fd0f1c477dff03cb59a31b7ab7e6
+Last synced: 2026-05-13T12:52:12Z from sha256:2f22c02b88f0e6fb743acbaad82230ee7fcfe54d77a3df1aeee50eaca5e2b21c
 <!-- perf:end -->
 
 Benchmark profiles are explicit so agents and CI can pick the right cost tier:

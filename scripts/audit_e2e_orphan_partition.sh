@@ -42,7 +42,7 @@
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${EE_ORPHAN_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BASELINE="$REPO_ROOT/tests/fixtures/e2e_invocation/orphan_baseline.txt"
 # Baseline entries are paths relative to this root. Overridable only so the
 # self-test can plant its own scripts outside the repo; production runs never
@@ -68,7 +68,7 @@ done
 
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 # shellcheck disable=SC1091
-. "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+. "$SCRIPT_DIR/lib/ee_binary_resolution.sh"
 EE_BIN="${EE_BINARY:-${EE_BIN:-$(ee_resolve_binary 2>/dev/null)}}"
 
 # Refuse a stale or foreign binary rather than grading one. A partition taken

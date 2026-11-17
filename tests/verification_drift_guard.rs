@@ -5086,3 +5086,247 @@ fn degradation_repair_command_is_omitted_when_none_and_emitted_when_some() {
         Some("ee context --workspace . --no-pack-dna --json")
     );
 }
+
+const HARD_FAIL_EXEMPT_STAGE_ALLOWANCE: usize = 1;
+
+#[test]
+fn unit_contract_golden_stage_declares_ratcheted_hard_fail_exemption_and_verify_sh_enforces_both_arms_bd_xh5zd()
+ {
+    let budget_manifest =
+        fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let blocks = budget_stage_blocks(&budget_manifest);
+
+    let mut exempt_stages: Vec<(String, String)> = Vec::new();
+    for block in &blocks {
+        let name = block
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("stage should have a name");
+        if let Some(reason) = block
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("hard_fail_exempt_reason = "))
+        {
+            let clean = reason.trim().trim_matches('"').to_string();
+            assert!(
+                !clean.is_empty() && clean.contains("bd-xh5zd"),
+                "stage {name} declares hard_fail_exempt_reason without citing bd-xh5zd: {clean:?}"
+            );
+            exempt_stages.push((name.to_string(), clean));
+        }
+    }
+
+    assert!(
+        exempt_stages.len() <= HARD_FAIL_EXEMPT_STAGE_ALLOWANCE,
+        "{} stages declare hard_fail_exempt_reason, over the ratchet allowance of \
+         {HARD_FAIL_EXEMPT_STAGE_ALLOWANCE}: {exempt_stages:?}",
+        exempt_stages.len()
+    );
+    assert_eq!(
+        exempt_stages.len(),
+        1,
+        "expected Unit, Contract, and Golden Tests to declare hard_fail_exempt_reason (bd-xh5zd)"
+    );
+    assert_eq!(
+        exempt_stages[0].0, "Unit, Contract, and Golden Tests",
+        "only Unit, Contract, and Golden Tests may declare hard_fail_exempt_reason"
+    );
+
+    // Execute verify.sh's real stage_budget_summary and enforce_stage_budget functions
+    // against both an exempt stage and an ordinary non-exempt stage at duration=640s > fail=360s.
+    let run_probe = |stage_name: &str, duration: u64| -> Output {
+        Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -uo pipefail
+VERIFY_BUDGET_FILE="$VERIFY_BUDGET"
+VERIFY_BUDGET_FAIL_CODE=6
+eval "$(awk '/^stage_budget_value\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^stage_budget_thresholds\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^stage_budget_summary\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^enforce_stage_budget\(\) /,/^}/' "$VERIFY_SCRIPT")"
+printf 'summary=%s\n' "$(stage_budget_summary "$STAGE_NAME" "$DURATION")"
+enforce_stage_budget "$STAGE_NAME" "$DURATION"
+"#,
+            )
+            .env("VERIFY_SCRIPT", verify_script_path())
+            .env("VERIFY_BUDGET", verify_budget_path())
+            .env("STAGE_NAME", stage_name)
+            .env("DURATION", duration.to_string())
+            .current_dir(project_root())
+            .output()
+            .expect("run stage budget probe")
+    };
+
+    // Positive control: Unit, Contract, and Golden Tests at 640s (> 360s hard line)
+    // declares hard_fail_exempt_reason, emits budget=hard_fail_exempt, and exits 0.
+    let exempt_probe = run_probe("Unit, Contract, and Golden Tests", 640);
+    let exempt_stdout = String::from_utf8_lossy(&exempt_probe.stdout);
+    let exempt_stderr = String::from_utf8_lossy(&exempt_probe.stderr);
+    assert_eq!(
+        exempt_probe.status.code(),
+        Some(0),
+        "exempt stage exceeding 360s aspiration must exit 0 with explicit warning\nstdout={exempt_stdout}\nstderr={exempt_stderr}"
+    );
+    assert!(
+        exempt_stdout.contains(
+            "summary=budget=hard_fail_exempt elapsed=640s p50=120s advisory=180s fail=360s"
+        ),
+        "exempt stage must report budget=hard_fail_exempt\nstdout={exempt_stdout}"
+    );
+    assert!(
+        exempt_stderr.contains("exceeded hard-fail aspiration")
+            && exempt_stderr.contains("hard_fail_exempt_reason=bd-xh5zd:"),
+        "exempt stage must print the declared hard_fail_exempt_reason\nstderr={exempt_stderr}"
+    );
+
+    // Negative control: an ordinary stage without hard_fail_exempt_reason exceeding p50 * 3
+    // still fails with VERIFY_BUDGET_FAIL_CODE (6) and budget=fail.
+    let strict_probe = run_probe("Forbidden Dependencies", 640);
+    let strict_stdout = String::from_utf8_lossy(&strict_probe.stdout);
+    let strict_stderr = String::from_utf8_lossy(&strict_probe.stderr);
+    assert_eq!(
+        strict_probe.status.code(),
+        Some(6),
+        "non-exempt stage exceeding p50*3 must fail with VERIFY_BUDGET_FAIL_CODE=6\nstdout={strict_stdout}\nstderr={strict_stderr}"
+    );
+    assert!(
+        strict_stdout.contains("summary=budget=fail elapsed=640s"),
+        "non-exempt stage must report budget=fail\nstdout={strict_stdout}"
+    );
+    assert!(
+        strict_stderr
+            .contains("error: verification stage exceeded hard budget: Forbidden Dependencies"),
+        "non-exempt stage must emit hard budget failure diagnostic\nstderr={strict_stderr}"
+    );
+}
+
+#[test]
+fn all_targets_compile_gate_is_wired_and_compile_gate_only_bypasses_ee_binary_check_bd_qdxc0() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let budget_manifest =
+        fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+
+    let stage_name = "All-Targets Compile Gate (bd-qdxc0)";
+    let unit_stage_name = "Unit, Contract, and Golden Tests";
+
+    let compile_gate_pos = verify_script
+        .lines()
+        .position(|line| {
+            line.trim()
+                == format!(r#"run_stage "{stage_name}" "cargo check --locked --all-targets""#)
+        })
+        .expect("All-Targets Compile Gate must be wired in verify.sh");
+    let unit_stage_pos = verify_script
+        .lines()
+        .position(|line| line.contains(&format!(r#"run_stage "{unit_stage_name}""#)))
+        .expect("Unit, Contract, and Golden Tests must be wired in verify.sh");
+    assert!(
+        compile_gate_pos < unit_stage_pos,
+        "{stage_name} (line {}) must run before {unit_stage_name} (line {})",
+        compile_gate_pos + 1,
+        unit_stage_pos + 1
+    );
+
+    let blocks = budget_stage_blocks(&budget_manifest);
+    let block = blocks
+        .iter()
+        .find(|b| {
+            b.iter()
+                .any(|l| l.trim() == format!("name = \"{stage_name}\""))
+        })
+        .expect("verify-budget.toml must declare All-Targets Compile Gate (bd-qdxc0)");
+    let provenance = stage_p50_provenance(block)
+        .expect("All-Targets Compile Gate must carry a P50_PROVENANCE record");
+    assert!(
+        provenance.contains_key("measured"),
+        "All-Targets Compile Gate must carry a measured= provenance record: {provenance:?}"
+    );
+    assert_eq!(
+        budget_stage_p50(block),
+        Some(83),
+        "All-Targets Compile Gate p50 must match its measured provenance"
+    );
+    assert!(
+        opt_in_gated_stage_names(&verify_script).contains(stage_name),
+        "All-Targets Compile Gate must be opt-in gated via --include-compile-gate"
+    );
+
+    // Execute verify.sh --compile-gate-only with a fake cargo on PATH and a
+    // nonexistent EE_BINARY in both positive (exit 0) and negative (exit 101) arms.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fake_cargo = temp.path().join("cargo");
+    fs::write(
+        &fake_cargo,
+        r#"#!/usr/bin/env bash
+if [ "${1:-}" = "metadata" ]; then
+    echo '{"target_directory":"/nonexistent/target"}'
+    exit 0
+fi
+if [ "${1:-}" = "check" ] && [ "${2:-}" = "--locked" ] && [ "${3:-}" = "--all-targets" ]; then
+    echo "FAKE_CARGO_CHECK_ARGS=$*"
+    exit "${FAKE_CARGO_EXIT_CODE:-0}"
+fi
+echo "unexpected cargo invocation: $*" >&2
+exit 99
+"#,
+    )
+    .expect("write fake cargo");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_cargo).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, perms).expect("chmod fake cargo");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let pos = Command::new("bash")
+        .arg(verify_script_path())
+        .arg("--compile-gate-only")
+        .env("PATH", &path_env)
+        .env("EE_BINARY", "/nonexistent/ee-binary-for-qdxc0")
+        .env("FAKE_CARGO_EXIT_CODE", "0")
+        .current_dir(project_root())
+        .output()
+        .expect("run verify.sh --compile-gate-only positive arm");
+    let pos_stdout = String::from_utf8_lossy(&pos.stdout);
+    let pos_stderr = String::from_utf8_lossy(&pos.stderr);
+    assert_eq!(
+        pos.status.code(),
+        Some(0),
+        "--compile-gate-only positive arm must exit 0 even when EE_BINARY is absent\nstdout={pos_stdout}\nstderr={pos_stderr}"
+    );
+    assert!(
+        pos_stdout.contains("FAKE_CARGO_CHECK_ARGS=check --locked --all-targets")
+            && pos_stdout.contains("[+] PASS: All-Targets Compile Gate (bd-qdxc0)"),
+        "--compile-gate-only positive arm must run cargo check --locked --all-targets and report PASS\nstdout={pos_stdout}"
+    );
+
+    let neg = Command::new("bash")
+        .arg(verify_script_path())
+        .arg("--compile-gate-only")
+        .env("PATH", &path_env)
+        .env("EE_BINARY", "/nonexistent/ee-binary-for-qdxc0")
+        .env("FAKE_CARGO_EXIT_CODE", "101")
+        .current_dir(project_root())
+        .output()
+        .expect("run verify.sh --compile-gate-only negative arm");
+    let neg_stdout = String::from_utf8_lossy(&neg.stdout);
+    let neg_stderr = String::from_utf8_lossy(&neg.stderr);
+    assert_eq!(
+        neg.status.code(),
+        Some(101),
+        "--compile-gate-only negative arm must propagate cargo check's exit 101\nstdout={neg_stdout}\nstderr={neg_stderr}"
+    );
+    assert!(
+        neg_stdout.contains("[-] FAIL: All-Targets Compile Gate (bd-qdxc0) (Exit code: 101"),
+        "--compile-gate-only negative arm must report FAIL with exit code 101\nstdout={neg_stdout}"
+    );
+}

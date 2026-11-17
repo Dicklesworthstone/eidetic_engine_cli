@@ -1703,7 +1703,13 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
                 &prepared.workspace_id,
             )?);
         }
-        slot.as_ref().expect("batch session initialized")
+        let Some(session) = slot.as_ref() else {
+            return Err(DomainError::Storage {
+                message: "Failed to initialize remember batch session".to_owned(),
+                repair: Some("ee doctor".to_owned()),
+            });
+        };
+        session
     } else {
         owned_session = Some(RememberBatchStoreSession::open_for_prepared(
             &prepared.database_path,
@@ -1711,7 +1717,13 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
             options.workspace_path,
             &prepared.workspace_id,
         )?);
-        owned_session.as_ref().expect("owned session initialized")
+        let Some(session) = owned_session.as_ref() else {
+            return Err(DomainError::Storage {
+                message: "Failed to initialize owned remember session".to_owned(),
+                repair: Some("ee doctor".to_owned()),
+            });
+        };
+        session
     };
     let connection = &session.connection;
     prepared.workspace_id = session.workspace_id.clone();
@@ -8615,7 +8627,12 @@ fn remember_memory_with_creation_companions_and_batch_session(
                         &stable_workspace_id(&canonical),
                     )?);
                 }
-                let session = slot.as_ref().expect("batch session initialized");
+                let Some(session) = slot.as_ref() else {
+                    return Err(DomainError::Storage {
+                        message: "Failed to initialize remember batch session".to_owned(),
+                        repair: Some("ee doctor".to_owned()),
+                    });
+                };
                 (&session.connection, session.workspace_id.clone())
             } else {
                 owned_connection = open_remember_database_with_retry(&database_path)?;
