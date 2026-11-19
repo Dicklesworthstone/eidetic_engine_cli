@@ -28,34 +28,7 @@
 # detector's own absence -- the detector's blind spots are the reason this file
 # needs hand verification at all.
 
-# No invocation of any kind anywhere in tests/ or scripts/. Zero lines mention
-# both words outside comments. These three are the clearest real gaps in the set.
-# `focus add` was the fourth until 2026-10-19, when the gate reported it as now
-# exercised: tests/conformance/query_v1_matrix.rs:353 runs it through run_ee and
-# asserts both the exit code and the response envelope. Verified independently
-# before removing the line, and the other three still have zero references.
-focus explain
-focus remove
-focus show
-
-# `ee workflow create`: the only hits pairing "workflow" with "create" are
-# unrelated (`gh release create` in tests/install_workflows.rs, and prose about
-# shell startup files). Nothing invokes the surface.
-workflow create
-
-# `ee diag contention`: scripts/e2e_diag_contention.sh does exercise it, but
-# that script is itself an orphan -- it is listed in
-# tests/fixtures/e2e_invocation/orphan_baseline.txt, wired into no runner, and
-# therefore never executed. The only other hit is a string equality in
-# tests/contracts/contention_schema.rs (`== Some("diag contention")`), which
-# compares a name rather than running a command. A suite nothing runs is not
-# evidence; retiring this entry means wiring that script, which is bd-udjrq's
-# remaining work.
-diag contention
-
-# `ee import eidetic-legacy`: appears only inside an effect-contract name list
-# (tests/effect_contracts.rs, `for command in ["import cass", "import jsonl",
-# "import eidetic-legacy"]`). That asserts the command's declared effect, not
-# its behavior -- it is parser presence one layer removed, which is the exact
-# bar this term declines to accept.
-import eidetic-legacy
+# All 6 previously unexercised surfaces (`focus explain`, `focus remove`,
+# `focus show`, `workflow create`, `diag contention`, and `import eidetic-legacy`)
+# now have real-binary behavioral CLI E2E tests in `tests/cli_loop_e2e.rs`
+# (compiled into `integration_a_d`). Baseline is now 0 (148/148 = 100.0%).

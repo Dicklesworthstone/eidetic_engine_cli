@@ -2263,7 +2263,8 @@ pub fn close_workflow(
 pub fn create_workflow(
     options: &WorkflowCreateOptions<'_>,
 ) -> Result<WorkflowCreateReport, DomainError> {
-    let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+    let workspace_path =
+        resolve_memory_write_workspace_path(options.workspace_path, options.dry_run)?;
     let database_path = options
         .database_path
         .map(Path::to_path_buf)
@@ -2295,6 +2296,10 @@ pub fn create_workflow(
             audit_id: None,
             next_action,
         });
+    }
+
+    if !database_path.exists() {
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =

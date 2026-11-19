@@ -692,3 +692,576 @@ fn cli_loop_status_reports_workspace_health() -> TestResult {
         "status must report asupersync engine",
     )
 }
+
+// ============================================================================
+// Behavioral E2E coverage for the remaining documented CLI surfaces:
+// focus show / focus explain / focus remove, workflow create, diag contention,
+// and import eidetic-legacy.
+// ============================================================================
+
+#[test]
+fn cli_loop_focus_show_explain_remove_lifecycle() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "focus init exit code")?;
+
+    let mem1_out = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Always check release artifacts before publication.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    ensure_equal(&mem1_out.status.code(), &Some(0), "remember mem1 exit code")?;
+    let mem1_json = stdout_json(&mem1_out)?;
+    let mem1_id = mem1_json["data"]["memoryId"]
+        .as_str()
+        .ok_or("missing mem1 memoryId")?
+        .to_owned();
+
+    let mem2_out = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Verify minisign signatures and SHA256SUMS for every target.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    ensure_equal(&mem2_out.status.code(), &Some(0), "remember mem2 exit code")?;
+    let mem2_json = stdout_json(&mem2_out)?;
+    let mem2_id = mem2_json["data"]["memoryId"]
+        .as_str()
+        .ok_or("missing mem2 memoryId")?
+        .to_owned();
+
+    // Empty workspace: focus show and focus explain are read-only and report empty state.
+    let show_empty = run_ee(&["--workspace", &workspace, "focus", "show", "--json"])?;
+    ensure_equal(
+        &show_empty.status.code(),
+        &Some(0),
+        "focus show empty exit code",
+    )?;
+    let show_empty_json = stdout_json(&show_empty)?;
+    ensure_equal(
+        &show_empty_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "focus show empty schema",
+    )?;
+    ensure_equal(
+        &show_empty_json["data"]["command"],
+        &serde_json::json!("focus show"),
+        "focus show command",
+    )?;
+    ensure_equal(
+        &show_empty_json["data"]["mutated"],
+        &serde_json::json!(false),
+        "focus show read-only",
+    )?;
+    ensure_equal(
+        &show_empty_json["data"]["activeMemoryIds"],
+        &serde_json::json!([]),
+        "focus show initially empty",
+    )?;
+
+    let explain_empty = run_ee(&["--workspace", &workspace, "focus", "explain", "--json"])?;
+    ensure_equal(
+        &explain_empty.status.code(),
+        &Some(0),
+        "focus explain empty exit code",
+    )?;
+    let explain_empty_json = stdout_json(&explain_empty)?;
+    ensure_equal(
+        &explain_empty_json["data"]["command"],
+        &serde_json::json!("focus explain"),
+        "focus explain command",
+    )?;
+    let empty_explanations = explain_empty_json["data"]["explanations"]
+        .as_array()
+        .ok_or("focus explain empty missing explanations array")?;
+    ensure(
+        empty_explanations
+            .iter()
+            .any(|item| item["code"] == "focus_empty"),
+        "focus explain empty must include focus_empty explanation",
+    )?;
+
+    // Set focus with a pinned focal item and a secondary item.
+    let set = run_ee(&[
+        "--workspace",
+        &workspace,
+        "focus",
+        "set",
+        &mem1_id,
+        &mem2_id,
+        "--focal",
+        &mem1_id,
+        "--pin",
+        &mem1_id,
+        "--reason",
+        "release staging gate",
+        "--json",
+    ])?;
+    ensure_equal(&set.status.code(), &Some(0), "focus set exit code")?;
+
+    let show_active = run_ee(&["--workspace", &workspace, "focus", "show", "--json"])?;
+    ensure_equal(
+        &show_active.status.code(),
+        &Some(0),
+        "focus show active exit code",
+    )?;
+    let show_active_json = stdout_json(&show_active)?;
+    let active_ids = show_active_json["data"]["activeMemoryIds"]
+        .as_array()
+        .ok_or("focus show active missing activeMemoryIds")?;
+    ensure_equal(&active_ids.len(), &2, "focus show active count")?;
+    ensure(
+        active_ids.iter().any(|id| id == &mem1_id) && active_ids.iter().any(|id| id == &mem2_id),
+        "focus show active must include both focused memories",
+    )?;
+    ensure_equal(
+        &show_active_json["data"]["focusState"]["focalMemoryId"],
+        &serde_json::json!(mem1_id),
+        "focus show focal memory id",
+    )?;
+
+    let explain_active = run_ee(&["--workspace", &workspace, "focus", "explain", "--json"])?;
+    ensure_equal(
+        &explain_active.status.code(),
+        &Some(0),
+        "focus explain active exit code",
+    )?;
+    let explain_active_json = stdout_json(&explain_active)?;
+    let active_explanations = explain_active_json["data"]["explanations"]
+        .as_array()
+        .ok_or("focus explain active missing explanations")?;
+    ensure(
+        active_explanations.iter().any(|item| {
+            item["code"] == "focus_item_included"
+                && item["memoryId"] == mem1_id
+                && item["message"].as_str().is_some_and(|msg| {
+                    msg.contains("pinned focal") && msg.contains("release staging gate")
+                })
+        }),
+        "focus explain must report pinned focal reason for mem1",
+    )?;
+
+    // Remove the focal memory: clears focalMemoryId and retains mem2.
+    let remove_focal = run_ee(&[
+        "--workspace",
+        &workspace,
+        "focus",
+        "remove",
+        &mem1_id,
+        "--json",
+    ])?;
+    ensure_equal(
+        &remove_focal.status.code(),
+        &Some(0),
+        "focus remove focal exit code",
+    )?;
+    let remove_focal_json = stdout_json(&remove_focal)?;
+    ensure_equal(
+        &remove_focal_json["data"]["command"],
+        &serde_json::json!("focus remove"),
+        "focus remove command",
+    )?;
+    ensure_equal(
+        &remove_focal_json["data"]["mutated"],
+        &serde_json::json!(true),
+        "focus remove mutated",
+    )?;
+    ensure_equal(
+        &remove_focal_json["data"]["activeMemoryIds"],
+        &serde_json::json!([mem2_id]),
+        "focus remove remaining activeMemoryIds",
+    )?;
+    ensure(
+        remove_focal_json["data"]["focusState"]["focalMemoryId"].is_null(),
+        "removing focal memory must clear focalMemoryId",
+    )?;
+
+    // Idempotent repeat removal reports mutated=false and focus_remove_not_present.
+    let remove_repeat = run_ee(&[
+        "--workspace",
+        &workspace,
+        "focus",
+        "remove",
+        &mem1_id,
+        "--json",
+    ])?;
+    ensure_equal(
+        &remove_repeat.status.code(),
+        &Some(0),
+        "focus remove repeat exit code",
+    )?;
+    let remove_repeat_json = stdout_json(&remove_repeat)?;
+    ensure_equal(
+        &remove_repeat_json["data"]["mutated"],
+        &serde_json::json!(false),
+        "focus remove repeat must not mutate",
+    )?;
+    let repeat_explanations = remove_repeat_json["data"]["explanations"]
+        .as_array()
+        .ok_or("focus remove repeat missing explanations")?;
+    ensure(
+        repeat_explanations
+            .iter()
+            .any(|item| item["code"] == "focus_remove_not_present"),
+        "focus remove repeat must report focus_remove_not_present",
+    )
+}
+
+#[test]
+fn cli_loop_workflow_create_storeless_dry_run_persist_and_close() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let db_path = tempdir.path().join(".ee").join("ee.db");
+
+    // Storeless workspace without --dry-run must fail closed with exit 10 and create no DB.
+    let storeless = run_ee(&[
+        "--workspace",
+        &workspace,
+        "workflow",
+        "create",
+        "release-prep",
+        "--json",
+    ])?;
+    ensure_equal(
+        &storeless.status.code(),
+        &Some(10),
+        "workflow create on storeless workspace must exit 10",
+    )?;
+    ensure(
+        !db_path.exists(),
+        "storeless workflow create must not create .ee/ee.db",
+    )?;
+
+    // Dry-run on storeless workspace succeeds without persisting state.
+    let dry_run = run_ee(&[
+        "--workspace",
+        &workspace,
+        "workflow",
+        "create",
+        "release-prep",
+        "--description",
+        "Release staging checklist",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(
+        &dry_run.status.code(),
+        &Some(0),
+        "workflow create --dry-run exit code",
+    )?;
+    let dry_run_json = stdout_json(&dry_run)?;
+    ensure_equal(
+        &dry_run_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "workflow create dry-run envelope schema",
+    )?;
+    ensure_equal(
+        &dry_run_json["data"]["workflowId"],
+        &serde_json::json!("release-prep"),
+        "workflow create dry-run workflowId",
+    )?;
+    ensure_equal(
+        &dry_run_json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "workflow create dryRun flag",
+    )?;
+    ensure_equal(
+        &dry_run_json["data"]["persisted"],
+        &serde_json::json!(false),
+        "workflow create dry-run persisted=false",
+    )?;
+    ensure(
+        !db_path.exists(),
+        "workflow create --dry-run must not create .ee/ee.db",
+    )?;
+
+    // Initialize workspace, create workflow durably, verify idempotence, attach memory, close.
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "workflow init exit code")?;
+
+    let created = run_ee(&[
+        "--workspace",
+        &workspace,
+        "workflow",
+        "create",
+        "release-prep",
+        "--description",
+        "Release staging checklist",
+        "--json",
+    ])?;
+    ensure_equal(
+        &created.status.code(),
+        &Some(0),
+        "workflow create persisted exit code",
+    )?;
+    let created_json = stdout_json(&created)?;
+    ensure_equal(
+        &created_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "workflow create persisted schema",
+    )?;
+    ensure_equal(
+        &created_json["data"]["workflowId"],
+        &serde_json::json!("release-prep"),
+        "workflow create persisted workflowId",
+    )?;
+    ensure_equal(
+        &created_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "workflow create persisted=true",
+    )?;
+    ensure(
+        created_json["data"]["auditId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "workflow create must record a non-empty auditId",
+    )?;
+
+    let created_again = run_ee(&[
+        "--workspace",
+        &workspace,
+        "workflow",
+        "create",
+        "release-prep",
+        "--json",
+    ])?;
+    ensure_equal(
+        &created_again.status.code(),
+        &Some(0),
+        "workflow create idempotent repeat exit code",
+    )?;
+
+    let remembered = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Stage private release artifacts before human sign-off.",
+        "--level",
+        "working",
+        "--kind",
+        "fact",
+        "--workflow",
+        "release-prep",
+        "--json",
+    ])?;
+    ensure_equal(
+        &remembered.status.code(),
+        &Some(0),
+        "workflow remember exit code",
+    )?;
+
+    let closed = run_ee(&[
+        "--workspace",
+        &workspace,
+        "workflow",
+        "close",
+        "release-prep",
+        "--json",
+    ])?;
+    ensure_equal(&closed.status.code(), &Some(0), "workflow close exit code")
+}
+
+#[test]
+fn cli_loop_diag_contention_default_triage_and_missing_daemon() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "diag contention init")?;
+
+    let default_out = run_ee(&["--workspace", &workspace, "diag", "contention", "--json"])?;
+    ensure_equal(
+        &default_out.status.code(),
+        &Some(0),
+        "diag contention exit code",
+    )?;
+    ensure(
+        default_out.stderr.is_empty(),
+        "diag contention --json stderr must be empty",
+    )?;
+    let default_json = stdout_json(&default_out)?;
+    ensure_equal(
+        &default_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "diag contention envelope schema",
+    )?;
+    ensure_equal(
+        &default_json["success"],
+        &serde_json::json!(true),
+        "diag contention success",
+    )?;
+    ensure_equal(
+        &default_json["data"]["command"],
+        &serde_json::json!("diag contention"),
+        "diag contention command",
+    )?;
+    ensure_equal(
+        &default_json["data"]["report"]["schema"],
+        &serde_json::json!("ee.diag.contention.v1"),
+        "diag contention report schema",
+    )?;
+    ensure(
+        default_json["data"]["report"]["overallPosture"]
+            .as_str()
+            .is_some_and(|posture| !posture.is_empty()),
+        "diag contention must include overallPosture",
+    )?;
+    ensure_equal(
+        &default_json["degraded"],
+        &serde_json::json!([]),
+        "diag contention in-process degraded empty",
+    )?;
+
+    let triage_out = run_ee(&[
+        "--workspace",
+        &workspace,
+        "diag",
+        "contention",
+        "--robot-triage",
+        "--json",
+    ])?;
+    ensure_equal(
+        &triage_out.status.code(),
+        &Some(0),
+        "diag contention --robot-triage exit code",
+    )?;
+    let triage_json = stdout_json(&triage_out)?;
+    ensure_equal(
+        &triage_json["data"]["robotTriage"],
+        &serde_json::json!(true),
+        "diag contention robotTriage flag",
+    )?;
+    ensure(
+        triage_json["data"]["topContention"].is_array(),
+        "diag contention --robot-triage must surface topContention array",
+    )?;
+
+    let missing_socket = tempdir.path().join("missing-daemon.sock");
+    let missing_socket_arg = missing_socket.to_string_lossy().to_string();
+    let daemon_fallback = run_ee(&[
+        "--workspace",
+        &workspace,
+        "diag",
+        "contention",
+        "--use-daemon",
+        "--daemon-socket",
+        &missing_socket_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &daemon_fallback.status.code(),
+        &Some(0),
+        "diag contention --use-daemon missing socket fallback exit code",
+    )?;
+    let fallback_json = stdout_json(&daemon_fallback)?;
+    let degraded = fallback_json["degraded"]
+        .as_array()
+        .ok_or("diag contention fallback missing degraded array")?;
+    ensure(
+        !degraded.is_empty(),
+        "diag contention --use-daemon with missing socket must disclose degradation",
+    )
+}
+
+#[test]
+fn cli_loop_import_eidetic_legacy_dry_run_and_non_dry_run_refusal() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let canonical_root = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize tempdir: {error}"))?;
+    let legacy_dir = canonical_root.join("legacy-export");
+    fs::create_dir_all(&legacy_dir).map_err(|error| error.to_string())?;
+    fs::write(
+        legacy_dir.join("sessions.json"),
+        r#"{"messages":[{"role":"assistant","content":"Always verify checksums."}]}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(legacy_dir.join("notes.bin"), b"ignored binary blob")
+        .map_err(|error| error.to_string())?;
+    let legacy_arg = legacy_dir.to_string_lossy().to_string();
+
+    // Negative control: omitting --dry-run must fail closed (import error exit 5).
+    let refused = run_ee(&[
+        "import",
+        "eidetic-legacy",
+        "--source",
+        &legacy_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &refused.status.code(),
+        &Some(5),
+        "import eidetic-legacy without --dry-run must exit 5",
+    )?;
+    let refused_json = stdout_json(&refused)?;
+    ensure_equal(
+        &refused_json["schema"],
+        &serde_json::json!("ee.error.v2"),
+        "import eidetic-legacy refusal error envelope",
+    )?;
+
+    // Positive path: --dry-run scans without mutating storage and reports discovered artifacts.
+    let scanned = run_ee(&[
+        "import",
+        "eidetic-legacy",
+        "--source",
+        &legacy_arg,
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(
+        &scanned.status.code(),
+        &Some(0),
+        "import eidetic-legacy --dry-run exit code",
+    )?;
+    let scanned_json = stdout_json(&scanned)?;
+    ensure_equal(
+        &scanned_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "import eidetic-legacy response schema",
+    )?;
+    ensure_equal(
+        &scanned_json["success"],
+        &serde_json::json!(true),
+        "import eidetic-legacy success",
+    )?;
+    ensure_equal(
+        &scanned_json["data"]["schema"],
+        &serde_json::json!("ee.import.eidetic_legacy.scan.v1"),
+        "import eidetic-legacy inner schema",
+    )?;
+    ensure_equal(
+        &scanned_json["data"]["command"],
+        &serde_json::json!("import eidetic-legacy"),
+        "import eidetic-legacy command",
+    )?;
+    ensure_equal(
+        &scanned_json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "import eidetic-legacy dryRun flag",
+    )?;
+    ensure_equal(
+        &scanned_json["data"]["artifactsFound"],
+        &serde_json::json!(1),
+        "import eidetic-legacy artifactsFound",
+    )?;
+    ensure_equal(
+        &scanned_json["data"]["scannedFiles"],
+        &serde_json::json!(2),
+        "import eidetic-legacy scannedFiles",
+    )
+}
