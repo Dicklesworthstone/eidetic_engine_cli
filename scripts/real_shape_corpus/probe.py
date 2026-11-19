@@ -493,6 +493,120 @@ def degraded_codes(payload):
     return codes
 
 
+def apply_plausible_irrelevant_control(metrics):
+    """Mutate a metric summary as if packs were flooded with readable, plausible
+    but judged-irrelevant prose (bd-reality-core-convergence-1azkt.50).
+
+    UTR stays high (>= 0.99, zero JSON scaffolding) and named-distractor FAR
+    stays low (<= 0.05, because the injected prose is not one of the explicitly
+    labelled distractors), yet pack_scenario_precision and relevant_items collapse.
+    The relevance gate in evaluate_enforced_metrics must reject this.
+    """
+    mutated = json.loads(json.dumps(metrics))
+    far = dict(mutated.get("FAR") or {})
+    far["packed_items"] = max(2000, far.get("packed_items") or 2000)
+    far["distractor_items"] = min(far.get("distractor_items") or 0, int(far["packed_items"] * 0.01))
+    far["value"] = round(far["distractor_items"] / far["packed_items"], 4)
+    far["relevant_items"] = 0
+    mutated["FAR"] = far
+    utr = dict(mutated.get("UTR") or {})
+    utr["value"] = max(0.995, utr.get("value") or 0.995)
+    mutated["UTR"] = utr
+    mutated["pack_scenario_precision"] = {"value": 0.0}
+    mutated["pack_precision"] = {
+        "value": 0.0,
+        "definition": "packed items from a session holding a judged-relevant record / packed items",
+        "items_per_pack": round(far["packed_items"] / 40.0, 2),
+    }
+    return mutated
+
+
+def evaluate_enforced_metrics(metrics, total_records, query_count, enforce_latency=False):
+    """Evaluate §16.5 outcome metrics against bd-reality-core-convergence-1azkt.50 thresholds.
+
+    Returns a dict with per-check rows and a `failures` list for checks in
+    `state == "enforce"`.
+    """
+    checks = []
+    failures = []
+
+    def record(name, state, observed, threshold, passed):
+        row = {
+            "check": name,
+            "state": state,
+            "observed": observed,
+            "threshold": threshold,
+            "passed": bool(passed),
+        }
+        checks.append(row)
+        if state == "enforce" and not passed:
+            failures.append(row)
+
+    utr_val = (metrics.get("UTR") or {}).get("value")
+    record("real_corpus_pack_usefulness_utr", "enforce", utr_val, ">= 0.95",
+           isinstance(utr_val, (int, float)) and utr_val >= 0.95)
+
+    far_obj = metrics.get("FAR") or {}
+    far_val = far_obj.get("value")
+    record("real_corpus_admission_far", "enforce", far_val, "<= 0.05",
+           isinstance(far_val, (int, float)) and far_val <= 0.05)
+
+    distractors_top5 = (metrics.get("recall_at_5") or {}).get("distractors_in_top5")
+    record("real_corpus_top5_no_distractors", "enforce", distractors_top5, "== 0",
+           distractors_top5 == 0)
+
+    scen_hit = (metrics.get("scenario_hit_at_5") or {}).get("value")
+    record("real_corpus_scenario_hit_at_5", "enforce", scen_hit, ">= 0.85",
+           isinstance(scen_hit, (int, float)) and scen_hit >= 0.85)
+
+    scen_prec = (metrics.get("pack_scenario_precision") or {}).get("value")
+    rel_items = far_obj.get("relevant_items")
+    min_rel_items = max(1, query_count // 2) if query_count else 1
+    record(
+        "real_corpus_pack_relevance_survival",
+        "enforce",
+        {"pack_scenario_precision": scen_prec, "relevant_items": rel_items},
+        f"pack_scenario_precision >= 0.05 and relevant_items >= {min_rel_items}",
+        isinstance(scen_prec, (int, float))
+        and scen_prec >= 0.05
+        and isinstance(rel_items, int)
+        and rel_items >= min_rel_items,
+    )
+
+    pap = metrics.get("PAP") or {}
+    pap_prec = pap.get("precision")
+    pap_rec = pap.get("recall")
+    pap_polluted = pap.get("polluted")
+    record(
+        "real_corpus_learn_quality",
+        "enforce",
+        {"precision": pap_prec, "recall": pap_rec, "polluted": pap_polluted},
+        "precision >= 0.70, recall >= 0.70, polluted == 0",
+        isinstance(pap_prec, (int, float))
+        and pap_prec >= 0.70
+        and isinstance(pap_rec, (int, float))
+        and pap_rec >= 0.70
+        and pap_polluted == 0,
+    )
+
+    ttfuc_p50 = (metrics.get("TTFUC") or {}).get("pack_p50_seconds")
+    latency_state = "enforce" if enforce_latency else "report"
+    record("real_corpus_latency", latency_state, ttfuc_p50, "<= 2.0",
+           isinstance(ttfuc_p50, (int, float)) and ttfuc_p50 <= 2.0)
+
+    wcs_slope = (metrics.get("WCS") or {}).get("slope")
+    wcs_state = "enforce" if isinstance(wcs_slope, (int, float)) else "report"
+    record("real_corpus_wcs_slope", wcs_state, wcs_slope, "<= 0.15",
+           isinstance(wcs_slope, (int, float)) and wcs_slope <= 0.15)
+
+    return {
+        "checks": checks,
+        "enforced_count": sum(1 for c in checks if c["state"] == "enforce"),
+        "failed_count": len(failures),
+        "failures": failures,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ee")
@@ -502,6 +616,17 @@ def main():
     parser.add_argument("--queries", choices=["all", "evaluation"], default="all")
     parser.add_argument("--pack-tokens", type=int, default=3000)
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--mode", choices=["report", "enforce"], default="report",
+                        help="report mode exits 0 on any valid measurement; enforce mode exits 1 "
+                             "when any enforced §16.5 outcome metric misses its threshold (.50)")
+    parser.add_argument("--enforce", action="store_true",
+                        help="shorthand for --mode enforce")
+    parser.add_argument("--enforce-latency", action="store_true",
+                        help="enforce TTFUC <= 2.0s cold latency check (for release binaries)")
+    parser.add_argument("--plausible-irrelevant-control", action="store_true",
+                        help="negative control (.50): flood packs with readable, plausible but "
+                             "judged-irrelevant prose while leaving UTR and named-distractor FAR "
+                             "within target; enforce mode must reject it")
     parser.add_argument("--self-test", action="store_true",
                         help="validate the probe's own platform, diagnostic, env and fail-closed "
                              "behaviour; with --ee it also runs the end-to-end controls")
@@ -515,6 +640,7 @@ def main():
     if not args.ee:
         parser.error("--ee is required unless --self-test is given")
 
+    mode = "enforce" if args.enforce else args.mode
     ee = os.path.abspath(args.ee)
     root = allocate_physical_root()
     out = args.out or os.path.join(root, "out")
@@ -522,7 +648,7 @@ def main():
     workspace = os.path.join(root, "ws")
     corpus = os.path.join(root, "corpus")
     os.makedirs(workspace)
-    summary = {"schema": "ee.real_corpus_probe.v1", "mode": "report", "ee": ee,
+    summary = {"schema": "ee.real_corpus_probe.v1", "mode": mode, "ee": ee,
                "cass": "stub:scripts/real_shape_corpus/cass_fixture.py",
                # Recorded so a failed run is inspectable: with --out or --keep the
                # root survives, and the workspace under it is the store whose
@@ -553,6 +679,16 @@ def main():
         embedding = model_env(model_cache, download)
         env.update(embedding)
         summary["embedding"] = {"configured": embedding or "ee defaults (nothing set)"}
+
+        v_code, v_payload, _, _ = run_ee(ee, ["version", "--json"], env, workspace)
+        if v_code == 0 and isinstance(v_payload, dict):
+            v_data = v_payload.get("data") or {}
+            summary["candidate_identity"] = {
+                "version": v_data.get("version"),
+                "targetTriple": v_data.get("targetTriple"),
+                "source": v_data.get("source"),
+                "frankenStack": v_data.get("frankenStack"),
+            }
 
         code, payload, elapsed, err = run_ee(ee, ["init", "--workspace", workspace, "--json"], env, workspace)
         event("init", exit=code, seconds=round(elapsed, 3))
@@ -724,6 +860,17 @@ def main():
         problem = zero_guard(m, per_query, manifest["total_records"], len(queries))
         if problem:
             raise Harness(problem)
+        if args.plausible_irrelevant_control:
+            summary["metrics"] = apply_plausible_irrelevant_control(m)
+            m = summary["metrics"]
+            summary["plausible_irrelevant_control"] = True
+        enforced = evaluate_enforced_metrics(
+            m,
+            manifest["total_records"],
+            len(queries),
+            enforce_latency=args.enforce_latency,
+        )
+        summary["enforced_checks"] = enforced
     except Harness as error:
         summary["harness_error"] = str(error)
         if error.code:
@@ -732,11 +879,20 @@ def main():
         print(json.dumps(summary, indent=2))
         return 2
     finally:
-        with open(os.path.join(out, "summary.json"), "w") as fh:
+        summary_path = os.path.join(out, "summary.json")
+        with open(summary_path, "w") as fh:
             json.dump(summary, fh, indent=2)
         if not args.keep and not args.out:
             shutil.rmtree(root, ignore_errors=True)
     print(json.dumps(summary, indent=2))
+    if mode == "enforce" and summary.get("enforced_checks", {}).get("failed_count", 0) > 0:
+        for row in summary["enforced_checks"]["failures"]:
+            sys.stderr.write(
+                f"real-corpus-probe: FAIL check={row['check']} "
+                f"observed={json.dumps(row['observed'])} "
+                f"threshold={row['threshold']!r} artifact={summary_path}\n"
+            )
+        return 1
     return 0
 
 
@@ -994,6 +1150,43 @@ def self_test(ee=None):
         arm("TWIN: a mutated fail-closed contract does NOT match tests/golden/probe-fail-closed.snap",
             mutated_contract != golden_contract)
 
+        print("ENFORCE-GATE arms -- .50 per-metric enforce checks and plausible-irrelevant control:")
+        sample_metrics = {
+            "UTR": {"value": 0.9997, "packed_chars": 222753, "target": ">= 0.95"},
+            "TTFUC": {"pack_p50_seconds": 1.637, "pack_max_seconds": 2.469, "target": "<= 2 s cold"},
+            "recall_at_5": {"mean": 0.7583, "queries": 40, "distractors_in_top5": 0},
+            "FAR": {"value": 0.0431, "packed_items": 1670, "distractor_items": 72, "relevant_items": 52, "target": "<= 0.05"},
+            "scenario_hit_at_5": {"value": 0.975},
+            "pack_scenario_precision": {"value": 0.0784},
+            "PAP": {"precision": 1.0, "recall": 0.8333, "proposals": 5, "polluted": 0},
+            "WCS": {"remember_p50_seconds": 1.503, "corpus_records": 123},
+        }
+        enforced_ok = evaluate_enforced_metrics(sample_metrics, 123, 40, enforce_latency=True)
+        arm("TWIN THAT MUST NOT FIRE: healthy release metrics pass all enforced checks",
+            enforced_ok["failed_count"] == 0 and enforced_ok["enforced_count"] >= 7)
+        bad_utr = evaluate_enforced_metrics(
+            dict(sample_metrics, UTR={"value": 0.65}), 123, 40
+        )
+        arm("TWIN: v0.16.0-class UTR (0.65 < 0.95) is rejected by enforce gate",
+            any(f["check"] == "real_corpus_pack_usefulness_utr" for f in bad_utr["failures"]))
+        bad_pap = evaluate_enforced_metrics(
+            dict(sample_metrics, PAP={"precision": 0.0, "recall": 0.0, "polluted": 2}), 123, 40
+        )
+        arm("TWIN: v0.16.0-class PAP (0/10 proposals) is rejected by enforce gate",
+            any(f["check"] == "real_corpus_learn_quality" for f in bad_pap["failures"]))
+        bad_lat = evaluate_enforced_metrics(
+            dict(sample_metrics, TTFUC={"pack_p50_seconds": 8.7}), 123, 40, enforce_latency=True
+        )
+        arm("TWIN: v0.16.0-class cold latency (8.7s > 2.0s) is rejected when latency enforced",
+            any(f["check"] == "real_corpus_latency" for f in bad_lat["failures"]))
+        plausible_irrelevant = apply_plausible_irrelevant_control(sample_metrics)
+        pi_eval = evaluate_enforced_metrics(plausible_irrelevant, 123, 40)
+        arm("PLAUSIBLE-IRRELEVANT CONTROL: UTR and named-distractor FAR still pass their individual checks",
+            plausible_irrelevant["UTR"]["value"] >= 0.95
+            and plausible_irrelevant["FAR"]["value"] <= 0.05)
+        arm("PLAUSIBLE-IRRELEVANT CONTROL: enforce gate rejects the run on relevance survival",
+            any(f["check"] == "real_corpus_pack_relevance_survival" for f in pi_eval["failures"]))
+
         if ee:
             print(f"END-TO-END controls against {ee}:")
             base = [sys.executable, "-I", __file__, "--ee", ee, "--target-records", "0"]
@@ -1003,17 +1196,31 @@ def self_test(ee=None):
             # neural path supplies EE_PROBE_MODEL_DIR instead.
             hermetic = dict(os.environ, EE_PROBE_EMBED_DOWNLOAD="off")
             hermetic.pop("EE_PROBE_MODEL_DIR", None)
-            positive = subprocess.run(base, capture_output=True, text=True, timeout=7200,
-                                      env=hermetic)
+            positive = subprocess.run(base + ["--enforce"], capture_output=True, text=True,
+                                      timeout=7200, env=hermetic)
             summary = json.loads(positive.stdout or "{}")
             metrics = summary.get("metrics", {})
             recall = (metrics.get("recall_at_5") or {}).get("mean")
             utr = (metrics.get("UTR") or {}).get("value")
-            arm(f"POSITIVE CONTROL: the probe exits 0 (got {positive.returncode}; "
-                f"harness_error={summary.get('harness_error')})", positive.returncode == 0)
+            enforced = summary.get("enforced_checks", {})
+            arm(f"POSITIVE CONTROL (--enforce): the probe exits 0 (got {positive.returncode}; "
+                f"harness_error={summary.get('harness_error')}; "
+                f"failed_count={enforced.get('failed_count')})",
+                positive.returncode == 0
+                and summary.get("mode") == "enforce"
+                and enforced.get("failed_count") == 0)
             arm(f"POSITIVE CONTROL: recall_at_5 mean > 0 (got {recall})",
                 isinstance(recall, (int, float)) and recall > 0)
             arm(f"POSITIVE CONTROL: UTR is not null (got {utr})", utr is not None)
+            arm("POSITIVE CONTROL: candidate_identity is recorded",
+                isinstance((summary.get("candidate_identity") or {}).get("version"), str))
+            live_pi = evaluate_enforced_metrics(
+                apply_plausible_irrelevant_control(metrics), 123, 40
+            )
+            arm("NEGATIVE CONTROL (live metrics): plausible-irrelevant dilution is rejected by enforce gate",
+                live_pi.get("failed_count", 0) > 0
+                and any(f["check"] == "real_corpus_pack_relevance_survival"
+                        for f in live_pi.get("failures", [])))
             negative = subprocess.run(base + ["--negative-control"], env=hermetic,
                                       capture_output=True, text=True, timeout=7200)
             neg_summary = json.loads(negative.stdout or "{}")
