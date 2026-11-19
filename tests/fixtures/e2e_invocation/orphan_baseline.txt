@@ -191,5 +191,3 @@ e2e_overhaul/mesh_tailscale_smoke.sh
 # (e2e_overhaul/derivation_reflection_readiness.sh; bd-unreachable-e2e-scripts-u14sr
 # transitive-closure fixpoint):
 e2e_overhaul/external_derivation_lifecycle.sh
-e2e_overhaul/lib/derivation_reflection.sh
-e2e_overhaul/reflection_handshake_gaps.sh

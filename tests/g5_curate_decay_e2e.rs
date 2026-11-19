@@ -64,3 +64,62 @@ fn g5_curate_decay_script_passes_with_cargo_built_binary() {
         log
     );
 }
+
+#[test]
+fn reflection_handshake_gaps_script_passes_with_cargo_built_binary() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = repo_root.join("scripts/e2e_overhaul/reflection_handshake_gaps.sh");
+    let ee_binary = env!("CARGO_BIN_EXE_ee");
+    let log_path = std::env::temp_dir().join(format!(
+        "ee-reflection-handshake-gaps-e2e-{}.jsonl",
+        std::process::id()
+    ));
+
+    let temp = tempfile::tempdir().expect("isolated tempdir");
+    let output = Command::new("bash")
+        .arg(&script)
+        .current_dir(repo_root)
+        .env("HOME", temp.path().join("home"))
+        .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_BINARY", ee_binary)
+        .env("EE_E2E_KEEP_WORKSPACE", "1")
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", script.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|error| format!("<failed to read {}: {error}>", log_path.display()));
+    assert!(
+        output.status.success(),
+        "reflection handshake gaps e2e script failed with status {} (code {:?})\nstdout:\n{}\nstderr:\n{}\nlog path: {}\nlog:\n{}",
+        output.status,
+        output.status.code(),
+        stdout,
+        stderr,
+        log_path.display(),
+        log
+    );
+
+    assert!(
+        log.contains("reflection_reflect_propose_response_schema"),
+        "structured log should include reflection propose schema assertion; log path: {}\nlog:\n{}",
+        log_path.display(),
+        log
+    );
+    assert!(
+        log.contains("reflection_request_id_present"),
+        "structured log should include reflection requestId assertion; log path: {}\nlog:\n{}",
+        log_path.display(),
+        log
+    );
+    assert!(
+        log.contains("reflection_request_ledger_inserted"),
+        "structured log should include reflection ledger insertion assertion; log path: {}\nlog:\n{}",
+        log_path.display(),
+        log
+    );
+}
