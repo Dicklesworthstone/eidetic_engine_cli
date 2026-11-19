@@ -17948,7 +17948,10 @@ fn pack_quality_actuals_for_cases(
                 .data
                 .degraded
                 .iter()
-                .filter(|entry| entry.category().included_by_default())
+                .filter(|entry| {
+                    entry.category().included_by_default()
+                        && !crate::pack::is_non_canonical_telemetry_degradation_code(&entry.code)
+                })
                 .map(|entry| entry.code.to_string())
                 .collect::<BTreeSet<_>>()
                 .into_iter()

@@ -16663,6 +16663,65 @@ fn uncalibrated_local_pack_sources(search_hits: &[SearchHit]) -> BTreeMap<&str, 
         .collect()
 }
 
+/// Identify single-arm semantic hits in a mixed 2-arm/1-arm `hybrid` RRF pool
+/// that carry strong cosine evidence (`best_semantic >= 0.35`, i.e., above the
+/// `weak_query_recall` threshold, and `semantic_score >= 0.25.max(0.60 * best)`).
+///
+/// In RRF fusion, a 2-arm (`lexical + semantic`) hit sums two reciprocal ranks
+/// (`~2 / (k + 1)`) while a 1-arm (`semantic` only) hit has at most one
+/// (`~1 / (k + 1)`). When a query has strong semantic evidence (`>= 0.35`), that
+/// structural 2:1 step function would otherwise discard high-cosine semantic
+/// guardrails (such as `rm -rf` or `WIP commit` on a cleanup query) while
+/// still rejecting weak semantic distractors (such as `fastScore = 0.1555`
+/// espresso advice or queries below the `0.35` weak-semantic threshold).
+fn strong_semantic_only_hybrid_docs(search_hits: &[SearchHit]) -> BTreeSet<&str> {
+    let is_local_uncalibrated_hybrid = |hit: &&SearchHit| {
+        hit.source == crate::core::search::ScoreSource::Hybrid
+            && !search_hit_is_global_store_lane(hit)
+            && hit
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("calibrated"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+    };
+    let semantic_score = |hit: &SearchHit| {
+        let fast = hit.fast_score.filter(|s| s.is_finite() && *s > 0.0);
+        let qual = hit.quality_score.filter(|s| s.is_finite() && *s > 0.0);
+        match (fast, qual) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    };
+    let has_lexical = |hit: &SearchHit| {
+        hit.lexical_score
+            .is_some_and(|score| score.is_finite() && score > 0.0)
+    };
+    let mut best_semantic = 0.0_f32;
+    let mut has_two_arm = false;
+    for hit in search_hits.iter().filter(is_local_uncalibrated_hybrid) {
+        if let Some(sem) = semantic_score(hit) {
+            best_semantic = best_semantic.max(sem);
+            if has_lexical(hit) {
+                has_two_arm = true;
+            }
+        }
+    }
+    if !has_two_arm || best_semantic < 0.35 {
+        return BTreeSet::new();
+    }
+    let min_semantic = 0.25_f32.max(best_semantic * 0.60);
+    search_hits
+        .iter()
+        .filter(is_local_uncalibrated_hybrid)
+        .filter(|hit| !has_lexical(hit))
+        .filter(|hit| semantic_score(hit).is_some_and(|sem| sem >= min_semantic))
+        .map(|hit| hit.doc_id.as_str())
+        .collect()
+}
+
 /// Find a clear separation in one query's uncalibrated ranking domain.
 ///
 /// This is admission policy, not a relevance estimator: scores and their
@@ -16722,6 +16781,7 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
     }
     let query_terms = context_pack_query_subject_terms(query);
     let sources = uncalibrated_local_pack_sources(search_hits);
+    let strong_semantic_docs = strong_semantic_only_hybrid_docs(search_hits);
     let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32, bool)>::new();
     for candidate in candidates.iter() {
         // Focus, explicit graph seeds, warnings, and independently normalized
@@ -16732,11 +16792,12 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
         {
             continue;
         }
-        if let Some((source, lexical_match)) = sources.get(candidate.memory_id.to_string().as_str())
-        {
+        let doc_id = candidate.memory_id.to_string();
+        if let Some((source, lexical_match)) = sources.get(doc_id.as_str()) {
             let score = candidate.relevance.into_inner();
-            let subject_match = *lexical_match
-                && shares_context_pack_query_subject(&query_terms, &candidate.content);
+            let subject_match = (*lexical_match
+                && shares_context_pack_query_subject(&query_terms, &candidate.content))
+                || strong_semantic_docs.contains(doc_id.as_str());
             population
                 .entry(ContextPackEntityKey::Memory(candidate.memory_id))
                 .and_modify(|entry| {
@@ -16755,8 +16816,9 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                 (
                     *source,
                     item.relevance.into_inner(),
-                    *lexical_match
-                        && shares_context_pack_query_subject(&query_terms, &item.content),
+                    (*lexical_match
+                        && shares_context_pack_query_subject(&query_terms, &item.content))
+                        || strong_semantic_docs.contains(item.rule_id.as_str()),
                 ),
             );
         }
@@ -16772,8 +16834,12 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
                 (
                     *source,
                     candidate.item.relevance.into_inner(),
-                    *lexical_match
-                        && shares_context_pack_query_subject(&query_terms, &candidate.item.content),
+                    (*lexical_match
+                        && shares_context_pack_query_subject(
+                            &query_terms,
+                            &candidate.item.content,
+                        ))
+                        || strong_semantic_docs.contains(candidate.item.evidence_id.as_str()),
                 ),
             );
         }
@@ -19197,6 +19263,65 @@ mod relevance_floor_tests {
         }));
         assert!(degraded[0].message.contains("lexical=0.8501"));
         assert!(!degraded[0].message.contains("semantic_fast="));
+    }
+
+    #[test]
+    fn mixed_hybrid_two_arm_and_semantic_only_regimes_are_fitted_separately() {
+        // Positive arm: 2 two-arm (lexical + semantic) hits (~0.3967) and 2
+        // single-arm semantic hits (~0.195, ~0.192). The 2:1 RRF arm-count step
+        // must not manufacture a false elbow that discards the semantic-only hits.
+        let mut candidates = elbow_candidate_set(&[0.3967, 0.3967, 0.1951, 0.1920]);
+        candidates.rules.clear();
+        candidates.evidence.clear();
+        let mut hits = retrieval_hits(&candidates);
+        for (index, hit) in hits.iter_mut().enumerate() {
+            hit.source = crate::core::search::ScoreSource::Hybrid;
+            hit.fast_score = Some(0.35);
+            hit.lexical_score = (index < 2).then_some(2.0);
+        }
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            "clean up generated files and reset the repo state",
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert!(omitted.is_empty());
+        assert!(degraded.is_empty());
+        assert_eq!(candidates.memories.len(), 4);
+
+        // Negative twin arm: low-cosine semantic distractors (fast_score 0.1555,
+        // below 0.25.max(0.60 * best)) are NOT exempted and are omitted by the
+        // `hybrid` elbow while the strong semantic hits (fast_score >= 0.28) survive.
+        let mut candidates_with_tail =
+            elbow_candidate_set(&[0.3967, 0.3967, 0.1951, 0.1920, 0.1877, 0.1848]);
+        candidates_with_tail.rules.clear();
+        candidates_with_tail.evidence.clear();
+        let mut hits_with_tail = retrieval_hits(&candidates_with_tail);
+        let fast_scores = [0.4521, 0.4320, 0.3369, 0.2805, 0.1555, 0.1200];
+        for (index, hit) in hits_with_tail.iter_mut().enumerate() {
+            hit.source = crate::core::search::ScoreSource::Hybrid;
+            hit.fast_score = Some(fast_scores[index]);
+            hit.lexical_score = (index < 2).then_some(2.0);
+        }
+        let mut degraded_tail = Vec::new();
+        let omitted_tail = filter_context_pack_candidates_by_query_relative_elbow(
+            "clean up generated files and reset the repo state",
+            &hits_with_tail,
+            &BTreeSet::new(),
+            &mut candidates_with_tail.memories,
+            &mut candidates_with_tail.rules,
+            &mut candidates_with_tail.evidence,
+            None,
+            &mut degraded_tail,
+        );
+        assert_eq!(omitted_tail.len(), 2);
+        assert_eq!(candidates_with_tail.memories.len(), 4);
+        assert!(degraded_tail[0].message.contains("hybrid="));
     }
 
     #[test]
