@@ -335,8 +335,9 @@ fn configure_workspace_config_open_no_follow(options: &mut std::fs::OpenOptions)
 fn configure_workspace_config_open_no_follow(_options: &mut std::fs::OpenOptions) {}
 
 fn first_existing_config_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
+    let (mut current, inspected_path) = crate::util::boundary_walk_plan(path)?
+        .unwrap_or_else(|| (PathBuf::new(), path.to_path_buf()));
+    for component in inspected_path.components() {
         match component {
             std::path::Component::Prefix(_) | std::path::Component::RootDir => {
                 current.push(component.as_os_str());

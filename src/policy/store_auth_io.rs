@@ -8,6 +8,8 @@
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Write};
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use zeroize::Zeroizing;
 
@@ -24,6 +26,45 @@ pub(super) fn reject_symlink_components(
     keys_dir: &Path,
     path: &Path,
 ) -> Result<(), StoreAuthError> {
+    let boundary = crate::util::fs_boundary().map_err(|error| io_error(path, error))?;
+    reject_symlink_components_with_boundary(keys_dir, path, boundary.as_ref())
+}
+
+fn reject_symlink_components_with_boundary(
+    keys_dir: &Path,
+    path: &Path,
+    boundary: Option<&crate::util::FsBoundary>,
+) -> Result<(), StoreAuthError> {
+    if let Some(boundary) = boundary {
+        for requested in [keys_dir, path] {
+            let absolute = boundary
+                .ensure_within(requested)
+                .map_err(|error| io_error(requested, error))?;
+            let suffix = absolute
+                .strip_prefix(boundary.root())
+                .map_err(|error| io_error(requested, error))?;
+            let mut current = boundary.root().to_path_buf();
+            // Inspect the boundary itself and descend in order. Inspecting a
+            // leaf first could follow an unchecked interior symlink outside
+            // the boundary before the ancestor walk gets to reject it.
+            for component in std::iter::once(None).chain(suffix.components().map(Some)) {
+                if let Some(component) = component {
+                    current.push(component.as_os_str());
+                }
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.is_symlink() => {
+                        return Err(StoreAuthError::SymlinkComponent {
+                            path: current.display().to_string(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) => return Err(io_error(&current, error)),
+                }
+            }
+        }
+        return Ok(());
+    }
     for candidate in keys_dir.ancestors().chain(path.ancestors()) {
         if candidate.as_os_str().is_empty() {
             continue;
@@ -85,15 +126,48 @@ fn regular_file(path: &Path, metadata: &Metadata) -> Result<(), StoreAuthError> 
 // path check alone cannot protect against a swapped ancestor at open time.
 #[cfg(unix)]
 fn open_directory(path: &Path) -> Result<File, StoreAuthError> {
+    let boundary = crate::util::fs_boundary().map_err(|error| io_error(path, error))?;
+    open_directory_with_boundary(path, boundary.as_ref())
+}
+
+/// The operator vouches for ancestors above an explicit filesystem boundary.
+/// Open that directory itself with NOFOLLOW, then retain the existing
+/// descriptor-relative protection for every component beneath it.
+#[cfg(unix)]
+fn directory_descent(
+    path: &Path,
+    boundary: Option<&crate::util::FsBoundary>,
+) -> Result<(PathBuf, PathBuf), StoreAuthError> {
+    if let Some(boundary) = boundary {
+        let absolute = boundary
+            .ensure_within(path)
+            .map_err(|error| io_error(path, error))?;
+        let suffix = absolute
+            .strip_prefix(boundary.root())
+            .map_err(|error| io_error(path, error))?;
+        Ok((boundary.root().to_path_buf(), suffix.to_path_buf()))
+    } else {
+        Ok((
+            PathBuf::from(if path.is_absolute() { "/" } else { "." }),
+            path.to_path_buf(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn open_directory_with_boundary(
+    path: &Path,
+    boundary: Option<&crate::util::FsBoundary>,
+) -> Result<File, StoreAuthError> {
     use rustix::fs::{Mode, OFlags};
     use std::path::Component;
 
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let start = if path.is_absolute() { "/" } else { "." };
+    let (start, suffix) = directory_descent(path, boundary)?;
     let mut directory = File::from(
-        rustix::fs::open(start, flags, Mode::empty()).map_err(|error| io_error(path, error))?,
+        rustix::fs::open(&start, flags, Mode::empty()).map_err(|error| io_error(path, error))?,
     );
-    for component in path.components() {
+    for component in suffix.components() {
         let name = match component {
             Component::RootDir | Component::CurDir => continue,
             Component::Normal(name) => name,
@@ -160,6 +234,16 @@ pub(super) fn ensure_hardened_dir(keys_dir: &Path) -> Result<(), StoreAuthError>
 #[cfg(unix)]
 fn create_key_directory_with(
     keys_dir: &Path,
+    sync: impl FnMut(&Path, &File) -> Result<(), StoreAuthError>,
+) -> Result<(), StoreAuthError> {
+    let boundary = crate::util::fs_boundary().map_err(|error| io_error(keys_dir, error))?;
+    create_key_directory_from(keys_dir, boundary.as_ref(), sync)
+}
+
+#[cfg(unix)]
+fn create_key_directory_from(
+    keys_dir: &Path,
+    boundary: Option<&crate::util::FsBoundary>,
     mut sync: impl FnMut(&Path, &File) -> Result<(), StoreAuthError>,
 ) -> Result<(), StoreAuthError> {
     use rustix::fs::{Mode, OFlags};
@@ -167,12 +251,13 @@ fn create_key_directory_with(
     use std::path::Component;
 
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let start = if keys_dir.is_absolute() { "/" } else { "." };
+    let (start, suffix) = directory_descent(keys_dir, boundary)?;
     let mut directory = File::from(
-        rustix::fs::open(start, flags, Mode::empty()).map_err(|error| io_error(keys_dir, error))?,
+        rustix::fs::open(&start, flags, Mode::empty())
+            .map_err(|error| io_error(keys_dir, error))?,
     );
-    let mut current = std::path::PathBuf::from(start);
-    for component in keys_dir.components() {
+    let mut current = start;
+    for component in suffix.components() {
         let (name, may_create) = match component {
             Component::RootDir | Component::CurDir => continue,
             Component::Normal(name) => (name, true),
@@ -522,6 +607,147 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777
+        }
+
+        #[test]
+        fn bounded_bootstrap_syncs_only_the_workspace_and_descendants() {
+            let root = fixture();
+            let workspace = root.path().join("workspace");
+            fs::create_dir(&workspace).expect("workspace");
+            fs::set_permissions(&workspace, fs::Permissions::from_mode(0o750))
+                .expect("workspace permissions");
+            let boundary = crate::util::FsBoundary::new(&workspace).expect("boundary");
+            let marker = workspace.join(".ee");
+            let keys = marker.join("keys");
+            let mut barriers = Vec::new();
+            create_key_directory_from(&keys, Some(&boundary), |path, directory| {
+                assert!(path.starts_with(&workspace), "no ancestor barrier");
+                barriers.push(path.to_path_buf());
+                sync(path, directory)
+            })
+            .expect("bounded directory bootstrap");
+            assert_eq!(
+                barriers,
+                vec![
+                    marker.clone(),
+                    workspace.clone(),
+                    keys.clone(),
+                    marker,
+                    keys.clone(),
+                ]
+            );
+            assert_eq!(mode(&workspace), 0o750, "boundary mode stays unchanged");
+            assert_eq!(mode(&keys), 0o700);
+            let opened =
+                open_directory_with_boundary(&keys, Some(&boundary)).expect("bounded reopen");
+            assert_eq!(
+                opened.metadata().expect("opened metadata").ino(),
+                fs::metadata(&keys).expect("path metadata").ino()
+            );
+        }
+
+        #[test]
+        fn bounded_bootstrap_trusts_only_ancestors_above_the_boundary() {
+            let root = fixture();
+            let real_parent = root.path().join("real-parent");
+            let alias = root.path().join("trusted-parent-alias");
+            fs::create_dir_all(real_parent.join("workspace")).expect("physical workspace");
+            symlink(&real_parent, &alias).expect("operator-trusted ancestor");
+            let workspace = alias.join("workspace");
+            let boundary = crate::util::FsBoundary::new(&workspace).expect("boundary");
+            let keys = workspace.join(".ee/keys");
+            reject_symlink_components_with_boundary(&keys, &keys, Some(&boundary))
+                .expect("ancestors above boundary are not inspected");
+            create_key_directory_from(&keys, Some(&boundary), sync)
+                .expect("open workspace directly");
+            assert!(real_parent.join("workspace/.ee/keys").is_dir());
+            assert!(open_directory_with_boundary(&keys, Some(&boundary)).is_ok());
+            assert!(matches!(
+                reject_symlink_components_with_boundary(&keys, &keys, None),
+                Err(StoreAuthError::SymlinkComponent { .. })
+            ));
+            assert!(open_directory_with_boundary(&keys, None).is_err());
+
+            let outside = root.path().join("outside");
+            fs::create_dir(&outside).expect("outside");
+            symlink(&outside, workspace.join("redirected")).expect("interior symlink");
+            let redirected_keys = workspace.join("redirected/keys");
+            assert!(matches!(
+                reject_symlink_components_with_boundary(
+                    &redirected_keys,
+                    &redirected_keys,
+                    Some(&boundary)
+                ),
+                Err(StoreAuthError::SymlinkComponent { .. })
+            ));
+            assert!(create_key_directory_from(&redirected_keys, Some(&boundary), sync).is_err());
+            assert!(!outside.join("keys").exists());
+        }
+
+        #[test]
+        fn bounded_bootstrap_rejects_outside_paths_and_a_swapped_boundary() {
+            let root = fixture();
+            let workspace = root.path().join("workspace");
+            let retained = root.path().join("retained-workspace");
+            let outside = root.path().join("outside");
+            fs::create_dir(&workspace).expect("workspace");
+            fs::create_dir(&outside).expect("outside");
+            let boundary = crate::util::FsBoundary::new(&workspace).expect("boundary");
+            for keys in [
+                outside.join("keys"),
+                workspace.join("../outside/keys"),
+                workspace.join("../workspace/keys"),
+            ] {
+                assert!(create_key_directory_from(&keys, Some(&boundary), sync).is_err());
+                assert!(open_directory_with_boundary(&keys, Some(&boundary)).is_err());
+                assert!(
+                    reject_symlink_components_with_boundary(&keys, &keys, Some(&boundary)).is_err()
+                );
+            }
+            fs::rename(&workspace, &retained).expect("replace boundary namespace");
+            symlink(&outside, &workspace).expect("swapped boundary");
+            let keys = workspace.join(".ee/keys");
+            assert!(create_key_directory_from(&keys, Some(&boundary), sync).is_err());
+            assert!(open_directory_with_boundary(&workspace, Some(&boundary)).is_err());
+            assert!(matches!(
+                reject_symlink_components_with_boundary(&keys, &keys, Some(&boundary)),
+                Err(StoreAuthError::SymlinkComponent { .. })
+            ));
+            assert_eq!(fs::read_dir(&outside).expect("outside entries").count(), 0);
+            assert_eq!(
+                fs::read_dir(&retained).expect("retained entries").count(),
+                0
+            );
+        }
+
+        #[test]
+        fn bounded_bootstrap_keeps_the_opened_parent_when_a_child_is_swapped() {
+            let root = fixture();
+            let workspace = root.path().join("workspace");
+            let outside = root.path().join("outside");
+            fs::create_dir(&workspace).expect("workspace");
+            fs::create_dir(&outside).expect("outside");
+            let boundary = crate::util::FsBoundary::new(&workspace).expect("boundary");
+            let marker = workspace.join(".ee");
+            let retained = workspace.join("retained-marker");
+            let keys = marker.join("keys");
+            let mut swapped = false;
+            create_key_directory_from(&keys, Some(&boundary), |path, directory| {
+                if path == marker && !swapped {
+                    fs::rename(&marker, &retained).map_err(|error| io_error(path, error))?;
+                    symlink(&outside, &marker).map_err(|error| io_error(path, error))?;
+                    swapped = true;
+                }
+                sync(path, directory)
+            })
+            .expect("descent remains bound to the held directory");
+            assert!(swapped);
+            assert!(retained.join("keys").is_dir());
+            assert!(!outside.join("keys").exists());
+            assert!(matches!(
+                reject_symlink_components_with_boundary(&keys, &keys, Some(&boundary)),
+                Err(StoreAuthError::SymlinkComponent { .. })
+            ));
         }
 
         #[test]

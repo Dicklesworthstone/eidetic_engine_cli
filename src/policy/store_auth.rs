@@ -557,6 +557,18 @@ impl StoreAuthRoot {
     pub fn open_or_create(keys_dir: impl AsRef<Path>) -> Result<Self, StoreAuthError> {
         let keys_dir = keys_dir.as_ref();
         let path = keys_dir.join(KEY_FILE_NAME);
+        // In bounded mode, reject an outside or redirected path before even
+        // probing the key file. The normal constructors repeat the check at
+        // their own I/O boundary; this covers the preliminary existence read.
+        if crate::util::fs_boundary()
+            .map_err(|error| StoreAuthError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            })?
+            .is_some()
+        {
+            reject_symlink_components(keys_dir, &path)?;
+        }
         match path.try_exists() {
             Ok(true) => Self::open(keys_dir),
             Ok(false) => match Self::create(keys_dir) {

@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+mod fs_boundary;
+pub(crate) use fs_boundary::{FsBoundary, boundary_walk_plan, canonicalize_path, fs_boundary};
+
 pub mod radix_ulid_sort;
 
 /// Canonicalize only a caller-designated trusted prefix. Never use an
@@ -26,6 +29,11 @@ fn path_with_canonical_prefix(path: &Path, prefix: &Path) -> PathBuf {
 /// they must continue to inspect attacker-controlled components below it.
 #[must_use]
 pub(crate) fn path_with_canonical_process_temp_prefix(path: &Path) -> PathBuf {
+    // Even an invalid setting must not fall back to probing trusted ancestors.
+    // Fallible boundary helpers report configuration errors at the I/O gates.
+    if crate::config::env_registry::is_set(crate::config::env_registry::EnvVar::FsBoundary) {
+        return path.to_path_buf();
+    }
     let temp_dir = std::env::temp_dir();
     path_with_canonical_prefix(path, &temp_dir)
 }

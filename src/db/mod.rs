@@ -1168,8 +1168,19 @@ struct SymlinkComponentInspectionError {
 fn first_existing_symlink_component(
     path: &Path,
 ) -> std::result::Result<Option<PathBuf>, SymlinkComponentInspectionError> {
-    let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
-    let mut current = PathBuf::new();
+    let (mut current, inspected_path) =
+        match crate::util::boundary_walk_plan(path).map_err(|source| {
+            SymlinkComponentInspectionError {
+                path: path.to_path_buf(),
+                source,
+            }
+        })? {
+            Some(plan) => plan,
+            None => (
+                PathBuf::new(),
+                crate::util::path_with_canonical_process_temp_prefix(path),
+            ),
+        };
     for component in inspected_path.components() {
         current.push(component.as_os_str());
         #[cfg(windows)]

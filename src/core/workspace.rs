@@ -553,7 +553,7 @@ fn resolve_workspace_report_with_input_mode(
                     repair: Some("ee workspace list --json".to_string()),
                 }
             })?;
-            return Ok(resolve_alias_row_report(&registry_path, target, row));
+            return resolve_alias_row_report(&registry_path, target, row);
         }
 
         return resolve_path_report(
@@ -1497,8 +1497,9 @@ fn configure_agent_mail_snapshot_open_no_follow(options: &mut fs::OpenOptions) {
 fn configure_agent_mail_snapshot_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
+    let (mut current, inspected_path) = crate::util::boundary_walk_plan(path)?
+        .unwrap_or_else(|| (PathBuf::new(), path.to_path_buf()));
+    for component in inspected_path.components() {
         match component {
             Component::Prefix(_) | Component::RootDir => {
                 current.push(component.as_os_str());
@@ -2307,10 +2308,19 @@ fn resolve_alias_row_report(
     registry_path: &Path,
     target: &str,
     row: StoredWorkspace,
-) -> WorkspaceResolveReport {
+) -> Result<WorkspaceResolveReport, DomainError> {
     let root = PathBuf::from(&row.path);
-    let canonical_root = canonical_or_lexical(&root);
-    WorkspaceResolveReport {
+    let canonical_root = canonical_or_lexical(&root)?;
+    let marker = root.join(WORKSPACE_MARKER);
+    let marker_present = if crate::util::fs_boundary()
+        .map_err(|error| boundary_path_error(&root, error))?
+        .is_some()
+    {
+        crate::util::canonicalize_path(&marker).is_ok_and(|path| path.is_dir())
+    } else {
+        marker.is_dir()
+    };
+    Ok(WorkspaceResolveReport {
         schema: WORKSPACE_RESOLVE_SCHEMA_V1,
         command: "workspace resolve",
         source: "alias".to_string(),
@@ -2318,7 +2328,7 @@ fn resolve_alias_row_report(
         workspace_id: row.id,
         root: root.display().to_string(),
         canonical_root: canonical_root.display().to_string(),
-        marker_present: root.join(WORKSPACE_MARKER).is_dir(),
+        marker_present,
         alias: row.name,
         scope_kind: row.scope_kind,
         repository_root: row.repository_root,
@@ -2326,7 +2336,7 @@ fn resolve_alias_row_report(
         subproject_path: row.subproject_path,
         registry_path: registry_path.display().to_string(),
         diagnostics: Vec::new(),
-    }
+    })
 }
 
 fn resolve_alias_target(
@@ -2355,13 +2365,17 @@ fn resolve_alias_target(
 }
 
 fn workspace_row_for_path(raw: &str) -> Result<StoredWorkspace, DomainError> {
-    let root = lexical_absolute(
-        &env::current_dir().map_err(|error| DomainError::Configuration {
-            message: format!("failed to read current directory: {error}"),
-            repair: Some("Run from a readable directory or pass --workspace .".to_string()),
-        })?,
-        Path::new(raw),
-    );
+    let current_dir = env::current_dir().map_err(|error| DomainError::Configuration {
+        message: format!("failed to read current directory: {error}"),
+        repair: Some("Run from a readable directory or pass --workspace .".to_string()),
+    })?;
+    let root = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        current_dir.join(raw)
+    };
+    let canonical = canonical_or_lexical(&root)?;
+    let root = normalize_lexical(&root);
     if !root.exists() {
         return Err(DomainError::Configuration {
             message: format!("workspace path does not exist: {}", root.display()),
@@ -2378,7 +2392,6 @@ fn workspace_row_for_path(raw: &str) -> Result<StoredWorkspace, DomainError> {
             )),
         });
     }
-    let canonical = canonical_or_lexical(&root);
     let path = canonical.display().to_string();
     let scope = workspace_scope_fields(&derive_workspace_scope(&canonical));
     Ok(StoredWorkspace {
@@ -2486,7 +2499,7 @@ fn find_workspace_alias_read_only(
     if !registry_file_exists(registry_path)? {
         return Ok(None);
     }
-    let canonical = canonical_or_lexical(workspace_path);
+    let canonical = canonical_or_lexical(workspace_path)?;
     let conn = open_registry_read_only(registry_path)?;
     Ok(select_existing_workspace_row(
         &conn,
@@ -2716,9 +2729,32 @@ fn looks_like_path(path: &Path) -> bool {
         || rendered.contains('\\')
 }
 
-fn canonical_or_lexical(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .unwrap_or_else(|_| lexical_absolute(Path::new("."), path))
+fn canonical_or_lexical(path: &Path) -> Result<PathBuf, DomainError> {
+    let boundary = crate::util::fs_boundary().map_err(|error| boundary_path_error(path, error))?;
+    if let Some(boundary) = boundary.as_ref() {
+        boundary
+            .ensure_within(path)
+            .map_err(|error| boundary_path_error(path, error))?;
+    }
+    match crate::util::canonicalize_path(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if boundary.is_some() && error.kind() != io::ErrorKind::NotFound => {
+            Err(boundary_path_error(path, error))
+        }
+        Err(_) => Ok(lexical_absolute(Path::new("."), path)),
+    }
+}
+
+fn boundary_path_error(path: &Path, error: io::Error) -> DomainError {
+    DomainError::Configuration {
+        message: format!(
+            "Filesystem boundary refused path {}: {error}",
+            path.display()
+        ),
+        repair: Some(
+            "Select a path within EE_FS_BOUNDARY and verify that the boundary exists.".to_owned(),
+        ),
+    }
 }
 
 fn lexical_absolute(base: &Path, path: &Path) -> PathBuf {
@@ -2837,11 +2873,22 @@ pub(crate) fn ensure_bound_workspace(
 /// pass the raw CLI spelling first, and hashing that disagrees with
 /// remember's canonical id.
 pub(crate) fn bound_workspace_id_from_path(workspace_path: &Path) -> String {
-    let canonical = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let canonical = match crate::util::canonicalize_path(workspace_path) {
+        Ok(canonical) => canonical,
+        // This optional lookup cannot report errors. Refuse all filesystem
+        // inspection and keep the caller's stable identity hint instead.
+        Err(_) if !matches!(crate::util::fs_boundary(), Ok(None)) => {
+            return stable_workspace_id(workspace_path);
+        }
+        Err(_) => workspace_path.to_path_buf(),
+    };
     let requested = stable_workspace_id(&canonical);
     let database_path = workspace_path.join(".ee").join("ee.db");
+    if !matches!(crate::util::fs_boundary(), Ok(None))
+        && !matches!(first_existing_symlink_component(&database_path), Ok(None))
+    {
+        return requested;
+    }
     if !database_path.exists() {
         return requested;
     }
@@ -2878,7 +2925,7 @@ pub(crate) fn addressed_workspace_row(
     workspace_path: &Path,
     database_path: &Path,
 ) -> Result<Option<StoredWorkspace>, DomainError> {
-    let canonical = canonical_or_lexical(workspace_path);
+    let canonical = canonical_or_lexical(workspace_path)?;
     let requested = stable_workspace_id(&canonical);
     let matched = select_existing_workspace_row(
         connection,
@@ -2888,8 +2935,8 @@ pub(crate) fn addressed_workspace_row(
     let crate::db::DatabaseLocation::File(connection_path) = connection.location() else {
         return Ok(matched);
     };
-    let database = canonical_or_lexical(connection_path);
-    if canonical_or_lexical(database_path) != database {
+    let database = canonical_or_lexical(connection_path)?;
+    if canonical_or_lexical(database_path)? != database {
         return Err(DomainError::Storage {
             message: "The supplied read connection does not address the requested database."
                 .to_owned(),
@@ -2899,9 +2946,13 @@ pub(crate) fn addressed_workspace_row(
     if matched.is_some() {
         return Ok(matched);
     }
-    let is_addressed_local = [WORKSPACE_MARKER, ".ee-campaign"]
-        .iter()
-        .any(|marker| canonical_or_lexical(&canonical.join(marker).join("ee.db")) == database);
+    let mut is_addressed_local = false;
+    for marker in [WORKSPACE_MARKER, ".ee-campaign"] {
+        if canonical_or_lexical(&canonical.join(marker).join("ee.db"))? == database {
+            is_addressed_local = true;
+            break;
+        }
+    }
     if !is_addressed_local {
         return Ok(None);
     }
@@ -3064,7 +3115,7 @@ fn workspace_path_lookup_keys(path: &Path) -> Vec<String> {
     push(raw.clone());
     push(strip_windows_verbatim_prefix(&raw));
     push(normalize_lexical(path).to_string_lossy().into_owned());
-    if let Ok(canonical) = path.canonicalize() {
+    if let Ok(canonical) = crate::util::canonicalize_path(path) {
         let rendered = canonical.to_string_lossy().into_owned();
         push(rendered.clone());
         push(strip_windows_verbatim_prefix(&rendered));
@@ -3546,9 +3597,9 @@ mod tests {
         for path in [&original, &other, &copied] {
             fs::create_dir_all(path.join(".ee")).map_err(|error| error.to_string())?;
         }
-        let original = canonical_or_lexical(&original);
-        let other = canonical_or_lexical(&other);
-        let copied = canonical_or_lexical(&copied);
+        let original = canonical_or_lexical(&original).map_err(|error| error.to_string())?;
+        let other = canonical_or_lexical(&other).map_err(|error| error.to_string())?;
+        let copied = canonical_or_lexical(&copied).map_err(|error| error.to_string())?;
         let shared_database = temp.path().join("shared.db");
         let copied_database = copied.join(".ee/ee.db");
         let connection =
@@ -3825,7 +3876,7 @@ mod tests {
         let workspace = temp.path().join("workspace with 'quotes'");
         let marker = workspace.join(WORKSPACE_MARKER);
         fs::create_dir_all(&marker).map_err(|error| error.to_string())?;
-        let workspace = canonical_or_lexical(&workspace);
+        let workspace = canonical_or_lexical(&workspace).map_err(|error| error.to_string())?;
         let database = marker.join("ee.db");
         let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         db.close().map_err(|error| error.to_string())?;
@@ -3999,7 +4050,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&git.stderr)
         );
-        let repository = canonical_or_lexical(&repository);
+        let repository = canonical_or_lexical(&repository).map_err(|error| error.to_string())?;
         for (path, kind, subproject) in [
             (temp.path().join("standalone"), "standalone", None),
             (repository.clone(), "repository", None),
@@ -4010,7 +4061,7 @@ mod tests {
             ),
         ] {
             fs::create_dir_all(path.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
-            let path = canonical_or_lexical(&path);
+            let path = canonical_or_lexical(&path).map_err(|error| error.to_string())?;
             let db = DbConnection::open_file(path.join(WORKSPACE_MARKER).join("ee.db"))
                 .map_err(|error| error.to_string())?;
             db.migrate().map_err(|error| error.to_string())?;

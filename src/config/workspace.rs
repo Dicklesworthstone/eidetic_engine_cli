@@ -295,15 +295,19 @@ pub(crate) fn canonicalize_workspace_location(
     input_path: &Path,
     policy: SymlinkPolicy,
 ) -> Result<(PathBuf, Vec<SymlinkTraversal>), CanonicalizationError> {
-    let canonical_path =
-        input_path
-            .canonicalize()
-            .map_err(|source| CanonicalizationError::CanonicalizeFailure {
-                path: input_path.to_path_buf(),
-                source,
-            })?;
+    let canonical_path = crate::util::canonicalize_path(input_path).map_err(|source| {
+        CanonicalizationError::CanonicalizeFailure {
+            path: input_path.to_path_buf(),
+            source,
+        }
+    })?;
 
-    let symlink_chain = detect_symlinks(input_path, &canonical_path);
+    let symlink_chain = detect_symlinks(input_path, &canonical_path).map_err(|source| {
+        CanonicalizationError::CanonicalizeFailure {
+            path: input_path.to_path_buf(),
+            source,
+        }
+    })?;
 
     if policy == SymlinkPolicy::Deny && !symlink_chain.is_empty() && input_path != canonical_path {
         return Err(CanonicalizationError::SymlinkBlocked {
@@ -317,11 +321,12 @@ pub(crate) fn canonicalize_workspace_location(
 }
 
 /// Detect symlinks by comparing input path components to canonical path.
-fn detect_symlinks(input_path: &Path, canonical_path: &Path) -> Vec<SymlinkTraversal> {
+fn detect_symlinks(input_path: &Path, canonical_path: &Path) -> io::Result<Vec<SymlinkTraversal>> {
     let mut symlinks = Vec::new();
-    let mut current = PathBuf::new();
+    let (mut current, inspected_path) = crate::util::boundary_walk_plan(input_path)?
+        .unwrap_or_else(|| (PathBuf::new(), input_path.to_path_buf()));
 
-    for component in input_path.components() {
+    for component in inspected_path.components() {
         match component {
             Component::Prefix(p) => current.push(p.as_os_str()),
             Component::RootDir => current.push(component.as_os_str()),
@@ -350,7 +355,7 @@ fn detect_symlinks(input_path: &Path, canonical_path: &Path) -> Vec<SymlinkTrave
         // We don't add a fake symlink entry here - the paths just differ.
     }
 
-    symlinks
+    Ok(symlinks)
 }
 
 /// Compute a salted BLAKE3 hash of the workspace path.
@@ -379,11 +384,23 @@ fn derive_key_from_salt(salt: &[u8]) -> [u8; 32] {
 
 /// Detect the git repository root containing this path.
 fn detect_git_root(path: &Path) -> Option<PathBuf> {
-    let mut current = path;
+    let boundary = crate::util::fs_boundary().ok()?;
+    let bounded_start = boundary
+        .as_ref()
+        .map(|boundary| boundary.ensure_within(path))
+        .transpose()
+        .ok()?;
+    let mut current = bounded_start.as_deref().unwrap_or(path);
     loop {
         let git_dir = current.join(".git");
-        if git_dir.exists() {
+        if marker_exists_within_boundary(&git_dir, boundary.is_some(), false) {
             return Some(current.to_path_buf());
+        }
+        if boundary
+            .as_ref()
+            .is_some_and(|boundary| current == boundary.root())
+        {
+            return None;
         }
         current = current.parent()?;
     }
@@ -665,8 +682,9 @@ fn installation_salt_open_options() -> fs::OpenOptions {
 }
 
 fn ensure_installation_salt_path_has_no_symlink_components(salt_path: &Path) -> io::Result<()> {
-    let mut current = PathBuf::new();
-    for component in salt_path.components() {
+    let (mut current, inspected_path) = crate::util::boundary_walk_plan(salt_path)?
+        .unwrap_or_else(|| (PathBuf::new(), salt_path.to_path_buf()));
+    for component in inspected_path.components() {
         match component {
             Component::Prefix(_)
             | Component::RootDir
@@ -878,19 +896,36 @@ pub struct WorkspaceResolution {
 }
 
 impl WorkspaceResolution {
-    fn new(location: WorkspaceLocation, source: WorkspaceResolutionSource) -> Self {
-        let marker_present = location.config_dir.is_dir();
-        let canonical_root = canonical_or_lexical(&location.root);
+    fn new(
+        location: WorkspaceLocation,
+        source: WorkspaceResolutionSource,
+    ) -> Result<Self, WorkspaceError> {
+        let boundary = validate_workspace_boundary(&location.root)?;
+        let marker_present = marker_exists_within_boundary(&location.config_dir, boundary, true);
+        let canonical_root = if boundary {
+            match crate::util::canonicalize_path(&location.root) {
+                Ok(root) => root,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => location.root.clone(),
+                Err(source) => {
+                    return Err(WorkspaceError::FilesystemBoundary {
+                        path: location.root.clone(),
+                        source,
+                    });
+                }
+            }
+        } else {
+            canonical_or_lexical(&location.root)
+        };
         let fingerprint = workspace_fingerprint(&canonical_root);
         let scope = derive_workspace_scope(&canonical_root);
-        Self {
+        Ok(Self {
             location,
             source,
             marker_present,
             canonical_root,
             fingerprint,
             scope,
-        }
+        })
     }
 }
 
@@ -992,14 +1027,15 @@ impl WorkspaceDiagnostic {
 
 /// Errors returned by [`discover_from_current_dir`].
 ///
-/// [`discover`] never returns an error — missing paths simply yield
-/// `Ok(None)` because workspace detection is informational, not a
-/// gate. [`discover_from_current_dir`] surfaces the underlying I/O
-/// error from [`std::env::current_dir`] when the cwd cannot be read.
+/// [`discover`] is informational and returns `None` for inaccessible paths.
+/// Fallible resolution surfaces also report an unreadable current directory or
+/// a configured filesystem boundary that refuses the selected path.
 #[derive(Debug)]
 pub enum WorkspaceError {
     /// `std::env::current_dir` failed (process has no cwd, etc.).
     CurrentDir(io::Error),
+    /// A configured filesystem boundary refused workspace resolution.
+    FilesystemBoundary { path: PathBuf, source: io::Error },
     /// Resolution required an initialized workspace but none was found.
     NotFound { start: PathBuf },
     /// An explicit or environment root was chosen but lacks `.ee/`.
@@ -1015,6 +1051,11 @@ impl std::fmt::Display for WorkspaceError {
             Self::CurrentDir(error) => write!(
                 formatter,
                 "failed to read the current working directory: {error}"
+            ),
+            Self::FilesystemBoundary { path, source } => write!(
+                formatter,
+                "filesystem boundary refused workspace {}: {source}",
+                path.display()
             ),
             Self::NotFound { start } => {
                 write!(formatter, "no ee workspace found from {}", start.display())
@@ -1035,6 +1076,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CurrentDir(error) => Some(error),
+            Self::FilesystemBoundary { source, .. } => Some(source),
             Self::NotFound { .. } | Self::MissingMarker { .. } => None,
         }
     }
@@ -1062,18 +1104,19 @@ pub fn resolve_workspace(
     if let Some(path) = request.environment_workspace.as_ref() {
         return resolve_selected_root(request, path, WorkspaceResolutionSource::Environment);
     }
+    validate_workspace_boundary(&request.current_dir)?;
     if let Some(location) = discover(&request.current_dir) {
-        return Ok(WorkspaceResolution::new(
+        return WorkspaceResolution::new(
             absolutize_location(&request.current_dir, location),
             WorkspaceResolutionSource::Discovered,
-        ));
+        );
     }
     if request.mode == WorkspaceResolutionMode::AllowUninitialized {
         let root = lexical_absolute(&request.current_dir, Path::new("."));
-        return Ok(WorkspaceResolution::new(
+        return WorkspaceResolution::new(
             WorkspaceLocation::new(root),
             WorkspaceResolutionSource::CurrentDirectory,
-        ));
+        );
     }
     Err(WorkspaceError::NotFound {
         start: request.current_dir.clone(),
@@ -1093,7 +1136,11 @@ pub(crate) fn resolve_workspace_with_expanded_explicit_path(
     };
     resolve_selected_location(
         request,
-        lexical_absolute(&request.current_dir, path),
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            request.current_dir.join(path)
+        },
         WorkspaceResolutionSource::Explicit,
     )
 }
@@ -1103,7 +1150,13 @@ fn resolve_selected_root(
     raw: &Path,
     source: WorkspaceResolutionSource,
 ) -> Result<WorkspaceResolution, WorkspaceError> {
-    resolve_selected_location(request, selected_root(request, raw), source)
+    let expanded = expand_selected_path(raw);
+    let root = if expanded.is_absolute() {
+        expanded
+    } else {
+        request.current_dir.join(expanded)
+    };
+    resolve_selected_location(request, root, source)
 }
 
 fn resolve_selected_location(
@@ -1111,14 +1164,53 @@ fn resolve_selected_location(
     root: PathBuf,
     source: WorkspaceResolutionSource,
 ) -> Result<WorkspaceResolution, WorkspaceError> {
-    let location = WorkspaceLocation::new(root);
-    if request.mode == WorkspaceResolutionMode::ExistingOnly && !location.config_dir.is_dir() {
+    let bounded = validate_workspace_boundary(&root)?;
+    let location = WorkspaceLocation::new(normalize_lexical(&root));
+    if request.mode == WorkspaceResolutionMode::ExistingOnly
+        && !marker_exists_within_boundary(&location.config_dir, bounded, true)
+    {
         return Err(WorkspaceError::MissingMarker {
             source,
             root: location.root,
         });
     }
-    Ok(WorkspaceResolution::new(location, source))
+    WorkspaceResolution::new(location, source)
+}
+
+fn validate_workspace_boundary(path: &Path) -> Result<bool, WorkspaceError> {
+    crate::util::fs_boundary()
+        .and_then(|boundary| {
+            if let Some(boundary) = boundary {
+                boundary.ensure_within(path)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .map_err(|source| WorkspaceError::FilesystemBoundary {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Optional discovery treats inaccessible markers as absent. In bounded mode,
+/// resolve links before metadata so an informational probe cannot escape.
+fn marker_exists_within_boundary(path: &Path, bounded: bool, directory_only: bool) -> bool {
+    let resolved;
+    let inspected = if bounded {
+        let Ok(path) = crate::util::canonicalize_path(path) else {
+            return false;
+        };
+        resolved = path;
+        resolved.as_path()
+    } else {
+        path
+    };
+    if directory_only {
+        inspected.is_dir()
+    } else {
+        inspected.exists()
+    }
 }
 
 fn selected_root(request: &WorkspaceResolutionRequest, raw: &Path) -> PathBuf {
@@ -1255,8 +1347,7 @@ fn absolutize_location(base: &Path, location: WorkspaceLocation) -> WorkspaceLoc
 }
 
 fn canonical_or_lexical(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .unwrap_or_else(|_| lexical_absolute(Path::new("."), path))
+    crate::util::canonicalize_path(path).unwrap_or_else(|_| lexical_absolute(Path::new("."), path))
 }
 
 /// Resolve an existing workspace root to its filesystem-canonical path, falling
@@ -1383,14 +1474,26 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 /// the path in.
 #[must_use]
 pub fn discover(start: &Path) -> Option<WorkspaceLocation> {
-    let mut current = start;
+    let boundary = crate::util::fs_boundary().ok()?;
+    let bounded_start = boundary
+        .as_ref()
+        .map(|boundary| boundary.ensure_within(start))
+        .transpose()
+        .ok()?;
+    let mut current = bounded_start.as_deref().unwrap_or(start);
     loop {
         let candidate = current.join(WORKSPACE_MARKER);
-        if candidate.is_dir() {
+        if marker_exists_within_boundary(&candidate, boundary.is_some(), true) {
             return Some(WorkspaceLocation {
                 root: current.to_path_buf(),
                 config_dir: candidate,
             });
+        }
+        if boundary
+            .as_ref()
+            .is_some_and(|boundary| current == boundary.root())
+        {
+            return None;
         }
         let parent = current.parent()?;
         if parent == current {
@@ -1409,14 +1512,31 @@ pub fn discover(start: &Path) -> Option<WorkspaceLocation> {
 #[must_use]
 pub fn discover_all(start: &Path) -> Vec<WorkspaceLocation> {
     let mut locations = Vec::new();
-    let mut current = start;
+    let Ok(boundary) = crate::util::fs_boundary() else {
+        return locations;
+    };
+    let bounded_start = match boundary
+        .as_ref()
+        .map(|boundary| boundary.ensure_within(start))
+        .transpose()
+    {
+        Ok(path) => path,
+        Err(_) => return locations,
+    };
+    let mut current = bounded_start.as_deref().unwrap_or(start);
     loop {
         let candidate = current.join(WORKSPACE_MARKER);
-        if candidate.is_dir() {
+        if marker_exists_within_boundary(&candidate, boundary.is_some(), true) {
             locations.push(WorkspaceLocation {
                 root: current.to_path_buf(),
                 config_dir: candidate,
             });
+        }
+        if boundary
+            .as_ref()
+            .is_some_and(|boundary| current == boundary.root())
+        {
+            break;
         }
         let Some(parent) = current.parent() else {
             break;
@@ -1439,6 +1559,7 @@ pub fn discover_all(start: &Path) -> Vec<WorkspaceLocation> {
 /// `Ok(None)`.
 pub fn discover_from_current_dir() -> Result<Option<WorkspaceLocation>, WorkspaceError> {
     let cwd = env::current_dir().map_err(WorkspaceError::CurrentDir)?;
+    validate_workspace_boundary(&cwd)?;
     Ok(discover(&cwd))
 }
 

@@ -2663,18 +2663,40 @@ fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    absolute
-        .canonicalize()
-        .map_err(|error| DomainError::Configuration {
-            message: format!(
-                "Failed to resolve workspace {}: {error}",
-                absolute.display()
-            ),
-            repair: Some("ee init --workspace .".to_owned()),
-        })
+    crate::util::canonicalize_path(&absolute).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to resolve workspace {}: {error}",
+            absolute.display()
+        ),
+        repair: Some("ee init --workspace .".to_owned()),
+    })
 }
 
 fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    let boundary = crate::util::fs_boundary().map_err(|error| DomainError::Configuration {
+        message: format!("Invalid filesystem boundary for journal database: {error}"),
+        repair: Some("Verify EE_FS_BOUNDARY names an existing directory.".to_owned()),
+    })?;
+    if boundary.is_some() {
+        let symlink = super::path_safety::first_existing_symlink_component(database_path).map_err(
+            |error| DomainError::Configuration {
+                message: format!(
+                    "Invalid journal database path {}: {error}",
+                    database_path.display()
+                ),
+                repair: Some("Select a database within EE_FS_BOUNDARY.".to_owned()),
+            },
+        )?;
+        if let Some(symlink) = symlink {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Refusing journal database through symlink {}",
+                    symlink.display()
+                ),
+                repair: Some("Select a database path without symlinked components.".to_owned()),
+            });
+        }
+    }
     if !database_path.exists() {
         return Err(crate::core::storeless_workspace_error(database_path));
     }

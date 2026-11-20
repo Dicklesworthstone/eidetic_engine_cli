@@ -88,6 +88,7 @@ registered model is available for a later full retrieval.
 | `EE_FLIGHT_RECORDER` | diagnostics | boolean flag | `false` | Enable the redacted command flight recorder for ee subcommands. | Disabled by default; when enabled, command traces must stay redacted and retention-bounded. |
 | `EE_FLIGHT_RECORDER_DIR` | paths | path | none | Override the directory where flight recorder traces are written. | Machine-local override for command trace storage; do not commit absolute local paths. |
 | `EE_FLIGHT_RECORDER_RETENTION_DAYS` | diagnostics | integer days | `7` | Override the flight recorder trace retention window in days. | Applies to flight-recorder trace pruning once the recorder is enabled. |
+| `EE_FS_BOUNDARY` | paths | absolute existing directory | none | Root filesystem safety walks at an explicitly trusted sandbox directory. | Opt-in for workspace-only OS sandboxes: trust ancestors above this directory without opening, syncing, or inspecting them. The directory itself and descendants retain no-follow checks. Empty/relative values, `..` in the boundary or caller paths, paths outside it, and symlink targets that leave it fail closed. Internal symlink resolution is allowed only where the existing operation permits it. Unset preserves ordinary filesystem walks. |
 | `EE_FORMAT` | output | output format | none | Select the default output renderer. | Lower-priority compatibility alias for output format selection. |
 | `EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT` | tuning | integer percent | `80` | Override the graph snapshot advisory threshold as a percent of the snapshot cap. | Maps to `[graph.memory].degraded_below_pct`; values above `100` clamp to `100` for deterministic admission checks. |
 | `EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS` | tuning | integer basis points | `15000` | Override the graph snapshot in-build growth tripwire ratio in basis points. | Maps to `[graph.memory].growth_multiplier_basis_points`; `15000` means `1.5x`. |
@@ -177,6 +178,34 @@ registered model is available for a later full retrieval.
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
 | `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S` | tuning | integer seconds | `5` | Override workspace-close wait time for read snapshot pins in seconds. | Bounds how long workspace-close lifecycle waits for active SnapshotPins before force-poisoning remaining read snapshots. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
+
+### Workspace-only filesystem boundary
+
+When an OS sandbox grants access to an existing workspace but forbids opening
+its ancestors, set the boundary to that workspace before invoking `ee`:
+
+```bash
+export EE_FS_BOUNDARY=/absolute/path/to/workspace
+ee init --workspace "$EE_FS_BOUNDARY" --json --skip-boilerplate
+printf '%s\n' '{"body":"A durable observation from this session"}' |
+  ee journal append --workspace "$EE_FS_BOUNDARY" --source hook --stdin --json
+```
+
+The operator vouches for directories above the boundary. `ee` starts its path
+checks and key-store descriptor descent at the boundary itself, which must
+already exist and must not be a symlink. Descendants keep the existing
+no-follow protections. Boundary mode rejects `..` in caller-supplied paths,
+including paths that would leave and re-enter the boundary. Canonicalization
+may follow an internal symlink only while every target component stays inside;
+operations that prohibit symlinks continue to prohibit them.
+
+Unset `EE_FS_BOUNDARY` preserves ordinary filesystem behavior. An empty,
+relative, missing, or otherwise invalid boundary fails closed. This setting is
+an integration aid for an OS sandbox, not a process-wide I/O sandbox: configure
+other required paths and sandbox grants separately. The pinned FrankenSQLite
+VFS still canonicalizes database paths, so denying all ancestor metadata can
+remain an upstream limitation even though `ee` no longer opens or syncs those
+ancestor directories.
 
 ## Build-time variables
 

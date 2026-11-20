@@ -15,6 +15,8 @@ use std::path::{Component, Path, PathBuf};
 /// that is a symbolic link, or `Ok(None)` if traversal reaches a component that
 /// does not yet exist without encountering one. A non-directory parent is an
 /// inspection error, not a missing tail.
+/// With `EE_FS_BOUNDARY` set, inspection starts at that existing directory;
+/// ancestors are trusted and outside paths are refused before probing.
 ///
 /// Structural anchors — the path prefix (`C:`, `\\?\C:`, a UNC share, …) and
 /// the root directory — are never symlinks and cannot be inspected in
@@ -24,8 +26,13 @@ use std::path::{Component, Path, PathBuf};
 /// the walk correct both for the canonicalized, `\\?\`-prefixed paths Rust
 /// produces on Windows and for ordinary POSIX paths.
 pub(crate) fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
-    let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
-    let mut current = PathBuf::new();
+    let (mut current, inspected_path) = match crate::util::boundary_walk_plan(path)? {
+        Some(plan) => plan,
+        None => (
+            PathBuf::new(),
+            crate::util::path_with_canonical_process_temp_prefix(path),
+        ),
+    };
     for component in inspected_path.components() {
         current.push(component.as_os_str());
         if matches!(component, Component::Prefix(_) | Component::RootDir) {

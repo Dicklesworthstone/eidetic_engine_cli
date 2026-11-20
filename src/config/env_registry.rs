@@ -157,6 +157,8 @@ pub enum EnvVar {
     FlightRecorderRetentionDays,
     /// `EE_FORMAT`
     Format,
+    /// `EE_FS_BOUNDARY`
+    FsBoundary,
     /// `EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT`
     GraphMemoryDegradedBelowPct,
     /// `EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS`
@@ -386,6 +388,7 @@ impl EnvVar {
             Self::FlightRecorderDir,
             Self::FlightRecorderRetentionDays,
             Self::Format,
+            Self::FsBoundary,
             Self::GraphMemoryDegradedBelowPct,
             Self::GraphMemoryGrowthMultiplierBasisPoints,
             Self::GraphMemoryPerAlgorithmCapMb,
@@ -527,6 +530,7 @@ impl EnvVar {
             Self::FlightRecorderDir => "EE_FLIGHT_RECORDER_DIR",
             Self::FlightRecorderRetentionDays => "EE_FLIGHT_RECORDER_RETENTION_DAYS",
             Self::Format => "EE_FORMAT",
+            Self::FsBoundary => "EE_FS_BOUNDARY",
             Self::GraphMemoryDegradedBelowPct => "EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT",
             Self::GraphMemoryGrowthMultiplierBasisPoints => {
                 "EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS"
@@ -759,6 +763,9 @@ impl EnvVar {
                 "Override the flight recorder trace retention window in days."
             }
             Self::Format => "Select the default output renderer.",
+            Self::FsBoundary => {
+                "Root filesystem safety walks at an explicitly trusted sandbox directory."
+            }
             Self::GraphMemoryDegradedBelowPct => {
                 "Override the graph snapshot advisory threshold as a percent of the snapshot cap."
             }
@@ -1062,6 +1069,7 @@ impl EnvVar {
             | Self::E2eRetentionManifest
             | Self::ExternalBuildRoot
             | Self::FlightRecorderDir
+            | Self::FsBoundary
             | Self::IndexDir
             | Self::L2PackCacheDir
             | Self::ReflectionHmacKeyPath
@@ -1676,6 +1684,23 @@ mod tests {
         }
         if EnvVar::EmbedModelDir.category() != "embeddings" {
             return Err("EE_EMBED_MODEL_DIR must be categorized as embeddings".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_boundary_is_registered_without_enabling_it_by_default() -> TestResult {
+        if !EnvVar::all().contains(&EnvVar::FsBoundary) {
+            return Err("EE_FS_BOUNDARY missing from registry order".to_owned());
+        }
+        if EnvVar::FsBoundary.name() != "EE_FS_BOUNDARY" {
+            return Err("EE_FS_BOUNDARY name mismatch".to_owned());
+        }
+        if EnvVar::FsBoundary.default_value().is_some() {
+            return Err("EE_FS_BOUNDARY must remain opt-in".to_owned());
+        }
+        if EnvVar::FsBoundary.category() != "paths" {
+            return Err("EE_FS_BOUNDARY must be categorized as a path boundary".to_owned());
         }
         Ok(())
     }

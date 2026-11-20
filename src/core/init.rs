@@ -340,9 +340,40 @@ fn path_without_trailing_separators(path: &Path) -> PathBuf {
 /// create scratch workspaces there. Refusing those paths forces `realpath`
 /// busywork even though init can safely operate on the canonical target. A
 /// final symlink remains refused unless `--allow-symlink` is explicit.
-fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -> PathBuf {
+fn canonicalize_init_workspace_for_no_follow(
+    path: &Path,
+    allow_symlink: bool,
+) -> io::Result<PathBuf> {
+    if let Some(boundary) = crate::util::fs_boundary()? {
+        let path = boundary.ensure_within(path)?;
+        // Resolve the parent before inspecting the leaf: an intermediate link
+        // must never let a metadata probe cross the configured boundary.
+        if !allow_symlink && path != boundary.root() {
+            let parent = path.parent().ok_or_else(|| {
+                io::Error::new(ErrorKind::InvalidInput, "workspace path has no parent")
+            })?;
+            let parent = canonicalize_init_existing_prefix(parent, boundary.root())?;
+            let leaf = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "workspace path has no final component",
+                )
+            })?;
+            let candidate = parent.join(leaf);
+            match fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() => return Ok(candidate),
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        return canonicalize_init_existing_prefix(&path, boundary.root());
+    }
+
+    let normalized = normalize_workspace_path(path);
+    let path = normalized.as_path();
     if allow_symlink {
-        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        return Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
     }
 
     let final_component_path = path_without_trailing_separators(path);
@@ -350,11 +381,11 @@ fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -
         fs::symlink_metadata(&final_component_path),
         Ok(metadata) if metadata.file_type().is_symlink()
     ) {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
 
     if path.exists() {
-        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        return Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
     }
 
     let mut ancestor = path;
@@ -366,7 +397,7 @@ fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -
         missing_suffix.push(leaf.to_os_string());
         ancestor = parent;
         if ancestor.exists() {
-            return ancestor
+            return Ok(ancestor
                 .canonicalize()
                 .map(|mut canonical| {
                     for component in missing_suffix.iter().rev() {
@@ -374,11 +405,46 @@ fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -
                     }
                     canonical
                 })
-                .unwrap_or_else(|_| path.to_path_buf());
+                .unwrap_or_else(|_| path.to_path_buf()));
         }
     }
 
-    path.to_path_buf()
+    Ok(path.to_path_buf())
+}
+
+/// Canonicalize the existing prefix of a bounded init path while retaining a
+/// missing suffix for creation. The boundary must already exist; init never
+/// climbs above it or creates it implicitly.
+fn canonicalize_init_existing_prefix(path: &Path, boundary_root: &Path) -> io::Result<PathBuf> {
+    let mut ancestor = path;
+    let mut missing_suffix = Vec::new();
+    loop {
+        match crate::util::canonicalize_path(ancestor) {
+            Ok(mut canonical) => {
+                for component in missing_suffix.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound && ancestor != boundary_root => {
+                let leaf = ancestor.file_name().ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidInput, "init path has no final component")
+                })?;
+                let parent = ancestor
+                    .parent()
+                    .filter(|parent| parent.starts_with(boundary_root))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            ErrorKind::PermissionDenied,
+                            "init path leaves EE_FS_BOUNDARY",
+                        )
+                    })?;
+                missing_suffix.push(leaf.to_os_string());
+                ancestor = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn record_failed_init_action(
@@ -416,15 +482,17 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     let version = build_info().version;
 
     let workspace = if options.workspace_path.is_absolute() {
-        normalize_workspace_path(&options.workspace_path)
+        options.workspace_path.clone()
     } else {
-        normalize_workspace_path(
-            &std::env::current_dir()
-                .unwrap_or_default()
-                .join(&options.workspace_path),
-        )
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(&options.workspace_path)
     };
-    let workspace = canonicalize_init_workspace_for_no_follow(&workspace, options.allow_symlink);
+    let (workspace, resolution_error) =
+        match canonicalize_init_workspace_for_no_follow(&workspace, options.allow_symlink) {
+            Ok(workspace) => (workspace, None),
+            Err(error) => (workspace, Some(error)),
+        };
 
     let ee_dir = workspace.join(".ee");
     let database_path = ee_dir.join("ee.db");
@@ -435,12 +503,54 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     let mut any_created = false;
     let mut any_failed = false;
 
-    if let Some(issue) = init_path_safety_issue(&workspace, options.allow_symlink) {
+    if let Some(issue) = resolution_error
+        .map(|error| InitPathSafetyIssue {
+            status: "inspect_failed",
+            message: format!(
+                "failed to resolve init workspace {}: {error}",
+                workspace.display()
+            ),
+        })
+        .or_else(|| init_path_safety_issue(&workspace, options.allow_symlink))
+    {
         record_failed_init_action(
             &mut actions,
             &mut action_errors,
             "check_workspace",
             workspace.clone(),
+            issue.status,
+            issue.message,
+        );
+        return InitReport {
+            version,
+            status: InitStatus::Failed,
+            workspace,
+            ee_dir,
+            database_path,
+            index_dir,
+            actions,
+            action_errors,
+            dry_run: options.dry_run,
+        };
+    }
+
+    // A workspace-root symlink may be explicitly admitted, but storage beneath
+    // it never inherits that permission. Check the marker before even probing
+    // `.ee/ee.db`: a leaf metadata request would follow a planted `.ee` link.
+    let bounded_store_issue = match crate::util::fs_boundary() {
+        Ok(Some(_)) => init_path_safety_issue(&ee_dir, false),
+        Ok(None) => None,
+        Err(error) => Some(InitPathSafetyIssue {
+            status: "inspect_failed",
+            message: format!("failed to inspect init storage boundary: {error}"),
+        }),
+    };
+    if let Some(issue) = bounded_store_issue {
+        record_failed_init_action(
+            &mut actions,
+            &mut action_errors,
+            "check_directory",
+            ee_dir.clone(),
             issue.status,
             issue.message,
         );
@@ -1231,7 +1341,34 @@ fn open_init_directory_chain_no_follow(path: &Path) -> io::Result<File> {
 
     let directory_flags =
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
-    let mut directory = if path.is_absolute() {
+    let bounded = crate::util::fs_boundary()?
+        .map(|boundary| {
+            let absolute = boundary.ensure_within(path)?;
+            let relative = absolute
+                .strip_prefix(boundary.root())
+                .map_err(|_| {
+                    io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "init path leaves EE_FS_BOUNDARY",
+                    )
+                })?
+                .to_path_buf();
+            Ok::<_, io::Error>((boundary.root().to_path_buf(), relative))
+        })
+        .transpose()?;
+    let walk_path = bounded
+        .as_ref()
+        .map_or(path, |(_, relative)| relative.as_path());
+    let mut directory = if let Some((root, _)) = bounded.as_ref() {
+        let fd = rustix::fs::openat(
+            rustix::fs::CWD,
+            root,
+            directory_flags,
+            rustix::fs::Mode::from_raw_mode(0),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
+    } else if path.is_absolute() {
         let fd = rustix::fs::openat(
             rustix::fs::CWD,
             Path::new("/"),
@@ -1251,7 +1388,7 @@ fn open_init_directory_chain_no_follow(path: &Path) -> io::Result<File> {
         File::from(fd)
     };
 
-    for component in path.components() {
+    for component in walk_path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
             Component::Normal(_) | Component::ParentDir => {
@@ -1330,6 +1467,21 @@ struct InitPathSafetyIssue {
 }
 
 fn init_path_safety_issue(path: &Path, allow_symlink: bool) -> Option<InitPathSafetyIssue> {
+    let bounded_check = crate::util::fs_boundary().and_then(|boundary| {
+        if let Some(boundary) = boundary {
+            let path = boundary.ensure_within(path)?;
+            if allow_symlink {
+                canonicalize_init_existing_prefix(&path, boundary.root())?;
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = bounded_check {
+        return Some(InitPathSafetyIssue {
+            status: "inspect_failed",
+            message: format!("refusing init path {}: {error}", path.display()),
+        });
+    }
     if allow_symlink {
         return None;
     }
@@ -1408,6 +1560,203 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_init_paths_trust_ancestors_and_preserve_descendant_checks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("scratch directory");
+        let physical = temp.path().join("physical");
+        let boundary = physical.join("boundary");
+        fs::create_dir_all(boundary.join("child")).expect("boundary child");
+        fs::create_dir_all(boundary.join("target")).expect("in-boundary target");
+        fs::create_dir_all(physical.join(".ee")).expect("ancestor workspace marker");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::write(outside.join("sentinel"), b"outside unchanged").expect("outside sentinel");
+        fs::write(boundary.join("target/sentinel"), b"inside unchanged").expect("inside sentinel");
+        let internal_store = boundary.join("store-internal");
+        let external_store = boundary.join("store-external");
+        fs::create_dir(&internal_store).expect("internal-link workspace");
+        fs::create_dir(&external_store).expect("external-link workspace");
+        symlink("../target", internal_store.join(".ee")).expect("internal storage link");
+        symlink(&outside, external_store.join(".ee")).expect("external storage link");
+        symlink(&outside, boundary.join("escape")).expect("escaping link");
+        symlink("target", boundary.join("link")).expect("in-boundary link");
+        let alias = temp.path().join("trusted-ancestor");
+        symlink(&physical, &alias).expect("trusted ancestor link");
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "core::init::tests::bounded_init_paths_child",
+                "--nocapture",
+            ])
+            .env("EIDETIC_BOUNDARY_INIT_TEST", "1")
+            .env(
+                crate::config::EnvVar::FsBoundary.name(),
+                alias.join("boundary"),
+            )
+            .output()
+            .expect("run isolated boundary assertions");
+        assert!(
+            output.status.success(),
+            "boundary child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "the child must execute the intended test"
+        );
+        assert!(
+            !outside.join(".ee").exists(),
+            "outside paths stay untouched"
+        );
+        for (target, content) in [
+            (outside, b"outside unchanged".as_slice()),
+            (boundary.join("target"), b"inside unchanged".as_slice()),
+        ] {
+            let names = fs::read_dir(&target)
+                .expect("inspect target after child")
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(names, vec![OsString::from("sentinel")]);
+            assert_eq!(fs::read(target.join("sentinel")).unwrap(), content);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_init_paths_child() {
+        if std::env::var_os("EIDETIC_BOUNDARY_INIT_TEST").is_none() {
+            return;
+        }
+        let boundary = crate::util::fs_boundary().unwrap().unwrap();
+        let root = boundary.root();
+        assert_eq!(
+            canonicalize_init_workspace_for_no_follow(root, false).unwrap(),
+            root
+        );
+        let missing = root.join("new/deep/workspace");
+        assert_eq!(
+            canonicalize_init_workspace_for_no_follow(&missing, false).unwrap(),
+            missing
+        );
+        assert!(
+            !missing.exists(),
+            "path resolution must not create missing descendants"
+        );
+        assert_eq!(
+            super::super::path_safety::first_existing_symlink_component(
+                &root.join("child/missing")
+            )
+            .unwrap(),
+            None,
+            "trusted symlink ancestors above the boundary are not inspected"
+        );
+        #[cfg(not(any(target_os = "espidf", target_os = "horizon")))]
+        assert!(
+            open_init_directory_chain_no_follow(&root.join("child"))
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .is_dir()
+        );
+
+        let linked = root.join("link");
+        assert_eq!(
+            canonicalize_init_workspace_for_no_follow(&linked, true).unwrap(),
+            root.join("target")
+        );
+        assert_eq!(
+            canonicalize_init_workspace_for_no_follow(&linked, false).unwrap(),
+            linked
+        );
+        assert_eq!(
+            init_path_safety_issue(&linked, false).unwrap().status,
+            "symlink_refused"
+        );
+        assert!(canonicalize_init_workspace_for_no_follow(&root.join("escape"), true).is_err());
+        assert!(
+            canonicalize_init_workspace_for_no_follow(&root.join("child/../target"), true).is_err()
+        );
+
+        // Discovery must not see the ancestor's marker, even though the
+        // ancestor is traversable through the trusted path spelling.
+        assert!(crate::config::workspace::discover(&root.join("child")).is_none());
+        assert!(crate::config::workspace::discover_all(&root.join("child")).is_empty());
+        let canonical = crate::config::workspace::canonicalize_workspace_path(
+            root,
+            b"bounded-workspace-test",
+            crate::config::workspace::SymlinkPolicy::Deny,
+        )
+        .unwrap();
+        assert_eq!(canonical.canonical_path, root);
+        assert!(canonical.symlink_chain.is_empty());
+        assert!(canonical.git_root.is_none());
+
+        for name in ["store-internal", "store-external"] {
+            let workspace = root.join(name);
+            for (dry_run, repair_plan) in [(false, false), (true, false), (false, true)] {
+                let report = init_workspace(&InitOptions {
+                    workspace_path: workspace.clone(),
+                    dry_run,
+                    repair_plan,
+                    force: false,
+                    allow_symlink: true,
+                    skip_boilerplate: false,
+                });
+                assert_eq!(report.status, InitStatus::Failed, "planted {name} marker");
+                assert_eq!(report.actions.len(), 1, "refuse before any storage work");
+                assert_eq!(report.actions[0].path, workspace.join(".ee"));
+                assert_eq!(report.actions[0].status, "symlink_refused");
+                assert!(
+                    fs::symlink_metadata(workspace.join(".ee"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                let names = fs::read_dir(&workspace)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    names,
+                    vec![OsString::from(".ee")],
+                    "no boilerplate or other mutation"
+                );
+            }
+        }
+
+        let outside = root.parent().unwrap().join("outside-new");
+        let report = init_workspace(&InitOptions {
+            workspace_path: outside.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: true,
+            skip_boilerplate: true,
+        });
+        assert_eq!(report.status, InitStatus::Failed);
+        assert!(
+            report
+                .action_errors
+                .iter()
+                .any(|error| error.message.contains("EE_FS_BOUNDARY"))
+        );
+        assert!(!outside.exists());
+        let request = crate::config::WorkspaceResolutionRequest::new(
+            root.to_path_buf(),
+            crate::config::WorkspaceResolutionMode::AllowUninitialized,
+        )
+        .with_explicit_workspace(outside);
+        assert!(matches!(
+            crate::config::resolve_workspace(&request),
+            Err(crate::config::WorkspaceError::FilesystemBoundary { .. })
+        ));
+    }
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
