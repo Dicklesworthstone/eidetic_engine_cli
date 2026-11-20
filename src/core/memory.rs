@@ -19,10 +19,12 @@ use super::audit_lane::{
 };
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config, merged_workspace_config};
+#[cfg(test)]
+use super::index::process_pending_index_jobs_coalesced;
 use super::index::{
     IndexHealth, IndexProcessingJobReport, IndexRebuildError, IndexStatusOptions,
     get_index_status_with_connection, process_index_job_for_connection,
-    process_pending_index_jobs_coalesced,
+    process_pending_index_jobs_coalesced_before,
 };
 use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
@@ -2541,15 +2543,31 @@ struct RememberWorkspaceWriteLock<'a> {
 }
 
 impl RememberWorkspaceWriteLock<'_> {
+    fn release_owned_lease(&self) -> Result<bool, crate::db::DbError> {
+        let release = || {
+            #[cfg(test)]
+            drain_budget_tests::before_remember_lease_release();
+            self.connection
+                .release_advisory_lock(&self.lock_id, &self.holder_id)
+        };
+        match asupersync::Cx::current() {
+            Some(cx) => cx.masked(|| {
+                // Ownership cleanup must survive the cancellation that ended
+                // publication, including the database's contention retries.
+                let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+                release()
+            }),
+            None => release(),
+        }
+    }
+
     /// Release the owned lease and return whether the durable row matched.
     ///
     /// Leadership handoff must observe this result before it probes the
     /// queue. A best-effort `Drop` alone cannot distinguish a real release
     /// from an I/O error or a row that no longer belongs to this holder.
     fn release(mut self) -> Result<bool, crate::db::DbError> {
-        let result = self
-            .connection
-            .release_advisory_lock(&self.lock_id, &self.holder_id);
+        let result = self.release_owned_lease();
         if result.is_ok() {
             // `false` means this guard no longer owns a durable row; retrying
             // the same holder delete in Drop cannot improve that fact.
@@ -2564,10 +2582,7 @@ impl Drop for RememberWorkspaceWriteLock<'_> {
         if self.release_complete {
             return;
         }
-        if let Err(error) = self
-            .connection
-            .release_advisory_lock(&self.lock_id, &self.holder_id)
-        {
+        if let Err(error) = self.release_owned_lease() {
             tracing::warn!(
                 target: "ee::memory",
                 resource_type = self.lock_id.resource_type(),
@@ -2926,15 +2941,94 @@ fn remember_index_drain_leader_holder(index_job_id: &str) -> String {
     format!("remember:{}:index-drain-{index_job_id}", std::process::id())
 }
 
-/// Leadership TTL covers both bounded drain rounds (each capped by the
-/// 300s index runtime budget) so a killed leader cannot wedge elections.
-const REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS: u64 = 660;
+/// Remember publication is interactive even when a large explicit rebuild is
+/// allowed an hour. One total budget covers every round and re-election, using
+/// the same five-minute ceiling as single-document inline publication.
+const REMEMBER_INDEX_DRAIN_TIMEOUT_SECS: u64 = 300;
+const REMEMBER_INDEX_DRAIN_LEADER_CLEANUP_MARGIN_SECS: u64 = 60;
 const REMEMBER_INDEX_DRAIN_MAX_ROUNDS: usize = 2;
 
 /// Bounded retries for the post-release pending probe: an inspection error
 /// is UNKNOWN, never quiescence, so the probe is retried before the loop
 /// concedes that it cannot verify the queue.
 const REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS: usize = 3;
+
+struct RememberIndexDrainBudget {
+    deadline: Instant,
+    caller: Option<asupersync::Cx>,
+}
+
+impl RememberIndexDrainBudget {
+    fn new(started: Instant, timeout: Duration, caller: Option<asupersync::Cx>) -> Self {
+        Self {
+            // The production timeout is at most five minutes. An unrepresentable
+            // deadline fails closed instead of becoming an unbounded drain.
+            deadline: started.checked_add(timeout).unwrap_or(started),
+            caller,
+        }
+    }
+
+    fn remaining(&self, now: Instant) -> Result<Duration, IndexRebuildError> {
+        if let Some(caller) = &self.caller
+            && (caller.checkpoint().is_err() || caller.is_cancel_requested())
+        {
+            return Err(IndexRebuildError::Cancelled(
+                caller.cancel_reason().unwrap_or_else(|| {
+                    crate::core::outcome::attributed_cancel_reason(
+                        caller,
+                        asupersync::CancelKind::ParentCancelled,
+                        "remember index drain caller cancelled without a recorded reason",
+                    )
+                }),
+            ));
+        }
+        let remaining = self.deadline.saturating_duration_since(now);
+        let remaining = self
+            .caller
+            .as_ref()
+            .and_then(|caller| caller.remaining_budget().deadline)
+            .map_or(remaining, |caller_remaining| {
+                remaining.min(caller_remaining)
+            });
+        if remaining.is_zero() {
+            return Err(IndexRebuildError::Cancelled(
+                asupersync::CancelReason::deadline()
+                    .with_message("remember index drain exhausted its total publication budget"),
+            ));
+        }
+        Ok(remaining)
+    }
+}
+
+fn remember_index_drain_timeout(configured: Duration) -> Duration {
+    configured.min(Duration::from_secs(REMEMBER_INDEX_DRAIN_TIMEOUT_SECS))
+}
+
+fn remember_index_drain_leader_ttl_secs(remaining: Duration) -> u64 {
+    remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() != 0))
+        .saturating_add(REMEMBER_INDEX_DRAIN_LEADER_CLEANUP_MARGIN_SECS)
+}
+
+fn remember_drain_budget_exhausted_report(
+    own_report: Option<IndexProcessingJobReport>,
+    index_job_id: &str,
+    error: &IndexRebuildError,
+) -> IndexProcessingJobReport {
+    let mut report = own_report
+        .unwrap_or_else(|| remember_index_job_queued_after_transient_failure(index_job_id, error));
+    // A completed own job remains completed. The public remember posture is
+    // still checked against all durable jobs and the final source generation;
+    // unfinished peer work must not become a claim of queue quiescence here.
+    if report.outcome != "failed" {
+        report.processing_mode.push_str("_drain_budget_exhausted");
+        report.error = Some(format!(
+            "{error}; remaining index work was not verified complete and stays available for retry"
+        ));
+    }
+    report
+}
 
 /// Attempt bounded, non-blocking leadership of a coalesced drain for a
 /// burst whose initial publisher already finished. Exactly one racing
@@ -2949,20 +3043,41 @@ const REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS: usize = 3;
 /// a still-running holder, which must either re-elect and drain it or
 /// lose the re-election to a newer holder that inherits the same
 /// obligation. The chain terminates at the first holder that observes an
-/// empty queue after release. A publication failure ends the invocation after
-/// releasing leadership, leaving durable jobs available for an explicit retry.
+/// empty queue after release. A publication failure or exhausted total budget
+/// ends the invocation after releasing leadership, leaving durable jobs
+/// available for an explicit retry.
 fn remember_lead_coalesced_index_drain(
     connection: &DbConnection,
     workspace_id: &str,
     index_job_id: &str,
     index_dir: &Path,
 ) -> IndexProcessingJobReport {
-    remember_drain_leadership_cycles(
+    let started = Instant::now();
+    let budget = RememberIndexDrainBudget::new(
+        started,
+        remember_index_drain_timeout(super::index::index_rebuild_timeout()),
+        asupersync::Cx::current(),
+    );
+    remember_drain_leadership_cycles_with_budget(
         connection,
         workspace_id,
         index_job_id,
+        &budget,
+        &Instant::now,
         &mut || remember_retry_sleep(Duration::ZERO, "lead coalesced index drain"),
-        &mut || process_pending_index_jobs_coalesced(connection, workspace_id, index_dir, None),
+        &mut |remaining| {
+            let deadline = Instant::now()
+                .checked_add(remaining)
+                .map_or(budget.deadline, |deadline| deadline.min(budget.deadline));
+            process_pending_index_jobs_coalesced_before(
+                connection,
+                workspace_id,
+                index_dir,
+                None,
+                deadline,
+                budget.caller.clone(),
+            )
+        },
         &mut || match remember_requeue_and_list_pending_index_job_ids(
             connection,
             workspace_id,
@@ -3003,12 +3118,40 @@ pub(crate) fn reconcile_pending_remember_index_jobs(
 /// planted-interleaving test can commit a racing writer inside a real
 /// publish-lock hold. See [`remember_lead_coalesced_index_drain`] for the
 /// handoff invariant this loop implements.
+#[cfg(test)]
 fn remember_drain_leadership_cycles(
     connection: &DbConnection,
     workspace_id: &str,
     index_job_id: &str,
     checkpoint: &mut dyn FnMut() -> Result<(), DomainError>,
     drain: &mut dyn FnMut() -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>,
+    pending_remaining: &mut dyn FnMut() -> Option<bool>,
+) -> IndexProcessingJobReport {
+    let budget = RememberIndexDrainBudget::new(
+        Instant::now(),
+        Duration::from_secs(REMEMBER_INDEX_DRAIN_TIMEOUT_SECS),
+        asupersync::Cx::current(),
+    );
+    remember_drain_leadership_cycles_with_budget(
+        connection,
+        workspace_id,
+        index_job_id,
+        &budget,
+        &Instant::now,
+        checkpoint,
+        &mut |_| drain(),
+        pending_remaining,
+    )
+}
+
+fn remember_drain_leadership_cycles_with_budget(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_job_id: &str,
+    budget: &RememberIndexDrainBudget,
+    now: &dyn Fn() -> Instant,
+    checkpoint: &mut dyn FnMut() -> Result<(), DomainError>,
+    drain: &mut dyn FnMut(Duration) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>,
     pending_remaining: &mut dyn FnMut() -> Option<bool>,
 ) -> IndexProcessingJobReport {
     let lock_id = remember_index_drain_leader_lock(workspace_id);
@@ -3026,7 +3169,7 @@ fn remember_drain_leadership_cycles(
     //        reporting it AlreadyHeld; AlreadyHeld therefore means an
     //        alive same-host holder or an unprobeable (remote/foreign)
     //        holder that deliberately fails closed;
-    //   E3 — publication failure, ambient Cx deadline/cancellation, or a
+    //   E3 — publication failure, total deadline/caller cancellation, or a
     //        persistently failing inspection ended the stint: report our own
     //        truthful outcome (queued when undecided) and NEVER claim quiescence.
     // There is deliberately no numeric cycle cap and no drain-progress
@@ -3036,7 +3179,14 @@ fn remember_drain_leadership_cycles(
     // `skipped` rows from a claim race (not progress). Neither proves a
     // successor; while the probe says pending work remains, re-elect.
     loop {
-        // Outer bound: the caller's Cx deadline/cancellation.
+        // The explicit monotonic deadline applies even to a synchronous CLI
+        // with no ambient context. Re-election never renews this budget.
+        let remaining = match budget.remaining(now()) {
+            Ok(remaining) => remaining,
+            Err(error) => {
+                return remember_drain_budget_exhausted_report(own_report, index_job_id, &error);
+            }
+        };
         if let Err(error) = checkpoint() {
             tracing::warn!(
                 target: "ee::memory",
@@ -3051,7 +3201,7 @@ fn remember_drain_leadership_cycles(
         match connection.acquire_advisory_lock(
             &lock_id,
             &holder_id,
-            Some(REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS),
+            Some(remember_index_drain_leader_ttl_secs(remaining)),
             Some("remember coalesced index drain leadership"),
         ) {
             Ok(crate::db::AcquireLockResult::Acquired(_))
@@ -3088,8 +3238,11 @@ fn remember_drain_leadership_cycles(
             let round = remember_drain_pending_rounds(
                 index_job_id,
                 REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
-                &mut *drain,
-                &mut *pending_remaining,
+                &mut || drain(budget.remaining(now())?),
+                &mut || {
+                    budget.remaining(now()).ok()?;
+                    pending_remaining()
+                },
                 || remember_index_job_report_from_durable_state(connection, index_job_id),
             );
             let cycle_report = round.own_report;
@@ -3134,6 +3287,9 @@ fn remember_drain_leadership_cycles(
                 return remember_index_job_queued_for_coalescing(index_job_id);
             }
         }
+        if let Err(error) = budget.remaining(now()) {
+            return remember_drain_budget_exhausted_report(own_report, index_job_id, &error);
+        }
         if publication_failed {
             // A failed publication is not quiescence or a successful handoff.
             // Preserve terminal job evidence for a later explicit retry; the
@@ -3156,6 +3312,9 @@ fn remember_drain_leadership_cycles(
         // never quiescence — so retry it a bounded number of times.
         let mut probe = None;
         for _attempt in 0..REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS {
+            if let Err(error) = budget.remaining(now()) {
+                return remember_drain_budget_exhausted_report(own_report, index_job_id, &error);
+            }
             probe = pending_remaining();
             if probe.is_some() {
                 break;
@@ -13847,6 +14006,10 @@ mod git_capture_identity_tests;
 #[cfg(test)]
 #[path = "memory_creation_companion_tests.rs"]
 mod creation_companion_tests;
+
+#[cfg(test)]
+#[path = "memory_drain_budget_tests.rs"]
+mod drain_budget_tests;
 
 #[cfg(test)]
 #[path = "memory_git_capture_security_tests.rs"]

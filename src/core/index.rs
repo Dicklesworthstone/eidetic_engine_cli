@@ -2743,6 +2743,53 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+/// Coalesce an interactive writer's queue without renewing its total budget.
+///
+/// Unlike standalone import/rebuild processing, every remember drain round
+/// receives the same monotonic deadline. Runtime setup consumes that budget
+/// too. The optional caller is a cancellation source, never a replacement for
+/// the runtime-owned context that drives this operation.
+pub(crate) fn process_pending_index_jobs_coalesced_before(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    job_limit: Option<u32>,
+    deadline: Instant,
+    caller: Option<asupersync::Cx>,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    let runtime = crate::core::build_cli_runtime().map_err(|error| {
+        IndexRebuildError::Index(format!("Failed to start index runtime: {error}"))
+    })?;
+    let bootstrap = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = caller
+        .as_ref()
+        .and_then(|caller| caller.remaining_budget().deadline)
+        .map_or(remaining, |caller_remaining| {
+            remaining.min(caller_remaining)
+        });
+    let cx = runtime.request_cx_with_budget(bootstrap.budget_for_timeout(remaining));
+    let control = IndexOperationControl::new(remaining, None, caller);
+    runtime.block_on(async move {
+        let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+        index_operation_checkpoint(&cx, Some(&control))?;
+        requeue_cancelled_search_index_jobs(db, workspace_id)?;
+        index_operation_checkpoint(&cx, Some(&control))?;
+        let selected = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
+        index_operation_checkpoint(&cx, Some(&control))?;
+        process_selected_index_jobs_coalesced_with_cx(
+            &cx,
+            db,
+            workspace_id,
+            index_dir,
+            selected,
+            None,
+            Some(&control),
+        )
+        .await
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn process_pending_index_jobs_coalesced_after_snapshot<F>(
     db: &DbConnection,
