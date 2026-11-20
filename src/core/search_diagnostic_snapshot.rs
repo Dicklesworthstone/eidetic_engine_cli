@@ -175,6 +175,88 @@ pub(super) fn admit_memories(
     Ok(())
 }
 
+/// Apply native rule authority to every diagnostic observation, including rules
+/// which never reach the final pool. Raw and final metadata are independent
+/// witnesses: a current final revision cannot authorize an obsolete raw score.
+pub(super) fn admit_rules(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    diag: &mut DiagSearchSyncResult,
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+) -> Result<(), SearchError> {
+    search_checkpoint(cx)?;
+    let ids: BTreeSet<&str> = diag
+        .pre_fusion
+        .lexical
+        .results
+        .iter()
+        .chain(&diag.pre_fusion.semantic_fast.results)
+        .map(|hit| hit.doc_id.as_str())
+        .chain(
+            diag.fusion
+                .per_doc_contribution
+                .iter()
+                .map(|hit| hit.doc_id.as_str()),
+        )
+        .chain(diag.candidate_metadata.keys().map(String::as_str))
+        .collect();
+    let mut candidates = Vec::new();
+    for id in ids {
+        search_checkpoint(cx)?;
+        let hit = SearchHit {
+            doc_id: id.to_owned(),
+            score: 0.0,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: diag.candidate_metadata.get(id).cloned(),
+            explanation: None,
+        };
+        if super::rule_admission::is_rule_hit(&hit) {
+            candidates.push(hit);
+        }
+    }
+    candidates.extend(
+        diag.final_hits
+            .iter()
+            .filter(|hit| super::rule_admission::is_rule_hit(hit))
+            .cloned(),
+    );
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut unverified = BTreeMap::<String, usize>::new();
+    for hit in &candidates {
+        *unverified.entry(hit.doc_id.clone()).or_default() += 1;
+    }
+    // Shared admission batches native bodies/lineage/holds in the same source
+    // snapshot. Passing all witnesses together avoids per-arm database reads.
+    for hit in super::rule_admission::admit_hits(options, candidates, degraded, read_connection) {
+        if let Some(count) = unverified.get_mut(&hit.doc_id) {
+            *count -= 1;
+        }
+    }
+    search_checkpoint(cx)?;
+    let visible = |id: &str| unverified.get(id).is_none_or(|count| *count == 0);
+    diag.candidate_metadata.retain(|id, _| visible(id));
+    diag.pre_fusion
+        .lexical
+        .results
+        .retain(|hit| visible(&hit.doc_id));
+    diag.pre_fusion
+        .semantic_fast
+        .results
+        .retain(|hit| visible(&hit.doc_id));
+    diag.fusion
+        .per_doc_contribution
+        .retain(|hit| visible(&hit.doc_id));
+    diag.final_hits.retain(|hit| visible(&hit.doc_id));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "lexical-bm25")]
@@ -186,7 +268,7 @@ mod tests {
         SearchArmHit, SearchDedupMode, SearchSourceMode, SpeedMode,
     };
     use super::*;
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+    use crate::db::{CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput};
     use crate::models::MemoryScope;
     use serde_json::json;
     #[cfg(feature = "lexical-bm25")]
@@ -345,6 +427,258 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    fn insert_rule(
+        db: &DbConnection,
+        id: &str,
+        workspace: &str,
+        sources: Vec<String>,
+    ) -> TestResult {
+        db.insert_procedural_rule(
+            id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace.to_owned(),
+                content: PHRASE.to_owned(),
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: true,
+                source_memory_ids: sources,
+                tags: vec!["diagnostic".to_owned()],
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn diagnostic_native_rules_obey_source_authority_in_every_arm() -> TestResult {
+        let (_temp, mut options, db) = fixture()?;
+        let visible = "rule_00000000000000000000000011";
+        let tombstoned = "rule_00000000000000000000000012";
+        let superseded = "rule_00000000000000000000000013";
+        let foreign = "rule_00000000000000000000000014";
+        let missing = "rule_00000000000000000000000015";
+        let held = "rule_00000000000000000000000016";
+        let bad_lineage = "rule_00000000000000000000000017";
+        db.insert_workspace(
+            OTHER_WORKSPACE,
+            &CreateWorkspaceInput {
+                path: options.workspace_path.join("other").display().to_string(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        db.insert_memory(HIDDEN, &input(OTHER_WORKSPACE, "foreign rule lineage"))
+            .map_err(|error| error.to_string())?;
+        for id in [visible, tombstoned, superseded, held] {
+            insert_rule(&db, id, WORKSPACE, Vec::new())?;
+        }
+        insert_rule(&db, foreign, OTHER_WORKSPACE, Vec::new())?;
+        insert_rule(&db, bad_lineage, WORKSPACE, vec![HIDDEN.to_owned()])?;
+        db.execute_raw(&format!(
+            "UPDATE procedural_rules SET tombstoned_at = '2026-07-01T00:00:00Z' WHERE id = '{tombstoned}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        db.execute_raw(&format!(
+            "UPDATE procedural_rules SET maturity = 'superseded' WHERE id = '{superseded}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        db.insert_feedback_quarantine(
+            "fq_00000000000000000000000011",
+            &crate::db::CreateFeedbackQuarantineInput {
+                workspace_id: WORKSPACE.to_owned(),
+                source_id: "private-diagnostic-rule-hold".to_owned(),
+                target_type: "rule".to_owned(),
+                target_id: held.to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 0.5,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+                reason: "private-diagnostic-rule-hold".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: "blake3:diagnostic-rule-hold".to_owned(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let ids = [
+            tombstoned,
+            superseded,
+            foreign,
+            missing,
+            held,
+            bad_lineage,
+            "rule_malformed",
+            "native-rule-labelled-only",
+            visible,
+            VISIBLE,
+        ];
+        // Most rejected rules exist only in the raw arms, never in final hits.
+        let mut diag = diagnostic(&ids, &[foreign, visible, VISIBLE]);
+        for id in ids {
+            diag.candidate_metadata.insert(
+                id.to_owned(),
+                json!({"content": "private indexed diagnostic canary"}),
+            );
+        }
+        diag.candidate_metadata.insert(
+            "native-rule-labelled-only".to_owned(),
+            json!({"source": "rule", "content": "private labelled rule"}),
+        );
+        let original = diag.pre_fusion.lexical.results[8].clone();
+        options.include_tombstoned = true;
+        options.include_stale = true;
+        options.relevance_floor = Some(1.0);
+        let mut degraded = Vec::new();
+        admit_rules(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut diag,
+            &mut degraded,
+            Some(&db),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_arms(&diag, &[visible, VISIBLE]);
+        assert_eq!(
+            diag.final_hits
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            [visible, VISIBLE]
+        );
+        assert_eq!(diag.candidate_metadata.len(), 2);
+        assert!(diag.candidate_metadata.contains_key(visible));
+        assert!(diag.candidate_metadata.contains_key(VISIBLE));
+        assert_eq!(diag.pre_fusion.lexical.results[0].rank, original.rank);
+        assert_eq!(
+            diag.pre_fusion.lexical.results[0].raw_score.to_bits(),
+            original.raw_score.to_bits()
+        );
+        assert_eq!(diag.fusion.per_doc_contribution[0].lexical_rank, Some(9));
+        assert_eq!(
+            diag.fusion.per_doc_contribution[0].fused_score.to_bits(),
+            0.003_f64.to_bits()
+        );
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "rule_live_admission_filtered")
+        );
+        let messages = format!("{degraded:?}");
+        assert!(!messages.contains("private-diagnostic-rule-hold"));
+        assert!(!messages.contains(held));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_rule_revisions_require_every_raw_and_final_witness() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        let rule = "rule_00000000000000000000000021";
+        let control = "rule_00000000000000000000000022";
+        for id in [rule, control] {
+            insert_rule(&db, id, WORKSPACE, Vec::new())?;
+        }
+        let current = super::super::rule_admission::admit_hits(
+            &options,
+            vec![hit(rule)],
+            &mut Vec::new(),
+            Some(&db),
+        );
+        let metadata = current
+            .first()
+            .and_then(|hit| hit.metadata.clone())
+            .ok_or("current rule metadata")?;
+        for revision in [json!("blake3:obsolete"), json!(null), json!(42)] {
+            let mut raw_only = diagnostic(&[rule, control], &[]);
+            raw_only
+                .candidate_metadata
+                .insert(rule.to_owned(), json!({"entity_revision": revision}));
+            admit_rules(
+                &asupersync::Cx::for_testing(),
+                &options,
+                &mut raw_only,
+                &mut Vec::new(),
+                Some(&db),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_arms(&raw_only, &[control]);
+            assert!(!raw_only.candidate_metadata.contains_key(rule));
+            for invalid_in_raw in [false, true] {
+                let mut diag = diagnostic(&[rule, control], &[rule]);
+                let invalid = json!({"entity_revision": revision});
+                let (raw, final_metadata) = if invalid_in_raw {
+                    (invalid, metadata.clone())
+                } else {
+                    (metadata.clone(), invalid)
+                };
+                diag.candidate_metadata.insert(rule.to_owned(), raw);
+                diag.final_hits[0].metadata = Some(final_metadata);
+                admit_rules(
+                    &asupersync::Cx::for_testing(),
+                    &options,
+                    &mut diag,
+                    &mut Vec::new(),
+                    Some(&db),
+                )
+                .map_err(|error| error.to_string())?;
+                assert_arms(&diag, &[control]);
+                assert!(diag.final_hits.is_empty());
+                assert!(!diag.candidate_metadata.contains_key(rule));
+                assert_eq!(diag.pre_fusion.lexical.results[0].rank, 2);
+            }
+        }
+        let mut valid = diagnostic(&[rule, control], &[rule]);
+        valid.candidate_metadata.insert(rule.to_owned(), metadata);
+        admit_rules(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut valid,
+            &mut Vec::new(),
+            Some(&db),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_arms(&valid, &[rule, control]);
+        assert_eq!(valid.final_hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_rule_authority_failure_withholds_rules_and_preserves_cancellation() -> TestResult
+    {
+        let (_temp, options, db) = fixture()?;
+        let rule = "rule_00000000000000000000000031";
+        insert_rule(&db, rule, WORKSPACE, Vec::new())?;
+        db.execute_raw("ALTER TABLE rule_source_memories RENAME TO unavailable_rule_sources")
+            .map_err(|error| error.to_string())?;
+        let mut diag = diagnostic(&[rule, VISIBLE], &[rule, VISIBLE]);
+        diag.candidate_metadata
+            .insert(rule.to_owned(), json!({"content": PHRASE}));
+        admit_rules(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut diag,
+            &mut Vec::new(),
+            Some(&db),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_arms(&diag, &[VISIBLE]);
+        assert_eq!(diag.final_hits.len(), 1);
+        assert_eq!(diag.final_hits[0].doc_id, VISIBLE);
+        assert!(diag.candidate_metadata.is_empty());
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel rule diagnostics"));
+        assert!(
+            matches!(admit_rules(&cx, &options, &mut diag, &mut Vec::new(), Some(&db)),
+            Err(SearchError::Cancelled(reason)) if reason.message.as_deref() == Some("cancel rule diagnostics"))
+        );
+        Ok(())
     }
 
     fn revision_fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String> {

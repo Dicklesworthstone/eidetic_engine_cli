@@ -12314,6 +12314,13 @@ async fn run_diag_search_in_snapshot(
         &mut degraded,
         read_connection,
     )?;
+    diagnostic_snapshot::admit_rules(
+        cx,
+        options,
+        &mut diag_result,
+        &mut degraded,
+        read_connection,
+    )?;
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
     let raw_hits = rule_admission::admit_hits(options, raw_hits, &mut degraded, read_connection);
