@@ -927,6 +927,435 @@ fn assert_global_sources_with_healthy_workspace() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn global_search_keeps_bodies_feedback_and_scores_in_the_same_retained_generation() {
+    let fixture = Fixture::new();
+    let paths =
+        super::super::global_store::GlobalStorePaths::from_root(&fixture.root.join("global"));
+    let (global, workspace) =
+        super::super::global_store::open_or_create_global_store(&paths).unwrap();
+    let memory = global_memory(&global, &workspace, 401, BODY);
+    let reference = Utc::now();
+    global
+        .insert_feedback_event_for_recovery(&StoredFeedbackEvent {
+            id: "fb_00000000000000000000000401".to_owned(),
+            workspace_id: workspace.clone(),
+            target_type: "memory".to_owned(),
+            target_id: memory.clone(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "human_explicit".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+            applied_at: None,
+            created_at: (reference - chrono::Duration::seconds(1)).to_rfc3339(),
+        })
+        .unwrap();
+    let _old_stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    let options = fixture.options();
+    let old_query = capture_global_search(&paths, &options, reference);
+    let new_query = capture_global_search(&paths, &options, reference);
+    let old_generation = old_query.generation.unwrap();
+
+    // Force the exact production race: body/feedback admission has completed,
+    // then another writer changes the same ID and publishes a new corpus.
+    rewrite_global_memory(
+        &global,
+        &workspace,
+        &memory,
+        "Racingnebula uses different release rules.",
+    );
+    global
+        .execute_raw("UPDATE feedback_events SET signal = 'helpful'")
+        .unwrap();
+    global_memory(
+        &global,
+        &workspace,
+        402,
+        "Racingnebula has a newly added convention.",
+    );
+    let _new_stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    assert!(
+        global
+            .get_workspace_generation(&workspace)
+            .unwrap()
+            .unwrap()
+            > old_generation
+    );
+    assert_eq!(
+        old_query
+            .source
+            .connection()
+            .get_workspace_generation(&workspace)
+            .unwrap(),
+        Some(old_generation)
+    );
+    let before = index_file_hashes(&paths.root);
+
+    let old = retrieve_captured_global_search(&paths, &options, old_query);
+    assert_eq!(old.hits.len(), 1);
+    assert_eq!(old.hits[0].doc_id, memory);
+    assert!(old.hits[0].lexical_score.is_some_and(|score| score > 0.0));
+    assert_eq!(old.memories[&memory].content, BODY);
+    assert_eq!(old.memories[&memory].confidence, 1.0);
+    assert_eq!(
+        old.hits[0].metadata.as_ref().unwrap()[SEARCH_ANALYSIS_CONTENT_KEY],
+        BODY
+    );
+    assert_eq!(
+        old.feedback
+            .as_ref()
+            .unwrap()
+            .harmful_count(&old.memories[&memory], reference),
+        Some(1)
+    );
+    assert!(!old.degraded.iter().any(|entry| matches!(
+        entry.code.as_str(),
+        "global_index_unavailable" | "global_live_snapshot_lexical"
+    )));
+
+    let mut changed_query = options.clone();
+    changed_query.query = "racingnebula".to_owned();
+    let changed = retrieve_captured_global_search(&paths, &changed_query, new_query);
+    assert!(
+        changed.hits.is_empty(),
+        "new index terms must not relabel old source bodies"
+    );
+    assert!(changed.memories.is_empty());
+    assert!(
+        !changed
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_index_unavailable")
+    );
+    let fresh_reference = Utc::now();
+    let fresh = retrieve_captured_global_search(
+        &paths,
+        &changed_query,
+        capture_global_search(&paths, &changed_query, fresh_reference),
+    );
+    assert_eq!(fresh.hits.len(), 2);
+    assert!(fresh.memories[&memory].content.contains("Racingnebula"));
+    assert_eq!(
+        fresh
+            .feedback
+            .as_ref()
+            .unwrap()
+            .harmful_count(&fresh.memories[&memory], fresh_reference),
+        Some(0)
+    );
+    assert_eq!(index_file_hashes(&paths.root), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn ready_global_index_refills_past_retired_rows_from_the_admitted_snapshot() {
+    let fixture = Fixture::new();
+    let paths =
+        super::super::global_store::GlobalStorePaths::from_root(&fixture.root.join("global"));
+    let (global, workspace) =
+        super::super::global_store::open_or_create_global_store(&paths).unwrap();
+    // Historical rows remain indexed. Their short exact-match bodies outrank
+    // the one current row and fill the first 32 native candidates completely.
+    for number in 500..533 {
+        let retired = global_memory(&global, &workspace, number, WORD);
+        global
+            .mark_memory_superseded(&retired, "2020-01-01T00:00:00Z")
+            .unwrap();
+    }
+    let visible = global_memory(
+        &global,
+        &workspace,
+        550,
+        &format!("{WORD} {}", "unrelated background context ".repeat(512)),
+    );
+    let _stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    let options = fixture.options();
+    let captured = capture_global_search(&paths, &options, Utc::now());
+    assert_eq!(captured.memories.len(), 1);
+    let before = index_file_hashes(&paths.root);
+    let result = retrieve_captured_global_search(&paths, &options, captured);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].doc_id, visible);
+    assert!(!result.degraded.iter().any(|entry| matches!(
+        entry.code.as_str(),
+        "global_index_unavailable" | "global_live_snapshot_lexical"
+    )));
+    assert_eq!(index_file_hashes(&paths.root), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn global_search_uses_captured_corpus_when_publication_has_no_matching_retained_generation() {
+    let fixture = Fixture::new();
+    let paths =
+        super::super::global_store::GlobalStorePaths::from_root(&fixture.root.join("global"));
+    let (global, workspace) =
+        super::super::global_store::open_or_create_global_store(&paths).unwrap();
+    let original = global_memory(&global, &workspace, 411, BODY);
+    let _old_stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    let fresh = global_memory(&global, &workspace, 412, BODY);
+    let options = fixture.options();
+    let captured = capture_global_search(&paths, &options, Utc::now());
+    let captured_generation = captured.generation.unwrap();
+    rewrite_global_memory(
+        &global,
+        &workspace,
+        &original,
+        "Racingnebula changed after admission.",
+    );
+    let _new_stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    let before = index_file_hashes(&paths.root);
+    let result = retrieve_captured_global_search(&paths, &options, captured);
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([original, fresh])
+    );
+    assert!(
+        result
+            .memories
+            .values()
+            .all(|memory| memory.content == BODY)
+    );
+    assert!(
+        result
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_live_snapshot_lexical")
+    );
+    assert!(
+        !result
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_index_unavailable")
+    );
+    assert!(
+        global
+            .get_workspace_generation(&workspace)
+            .unwrap()
+            .unwrap()
+            > captured_generation
+    );
+    assert_eq!(index_file_hashes(&paths.root), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn global_snapshot_overtaken_by_first_publication_keeps_fallback_policy_and_integrity() {
+    let fixture = Fixture::new();
+    let paths =
+        super::super::global_store::GlobalStorePaths::from_root(&fixture.root.join("global"));
+    let (global, workspace) =
+        super::super::global_store::open_or_create_global_store(&paths).unwrap();
+    let memory = global_memory(&global, &workspace, 421, BODY);
+    let reference = Utc::now();
+    let options = fixture.options();
+    let mut variants = vec![("current", options.clone()), ("new terms", options.clone())];
+    variants[1].1.query = "racingnebula".to_owned();
+    let mut historical = options.clone();
+    historical.as_of = Some(reference);
+    variants.push(("historical", historical));
+    let mut tombstones = options.clone();
+    tombstones.include_tombstoned = true;
+    variants.push(("tombstones", tombstones));
+    for mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+        let mut strict = options.clone();
+        strict.source_mode = mode;
+        strict.strict_source_mode = true;
+        variants.push(("strict semantic", strict));
+    }
+    let captures = variants
+        .into_iter()
+        .map(|(label, options)| {
+            let captured = capture_global_search(&paths, &options, reference);
+            (label, options, captured)
+        })
+        .collect::<Vec<_>>();
+    let corrupt_capture = capture_global_search(&paths, &options, reference);
+    rewrite_global_memory(
+        &global,
+        &workspace,
+        &memory,
+        "Racingnebula replaced the unpublished advice.",
+    );
+    let _stack = publish_store_index(
+        &paths.root,
+        &paths.database_path,
+        &paths.index_dir,
+        &workspace,
+    );
+    let before = index_file_hashes(&paths.root);
+    for (label, options, captured) in captures {
+        let result = retrieve_captured_global_search(&paths, &options, captured);
+        // The separate global lane is lexical for both native retrieval and
+        // source fallback, including a strict semantic workspace request.
+        if matches!(label, "current" | "new terms" | "strict semantic") {
+            assert!(
+                result
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_live_snapshot_lexical"),
+                "{label}"
+            );
+            assert!(
+                !result
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_index_unavailable"),
+                "{label}"
+            );
+            if label != "new terms" {
+                assert_eq!(result.hits.len(), 1);
+                assert_eq!(result.hits[0].doc_id, memory);
+                assert_eq!(result.memories[&memory].content, BODY);
+            } else {
+                assert!(result.hits.is_empty());
+            }
+        } else {
+            assert!(result.hits.is_empty(), "{label}");
+            assert!(
+                result
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_index_unavailable"),
+                "{label}"
+            );
+            assert!(
+                !result
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "global_live_snapshot_lexical"),
+                "{label}"
+            );
+        }
+    }
+    assert_eq!(index_file_hashes(&paths.root), before);
+
+    // A newer watermark is no excuse to ignore damaged persisted tiers.
+    std::fs::write(
+        paths.index_dir.join("vector.fast.idx"),
+        b"broken global vectors",
+    )
+    .unwrap();
+    let corrupt_before = index_file_hashes(&paths.root);
+    let rejected = retrieve_captured_global_search(&paths, &options, corrupt_capture);
+    assert!(rejected.hits.is_empty());
+    assert!(
+        rejected
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_index_unavailable")
+    );
+    assert!(
+        !rejected
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_live_snapshot_lexical")
+    );
+    assert_eq!(index_file_hashes(&paths.root), corrupt_before);
+}
+
+#[cfg(unix)]
+fn capture_global_search(
+    paths: &super::super::global_store::GlobalStorePaths,
+    options: &SearchOptions,
+    reference: DateTime<Utc>,
+) -> GlobalStoreSearchSnapshot {
+    read_global_search_memories(paths, options, SearchMemoryFilters::default(), reference)
+        .unwrap()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn rewrite_global_memory(db: &DbConnection, workspace: &str, memory: &str, content: &str) {
+    assert!(
+        db.apply_memory_curation_update(
+            memory,
+            &crate::db::ApplyMemoryCurationInput {
+                workspace_id: workspace.to_owned(),
+                content: content.to_owned(),
+                confidence: 0.4,
+                trust_class: "human_explicit".to_owned(),
+            },
+        )
+        .unwrap()
+    );
+}
+
+#[cfg(unix)]
+struct CapturedGlobalSearchResult {
+    hits: Vec<SearchHit>,
+    degraded: Vec<SearchDegradation>,
+    memories: BTreeMap<String, StoredMemory>,
+    feedback: Option<GlobalMemoryFeedbackSnapshot>,
+}
+
+#[cfg(unix)]
+fn retrieve_captured_global_search(
+    paths: &super::super::global_store::GlobalStorePaths,
+    options: &SearchOptions,
+    snapshot: GlobalStoreSearchSnapshot,
+) -> CapturedGlobalSearchResult {
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        let mut degraded = Vec::new();
+        let mut memories = BTreeMap::new();
+        let mut feedback = None;
+        let hits = global_store_snapshot_frankensearch_hits(
+            &cx,
+            options,
+            paths,
+            snapshot,
+            32,
+            &mut degraded,
+            Some(&mut memories),
+            &mut feedback,
+            &mut SearchPerformanceTrace::default(),
+            false,
+            false,
+        )
+        .await;
+        CapturedGlobalSearchResult {
+            hits,
+            degraded,
+            memories,
+            feedback,
+        }
+    })
+    .unwrap()
+}
+
 #[test]
 fn queued_writes_are_searchable_before_publication_without_consuming_their_jobs() {
     let fixture = Fixture::new();

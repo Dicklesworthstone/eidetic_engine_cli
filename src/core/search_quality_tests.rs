@@ -2385,13 +2385,17 @@ fn global_feedback_projection_uses_the_body_snapshot_and_exact_cutoff() {
     assert_eq!(scoring["inputs"]["harmfulCount"], 1);
     assert_eq!(scoring["inputs"]["confidence"], 1.0);
     assert!(scoring["components"]["harmfulPenalty"].as_f64().unwrap() < 1.0);
-    let (fresh, fresh_feedback) = read_global_search_memories(
+    let fresh_snapshot = read_global_search_memories(
         &global.paths,
         &fixture.options(),
         SearchMemoryFilters::default(),
         reference,
     )
+    .unwrap()
     .unwrap();
+    let fresh = fresh_snapshot.memories;
+    let fresh_feedback = fresh_snapshot.feedback;
+    fresh_snapshot.source.finish().unwrap();
     assert_eq!(fresh[0].confidence, 0.5);
     assert_eq!(fresh_feedback.harmful_count(&fresh[0], reference), Some(0));
     // A matching ID from another workspace cannot borrow observed zero.
@@ -2405,7 +2409,8 @@ fn global_feedback_projection_uses_the_body_snapshot_and_exact_cutoff() {
         SearchMemoryFilters::default(),
         reference,
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert!(error.contains("optional global lane was withheld"));
     assert!(!error.contains("PRIVATE-BAD-FEEDBACK-TIME"));
 }

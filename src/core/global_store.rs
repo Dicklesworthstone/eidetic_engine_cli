@@ -782,38 +782,91 @@ pub(crate) fn read_global_store_memories_with_observer_at(
     paths: &GlobalStorePaths,
     include_tombstoned: bool,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
-    mut include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
+    include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
     observe_memories: impl FnOnce(&DbConnection, &[StoredMemory]) -> Result<(), String>,
 ) -> Result<Vec<StoredMemory>, String> {
-    if !paths
-        .database_path
-        .try_exists()
-        .map_err(global_read_error)?
-    {
+    let Some(snapshot) = GlobalStoreReadSnapshot::open(paths)? else {
         return Ok(Vec::new());
-    }
-    let connection =
-        DbConnection::open_file_read_only(&paths.database_path).map_err(global_read_error)?;
-    connection
-        .begin_read_snapshot()
-        .map_err(global_read_error)?;
-    // The synchronous helper cannot yield between authority reads. On error
-    // the snapshot is still released; unwinding drops the owned connection.
-    let result = read_global_rows_in_snapshot(&connection, paths, include_tombstoned, as_of)
-        .and_then(|memories| {
-            let mut filtered = Vec::with_capacity(memories.len());
-            for memory in memories {
-                if include_memory(&connection, &memory).map_err(global_read_error)? {
-                    filtered.push(memory);
-                }
-            }
-            observe_memories(&connection, &filtered).map_err(global_read_error)?;
-            Ok(filtered)
-        });
-    let released = connection
-        .rollback_read_snapshot()
-        .map_err(global_read_error);
+    };
+    let result = snapshot.read_memories_with_observer_at(
+        include_tombstoned,
+        as_of,
+        include_memory,
+        observe_memories,
+    );
+    let released = snapshot.finish();
     result.and_then(|rows| released.map(|()| rows))
+}
+
+/// Own the read-only global source view through derived-index retrieval.
+/// Source admission, sidecars, generations and index status must all observe
+/// this connection; opening another read handle can certify a newer index
+/// against different bodies. No writer gate is acquired by this guard.
+pub(crate) struct GlobalStoreReadSnapshot {
+    connection: DbConnection,
+    paths: GlobalStorePaths,
+    active: bool,
+}
+
+impl GlobalStoreReadSnapshot {
+    pub(crate) fn open(paths: &GlobalStorePaths) -> Result<Option<Self>, String> {
+        if !paths
+            .database_path
+            .try_exists()
+            .map_err(global_read_error)?
+        {
+            return Ok(None);
+        }
+        let connection =
+            DbConnection::open_file_read_only(&paths.database_path).map_err(global_read_error)?;
+        connection
+            .begin_read_snapshot()
+            .map_err(global_read_error)?;
+        Ok(Some(Self {
+            connection,
+            paths: paths.clone(),
+            active: true,
+        }))
+    }
+
+    pub(crate) fn connection(&self) -> &DbConnection {
+        &self.connection
+    }
+
+    pub(crate) fn read_memories_with_observer_at(
+        &self,
+        include_tombstoned: bool,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+        mut include_memory: impl FnMut(&DbConnection, &StoredMemory) -> Result<bool, String>,
+        observe_memories: impl FnOnce(&DbConnection, &[StoredMemory]) -> Result<(), String>,
+    ) -> Result<Vec<StoredMemory>, String> {
+        let memories =
+            read_global_rows_in_snapshot(&self.connection, &self.paths, include_tombstoned, as_of)?;
+        let mut filtered = Vec::with_capacity(memories.len());
+        for memory in memories {
+            if include_memory(&self.connection, &memory).map_err(global_read_error)? {
+                filtered.push(memory);
+            }
+        }
+        observe_memories(&self.connection, &filtered).map_err(global_read_error)?;
+        Ok(filtered)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        self.connection
+            .rollback_read_snapshot()
+            .map_err(global_read_error)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for GlobalStoreReadSnapshot {
+    fn drop(&mut self) {
+        if self.active && self.connection.rollback_read_snapshot().is_err() {
+            tracing::error!(target: "ee::search::global", "could not release global read snapshot");
+        }
+    }
 }
 
 fn global_read_error(_: impl std::fmt::Display) -> String {

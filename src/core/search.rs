@@ -14856,6 +14856,15 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     }
 }
 
+/// Keep global bodies and sidecars bound to the source generation used for
+/// index selection and scoring, including during concurrent publication.
+struct GlobalStoreSearchSnapshot {
+    source: super::global_store::GlobalStoreReadSnapshot,
+    generation: Option<u64>,
+    memories: Vec<StoredMemory>,
+    feedback: GlobalMemoryFeedbackSnapshot,
+}
+
 /// The user-global rows this request may read: resolves the store path,
 /// applies the `[memory]` inclusion policy, and reads the store at the
 /// request's `as_of`. `None` means the lane is withheld. An explicit global
@@ -14869,8 +14878,7 @@ fn admitted_global_store_memories(
     degraded: &mut Vec<SearchDegradation>,
 ) -> Option<(
     super::global_store::GlobalStorePaths,
-    Vec<StoredMemory>,
-    GlobalMemoryFeedbackSnapshot,
+    GlobalStoreSearchSnapshot,
 )> {
     let paths = match super::global_store::default_global_store_paths_from_env() {
         Ok(paths) => paths,
@@ -14906,7 +14914,7 @@ fn admitted_global_store_memories(
         return None;
     }
     match read_global_search_memories(&paths, options, memory_filters, reference_time) {
-        Ok((memories, feedback)) => Some((paths, memories, feedback)),
+        Ok(snapshot) => snapshot.map(|snapshot| (paths, snapshot)),
         Err(error) => {
             // A global store that merely needs migration is an optional lane
             // being skipped, not a failure to verify the scope of the results
@@ -14930,14 +14938,17 @@ fn read_global_search_memories(
     options: &SearchOptions,
     memory_filters: SearchMemoryFilters<'_>,
     reference_time: DateTime<Utc>,
-) -> Result<(Vec<StoredMemory>, GlobalMemoryFeedbackSnapshot), String> {
+) -> Result<Option<GlobalStoreSearchSnapshot>, String> {
+    let Some(source) = super::global_store::GlobalStoreReadSnapshot::open(paths)? else {
+        return Ok(None);
+    };
+    let mut generation = None;
     let mut feedback = GlobalMemoryFeedbackSnapshot {
         reference_time,
         workspace_id: String::new(),
         harmful_counts: BTreeMap::new(),
     };
-    let memories = super::global_store::read_global_store_memories_with_observer_at(
-        paths,
+    let memories = source.read_memories_with_observer_at(
         options.include_tombstoned,
         Some(reference_time),
         |connection, memory| {
@@ -14957,10 +14968,23 @@ fn read_global_search_memories(
             // withholds this lane through the same sanitized admission error;
             // it must never manufacture observed zeroes for shared rows.
             feedback = GlobalMemoryFeedbackSnapshot::read(connection, memories, reference_time)?;
+            if let Some(memory) = memories.first() {
+                generation = Some(
+                    connection
+                        .get_workspace_generation(&memory.workspace_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "Global source generation unavailable".to_owned())?,
+                );
+            }
             Ok(())
         },
     )?;
-    Ok((memories, feedback))
+    Ok(Some(GlobalStoreSearchSnapshot {
+        source,
+        generation,
+        memories,
+        feedback,
+    }))
 }
 
 /// User-global rows for a context pack whose workspace retrieval could not
@@ -14986,7 +15010,7 @@ pub(crate) fn global_store_fallback_memories(
         options.as_of.unwrap_or_else(Utc::now),
         degraded,
     )
-    .map(|(_, memories, feedback)| (memories, Some(feedback)))
+    .map(|(_, snapshot)| (snapshot.memories, Some(snapshot.feedback)))
     .unwrap_or_default())
 }
 
@@ -15011,7 +15035,7 @@ async fn global_store_frankensearch_hits(
     if options.query.trim().is_empty() {
         return Vec::new();
     }
-    let Some((paths, mut memories, feedback)) = admitted_global_store_memories(
+    let Some((paths, mut snapshot)) = admitted_global_store_memories(
         options,
         memory_config,
         memory_filters,
@@ -15020,10 +15044,10 @@ async fn global_store_frankensearch_hits(
     ) else {
         return Vec::new();
     };
-    if !memory_filters.is_empty() && !memories.is_empty() {
+    if !memory_filters.is_empty() && !snapshot.memories.is_empty() {
         let admitted = local_connection.is_some_and(|connection| {
             memory_filters
-                .retain_global_memories_with_local_authority(connection, &mut memories)
+                .retain_global_memories_with_local_authority(connection, &mut snapshot.memories)
                 .is_ok()
         });
         if !admitted {
@@ -15033,9 +15057,47 @@ async fn global_store_frankensearch_hits(
             return Vec::new();
         }
     }
-    if memories.is_empty() {
+    if snapshot.memories.is_empty() {
         return Vec::new();
     }
+    global_store_snapshot_frankensearch_hits(
+        cx,
+        options,
+        &paths,
+        snapshot,
+        effective_limit,
+        degraded,
+        preloaded_memories,
+        feedback_snapshot,
+        trace,
+        reconcile,
+        source_only,
+    )
+    .await
+}
+
+async fn global_store_snapshot_frankensearch_hits(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    paths: &super::global_store::GlobalStorePaths,
+    snapshot: GlobalStoreSearchSnapshot,
+    effective_limit: u32,
+    degraded: &mut Vec<SearchDegradation>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    feedback_snapshot: &mut Option<GlobalMemoryFeedbackSnapshot>,
+    trace: &mut SearchPerformanceTrace,
+    reconcile: bool,
+    source_only: bool,
+) -> Vec<SearchHit> {
+    let GlobalStoreSearchSnapshot {
+        source,
+        generation,
+        memories,
+        feedback,
+    } = snapshot;
+    let Some(source_generation) = generation else {
+        return Vec::new();
+    };
     *feedback_snapshot = Some(feedback);
 
     let global_options = SearchOptions {
@@ -15111,18 +15173,30 @@ async fn global_store_frankensearch_hits(
         )
         .await;
     }
-    let index_status =
-        match cached_index_status_for_search(&global_options, &paths.index_dir, None, None) {
-            Ok(probe) => probe.report,
-            Err(IndexStatusError::SourceInspectionDeferred {
-                db_generation,
-                index_generation,
-            }) if current_source_request
-                && index_generation.is_some_and(|generation| generation < db_generation) =>
-            {
-                // The status count scan has a lower ceiling than the complete
-                // source fallback. Its typed watermark may establish lag, but
-                // never replace structural admission of the persisted tiers.
+    // The global source can outlive a concurrent publication just like the
+    // workspace snapshot. Never score its captured bodies with a newer live
+    // index merely because a fresh DB connection would call that index Ready.
+    #[cfg(unix)]
+    let index_dir = match generation_lease.index_for_snapshot_with_identity(
+        cx,
+        &paths.index_dir,
+        source_generation,
+        None,
+    ) {
+        Ok(selected) => selected,
+        Err(error) => {
+            // Selection deliberately skips a live generation newer than its
+            // source. If retention has already discarded our generation, a
+            // complete, structurally valid newer index may establish only that
+            // publication overtook this read, never scores for the old bodies.
+            // Unsafe retained entries, cancellation and inspection failures
+            // retain their refusal rather than taking this recovery branch.
+            let publication_overtook_snapshot = matches!(
+                &error,
+                crate::core::index::IndexRebuildError::Index(reason)
+                    if reason.starts_with("The live index is newer than the source snapshot and no compatible retained generation is available;")
+            );
+            if current_source_request && publication_overtook_snapshot {
                 if let Err(reason) =
                     crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
                         &paths.index_dir,
@@ -15131,6 +15205,9 @@ async fn global_store_frankensearch_hits(
                     degraded.push(SearchDegradation::global_index_unavailable(&reason));
                     return Vec::new();
                 }
+                // Selection already proved the live watermark is newer; the
+                // same lease prevents publication between that observation
+                // and this full, lexical-only structural validation.
                 return retrieve_global_store_live_snapshot(
                     cx,
                     options,
@@ -15141,13 +15218,68 @@ async fn global_store_frankensearch_hits(
                 )
                 .await;
             }
-            Err(error) => {
-                degraded.push(SearchDegradation::global_index_unavailable(&format!(
-                    "index status probe failed: {error}"
-                )));
+            degraded.push(SearchDegradation::global_index_unavailable(
+                &error.to_string(),
+            ));
+            return Vec::new();
+        }
+    };
+    #[cfg(not(unix))]
+    let index_dir = paths.index_dir.clone();
+    // Do not use the cached/fresh-connection retry helper here. A later source
+    // view is incapable of certifying the bodies, sidecars and feedback that
+    // were admitted above. The guard owns this snapshot through collection.
+    let index_status = match crate::core::index::get_index_status_for_lexical_search(
+        &IndexStatusOptions {
+            workspace_path: paths.root.clone(),
+            database_path: Some(paths.database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+        },
+        Some(source.connection()),
+        true,
+    ) {
+        Ok(report) => report,
+        Err(IndexStatusError::SourceInspectionDeferred {
+            db_generation,
+            index_generation,
+        }) if current_source_request
+            && db_generation == source_generation
+            && index_generation.is_some_and(|generation| generation < db_generation) =>
+        {
+            // The status count scan has a lower ceiling than the complete
+            // source fallback. Its typed watermark may establish lag, but
+            // never replace structural admission of the persisted tiers.
+            if let Err(reason) =
+                crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                    &index_dir,
+                )
+            {
+                degraded.push(SearchDegradation::global_index_unavailable(&reason));
                 return Vec::new();
             }
-        };
+            return retrieve_global_store_live_snapshot(
+                cx,
+                options,
+                memories,
+                degraded,
+                preloaded_memories,
+                trace,
+            )
+            .await;
+        }
+        Err(error) => {
+            degraded.push(SearchDegradation::global_index_unavailable(&format!(
+                "index status probe failed: {error}"
+            )));
+            return Vec::new();
+        }
+    };
+    if index_status.db_generation != Some(source_generation) {
+        degraded.push(SearchDegradation::global_index_unavailable(
+            "index status did not describe the admitted global source snapshot",
+        ));
+        return Vec::new();
+    }
     // Stale also describes incompatible metadata and incomplete persisted
     // tiers. Source fallback may cover generation lag, never conceal those
     // integrity failures or an index newer than the source snapshot.
@@ -15188,26 +15320,26 @@ async fn global_store_frankensearch_hits(
         degraded.push(SearchDegradation::global_index_unavailable(&reason));
         return Vec::new();
     }
+    if index_status.index_generation != Some(source_generation) {
+        degraded.push(SearchDegradation::global_index_unavailable(
+            "index generation did not match the admitted global source snapshot",
+        ));
+        return Vec::new();
+    }
 
     let global_search_start = Instant::now();
     let mut global_trace = SearchPerformanceTrace::default();
-    let admitted_ids = if memory_filters.is_empty() {
-        None
-    } else {
-        Some(
-            memories
-                .iter()
-                .map(|memory| memory.id.clone())
-                .collect::<BTreeSet<_>>(),
-        )
-    };
-    let candidate_filter = admitted_ids.as_ref().map_or(
-        SearchCandidateFilter::Unfiltered,
-        SearchCandidateFilter::Global,
-    );
+    // Source admission can hide sealed, retired or held rows even without an
+    // explicit typed filter. Refill from the complete owned set so excluded
+    // index hits cannot exhaust top-k and conceal an admitted global memory.
+    let admitted_ids = memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<BTreeSet<_>>();
+    let candidate_filter = SearchCandidateFilter::Global(&admitted_ids);
     let search_result = search_filtered_sync_with_performance(
         cx,
-        &paths.index_dir,
+        &index_dir,
         &global_options,
         effective_limit,
         SearchSourceMode::LexicalOnly,
@@ -15237,6 +15369,7 @@ async fn global_store_frankensearch_hits(
         }
     };
     degraded.extend(retrieval_degraded);
+    drop(source);
 
     admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories)
 }
