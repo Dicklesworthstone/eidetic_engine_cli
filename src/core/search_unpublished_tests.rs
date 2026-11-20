@@ -1384,13 +1384,274 @@ fn queued_writes_are_searchable_before_publication_without_consuming_their_jobs(
     assert!(!fixture.root.join(".ee/index").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn readonly_hybrid_search_and_pack_skip_model_preparation_for_complete_live_sources() {
+    for stale_index in [false, true] {
+        let fixture = Fixture::new();
+        let _embedder = if stale_index {
+            fixture.memory(800, "Previously published deployment guidance.");
+            Some(publish_store_index(
+                &fixture.root,
+                &fixture.root.join(".ee/ee.db"),
+                &fixture.root.join(".ee/index"),
+                &fixture.workspace,
+            ))
+        } else {
+            None
+        };
+        let memory = fixture.memory(801, BODY);
+        fixture
+            .db
+            .insert_search_index_job(
+                "sidx_00000000000000000000000801",
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: fixture.workspace.clone(),
+                    job_type: crate::db::SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory.clone()),
+                    documents_total: 1,
+                },
+            )
+            .unwrap();
+        let source_before = fixture.state();
+        let index_before = index_file_hashes(&fixture.root.join(".ee/index"));
+        let mut options = fixture.options();
+        options.source_mode = SearchSourceMode::Hybrid;
+        let run = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                &options,
+                None,
+                &[],
+                Duration::ZERO,
+                Duration::from_secs(60),
+                None,
+                true,
+                false,
+            )
+            .await
+        })
+        .unwrap()
+        .unwrap();
+        complete_lexical(&run.report);
+        assert_eq!(run.report.results[0].doc_id, memory);
+        assert!(
+            run.performance
+                .timings()
+                .all(|(name, _)| name != "search::embedderPrepare"),
+            "complete live-source search must never enter model preparation"
+        );
+        assert_eq!(fixture.state(), source_before);
+        assert_eq!(
+            index_file_hashes(&fixture.root.join(".ee/index")),
+            index_before
+        );
+
+        let mut pack_options = fixture.pack_options();
+        pack_options.source_mode = SearchSourceMode::Hybrid;
+        let packed = crate::core::context::run_context_pack_with_performance(
+            &pack_options,
+            crate::pack::PACK_COMMAND,
+        )
+        .unwrap();
+        assert!(packed.response.success);
+        assert!(
+            packed
+                .response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory)
+        );
+        assert!(
+            packed
+                .response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "search_live_snapshot_lexical" })
+        );
+        for timing in packed.performance["data"]["timings"].as_array().unwrap() {
+            assert_ne!(timing["name"], "embedderPrepare");
+        }
+        assert_eq!(fixture.state(), source_before);
+        assert_eq!(
+            index_file_hashes(&fixture.root.join(".ee/index")),
+            index_before
+        );
+        if !stale_index {
+            assert!(!fixture.root.join(".ee/index").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_live_generation_is_bound_to_its_query_and_source_snapshot() {
+    let fixture = Fixture::new();
+    fixture.memory(810, BODY);
+    let reader = fixture.reader();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        for changed_source in [false, true] {
+            let snapshot =
+                rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow(&reader)
+                    .unwrap();
+            let prepared = prepare_model_free_search_generation(&cx, &options, &reader)
+                .await
+                .unwrap()
+                .expect("bounded unpublished source prepares a live retrieval");
+            assert!(matches!(&prepared, PreparedSearchGeneration::Live(_)));
+            let mut requested = options.clone();
+            if changed_source {
+                snapshot.finish().unwrap();
+                fixture.memory(811, "A source write after the prepared snapshot.");
+            } else {
+                requested.query = "a different retrieval request".to_owned();
+                // Borrow the existing snapshot through the retrieval call.
+                let rejected = run_context_search_with_prepared_generation(
+                    &cx,
+                    &requested,
+                    &reader,
+                    None,
+                    None,
+                    Deterministic::from_seed(0).shared_child("search.rerank"),
+                    None,
+                    Some(prepared),
+                )
+                .await;
+                assert!(matches!(rejected, Err(SearchError::Index(message))
+                    if message.contains("request and pinned source snapshot")));
+                snapshot.finish().unwrap();
+                continue;
+            }
+            let rejected = run_context_search_with_prepared_generation(
+                &cx,
+                &requested,
+                &reader,
+                None,
+                None,
+                Deterministic::from_seed(0).shared_child("search.rerank"),
+                None,
+                Some(prepared),
+            )
+            .await;
+            assert!(matches!(rejected, Err(SearchError::Index(message))
+                if message.contains("request and pinned source snapshot")));
+        }
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn model_free_live_preparation_preserves_retained_generation_and_producer_admission() {
+    for retained_only in [false, true] {
+        let fixture = Fixture::new();
+        fixture.memory(830, "The previously published source generation.");
+        let index_dir = fixture.root.join(".ee/index");
+        let _embedder = publish_store_index(
+            &fixture.root,
+            &fixture.root.join(".ee/ee.db"),
+            &index_dir,
+            &fixture.workspace,
+        );
+        fixture.memory(831, BODY);
+        let selected_index = if retained_only {
+            let retained = index_dir.with_file_name("index.previous");
+            std::fs::rename(&index_dir, &retained).unwrap();
+            retained
+        } else {
+            index_dir.clone()
+        };
+        let source_before = fixture.state();
+        let index_before = index_file_hashes(&selected_index);
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            let reader = fixture.reader();
+            let snapshot =
+                rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow(&reader)
+                    .unwrap();
+            let mut options = fixture.options();
+            options.source_mode = SearchSourceMode::Hybrid;
+            let prepared = prepare_model_free_search_generation(&cx, &options, &reader)
+                .await
+                .unwrap()
+                .expect("complete stale source admits the matching producer");
+            let PreparedSearchGeneration::Live(live) = prepared else {
+                panic!("nonempty stale source requires a complete live retrieval");
+            };
+            assert_eq!(live.index_dir, selected_index);
+            assert!(!live.unpublished_source);
+            drop(live);
+
+            let _mismatched_producer = crate::core::index::install_test_workspace_embedder(
+                &fixture.workspace,
+                crate::search::EmbedderStack::from_parts(
+                    Arc::new(crate::search::HashEmbedder::jl_384(17)),
+                    None,
+                ),
+            );
+            assert!(
+                prepare_model_free_search_generation(&cx, &options, &reader)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "passive producer mismatch must retain ordinary model admission"
+            );
+            snapshot.finish().unwrap();
+            assert_eq!(fixture.state(), source_before);
+            assert_eq!(index_file_hashes(&selected_index), index_before);
+            if retained_only {
+                assert!(!index_dir.exists());
+            }
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn model_free_live_preparation_preserves_strict_semantic_and_historical_modes() {
+    let fixture = Fixture::new();
+    fixture.memory(820, BODY);
+    let reader = fixture.reader();
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        let snapshot =
+            rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow(&reader)
+                .unwrap();
+        for case in 0..5 {
+            let mut options = fixture.options();
+            options.source_mode = SearchSourceMode::Hybrid;
+            match case {
+                0 => options.strict_source_mode = true,
+                1 => options.source_mode = SearchSourceMode::SemanticOnly,
+                2 => options.as_of = Some(Utc::now()),
+                3 => options.include_tombstoned = true,
+                _ => options.source_mode = SearchSourceMode::LexicalOnly,
+            }
+            assert!(
+                prepare_model_free_search_generation(&cx, &options, &reader)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        snapshot.finish().unwrap();
+    })
+    .unwrap();
+}
+
 #[test]
 fn readonly_pack_can_select_unlinked_cass_evidence_before_first_publication() {
     use crate::core::context::run_context_pack;
     let fixture = Fixture::new();
     let evidence = fixture.evidence();
     let before = fixture.state();
-    let options = fixture.pack_options();
+    let mut options = fixture.pack_options();
+    options.source_mode = SearchSourceMode::Hybrid;
     let response = run_context_pack(&options).unwrap();
     assert!(response.success);
     assert!(
@@ -1466,6 +1727,26 @@ fn complete_source_byte_ceiling_refuses_instead_of_searching_a_truncated_corpus(
         run_search_with_read_connection(&fixture.options(), &fixture.reader()),
         Err(SearchError::NoIndex)
     ));
+    #[cfg(unix)]
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| {
+        let fixture = &fixture;
+        async move {
+            let reader = fixture.reader();
+            let snapshot =
+                rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow(&reader)
+                    .unwrap();
+            let mut options = fixture.options();
+            options.source_mode = SearchSourceMode::Hybrid;
+            assert!(
+                prepare_model_free_search_generation(&cx, &options, &reader)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            snapshot.finish().unwrap();
+        }
+    })
+    .unwrap();
     assert_eq!(
         fixture
             .db
@@ -1535,6 +1816,25 @@ fn orphaned_index_bytes_are_not_reclassified_as_unpublished_sources() {
     std::fs::create_dir(&index).unwrap();
     std::fs::write(index.join("fast.idx"), b"orphaned-private-header").unwrap();
     assert!(run_search_with_read_connection(&fixture.options(), &fixture.reader()).is_err());
+    #[cfg(unix)]
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| {
+        let fixture = &fixture;
+        async move {
+            let reader = fixture.reader();
+            let snapshot =
+                rule_admission::memory_revisions::RevisionReadSnapshot::begin_or_borrow(&reader)
+                    .unwrap();
+            let mut options = fixture.options();
+            options.source_mode = SearchSourceMode::Hybrid;
+            assert!(
+                prepare_model_free_search_generation(&cx, &options, &reader)
+                    .await
+                    .is_err()
+            );
+            snapshot.finish().unwrap();
+        }
+    })
+    .unwrap();
     assert_eq!(
         std::fs::read(index.join("fast.idx")).unwrap(),
         b"orphaned-private-header"

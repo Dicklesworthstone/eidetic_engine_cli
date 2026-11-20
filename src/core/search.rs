@@ -8879,11 +8879,11 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     });
     request_trace.record_elapsed("search::readPoolLookup", read_pool_start);
     let empty_probe_start = Instant::now();
-    let mut empty_read_snapshot = None;
-    let mut empty_generation = None;
+    let mut prepared_read_snapshot = None;
+    let mut prepared_generation = None;
     if prepared_fast_embedder.is_none()
         && options.execution_source_mode().uses_embeddings()
-        && empty_search_generation_hint(&index_dir)
+        && model_free_search_generation_possible(options, &index_dir)
         && let Some(read_pool) = read_pool.as_ref()
     {
         let snapshot = read_pool.pin_snapshot().map_err(|error| {
@@ -8892,7 +8892,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 database_path.display()
             ))
         })?;
-        empty_generation = prepare_empty_search_generation(
+        prepared_generation = prepare_model_free_search_generation(
             cx,
             options,
             snapshot.checked_connection().map_err(|error| {
@@ -8903,8 +8903,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             })?,
         )
         .await?;
-        if empty_generation.is_some() {
-            empty_read_snapshot = Some(snapshot);
+        if prepared_generation.is_some() {
+            prepared_read_snapshot = Some(snapshot);
         } else {
             // A writer may have published since the unleased hint. Release
             // this source view before preparing a model, then pin a new one.
@@ -8914,7 +8914,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     request_trace.record_elapsed("search::emptyGenerationProbe", empty_probe_start);
     let embedder_admission_start = Instant::now();
     let embedder_preparation = if prepared_fast_embedder.is_none()
-        && empty_generation.is_none()
+        && prepared_generation.is_none()
         && options.execution_source_mode().uses_embeddings()
         // Read-only snapshot selection can recover a retained generation even
         // when the live directory is missing or incompatible. Resolve the
@@ -8959,7 +8959,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
 
     if let Some(read_pool) = read_pool.as_ref() {
         let snapshot_start = Instant::now();
-        let read_snapshot = match empty_read_snapshot {
+        let read_snapshot = match prepared_read_snapshot {
             Some(snapshot) => snapshot,
             None => read_pool.pin_snapshot().map_err(|error| {
                 SearchError::Index(format!(
@@ -9001,7 +9001,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 true,
                 None,
                 fast_embedder_override.clone(),
-                empty_generation,
+                prepared_generation,
                 retrieval_only,
             )
             .await
@@ -9164,6 +9164,168 @@ pub(crate) struct PreparedEmptySearchGeneration {
     source_generation: u64,
     #[cfg(unix)]
     lease: crate::core::index::IndexGenerationLease,
+}
+
+/// A model-free retrieval decision made under the caller's source snapshot.
+/// Both variants retain generation admission until ordinary result collection.
+pub(crate) enum PreparedSearchGeneration {
+    Empty(PreparedEmptySearchGeneration),
+    #[cfg_attr(
+        not(all(unix, feature = "lexical-bm25")),
+        allow(
+            dead_code,
+            reason = "live preparation requires lexical retrieval and generation leases"
+        )
+    )]
+    Live(Box<PreparedLiveSearchGeneration>),
+}
+
+pub(crate) struct PreparedLiveSearchGeneration {
+    index_dir: PathBuf,
+    unpublished_source: bool,
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    source_generation: u64,
+    query: String,
+    explain: bool,
+    retrieval: runtime_fallback::Retrieval,
+    degraded: Vec<SearchDegradation>,
+    index_freshness: Option<SearchIndexFreshness>,
+    index_status: Option<IndexStatusReport>,
+    #[cfg(unix)]
+    lease: Option<crate::core::index::IndexGenerationLease>,
+}
+
+pub(crate) fn model_free_search_generation_possible(
+    options: &SearchOptions,
+    index_dir: &Path,
+) -> bool {
+    empty_search_generation_hint(index_dir) || current_hybrid_source_fallback_allowed(options)
+}
+
+fn current_hybrid_source_fallback_allowed(options: &SearchOptions) -> bool {
+    cfg!(all(unix, feature = "lexical-bm25"))
+        && options.execution_source_mode() == SearchSourceMode::Hybrid
+        && !options.strict_source_mode
+        && options.as_of.is_none()
+        && !options.include_tombstoned
+}
+
+/// Resolve complete current lexical fallback before paying for a model that
+/// this response will not use. A refusal preserves the ordinary preparation
+/// path; neither queue bookkeeping nor an unleased watermark grants freshness.
+pub(crate) async fn prepare_model_free_search_generation(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    connection: &DbConnection,
+) -> Result<Option<PreparedSearchGeneration>, SearchError> {
+    search_checkpoint(cx)?;
+    let index_dir = options.resolve_index_dir();
+    if empty_search_generation_hint(&index_dir)
+        && let Some(empty) = prepare_empty_search_generation(cx, options, connection).await?
+    {
+        return Ok(Some(PreparedSearchGeneration::Empty(empty)));
+    }
+    if !current_hybrid_source_fallback_allowed(options)
+        || connection.mode() != crate::db::DatabaseOpenMode::ReadOnly
+        || connection.needs_migration().unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    search_checkpoint(cx)?;
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    {
+        let Some(workspace) = crate::core::workspace::addressed_workspace_row(
+            connection,
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        )
+        .map_err(|error| SearchError::WorkspaceBinding(Box::new(error)))?
+        else {
+            return Ok(None);
+        };
+        let Some(source_generation) = connection
+            .get_workspace_generation(&workspace.id)
+            .map_err(|error| SearchError::Index(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        // This cheap observation only declines an optimization. Every accepted
+        // shortcut below repeats admission under its retained generation lease.
+        if crate::core::index::published_index_generation(&index_dir) == Some(source_generation) {
+            return Ok(None);
+        }
+        let lease = match pin_search_generation(cx, &index_dir).await {
+            Ok(lease) => Some(lease),
+            Err(SearchError::NoIndex) => None,
+            Err(error) => return Err(error),
+        };
+        let unpublished = match &lease {
+            Some(lease) => {
+                (!index_dir.exists() || index_dir_is_plain_empty(&index_dir))
+                    && !lease
+                        .has_retained_generation_directory(cx, &index_dir)
+                        .map_err(map_index_generation_error)?
+            }
+            None => true,
+        };
+        let selected = if unpublished {
+            index_dir
+        } else {
+            let Some(lease) = &lease else {
+                return Ok(None);
+            };
+            // A complete source fallback does not compare vectors. Corpus,
+            // security, path, tier and source-watermark admission still apply.
+            lease
+                .index_for_snapshot_with_identity(cx, &index_dir, source_generation, None)
+                .map_err(map_index_generation_error)?
+        };
+        let (mut degraded, index_freshness, index_status) =
+            search_degradations_with_connection(options, &selected, Some(connection), None, true);
+        search_checkpoint(cx)?;
+        if !unpublished
+            && !index_status.as_ref().is_some_and(|status| {
+                status.health == IndexHealth::Stale
+                    && status.last_check_error.is_none()
+                    && status.db_generation == Some(source_generation)
+                    && status
+                        .index_generation
+                        .is_some_and(|indexed| indexed < source_generation)
+            })
+        {
+            // Passive producer incompatibility or incomplete inspection must
+            // retain the existing model-selection/error behavior.
+            return Ok(None);
+        }
+        let Some(retrieval) =
+            stale_index_live_snapshot_retrieval(cx, options, Some(connection), &mut degraded)
+                .await?
+        else {
+            return Ok(None);
+        };
+        search_checkpoint(cx)?;
+        Ok(Some(PreparedSearchGeneration::Live(Box::new(
+            PreparedLiveSearchGeneration {
+                index_dir: selected,
+                unpublished_source: unpublished,
+                workspace_path: options.workspace_path.clone(),
+                database_path: options.resolve_database_path(),
+                source_generation,
+                query: options.query.clone(),
+                explain: options.explain,
+                retrieval,
+                degraded,
+                index_freshness,
+                index_status,
+                lease,
+            },
+        ))))
+    }
+    #[cfg(not(all(unix, feature = "lexical-bm25")))]
+    {
+        Ok(None)
+    }
 }
 
 pub(crate) async fn prepare_empty_search_generation(
@@ -9635,7 +9797,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
     workspace_state: Option<&SearchWorkspaceProbeState>,
     rerank_seed: Deterministic<Seed>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
-    empty_generation: Option<PreparedEmptySearchGeneration>,
+    prepared_generation: Option<PreparedSearchGeneration>,
 ) -> Result<ContextSearchReport, SearchError> {
     // Context candidate conversion batch-loads memories itself, so passthrough
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
@@ -9653,7 +9815,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
         false,
         Some(&mut preloaded_memories),
         fast_embedder_override,
-        empty_generation,
+        prepared_generation,
         audit_connection.is_none(),
     )
     .await?;
@@ -10900,10 +11062,13 @@ async fn run_search_inner_with_performance(
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
-    empty_generation: Option<PreparedEmptySearchGeneration>,
+    prepared_generation: Option<PreparedSearchGeneration>,
     retrieval_only: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
-    let model_free_empty_generation = empty_generation.is_some();
+    let model_free_empty_generation = matches!(
+        prepared_generation.as_ref(),
+        Some(PreparedSearchGeneration::Empty(_))
+    );
     options.validate()?;
     // Always keep an authoritative-memory map for this request. Global-store
     // hits populate it from their source database even when the caller does
@@ -11016,18 +11181,47 @@ async fn run_search_inner_with_performance(
     // Prefer an admitted published/retained generation. Only a genuine
     // NoIndex result may use source-only retrieval; corruption, incompatible
     // bytes, symlinks, lease failures and cancellation keep their typed error.
+    let mut prepared_live = None;
     let selected_index: Result<(PathBuf, Option<SearchError>), SearchError> = async {
-        if let Some(empty) = empty_generation {
-            if source_generation != Some(empty.source_generation) {
-                return Err(SearchError::Index(
-                    "Empty search generation does not match the pinned source snapshot".to_owned(),
-                ));
+        if let Some(prepared) = prepared_generation {
+            match prepared {
+                PreparedSearchGeneration::Empty(empty) => {
+                    if source_generation != Some(empty.source_generation) {
+                        return Err(SearchError::Index(
+                            "Empty search generation does not match the pinned source snapshot"
+                                .to_owned(),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    {
+                        generation_lease = Some(empty.lease);
+                    }
+                    return Ok((empty.index_dir, None));
+                }
+                PreparedSearchGeneration::Live(live) => {
+                    if source_generation != Some(live.source_generation)
+                        || options.workspace_path != live.workspace_path
+                        || options.resolve_database_path() != live.database_path
+                        || options.query != live.query
+                        || options.explain != live.explain
+                        || !current_hybrid_source_fallback_allowed(options)
+                    {
+                        return Err(SearchError::Index(
+                            "Live search generation does not match the request and pinned source snapshot"
+                                .to_owned(),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    let mut live = live;
+                    #[cfg(unix)]
+                    {
+                        generation_lease = live.lease.take();
+                    }
+                    let selected = live.index_dir.clone();
+                    prepared_live = Some(live);
+                    return Ok((selected, None));
+                }
             }
-            #[cfg(unix)]
-            {
-                generation_lease = Some(empty.lease);
-            }
-            return Ok((empty.index_dir, None));
         }
         if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
             return Err(SearchError::NoIndex);
@@ -11129,6 +11323,10 @@ async fn run_search_inner_with_performance(
         }
         Err(error) => return Err(error),
     };
+    let unpublished_source = unpublished_source
+        || prepared_live
+            .as_ref()
+            .is_some_and(|live| live.unpublished_source);
     trace.record_elapsed("search::indexExists", index_exists_start);
 
     let degradation_start = Instant::now();
@@ -11143,13 +11341,21 @@ async fn run_search_inner_with_performance(
     });
     let index_options = lexical_options.as_ref().unwrap_or(options);
     let (mut degraded, index_freshness, snapshot_index_status) =
-        search_degradations_with_connection(
-            index_options,
-            &index_dir,
-            read_connection,
-            fast_embedder_override.as_deref(),
-            source_snapshot.is_some(),
-        );
+        if let Some(live) = prepared_live.as_mut() {
+            (
+                std::mem::take(&mut live.degraded),
+                live.index_freshness.take(),
+                live.index_status.take(),
+            )
+        } else {
+            search_degradations_with_connection(
+                index_options,
+                &index_dir,
+                read_connection,
+                fast_embedder_override.as_deref(),
+                source_snapshot.is_some(),
+            )
+        };
     if let Some(error) = &producer_fallback {
         producer_change_lexical_degradations(
             error,
@@ -11178,7 +11384,9 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
     let live_snapshot_start = Instant::now();
-    let live_snapshot_retrieval = if producer_selection_error.is_none()
+    let live_snapshot_retrieval = if let Some(live) = prepared_live {
+        Some(live.retrieval)
+    } else if producer_selection_error.is_none()
         && (unpublished_source || index_freshness.as_ref().is_some_and(|status| status.stale))
     {
         stale_index_live_snapshot_retrieval(cx, options, read_connection, &mut degraded).await?

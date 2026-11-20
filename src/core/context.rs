@@ -73,10 +73,11 @@ use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchAdvisoryDeliveryReservation,
     SearchAdvisorySession, SearchDegradation, SearchError, SearchHit, SearchOptions,
     SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
-    SearchWorkspaceProbeState, elapsed_timing_json, empty_search_generation_hint,
-    map_frankensearch_error, performance_redaction_json, prepare_empty_search_generation,
-    query_observation_json, reconcile_search_index_before_read_with_cx,
-    resolve_search_rerank_runtime_posture, run_context_search_with_prepared_generation,
+    SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
+    model_free_search_generation_possible, performance_redaction_json,
+    prepare_model_free_search_generation, query_observation_json,
+    reconcile_search_index_before_read_with_cx, resolve_search_rerank_runtime_posture,
+    run_context_search_with_prepared_generation,
     search_advisory_snapshot_data_json_with_delivery_reservation, search_degraded_data_json,
 };
 #[cfg(test)]
@@ -3051,13 +3052,13 @@ async fn run_context_pack_attempt(
         read_pool_config,
     );
     let read_pool_ad_hoc_bypass_baseline = read_pool.stats().ad_hoc_bypass_count;
-    let mut empty_read_snapshot = None;
-    let mut empty_generation = None;
+    let mut prepared_read_snapshot = None;
+    let mut prepared_generation = None;
     if remote_search.is_none()
         && fast_embedder_override.is_none()
         && search_options.execution_source_mode().uses_embeddings()
         && pin_snapshot
-        && empty_search_generation_hint(&index_dir)
+        && model_free_search_generation_possible(&search_options, &index_dir)
     {
         let snapshot_open_start = Instant::now();
         let snapshot = read_pool
@@ -3067,28 +3068,28 @@ async fn run_context_pack_attempt(
             })?;
         trace.db_open_count = trace.db_open_count.saturating_add(1);
         trace.record_elapsed("dbOpen", snapshot_open_start);
-        empty_generation = prepare_empty_search_generation(
+        prepared_generation = prepare_model_free_search_generation(
             control.cx,
             &search_options,
             checked_context_read_snapshot(&read_pool, &snapshot)?,
         )
         .await
         .map_err(ContextPackError::Search)?;
-        if empty_generation.is_some() {
-            empty_read_snapshot = Some(snapshot);
+        if prepared_generation.is_some() {
+            prepared_read_snapshot = Some(snapshot);
         } else {
-            // A nonempty publication or a stale source view needs the normal
-            // preparation path. Never hold a read pin during model loading.
+            // A generation that still needs vector retrieval uses ordinary
+            // preparation. Never hold a read pin during model loading.
             snapshot.commit().map_err(|error| {
                 ContextPackError::Storage(format!(
-                    "Failed to release empty-generation probe snapshot: {error}"
+                    "Failed to release model-free generation probe snapshot: {error}"
                 ))
             })?;
         }
     }
     let embedder_preparation = if remote_search.is_none()
         && fast_embedder_override.is_none()
-        && empty_generation.is_none()
+        && prepared_generation.is_none()
         && search_options.execution_source_mode().uses_embeddings()
         // Snapshot recovery can select a retained generation even when the
         // live directory is absent or incompatible. Always provide a safe
@@ -3134,7 +3135,7 @@ async fn run_context_pack_attempt(
     } else {
         None
     };
-    let prepared_embed_backend = if empty_generation.is_some() {
+    let prepared_embed_backend = if prepared_generation.is_some() {
         EmbedBackend::HashFallback
     } else if let Some(embedder) = &fast_embedder_override {
         if embedder.is_semantic() {
@@ -3150,7 +3151,7 @@ async fn run_context_pack_attempt(
             })
     };
 
-    let read_snapshot = match empty_read_snapshot {
+    let read_snapshot = match prepared_read_snapshot {
         Some(snapshot) => snapshot,
         None => {
             let snapshot_open_start = Instant::now();
@@ -3308,7 +3309,7 @@ async fn run_context_pack_attempt(
                     .as_ref()
                     .map(|preparation| Arc::clone(&preparation.fast_embedder))
             }),
-            empty_generation,
+            prepared_generation,
         )
         .await
         {
