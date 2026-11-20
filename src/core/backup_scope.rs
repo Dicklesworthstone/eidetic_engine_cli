@@ -241,7 +241,13 @@ pub(in crate::core::backup) fn reconcile_primary(
         ("attempt_families", families.len()),
         (
             "attempt_family_members",
-            data.attempt_families_by_memory.len(),
+            // A declared family can have pointer-only, unslotted memories.
+            // Those preserve the declaration without manufacturing a ledger
+            // member or making a complete recovery point appear partial.
+            data.attempt_families_by_memory
+                .values()
+                .filter(|family| family.attempt_index.is_some() && family.disposition.is_some())
+                .count(),
         ),
     ] {
         if let Some(entry) = inventory.entries.iter_mut().find(|row| row.table == table) {

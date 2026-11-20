@@ -5757,33 +5757,22 @@ fn load_export_data_in_current_snapshot(
                 })?;
         tags_by_memory.extend(tags);
     }
-    // The ledger is keyed by revision-stable logical identity. Export its
-    // slot exactly once, on the current head; attaching the same slot to every
-    // historical revision makes restore attempt duplicate primary keys and
-    // misrepresents revisions as sibling attempts.
-    // bd-tmv70: "current head" is a revision-chain fact and since V123 it lives
-    // in `superseded_at`, which StoredMemory does not carry. Filtering on
-    // `valid_to.is_none()` here passed superseded revisions through as heads, so
-    // the ledger slot was exported for every revision in a chain -- the
-    // duplicate-primary-key case this comment already warns about. Ask the
-    // database, which can see the column.
-    let candidate_ids = memories
+    // The ledger is keyed by revision-stable logical identity. Carry its
+    // declaration and slot exactly once, on the terminal revision, including
+    // a tombstoned terminal. Retrieval's current-head filter excludes those
+    // rows, but their family evidence is still durable recovery state.
+    // `superseded_at` alone establishes revision history (bd-tmv70); author
+    // expiry and tombstones must not discard the only carrier for a family.
+    let superseded_at_by_memory = connection
+        .list_memory_supersession_markers(&workspace.id)
+        .map_err(work_history_error)?;
+    let terminal_memory_ids = memories
         .iter()
-        .map(|memory| memory.id.clone())
-        .collect::<Vec<_>>();
-    let current_set = connection
-        .filter_current_memory_ids(&candidate_ids)
-        .map_err(|error| DomainError::Storage {
-            message: error.to_string(),
-            repair: Some("ee db check --workspace .".to_owned()),
-        })?;
-    let current_memory_ids = memories
-        .iter()
-        .filter(|memory| current_set.contains(&memory.id))
+        .filter(|memory| !superseded_at_by_memory.contains_key(&memory.id))
         .map(|memory| memory.id.clone())
         .collect::<Vec<_>>();
     let attempt_family_batch = connection
-        .get_memory_attempt_family_details_batch_in_current_snapshot(&current_memory_ids)
+        .get_memory_attempt_family_details_batch_in_current_snapshot(&terminal_memory_ids)
         .map_err(|error| DomainError::Storage {
             message: error.to_string(),
             repair: Some("ee db check --workspace .".to_owned()),
@@ -5837,9 +5826,6 @@ fn load_export_data_in_current_snapshot(
         workspace_builder = workspace_builder.name(name);
     }
 
-    let superseded_at_by_memory = connection
-        .list_memory_supersession_markers(&workspace_row.id)
-        .map_err(work_history_error)?;
     let superseded_by_by_memory =
         superseded_by_within_export(&memories, &logical_ids_by_memory, &superseded_at_by_memory)?;
 

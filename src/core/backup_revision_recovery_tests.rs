@@ -101,6 +101,416 @@ fn source() -> Result<(tempfile::TempDir, PathBuf, PathBuf, String, String, Stri
     Ok((root, workspace, database, workspace_id, prior, head))
 }
 
+fn attempt_family_backup_round_trip(redaction: RedactionLevel, tombstoned: bool) -> TestResult {
+    use crate::db::MemoryAttemptFamily;
+
+    let (root, workspace, database, workspace_id, prior, head) = source()?;
+    let rejected = MemoryId::from_uuid(Uuid::from_u128(31)).to_string();
+    let unslotted = MemoryId::from_uuid(Uuid::from_u128(32)).to_string();
+    let selected_family = MemoryAttemptFamily {
+        family_id: "family-recovery-slots".to_owned(),
+        declared_size: Some(2),
+        attempt_index: Some(1),
+        disposition: Some("selected".to_owned()),
+    };
+    let rejected_family = MemoryAttemptFamily {
+        attempt_index: Some(2),
+        disposition: Some("rejected".to_owned()),
+        ..selected_family.clone()
+    };
+    let unslotted_family = MemoryAttemptFamily {
+        family_id: "family-recovery-declaration".to_owned(),
+        declared_size: Some(4),
+        attempt_index: None,
+        disposition: None,
+    };
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    // A revision carries the pointer, while the ledger keeps the original
+    // logical identity. Only the terminal revision may export its slot.
+    assert!(
+        db.set_memory_attempt_family(&prior, &selected_family)
+            .map_err(|error| error.to_string())?
+    );
+    assert!(
+        db.carry_memory_attempt_family_pointer(&prior, &head)
+            .map_err(|error| error.to_string())?
+    );
+    for (id, content, family) in [
+        (
+            &rejected,
+            "Rejected release manifest attempt.",
+            &rejected_family,
+        ),
+        (
+            &unslotted,
+            "Declared release manifest comparison.",
+            &unslotted_family,
+        ),
+    ] {
+        db.insert_memory_with_timestamps(
+            id,
+            &CreateMemoryInput {
+                workspace_id: workspace_id.clone(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: content.to_owned(),
+                workflow_id: None,
+                confidence: 0.7,
+                utility: 0.6,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+            id,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            db.set_memory_attempt_family(id, family)
+                .map_err(|error| error.to_string())?
+        );
+    }
+    assert!(
+        db.set_attempt_family_origin(&workspace_id, &unslotted_family.family_id, "legacy_v094")
+            .map_err(|error| error.to_string())?
+    );
+    if tombstoned {
+        for id in [&head, &rejected, &unslotted] {
+            assert!(db.tombstone_memory(id).map_err(|error| error.to_string())?);
+        }
+    }
+    let source_memories = db
+        .list_memories(&workspace_id, None, true)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(source_memories.len(), 4);
+    assert_eq!(
+        db.count_table_rows("attempt_families")
+            .map_err(|error| error.to_string())?,
+        2
+    );
+    assert_eq!(
+        db.count_table_rows("attempt_family_members")
+            .map_err(|error| error.to_string())?,
+        2,
+        "the declaration-only memory never manufactures a ledger member"
+    );
+    db.close().map_err(|error| error.to_string())?;
+
+    let create = |workspace: &Path, database: &Path| {
+        create_backup(&BackupCreateOptions {
+            workspace_path: workspace.to_owned(),
+            database_path: Some(database.to_owned()),
+            output_dir: None,
+            label: None,
+            redaction_level: redaction,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())
+    };
+    let assert_complete = |report: &BackupCreateReport| -> TestResult {
+        assert_eq!(report.status, "completed", "{:?}", report.degraded);
+        assert!(report.recovery_inventory.snapshot_coverage_complete);
+        for (table, expected) in [("attempt_families", 2), ("attempt_family_members", 2)] {
+            let entry = report
+                .recovery_inventory
+                .entries
+                .iter()
+                .find(|entry| entry.table == table)
+                .ok_or_else(|| format!("missing {table} inventory"))?;
+            assert_eq!(entry.row_count, expected);
+            assert!(entry.schema_covered && entry.snapshot_covered, "{table}");
+        }
+        Ok(())
+    };
+    let records = |backup: &Path| -> Result<BTreeMap<String, ExportMemoryRecord>, String> {
+        fs::read_to_string(backup.join(RECORDS_FILE))
+            .map_err(|error| error.to_string())?
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|value| value["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1)
+            .map(|value| {
+                serde_json::from_value::<ExportMemoryRecord>(value)
+                    .map(|record| (record.content.clone(), record))
+                    .map_err(|error| error.to_string())
+            })
+            .collect()
+    };
+    let created = create(&workspace, &database)?;
+    assert_complete(&created)?;
+    let backup = PathBuf::from(&created.backup_path);
+    let exported = records(&backup)?;
+    assert_eq!(exported.len(), 4);
+    assert_eq!(
+        exported
+            .values()
+            .filter(|record| record.attempt_family.is_some())
+            .count(),
+        3,
+        "three terminal pointers carry only two ledger slots"
+    );
+    let mut restored_ids = BTreeMap::new();
+    for source in &source_memories {
+        let record = exported
+            .get(&source.content)
+            .ok_or("exported family memory")?;
+        assert_eq!(record.tombstoned_at, source.tombstoned_at);
+        let expected_family = if source.id == prior {
+            assert_eq!(
+                record.superseded_at.as_ref().and_then(Option::as_deref),
+                Some("2026-06-01T00:00:00Z")
+            );
+            None
+        } else {
+            assert_eq!(record.superseded_at, Some(None));
+            Some(if source.id == head {
+                &selected_family
+            } else if source.id == rejected {
+                &rejected_family
+            } else {
+                &unslotted_family
+            })
+        };
+        match (record.attempt_family.as_ref(), expected_family) {
+            (None, None) => {}
+            (Some(actual), Some(expected)) => {
+                let family_id = if redaction == RedactionLevel::None {
+                    expected.family_id.clone()
+                } else {
+                    crate::models::public_attempt_family_alias(&expected.family_id)
+                };
+                assert_eq!(actual.family_id, family_id);
+                assert_eq!(actual.declared_size, expected.declared_size);
+                assert_eq!(actual.attempt_index, expected.attempt_index);
+                assert_eq!(actual.disposition, expected.disposition);
+                assert_eq!(
+                    actual.origin.as_deref(),
+                    Some(if source.id == unslotted {
+                        "legacy_v094"
+                    } else {
+                        "declared"
+                    })
+                );
+            }
+            _ => {
+                return Err(
+                    "terminal family evidence did not round-trip into the archive".to_owned(),
+                );
+            }
+        }
+        restored_ids.insert(
+            source.id.clone(),
+            import_memory_id(record, redaction).map_err(|error| error.message)?,
+        );
+    }
+    let verified = verify_backup(&BackupVerifyOptions {
+        workspace_path: workspace.clone(),
+        backup_path: backup.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    assert_eq!(verified.status, "verified", "{:?}", verified.issues);
+    let side_path = root.path().join("restored-families");
+    let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+        workspace_path: workspace,
+        backup_path: backup,
+        side_path: side_path.clone(),
+        restore_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.to_string())?;
+    assert_eq!(restored.status, "completed");
+    assert_eq!(restored.imported_memory_count, 4);
+    let restored_database = PathBuf::from(&restored.restored_database_path);
+    let db = DbConnection::open_file(&restored_database).map_err(|error| error.to_string())?;
+    assert_eq!(
+        db.count_table_rows("attempt_families")
+            .map_err(|error| error.to_string())?,
+        2
+    );
+    assert_eq!(
+        db.count_table_rows("attempt_family_members")
+            .map_err(|error| error.to_string())?,
+        2
+    );
+    for source in &source_memories {
+        let id = &restored_ids[&source.id];
+        let record = &exported[&source.content];
+        let memory = db
+            .get_memory(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("restored family memory")?;
+        assert_eq!(memory.tombstoned_at, source.tombstoned_at);
+        assert_eq!(
+            db.get_memory_superseded_at(id)
+                .map_err(|error| error.to_string())?,
+            record.superseded_at.clone().flatten()
+        );
+        let family = db
+            .get_memory_attempt_family(id)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            family,
+            record
+                .attempt_family
+                .as_ref()
+                .map(|family| MemoryAttemptFamily {
+                    family_id: family.family_id.clone(),
+                    declared_size: family.declared_size,
+                    attempt_index: family.attempt_index,
+                    disposition: family.disposition.clone(),
+                })
+        );
+        if let Some(family) = record.attempt_family.as_ref() {
+            assert_eq!(
+                db.get_attempt_family_declaration(&memory.workspace_id, &family.family_id)
+                    .map_err(|error| error.to_string())?,
+                Some((
+                    family.declared_size,
+                    family.origin.clone().ok_or("family origin")?
+                ))
+            );
+            if source.id == head {
+                assert_eq!(
+                    db.list_attempt_family_membership_logical_ids(
+                        &memory.workspace_id,
+                        &family.family_id
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        restored_ids[&prior].clone(),
+                        restored_ids[&rejected].clone()
+                    ])
+                );
+            }
+        }
+    }
+    let current = db
+        .filter_current_memory_ids(&restored_ids.values().cloned().collect::<Vec<_>>())
+        .map_err(|error| error.to_string())?;
+    let expected_current = if tombstoned {
+        BTreeSet::new()
+    } else {
+        BTreeSet::from([
+            restored_ids[&head].clone(),
+            restored_ids[&rejected].clone(),
+            restored_ids[&unslotted].clone(),
+        ])
+    };
+    assert_eq!(
+        current, expected_current,
+        "recovery must never revive deleted or superseded attempts"
+    );
+    db.close().map_err(|error| error.to_string())?;
+
+    let rebackup = create(&side_path, &restored_database)?;
+    assert_complete(&rebackup)?;
+    let reexported = records(Path::new(&rebackup.backup_path))?;
+    assert_eq!(reexported.len(), exported.len());
+    for (content, before) in &exported {
+        let after = &reexported[content];
+        assert_eq!(after.tombstoned_at, before.tombstoned_at);
+        assert_eq!(after.superseded_at, before.superseded_at);
+        let mut expected_family = before.attempt_family.clone();
+        if redaction != RedactionLevel::None
+            && let Some(family) = expected_family.as_mut()
+        {
+            family.family_id = crate::models::public_attempt_family_alias(&family.family_id);
+        }
+        assert_eq!(after.attempt_family, expected_family);
+    }
+    let verified = verify_backup(&BackupVerifyOptions {
+        workspace_path: side_path,
+        backup_path: PathBuf::from(rebackup.backup_path),
+    })
+    .map_err(|error| error.to_string())?;
+    assert_eq!(verified.status, "verified", "{:?}", verified.issues);
+    Ok(())
+}
+
+#[test]
+fn backup_declaration_only_families_round_trip_without_inventing_members() -> TestResult {
+    attempt_family_backup_round_trip(RedactionLevel::Minimal, false)
+}
+
+#[test]
+fn backup_tombstoned_attempt_families_round_trip_without_resurrection() -> TestResult {
+    for redaction in [
+        RedactionLevel::None,
+        RedactionLevel::Minimal,
+        RedactionLevel::Standard,
+    ] {
+        attempt_family_backup_round_trip(redaction, true)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_attempt_family_without_terminal_carrier_remains_incomplete() -> TestResult {
+    let (root, workspace, database, _, _, head) = source()?;
+    let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    assert!(
+        db.set_memory_attempt_family(
+            &head,
+            &crate::db::MemoryAttemptFamily {
+                family_id: "family-recovery-missing-terminal".to_owned(),
+                declared_size: Some(1),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            }
+        )
+        .map_err(|error| error.to_string())?
+    );
+    db.mark_memory_superseded(&head, "2026-06-02T00:00:00Z")
+        .map_err(|error| error.to_string())?;
+    db.close().map_err(|error| error.to_string())?;
+    let created = create_backup(&BackupCreateOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database),
+        output_dir: None,
+        label: None,
+        redaction_level: RedactionLevel::None,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.to_string())?;
+    assert_eq!(created.status, "partial");
+    assert_eq!(created.verification_status, "incomplete_source_coverage");
+    assert!(!created.recovery_inventory.snapshot_coverage_complete);
+    for table in ["attempt_families", "attempt_family_members"] {
+        let entry = created
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == table)
+            .ok_or_else(|| format!("missing {table} inventory"))?;
+        assert_eq!(entry.row_count, 1);
+        assert!(!entry.snapshot_covered);
+    }
+    let side_path = root.path().join("refused-family-restore");
+    restore_backup_to_side_path(&BackupRestoreOptions {
+        workspace_path: workspace,
+        backup_path: PathBuf::from(created.backup_path),
+        side_path: side_path.clone(),
+        restore_graph_cache: false,
+        dry_run: false,
+    })
+    .expect_err("unrepresented durable family evidence must prevent restore publication");
+    assert!(!side_path.join(WORKSPACE_MARKER).exists());
+    Ok(())
+}
+
 #[test]
 fn backup_restore_and_rebackup_preserve_absent_and_explicit_provenance() -> TestResult {
     for redaction in [RedactionLevel::Minimal, RedactionLevel::Standard] {
