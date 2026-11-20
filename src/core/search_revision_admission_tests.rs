@@ -291,26 +291,74 @@ fn bounded_batches_preserve_candidate_order_and_defer_unknown_store_identities()
                 &id,
                 &memory("Retained deployment evidence.", "2026-05-01T00:00:00Z"),
             )?;
+            let candidate = hit(&id);
             if ordinal % 2 == 0 {
                 db.restore_imported_memory_supersession(&id, "2026-06-01T00:00:00Z")?;
             } else {
-                expected.push(id.clone());
+                expected.push(candidate.clone());
             }
-            candidates.push(hit(&id));
+            candidates.push(candidate);
         }
         Ok(())
     })
     .map_err(|e| e.to_string())?;
     let unknown = MemoryId::from_uuid(Uuid::from_u128(5000)).to_string();
-    candidates.push(hit(&unknown));
-    expected.push(unknown);
+    for candidate in [hit(&unknown), hit(&unknown), hit("evd_other")] {
+        candidates.push(candidate.clone());
+        expected.push(candidate);
+    }
+    // Repeated IDs share authority reads but remain separate ranked hits.
+    let mut duplicate = hit(&expected[0].doc_id);
+    duplicate.score = 0.4;
+    duplicate.metadata = Some(json!({"duplicateHit": true}));
+    candidates.push(duplicate.clone());
+    expected.push(duplicate);
     candidates.reverse();
     expected.reverse();
-    let actual = admit_hits(&options, candidates, &mut Vec::new(), Some(&db));
+    let (actual, queries) = crate::db::capture_query_sql_for_test(|| {
+        admit_hits(&options, candidates, &mut Vec::new(), Some(&db))
+    });
     assert_eq!(
-        ids(&actual),
-        expected.iter().map(String::as_str).collect::<Vec<_>>()
+        serde_json::to_value(&actual).map_err(|error| error.to_string())?,
+        serde_json::to_value(&expected).map_err(|error| error.to_string())?,
+        "batch hydration must preserve order, scores, metadata and duplicate hits"
     );
+    let revision_reads: Vec<_> = queries
+        .iter()
+        .filter(|sql| sql.contains("FROM memories WHERE"))
+        .collect();
+    assert_eq!(
+        revision_reads.len(),
+        3,
+        "513 stored candidates plus one unknown identity require three revision reads"
+    );
+    assert!(revision_reads.iter().all(|sql| {
+        sql.starts_with("SELECT id, workspace_id, superseded_at FROM memories WHERE id IN (")
+            && sql.ends_with("ORDER BY id ASC")
+    }));
+    assert_eq!(
+        queries.len(),
+        9,
+        "each identity page needs only revision, seal and quarantine authority reads"
+    );
+    assert!(queries.iter().all(|sql| !sql.contains("?257")));
+    assert!(queries.iter().all(|sql| !sql.contains(&unknown)));
+    Ok(())
+}
+
+#[test]
+fn non_memory_candidates_do_not_read_revision_authority() -> TestResult {
+    let (_temp, options, db) = fixture()?;
+    let (actual, queries) = crate::db::capture_query_sql_for_test(|| {
+        admit_hits(
+            &options,
+            vec![hit("evd_other"), hit("rule_other")],
+            &mut Vec::new(),
+            Some(&db),
+        )
+    });
+    assert_eq!(ids(&actual), vec!["evd_other", "rule_other"]);
+    assert!(queries.is_empty());
     Ok(())
 }
 
