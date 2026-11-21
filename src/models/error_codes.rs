@@ -234,6 +234,13 @@ pub const GRAPH_SNAPSHOT_REFRESH_REQUIRED: ErrorCode = ErrorCode {
     default_repair: Some("ee graph centrality-refresh --workspace . --json"),
 };
 
+pub const MODEL_STAGING_DIRS_ABANDONED: ErrorCode = ErrorCode {
+    id: "EE-E305",
+    category: ErrorCategory::SearchIndex,
+    description: "Abandoned embedding model download staging directories remain in the model store",
+    default_repair: Some("ee doctor --fix --workspace . --json"),
+};
+
 // Import errors (EE-E400 - EE-E499)
 pub const IMPORT_SOURCE_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E400",
@@ -397,6 +404,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     INDEX_CORRUPTED,
     EMBEDDING_UNAVAILABLE,
     GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+    MODEL_STAGING_DIRS_ABANDONED,
     // Import
     IMPORT_SOURCE_NOT_FOUND,
     IMPORT_FORMAT_ERROR,

@@ -884,3 +884,63 @@ fn model_list_reports_reranker_only_registry_as_no_available_embedding() -> Test
     )?;
     Ok(())
 }
+
+#[test]
+fn model_status_json_includes_staging_dirs_and_repair_when_reclaimable() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize: {error}"))?;
+    fresh_db_for_workspace(&workspace_path)?;
+
+    let mut report = build_model_status_report(&ModelStatusOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+    })
+    .map_err(|error| format!("status report: {error:?}"))?;
+
+    let clean_json = report.data_json();
+    let staging = clean_json
+        .get("stagingDirs")
+        .ok_or("missing stagingDirs in model status JSON")?;
+    ensure(
+        staging.get("reclaimableCount").is_some()
+            && staging.get("reclaimableBytes").is_some()
+            && staging.get("activeOrFreshCount").is_some()
+            && staging.get("abandonedEmptyCount").is_some()
+            && staging.get("abandonedNonEmptyDeadPidCount").is_some(),
+        "stagingDirs must expose all classification counts and bytes",
+    )?;
+
+    report.staging_dirs = ee::core::model::ModelStagingDirsReport {
+        active_or_fresh_count: 1,
+        abandoned_empty_count: 2,
+        abandoned_non_empty_dead_pid_count: 1,
+        reclaimable_count: 3,
+        reclaimable_bytes: 2048,
+        repair: Some("ee doctor --fix --workspace . --json"),
+    };
+    let dirty_json = report.data_json();
+    ensure_equal(
+        dirty_json.pointer("/stagingDirs/reclaimableCount"),
+        Some(&serde_json::json!(3)),
+        "reclaimableCount",
+    )?;
+    ensure_equal(
+        dirty_json.pointer("/stagingDirs/reclaimableBytes"),
+        Some(&serde_json::json!(2048)),
+        "reclaimableBytes",
+    )?;
+    ensure_equal(
+        dirty_json.pointer("/stagingDirs/repair"),
+        Some(&serde_json::json!("ee doctor --fix --workspace . --json")),
+        "stagingDirs.repair",
+    )?;
+    let human = report.human_summary();
+    ensure(
+        human.contains("Staging dirs: 1 active/fresh, 2 abandoned empty, 1 abandoned dead-pid (3 reclaimable, 2048 bytes)")
+            && human.contains("ee doctor --fix --workspace . --json"),
+        &format!("human summary must surface staging dirs and repair hint: {human}"),
+    )
+}

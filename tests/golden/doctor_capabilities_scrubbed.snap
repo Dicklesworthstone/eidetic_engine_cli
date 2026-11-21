@@ -22,7 +22,8 @@
     "run_migration",
     "rewrite_jsonl",
     "atomic_rewrite_toml",
-    "snapshot_backup"
+    "snapshot_backup",
+    "reclaim_model_staging_dirs"
   ],
   "fix_dispatch": [
     {
@@ -83,6 +84,11 @@
     {
       "finding": "workspace_config_malformed_toml",
       "op_kind": "quarantine_by_rename",
+      "effect": "repair"
+    },
+    {
+      "finding": "model_staging_dirs_abandoned",
+      "op_kind": "reclaim_model_staging_dirs",
       "effect": "repair"
     }
   ],

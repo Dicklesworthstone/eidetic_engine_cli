@@ -447,6 +447,26 @@ pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatc
     }
 }
 
+/// GH #75 (bd-reality-core-convergence-1azkt.81): reclaim abandoned model
+/// download staging directories (`empty >= 1h` or `non-empty dead-PID >= 24h`)
+/// under the resolved model store root.
+#[must_use]
+pub fn fix_model_staging_dirs_abandoned(workspace_root: &Path) -> FixerDispatch {
+    let workspace = shell_quote_arg(&workspace_root.to_string_lossy());
+    FixerDispatch {
+        finding_code: "model_staging_dirs_abandoned",
+        severity: "warning",
+        path: super::index_download_backoff::staging_reclaim_root(),
+        op: Op::ReclaimModelStagingDirs {
+            steps: vec![
+                format!("ee model status --workspace {workspace} --json"),
+                "Reclaim empty (>=1h) and dead-PID non-empty (>=24h) model staging directories."
+                    .to_owned(),
+            ],
+        },
+    }
+}
+
 /// The closed set of fixer codes this module exposes. bd-tu4s8 delivered 12;
 /// bd-pbyay split `search_index_missing` out of `search_index_stale`, because a
 /// missing index was being repaired as stale; bd-xa6ud / bd-wswg0 added the
@@ -474,6 +494,7 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "snapshot_backup_owed",
     "state_file_permission_drift",
     "database_missing",
+    "model_staging_dirs_abandoned",
 ];
 
 /// Every finding [`fix_finding_for_check`] can return: what `ee doctor --fix`
@@ -497,6 +518,8 @@ pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "wal_checkpoint_pending",
     // bd-bigu7.
     "workspace_config_malformed_toml",
+    // bd-reality-core-convergence-1azkt.81.
+    "model_staging_dirs_abandoned",
 ];
 
 /// How `ee doctor --fix` treats one failing doctor check.
@@ -646,6 +669,9 @@ pub fn fix_finding_for_check(
         // directory. `--fix` is opt-in, and a detector whose repair never runs
         // is the gap this bead exists to close.
         Some("EE-E101") if check_name == "workspace" => Some("workspace_config_malformed_toml"),
+        Some("EE-E305") if check_name == "model_staging_dirs" => {
+            Some("model_staging_dirs_abandoned")
+        }
         Some(_) if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
     }
@@ -690,6 +716,7 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
         "workspace_config_malformed_toml" => {
             Some(fix_workspace_config_malformed_toml(workspace_root))
         }
+        "model_staging_dirs_abandoned" => Some(fix_model_staging_dirs_abandoned(workspace_root)),
         _ => None,
     }
 }
@@ -947,6 +974,7 @@ mod tests {
                 "cass",
                 "runtime",
                 "workspace",
+                "model_staging_dirs",
             ] {
                 for unreadable in [false, true] {
                     if let Some(finding) = fix_finding_for_check(code, name, unreadable) {
@@ -1632,5 +1660,23 @@ pub fn fix_test_only() -> FixerDispatch { finding_code: "test_only" }
             include_str!("../cli/mod.rs").contains("fix_dispatch_for_finding("),
             "src/cli/mod.rs must dispatch --fix through fix_dispatch_for_finding"
         );
+    }
+
+    #[test]
+    fn model_staging_dirs_abandoned_dispatches_only_for_model_staging_dirs_check() {
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E305"), "model_staging_dirs", false),
+            Some("model_staging_dirs_abandoned")
+        );
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E305"), "workspace", false),
+            None
+        );
+        let dispatch = fix_dispatch_for_finding(&root(), "model_staging_dirs_abandoned")
+            .expect("model_staging_dirs_abandoned dispatch");
+        assert_eq!(dispatch.finding_code, "model_staging_dirs_abandoned");
+        assert!(matches!(dispatch.op, Op::ReclaimModelStagingDirs { .. }));
+        assert!(dispatch.op.is_writing());
+        assert!(!dispatch.op.is_advisory());
     }
 }

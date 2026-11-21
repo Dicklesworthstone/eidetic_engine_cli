@@ -439,6 +439,10 @@ pub enum Op {
     /// records the planned snapshot as evidence with manual operator
     /// steps; the backup writer actor lands in a follow-up slice.
     SnapshotBackup { label: String, steps: Vec<String> },
+
+    /// Reclaim abandoned model download staging directories (`empty >= 1h`
+    /// or `non-empty dead-PID >= 24h`) under the resolved model store root.
+    ReclaimModelStagingDirs { steps: Vec<String> },
 }
 
 impl Op {
@@ -452,6 +456,7 @@ impl Op {
                 | Self::QuarantineByRename { .. }
                 | Self::CreateDirAll { .. }
                 | Self::RunIndexRebuild { .. }
+                | Self::ReclaimModelStagingDirs { .. }
         )
     }
 
@@ -488,6 +493,7 @@ impl Op {
             Self::RewriteJsonl { .. } => "rewrite_jsonl",
             Self::AtomicRewriteToml { .. } => "atomic_rewrite_toml",
             Self::SnapshotBackup { .. } => "snapshot_backup",
+            Self::ReclaimModelStagingDirs { .. } => "reclaim_model_staging_dirs",
         }
     }
 }
@@ -1228,6 +1234,32 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
                 steps.join(" ; ")
             ));
         }
+        Op::ReclaimModelStagingDirs { .. } => {
+            let summary =
+                super::index_download_backoff::reclaim_abandoned_staging_dirs(path, ctx.dry_run);
+            if summary.reclaimed_count == 0 {
+                if summary.failed_count > 0 {
+                    return Err(DoctorRuntimeError::Io {
+                        context: format!(
+                            "reclaim abandoned model staging dirs under {}",
+                            path.display()
+                        ),
+                        source: io::Error::other(
+                            "failed to reclaim abandoned model staging directories",
+                        ),
+                    });
+                }
+                return Err(DoctorRuntimeError::NoOpIdempotent);
+            }
+            notes = Some(format!(
+                "reclaim_model_staging_dirs inspected={} reclaimed_dirs={} reclaimed_bytes={} kept={} failed={}",
+                summary.inspected_count,
+                summary.reclaimed_count,
+                summary.reclaimed_bytes,
+                summary.kept_count,
+                summary.failed_count
+            ));
+        }
     }
 
     // Build the line.
@@ -1620,7 +1652,8 @@ fn validate_undo_action_ledger(
             | "run_migration"
             | "rewrite_jsonl"
             | "atomic_rewrite_toml"
-            | "snapshot_backup" => false,
+            | "snapshot_backup"
+            | "reclaim_model_staging_dirs" => false,
             other => {
                 return Err(DoctorRuntimeError::ActionsLogCorrupt {
                     line_number,
@@ -1873,7 +1906,8 @@ fn action_pre_state_matches(
         | "run_migration"
         | "rewrite_jsonl"
         | "atomic_rewrite_toml"
-        | "snapshot_backup" => Ok(true),
+        | "snapshot_backup"
+        | "reclaim_model_staging_dirs" => Ok(true),
         other => Err(DoctorRuntimeError::ActionsLogCorrupt {
             line_number: action.sequence as usize,
             reason: format!("unknown action kind: {other}"),
@@ -2146,7 +2180,8 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
         | "run_migration"
         | "rewrite_jsonl"
         | "atomic_rewrite_toml"
-        | "snapshot_backup" => {
+        | "snapshot_backup"
+        | "reclaim_model_staging_dirs" => {
             // No-op for undo. These op kinds are advisory: `mutate()`
             // records planned-mutation evidence in `actions.jsonl` but does
             // not touch the doctor's blast-radius files itself. The actual
@@ -2238,6 +2273,7 @@ impl CapabilitiesReport {
                 "rewrite_jsonl",
                 "atomic_rewrite_toml",
                 "snapshot_backup",
+                "reclaim_model_staging_dirs",
             ],
             fix_dispatch: super::doctor_fixers::FIX_DISPATCHED_FINDINGS
                 .iter()

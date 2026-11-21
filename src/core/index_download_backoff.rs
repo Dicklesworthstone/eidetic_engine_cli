@@ -153,6 +153,326 @@ pub(super) fn remove_own_staging_dirs(model_root: &Path, model: &str) -> usize {
 /// live download writes its first file within seconds of creating its dir.
 const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
 
+/// Non-empty staging directories whose owning PID is dead and whose mtime is
+/// older than 24 hours are abandoned partial downloads safe to reclaim.
+const ABANDONED_NON_EMPTY_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+const MAX_STAGING_WALK_DEPTH: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StagingPidLiveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+#[cfg(unix)]
+fn staging_process_liveness(pid: u32) -> StagingPidLiveness {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return StagingPidLiveness::Unknown;
+    };
+    let Some(pid_handle) = rustix::process::Pid::from_raw(raw_pid) else {
+        return StagingPidLiveness::Unknown;
+    };
+    match rustix::process::test_kill_process(pid_handle) {
+        Ok(()) => StagingPidLiveness::Alive,
+        Err(error) if error == rustix::io::Errno::PERM => StagingPidLiveness::Alive,
+        Err(error) if error == rustix::io::Errno::SRCH => StagingPidLiveness::Dead,
+        Err(_) => StagingPidLiveness::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+fn staging_process_liveness(_pid: u32) -> StagingPidLiveness {
+    StagingPidLiveness::Unknown
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StagingDirClass {
+    ActiveOrFresh,
+    AbandonedEmpty,
+    AbandonedNonEmptyDeadPid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StagingDirEntry {
+    pub model_name: String,
+    pub dir_name: String,
+    pub path: PathBuf,
+    pub pid: u32,
+    pub age_secs: u64,
+    pub empty: bool,
+    pub pid_liveness: StagingPidLiveness,
+    pub bytes: u64,
+    pub class: StagingDirClass,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StagingDirInventory {
+    pub active_or_fresh_count: usize,
+    pub abandoned_empty_count: usize,
+    pub abandoned_non_empty_dead_pid_count: usize,
+    pub reclaimable_count: usize,
+    pub reclaimable_bytes: u64,
+    pub entries: Vec<StagingDirEntry>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StagingReclaimSummary {
+    pub inspected_count: usize,
+    pub reclaimed_count: usize,
+    pub reclaimed_bytes: u64,
+    pub kept_count: usize,
+    pub failed_count: usize,
+}
+
+fn default_model_cache_root() -> PathBuf {
+    let env: std::collections::BTreeMap<String, std::ffi::OsString> = std::env::vars_os()
+        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+        .collect();
+    let ee_data_dir = if cfg!(windows) {
+        crate::config::path_resolver::resolve_dir_windows_localappdata(&env)
+            .ok()
+            .map(|root| root.join("ee"))
+    } else {
+        crate::config::path_resolver::resolve_dir_unix_xdg(&env, "ee").ok()
+    }
+    .unwrap_or_else(|| std::env::temp_dir().join("ee"));
+    ee_data_dir.join("models")
+}
+
+fn configured_embed_model_dir() -> Option<PathBuf> {
+    crate::config::env_registry::read_os(crate::config::env_registry::EnvVar::EmbedModelDir)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[must_use]
+pub(crate) fn staging_reclaim_root() -> PathBuf {
+    configured_embed_model_dir().unwrap_or_else(default_model_cache_root)
+}
+
+#[must_use]
+pub(crate) fn staging_search_roots_under(root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    if configured_embed_model_dir().is_none() {
+        let model2vec = root.join("model2vec");
+        if model2vec.is_dir() && model2vec != root {
+            roots.push(model2vec);
+        }
+    }
+    roots
+}
+
+#[must_use]
+pub(crate) fn staging_search_roots() -> Vec<PathBuf> {
+    staging_search_roots_under(&staging_reclaim_root())
+}
+
+fn parse_staging_dir_name(name: &str) -> Option<(String, u32)> {
+    let rest = name.strip_prefix('.')?;
+    let (model_name, tail) = rest.split_once("-download-")?;
+    if model_name.is_empty() {
+        return None;
+    }
+    let (pid_str, seq) = tail.split_once('-')?;
+    if seq.is_empty() {
+        return None;
+    }
+    let pid = pid_str.parse::<u32>().ok()?;
+    Some((model_name.to_owned(), pid))
+}
+
+fn measure_dir_contents(path: &Path, depth: usize) -> Option<(bool, u64)> {
+    if depth > MAX_STAGING_WALK_DEPTH {
+        return None;
+    }
+    let entries = std::fs::read_dir(path).ok()?;
+    let mut empty = true;
+    let mut total_bytes = 0u64;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return None;
+        };
+        empty = false;
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            return None;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_file() {
+            total_bytes = total_bytes.saturating_add(metadata.len());
+        } else if metadata.is_dir() {
+            let (_, child_bytes) = measure_dir_contents(&entry.path(), depth + 1)?;
+            total_bytes = total_bytes.saturating_add(child_bytes);
+        }
+    }
+    Some((empty, total_bytes))
+}
+
+#[must_use]
+pub(crate) fn inspect_staging_dirs_default() -> StagingDirInventory {
+    let roots = staging_search_roots();
+    inspect_staging_dirs_in_roots_at(&roots, SystemTime::now())
+}
+
+pub(crate) fn inspect_staging_dirs_in_roots_at(
+    roots: &[PathBuf],
+    now: SystemTime,
+) -> StagingDirInventory {
+    let mut inventory = StagingDirInventory::default();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name_os = entry.file_name();
+            let Some(dir_name) = name_os.to_str() else {
+                continue;
+            };
+            let Some((model_name, pid)) = parse_staging_dir_name(dir_name) else {
+                continue;
+            };
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                continue;
+            }
+            let age = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok());
+            let age_secs = age.map_or(0, |duration| duration.as_secs());
+            let pid_liveness = staging_process_liveness(pid);
+            let (empty, bytes, unreadable) = match measure_dir_contents(&path, 0) {
+                Some((empty, bytes)) => (empty, bytes, false),
+                None => (false, 0, true),
+            };
+
+            let class = if unreadable {
+                StagingDirClass::ActiveOrFresh
+            } else if empty && age.is_some_and(|d| d >= ABANDONED_STAGING_AGE) {
+                StagingDirClass::AbandonedEmpty
+            } else if !empty
+                && age.is_some_and(|d| d >= ABANDONED_NON_EMPTY_STAGING_AGE)
+                && pid_liveness == StagingPidLiveness::Dead
+            {
+                StagingDirClass::AbandonedNonEmptyDeadPid
+            } else {
+                StagingDirClass::ActiveOrFresh
+            };
+
+            match class {
+                StagingDirClass::ActiveOrFresh => {
+                    inventory.active_or_fresh_count =
+                        inventory.active_or_fresh_count.saturating_add(1);
+                }
+                StagingDirClass::AbandonedEmpty => {
+                    inventory.abandoned_empty_count =
+                        inventory.abandoned_empty_count.saturating_add(1);
+                    inventory.reclaimable_count = inventory.reclaimable_count.saturating_add(1);
+                    inventory.reclaimable_bytes = inventory.reclaimable_bytes.saturating_add(bytes);
+                }
+                StagingDirClass::AbandonedNonEmptyDeadPid => {
+                    inventory.abandoned_non_empty_dead_pid_count = inventory
+                        .abandoned_non_empty_dead_pid_count
+                        .saturating_add(1);
+                    inventory.reclaimable_count = inventory.reclaimable_count.saturating_add(1);
+                    inventory.reclaimable_bytes = inventory.reclaimable_bytes.saturating_add(bytes);
+                }
+            }
+
+            inventory.entries.push(StagingDirEntry {
+                model_name,
+                dir_name: dir_name.to_owned(),
+                path,
+                pid,
+                age_secs,
+                empty,
+                pid_liveness,
+                bytes,
+                class,
+            });
+        }
+    }
+    inventory
+        .entries
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    inventory
+}
+
+pub(crate) fn reclaim_abandoned_staging_dirs(root: &Path, dry_run: bool) -> StagingReclaimSummary {
+    let roots = staging_search_roots_under(root);
+    reclaim_abandoned_staging_dirs_in_roots_at(&roots, dry_run, SystemTime::now())
+}
+
+fn reclaim_abandoned_staging_dirs_in_roots_at(
+    roots: &[PathBuf],
+    dry_run: bool,
+    now: SystemTime,
+) -> StagingReclaimSummary {
+    let inventory = inspect_staging_dirs_in_roots_at(roots, now);
+    let mut summary = StagingReclaimSummary {
+        inspected_count: inventory.entries.len(),
+        ..StagingReclaimSummary::default()
+    };
+
+    for entry in &inventory.entries {
+        let pid_alive = matches!(entry.pid_liveness, StagingPidLiveness::Alive);
+        let (action, bytes_reclaimed) = match entry.class {
+            StagingDirClass::ActiveOrFresh => {
+                summary.kept_count = summary.kept_count.saturating_add(1);
+                ("keep", 0u64)
+            }
+            StagingDirClass::AbandonedEmpty => {
+                if dry_run {
+                    summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
+                    ("dry_run_reclaim_empty", 0u64)
+                } else if std::fs::remove_dir(&entry.path).is_ok() {
+                    summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
+                    summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
+                    ("reclaim_empty", entry.bytes)
+                } else {
+                    summary.failed_count = summary.failed_count.saturating_add(1);
+                    ("reclaim_failed", 0u64)
+                }
+            }
+            StagingDirClass::AbandonedNonEmptyDeadPid => {
+                if dry_run {
+                    summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
+                    summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
+                    ("dry_run_reclaim_dead_pid", entry.bytes)
+                } else if std::fs::remove_dir_all(&entry.path).is_ok() {
+                    summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
+                    summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
+                    ("reclaim_dead_pid", entry.bytes)
+                } else {
+                    summary.failed_count = summary.failed_count.saturating_add(1);
+                    ("reclaim_failed", 0u64)
+                }
+            }
+        };
+
+        tracing::info!(
+            target: "ee::model::staging",
+            schema = "ee.test_event.v1",
+            model_name = %entry.model_name,
+            dir_name = %entry.dir_name,
+            age_secs = entry.age_secs,
+            empty = entry.empty,
+            pid_alive,
+            action,
+            bytes_reclaimed,
+            "model download staging directory evaluated"
+        );
+    }
+
+    summary
+}
+
 /// Remove EMPTY `.<model>-download-*` staging directories older than
 /// [`ABANDONED_STAGING_AGE`], whatever process made them (bd-4b3j2).
 ///
@@ -325,6 +645,156 @@ mod tests {
         assert!(!own.exists());
         assert!(other.exists());
         assert!(installed.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_staging_dir_name_validates_format() {
+        assert_eq!(
+            parse_staging_dir_name(".potion-multilingual-128M-download-12345-0000000000000001"),
+            Some(("potion-multilingual-128M".to_owned(), 12345))
+        );
+        assert_eq!(parse_staging_dir_name("potion-multilingual-128M"), None);
+        assert_eq!(
+            parse_staging_dir_name(".potion-multilingual-128M-download-notapid-1"),
+            None
+        );
+        assert_eq!(
+            parse_staging_dir_name(".potion-multilingual-128M-download-123-"),
+            None
+        );
+    }
+
+    #[test]
+    fn reclaim_preserves_fresh_live_pid_symlink_and_installed_model_dirs() -> TestResult {
+        let root = temp_root("ee-staging-preserve-")?;
+        let model = "potion-multilingual-128M";
+        let live_pid = std::process::id();
+
+        let fresh_empty = root
+            .path()
+            .join(format!(".{model}-download-{live_pid}-0000000000000001"));
+        let live_non_empty = root
+            .path()
+            .join(format!(".{model}-download-{live_pid}-0000000000000002"));
+        let unknown_pid_non_empty = root
+            .path()
+            .join(format!(".{model}-download-{}-0000000000000003", u32::MAX));
+        let installed = root.path().join(model);
+        for dir in [
+            &fresh_empty,
+            &live_non_empty,
+            &unknown_pid_non_empty,
+            &installed,
+        ] {
+            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(live_non_empty.join("model.safetensors.part"), b"live-bytes")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            unknown_pid_non_empty.join("model.safetensors.part"),
+            b"unknown-pid-bytes",
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(installed.join("model.safetensors"), b"installed")
+            .map_err(|error| error.to_string())?;
+
+        #[cfg(unix)]
+        let symlink_staging = {
+            let link = root
+                .path()
+                .join(format!(".{model}-download-999999-0000000000000004"));
+            std::os::unix::fs::symlink(&installed, &link).map_err(|error| error.to_string())?;
+            link
+        };
+
+        let roots = vec![root.path().to_path_buf()];
+        // At now: even empty dir is fresh (< 1h).
+        let now_inv = inspect_staging_dirs_in_roots_at(&roots, SystemTime::now());
+        assert_eq!(now_inv.active_or_fresh_count, 3);
+        assert_eq!(now_inv.reclaimable_count, 0);
+
+        // After > 24h: live-PID non-empty and unknown-PID non-empty MUST still stay ActiveOrFresh.
+        let future = SystemTime::now() + ABANDONED_NON_EMPTY_STAGING_AGE + Duration::from_secs(60);
+        let summary = reclaim_abandoned_staging_dirs_in_roots_at(&roots, false, future);
+        // Only `fresh_empty` (now > 1h old and empty) is reclaimed; live_non_empty and unknown_pid_non_empty are kept.
+        assert_eq!(summary.reclaimed_count, 1);
+        assert_eq!(summary.kept_count, 2);
+        assert!(!fresh_empty.exists());
+        assert!(
+            live_non_empty.exists(),
+            "live PID non-empty dir must survive"
+        );
+        assert!(
+            unknown_pid_non_empty.exists(),
+            "unknown PID non-empty dir must survive"
+        );
+        assert!(installed.join("model.safetensors").is_file());
+        #[cfg(unix)]
+        assert!(
+            symlink_staging.exists(),
+            "symlink staging dir must stay untouched"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_classifies_and_reclaims_empty_and_aged_dead_pid_dirs() -> TestResult {
+        let root = temp_root("ee-staging-reclaim-")?;
+        let model = "potion-multilingual-128M";
+
+        // Spawn a trivial child and reap it so its PID is guaranteed dead (Errno::SRCH).
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let dead_pid = child.id();
+        let _ = child.wait().map_err(|error| error.to_string())?;
+
+        let abandoned_empty = root
+            .path()
+            .join(format!(".{model}-download-{dead_pid}-0000000000000001"));
+        let abandoned_dead_non_empty = root
+            .path()
+            .join(format!(".{model}-download-{dead_pid}-0000000000000002"));
+        let model2vec_sub = root.path().join("model2vec");
+        let nested_empty =
+            model2vec_sub.join(format!(".{model}-download-{dead_pid}-0000000000000003"));
+        for dir in [&abandoned_empty, &abandoned_dead_non_empty, &nested_empty] {
+            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        }
+        let payload = b"0123456789abcdef";
+        std::fs::write(
+            abandoned_dead_non_empty.join("model.safetensors.part"),
+            payload,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let roots = vec![root.path().to_path_buf(), model2vec_sub];
+        // At 2h: empty dirs are AbandonedEmpty, non-empty dead-PID dir is <24h so still ActiveOrFresh.
+        let two_hours = SystemTime::now() + Duration::from_secs(2 * 60 * 60);
+        let inv_2h = inspect_staging_dirs_in_roots_at(&roots, two_hours);
+        assert_eq!(inv_2h.abandoned_empty_count, 2);
+        assert_eq!(inv_2h.abandoned_non_empty_dead_pid_count, 0);
+        assert_eq!(inv_2h.active_or_fresh_count, 1);
+
+        // At 25h: dry-run sees all 3 reclaimable without deleting.
+        let twenty_five_hours = SystemTime::now() + Duration::from_secs(25 * 60 * 60);
+        let dry = reclaim_abandoned_staging_dirs_in_roots_at(&roots, true, twenty_five_hours);
+        assert_eq!(dry.reclaimed_count, 3);
+        assert_eq!(dry.reclaimed_bytes, payload.len() as u64);
+        assert!(abandoned_empty.exists());
+        assert!(abandoned_dead_non_empty.exists());
+        assert!(nested_empty.exists());
+
+        // Real reclaim deletes all 3 and accounts exact bytes.
+        let real = reclaim_abandoned_staging_dirs_in_roots_at(&roots, false, twenty_five_hours);
+        assert_eq!(real.reclaimed_count, 3);
+        assert_eq!(real.reclaimed_bytes, payload.len() as u64);
+        assert_eq!(real.failed_count, 0);
+        assert!(!abandoned_empty.exists());
+        assert!(!abandoned_dead_non_empty.exists());
+        assert!(!nested_empty.exists());
         Ok(())
     }
 }

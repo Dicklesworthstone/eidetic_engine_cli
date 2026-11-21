@@ -112,6 +112,12 @@ expression: canonical_json_text(value)
         "name": "wal_pressure",
         "severity": "warning",
         "tier": "advisory"
+      },
+      {
+        "message": "No abandoned model download staging directories detected.",
+        "name": "model_staging_dirs",
+        "severity": "ok",
+        "tier": "advisory"
       }
     ],
     "command": "doctor",

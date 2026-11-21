@@ -413,7 +413,8 @@ impl DoctorReport {
         // ADVISORY: check_ee_install_path (advisory via its own builder, bd-1et0v.18),
         //           check_shard_fanout, check_flight_recorder, check_lexical_ram_tier,
         //           check_graph_snapshot, check_graph_numa_pin, check_daemon_socket_reachable,
-        //           check_rch_worker_pressure, check_rch_verify_ledger, check_cass
+        //           check_rch_worker_pressure, check_rch_verify_ledger, check_cass,
+        //           check_wal_pressure, check_model_staging_dirs
         let checks = vec![
             check_runtime(),
             check_ee_install_path(),
@@ -433,6 +434,7 @@ impl DoctorReport {
             check_rch_verify_ledger(&verification_ledger).advisory(),
             check_cass(workspace_path).advisory(),
             check_wal_pressure(workspace_path).advisory(),
+            check_model_staging_dirs().advisory(),
         ];
 
         let overall_healthy = checks.iter().all(CheckResult::is_topline_healthy);
@@ -3930,6 +3932,38 @@ fn check_wal_pressure(workspace_path: Option<&Path>) -> CheckResult {
             wal.bytes, wal.frames, wal.database_bytes
         ),
         error_codes::WAL_EXCEEDS_DATABASE,
+    )
+}
+
+fn check_model_staging_dirs() -> CheckResult {
+    let inventory = crate::core::index_download_backoff::inspect_staging_dirs_default();
+    model_staging_dirs_check_from_inventory(&inventory)
+}
+
+fn model_staging_dirs_check_from_inventory(
+    inventory: &crate::core::index_download_backoff::StagingDirInventory,
+) -> CheckResult {
+    if inventory.reclaimable_count == 0 {
+        return CheckResult::ok(
+            "model_staging_dirs",
+            "No abandoned model download staging directories detected.",
+        );
+    }
+    CheckResult::warning(
+        "model_staging_dirs",
+        format!(
+            "{} abandoned model download staging director{} ({} empty, {} dead-pid non-empty, {} reclaimable bytes) can be reclaimed safely.",
+            inventory.reclaimable_count,
+            if inventory.reclaimable_count == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            inventory.abandoned_empty_count,
+            inventory.abandoned_non_empty_dead_pid_count,
+            inventory.reclaimable_bytes,
+        ),
+        error_codes::MODEL_STAGING_DIRS_ABANDONED,
     )
 }
 
@@ -8041,5 +8075,43 @@ mod remote_embedding_endpoint_tests {
             "an advisory check must never flip the top-line verdict"
         );
         assert!(check.repair.is_some());
+    }
+
+    #[test]
+    fn model_staging_dirs_check_reports_clean_and_abandoned_inventories() {
+        let clean = crate::core::index_download_backoff::StagingDirInventory::default();
+        let ok_check = model_staging_dirs_check_from_inventory(&clean).advisory();
+        assert_eq!(ok_check.name, "model_staging_dirs");
+        assert_eq!(ok_check.severity, CheckSeverity::Ok);
+        assert_eq!(ok_check.tier, CheckTier::Advisory);
+        assert!(ok_check.error_code.is_none());
+
+        let dirty = crate::core::index_download_backoff::StagingDirInventory {
+            active_or_fresh_count: 1,
+            abandoned_empty_count: 2,
+            abandoned_non_empty_dead_pid_count: 1,
+            reclaimable_count: 3,
+            reclaimable_bytes: 4096,
+            entries: Vec::new(),
+        };
+        let warn_check = model_staging_dirs_check_from_inventory(&dirty).advisory();
+        assert_eq!(warn_check.severity, CheckSeverity::Warning);
+        assert_eq!(warn_check.tier, CheckTier::Advisory);
+        assert!(warn_check.is_topline_healthy());
+        assert_eq!(warn_check.error_code.map(|code| code.id), Some("EE-E305"));
+        assert_eq!(
+            warn_check.repair,
+            Some("ee doctor --fix --workspace . --json")
+        );
+        assert!(
+            warn_check.message.contains("3 abandoned"),
+            "{}",
+            warn_check.message
+        );
+        assert!(
+            warn_check.message.contains("4096 reclaimable bytes"),
+            "{}",
+            warn_check.message
+        );
     }
 }

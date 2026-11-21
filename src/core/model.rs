@@ -801,6 +801,47 @@ struct ModelLifecycleAssetInspection {
     provenance_complete: bool,
 }
 
+/// Summary of download staging directories under the model cache root.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModelStagingDirsReport {
+    pub active_or_fresh_count: usize,
+    pub abandoned_empty_count: usize,
+    pub abandoned_non_empty_dead_pid_count: usize,
+    pub reclaimable_count: usize,
+    pub reclaimable_bytes: u64,
+    pub repair: Option<&'static str>,
+}
+
+impl ModelStagingDirsReport {
+    #[must_use]
+    pub fn from_inventory(
+        inventory: &crate::core::index_download_backoff::StagingDirInventory,
+    ) -> Self {
+        let repair =
+            (inventory.reclaimable_count > 0).then_some("ee doctor --fix --workspace . --json");
+        Self {
+            active_or_fresh_count: inventory.active_or_fresh_count,
+            abandoned_empty_count: inventory.abandoned_empty_count,
+            abandoned_non_empty_dead_pid_count: inventory.abandoned_non_empty_dead_pid_count,
+            reclaimable_count: inventory.reclaimable_count,
+            reclaimable_bytes: inventory.reclaimable_bytes,
+            repair,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "activeOrFreshCount": self.active_or_fresh_count,
+            "abandonedEmptyCount": self.abandoned_empty_count,
+            "abandonedNonEmptyDeadPidCount": self.abandoned_non_empty_dead_pid_count,
+            "reclaimableCount": self.reclaimable_count,
+            "reclaimableBytes": self.reclaimable_bytes,
+            "repair": self.repair,
+        })
+    }
+}
+
 /// Report shape returned by `ee model status`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStatusReport {
@@ -810,6 +851,7 @@ pub struct ModelStatusReport {
     pub active: ModelStatusActive,
     pub reranker: ModelStatusReranker,
     pub model_lifecycle: ModelLifecycleReport,
+    pub staging_dirs: ModelStagingDirsReport,
     pub registered_count: usize,
     pub available_count: usize,
     pub degradations: Vec<ModelDegradation>,
@@ -825,6 +867,7 @@ impl ModelStatusReport {
             "active": self.active.data_json(),
             "reranker": self.reranker.data_json(),
             "modelLifecycle": self.model_lifecycle.data_json(),
+            "stagingDirs": self.staging_dirs.data_json(),
             "registeredCount": self.registered_count,
             "availableCount": self.available_count,
             "degradations": model_degradations_data_json("model_status", &self.degradations),
@@ -866,6 +909,19 @@ impl ModelStatusReport {
                 "Selected reranker: {} ({}/{}, status {})\n",
                 selected.id, selected.provider, selected.model_name, selected.status,
             ));
+        }
+        if self.staging_dirs.reclaimable_count > 0 || self.staging_dirs.active_or_fresh_count > 0 {
+            output.push_str(&format!(
+                "Staging dirs: {} active/fresh, {} abandoned empty, {} abandoned dead-pid ({} reclaimable, {} bytes)\n",
+                self.staging_dirs.active_or_fresh_count,
+                self.staging_dirs.abandoned_empty_count,
+                self.staging_dirs.abandoned_non_empty_dead_pid_count,
+                self.staging_dirs.reclaimable_count,
+                self.staging_dirs.reclaimable_bytes,
+            ));
+            if let Some(repair) = self.staging_dirs.repair {
+                output.push_str(&format!("  repair: {repair}\n"));
+            }
         }
         if !self.degradations.is_empty() {
             output.push_str("Degraded:\n");
@@ -2871,6 +2927,9 @@ fn build_model_status_report_with_posture(
         cached_default_model_available,
     );
 
+    let staging_inventory = crate::core::index_download_backoff::inspect_staging_dirs_default();
+    let staging_dirs = ModelStagingDirsReport::from_inventory(&staging_inventory);
+
     Ok(ModelStatusReport {
         schema: MODEL_STATUS_SCHEMA_V2,
         workspace_path,
@@ -2878,6 +2937,7 @@ fn build_model_status_report_with_posture(
         active,
         reranker,
         model_lifecycle,
+        staging_dirs,
         registered_count,
         available_count,
         degradations,
@@ -6084,6 +6144,7 @@ mod tests {
             ),
             reranker: empty_reranker_status(),
             model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
+            staging_dirs: ModelStagingDirsReport::default(),
             registered_count: 2,
             available_count: 0,
             degradations: vec![
@@ -6487,6 +6548,7 @@ mod tests {
             ),
             reranker: empty_reranker_status(),
             model_lifecycle: fixture_model_lifecycle_report(&workspace_path),
+            staging_dirs: ModelStagingDirsReport::default(),
             registered_count: 1,
             available_count: 1,
             degradations: Vec::new(),
