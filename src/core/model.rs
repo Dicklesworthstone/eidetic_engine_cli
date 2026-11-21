@@ -814,7 +814,7 @@ pub struct ModelStagingDirsReport {
 
 impl ModelStagingDirsReport {
     #[must_use]
-    pub fn from_inventory(
+    pub(crate) fn from_inventory(
         inventory: &crate::core::index_download_backoff::StagingDirInventory,
     ) -> Self {
         let repair =
