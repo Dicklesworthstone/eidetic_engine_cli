@@ -211,10 +211,6 @@ impl RunningDaemon {
     fn socket_path(&self) -> &Path {
         &self.socket_path
     }
-
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1488,7 +1484,12 @@ fn bootstrap_speedup_ci_95(cold: &[f64], warm: &[f64], resamples: usize, seed: u
             cold_boot.push(cold[idx]);
             warm_boot.push(warm[idx]);
         }
-        let ratio = p50_slice(&cold_boot) / p50_slice(&warm_boot);
+        let warm_p50 = p50_slice(&warm_boot);
+        let ratio = if warm_p50 <= 0.0 {
+            0.0
+        } else {
+            p50_slice(&cold_boot) / warm_p50
+        };
         ratios.push(ratio);
     }
     ratios.sort_by(f64::total_cmp);
@@ -1504,7 +1505,7 @@ struct ProcessRssMeasurement {
     peak_rss_bytes: Option<u64>,
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(any(target_os = "linux", all(test, target_vendor = "apple")))]
 fn parse_proc_status_rss_bytes(status_text: &str) -> Option<ProcessRssMeasurement> {
     let mut rss_kb = None;
     let mut hwm_kb = None;
@@ -1684,10 +1685,14 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     let embedder_preparation_p50_ms = p50(embedder_preparation);
     let index_open_p50_ms = p50(index_open);
     let query_p50_ms = p50(query);
-    let speedup = cold_p50_ms / warm_p50_ms;
+    let speedup = if warm_p50_ms <= 0.0 {
+        0.0
+    } else {
+        cold_p50_ms / warm_p50_ms
+    };
     let rss_within_budget = daemon_rss
         .map(|rss| rss.peak_rss_bytes.unwrap_or(rss.rss_bytes) <= DAEMON_MAX_RSS_BYTES)
-        .unwrap_or(true);
+        .unwrap_or(!cfg!(target_os = "linux"));
     let passed = cold_p50_ms < SEARCH_COLD_P50_BUDGET_MS
         && warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS
         && rss_within_budget;
@@ -2654,10 +2659,14 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
         bootstrap_speedup_ci_95(&cold, &warm, BOOTSTRAP_RESAMPLES, trial_seed);
     let cold_p50_ms = p50(cold);
     let warm_p50_ms = p50(warm);
-    let speedup = cold_p50_ms / warm_p50_ms;
+    let speedup = if warm_p50_ms <= 0.0 {
+        0.0
+    } else {
+        cold_p50_ms / warm_p50_ms
+    };
     let rss_within_budget = daemon_rss
         .map(|rss| rss.peak_rss_bytes.unwrap_or(rss.rss_bytes) <= DAEMON_MAX_RSS_BYTES)
-        .unwrap_or(true);
+        .unwrap_or(!cfg!(target_os = "linux"));
     let passed = speedup >= PACK_MIN_P50_SPEEDUP && rss_within_budget;
     let verified_normal_calls = persistence.calls;
     let normal_persisted_records = persistence.record_ids.len();
@@ -3360,6 +3369,10 @@ mod pack_benchmark_contracts {
         assert!(low.is_finite() && high.is_finite());
         assert!(low <= 2.5 && high >= 2.5, "got CI [{low}, {high}]");
         assert!(low <= high);
+
+        let (zero_low, zero_high) =
+            bootstrap_speedup_ci_95(&[10.0, 20.0], &[0.0, 0.0], 100, DEFAULT_TRIAL_SEED);
+        assert_eq!((zero_low, zero_high), (0.0, 0.0));
     }
 
     #[test]

@@ -5435,12 +5435,26 @@ fn push_selected_context_memory_drift_degradations(
     }
     let mut hints = Vec::new();
     let mut read_errors = 0usize;
+    let local_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &crate::core::workspace::stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .ok();
     // GH #49: one git probe per pack, so HEAD, commit distances, and captured
     // blobs are resolved once for all selected items instead of per item.
     let git = GitDriftProbe::new(workspace_path);
     for item in &mut draft.items {
         let memory_id = item.memory_id.to_string();
-        let fetched = if preloaded_memories.contains_key(&memory_id) {
+        // Only reuse preloaded rows belonging to the local workspace; global-store
+        // memories are absent from the local connection and must stay skipped to
+        // match `connection.get_memory(&memory_id)` semantics.
+        let preloaded = preloaded_memories.get(&memory_id).filter(|memory| {
+            local_workspace_id
+                .as_deref()
+                .is_some_and(|workspace_id| memory.workspace_id == workspace_id)
+        });
+        let fetched = if preloaded.is_some() {
             None
         } else {
             match connection.get_memory(&memory_id) {
@@ -5451,7 +5465,7 @@ fn push_selected_context_memory_drift_degradations(
                 }
             }
         };
-        let Some(memory) = preloaded_memories.get(&memory_id).or(fetched.as_ref()) else {
+        let Some(memory) = preloaded.or(fetched.as_ref()) else {
             continue;
         };
         match memory_drift_selection_hint_for_memory(connection, &git, memory) {
@@ -8695,11 +8709,25 @@ fn context_pack_l2_store(
 
     let workspace_dictionary =
         crate::cache::pack_l2::load_workspace_compression_dictionary(&options.workspace_path);
-    match l2_context.cache.put_compressed_with_dictionary(
+    let write_result = match l2_context.cache.put_compressed_with_dictionary(
         &store_key,
         &payload,
         workspace_dictionary.as_ref(),
     ) {
+        Err(crate::cache::pack_l2::PackL2CacheError::Compression { .. }) => {
+            l2_context.cache.put(&store_key, &payload)
+        }
+        Ok(report)
+            if matches!(
+                report.outcome,
+                crate::cache::pack_l2::PackL2WriteOutcome::SkippedTooLarge { .. }
+            ) && workspace_dictionary.is_some() =>
+        {
+            l2_context.cache.put(&store_key, &payload)
+        }
+        other => other,
+    };
+    match write_result {
         Ok(report) => {
             tracing::info!(
                 target: "ee::pack_l2",
@@ -19669,19 +19697,29 @@ where
     }
     let mut index = crate::search::tag_bitmaps::TagBitmapIndex::default();
     let mut has_candidates = false;
+    let track_candidate_tags = !query.excludes().is_empty();
+    let mut candidate_tag_set = std::collections::BTreeSet::new();
     for (idx, tags) in candidate_tags {
         has_candidates = true;
         index.insert(idx, tags.iter().map(String::as_str));
+        if track_candidate_tags {
+            for tag in tags {
+                let normalized = crate::models::canonicalize_tag_filter(tag);
+                if !normalized.is_empty() {
+                    candidate_tag_set.insert(normalized);
+                }
+            }
+        }
     }
     if !has_candidates {
         return None;
     }
-    let prefilter = if !query.excludes().is_empty() {
+    let prefilter = if track_candidate_tags {
         let mut bloom = crate::search::bloom_prefilter::CountingBloomPrefilter::with_capacity(
-            query.excludes().len().max(1),
+            candidate_tag_set.len().max(1),
         );
-        for excluded in query.excludes() {
-            bloom.insert(excluded);
+        for tag in &candidate_tag_set {
+            bloom.insert(tag);
         }
         Some(bloom)
     } else {
@@ -19727,6 +19765,18 @@ mod hot_path_filter_tests {
         assert_eq!(diagnostics.tags, "bitmap");
         assert_eq!(diagnostics.negation_prefilter, "counting_bloom");
         assert_eq!(diagnostics.candidate_count, 2);
+
+        let absent_exclude_filters = TagFilters {
+            require: vec!["Rust".to_string()],
+            require_any: Vec::new(),
+            exclude: vec!["NonExistentTag".to_string()],
+        };
+        let (allowed_absent, _) = hot_path_allowed_candidate_indices(
+            &absent_exclude_filters,
+            rows.iter().map(|(idx, tags)| (*idx, tags.as_slice())),
+        )
+        .expect("non-empty require filters must activate hot_path bitmap index");
+        assert_eq!(allowed_absent, BTreeSet::from([0_u64, 1_u64, 3_u64]));
     }
 
     #[test]

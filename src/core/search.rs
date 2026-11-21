@@ -8735,10 +8735,12 @@ pub(crate) fn pack_search_retrieval_calls_for_test() -> u64 {
 
 /// Run canonical retrieval without a writer. The daemon may finish this after
 /// a disconnected client; only the receiving pack process can persist it.
+#[cfg(test)]
 pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHandoff, SearchError> {
     run_pack_search_with_cached_local_embedder(options, None)
 }
 
+#[cfg(test)]
 pub(crate) fn run_pack_search_with_cached_local_embedder(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,

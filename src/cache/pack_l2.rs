@@ -451,7 +451,18 @@ impl PackL2Cache {
             })?;
         let uncompressed_byte_len = uncompressed.len() as u64;
         let compression_start = Instant::now();
-        let compressed = zstd_compress(&uncompressed, dictionary)?;
+        let compressed = match zstd_compress(&uncompressed, dictionary) {
+            Ok(compressed) => compressed,
+            Err(PackL2CacheError::Compression { .. }) if dictionary.is_some() => {
+                return self.put_compressed_with_dictionary_at_traced(
+                    key,
+                    pack_json,
+                    None,
+                    stored_at_epoch_seconds,
+                );
+            }
+            Err(error) => return Err(error),
+        };
         let compression_latency_ms = elapsed_millis(compression_start.elapsed());
         let compressed_byte_len = compressed.len() as u64;
         let entry = PackL2CacheEntryV2 {
@@ -483,6 +494,14 @@ impl PackL2Cache {
             compression_latency_ms,
         };
         if byte_len > self.options.max_entry_bytes {
+            if dictionary.is_some() {
+                return self.put_compressed_with_dictionary_at_traced(
+                    key,
+                    pack_json,
+                    None,
+                    stored_at_epoch_seconds,
+                );
+            }
             return Ok(PackL2WriteReport {
                 key: key.to_owned(),
                 path,
@@ -1034,6 +1053,9 @@ pub fn load_workspace_compression_dictionary(
 ) -> Option<PackL2CompressionDictionary> {
     let dictionaries_dir =
         super::pack_compression::pack_compression_derived_root(workspace_root).join("dictionaries");
+    if ensure_no_symlink_components(&dictionaries_dir, "inspect_dictionaries").is_err() {
+        return None;
+    }
     let entries = fs::read_dir(&dictionaries_dir).ok()?;
     let mut best: Option<(SystemTime, String, PackL2CompressionDictionary)> = None;
     for entry in entries.flatten() {
@@ -3420,6 +3442,98 @@ mod tests {
             }
             PackL2CacheLookup::Miss(miss) => {
                 return Err(format!("dictionary-compressed entry should hit: {miss:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_workspace_compression_dictionary_rejects_symlinked_dictionaries_dir() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let derived_root =
+            super::super::pack_compression::pack_compression_derived_root(workspace.path());
+        fs::create_dir_all(&derived_root).map_err(|error| error.to_string())?;
+        let real_dicts = outside.path().join("dicts");
+        fs::create_dir_all(&real_dicts).map_err(|error| error.to_string())?;
+        let raw_dict = vec![0x37, 0xA4, 0x30, 0xEC, 1, 2, 3, 4];
+        let hex = blake3::hash(&raw_dict).to_hex().to_string();
+        let dict_id = format!("zstd_dict_{hex}");
+        fs::write(real_dicts.join(format!("{dict_id}.dict")), &raw_dict)
+            .map_err(|error| error.to_string())?;
+
+        symlink(&real_dicts, derived_root.join("dictionaries"))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            load_workspace_compression_dictionary(workspace.path()).is_none(),
+            "symlinked dictionaries directory must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn put_compressed_with_dictionary_falls_back_on_invalid_or_oversized_dictionary() -> TestResult
+    {
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(256 * 1024, Duration::from_secs(60)).with_max_entry_bytes(4096),
+        )?;
+        let pack = json!({
+            "schema": "ee.pack.v2",
+            "pack": "fallback",
+            "items": ["mem_1", "mem_2"],
+        });
+
+        let bad_bytes = b"not-a-valid-zstd-dictionary".to_vec();
+        let bad_dict = PackL2CompressionDictionary {
+            id: format!("zstd_dict_{}", blake3::hash(&bad_bytes).to_hex()),
+            byte_hash: blake3_hash(&bad_bytes),
+            bytes: bad_bytes,
+        };
+        let bad_key = "blake3:bad-dict-fallback";
+        let bad_report = cache
+            .put_compressed_with_dictionary(bad_key, &pack, Some(&bad_dict))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(bad_report.outcome, PackL2WriteOutcome::Stored);
+        assert_eq!(
+            bad_report
+                .compression
+                .as_ref()
+                .and_then(|c| c.dictionary_id.as_deref()),
+            None
+        );
+
+        let oversized_bytes = vec![0x5A; 8192];
+        let oversized_dict = PackL2CompressionDictionary {
+            id: format!("zstd_dict_{}", blake3::hash(&oversized_bytes).to_hex()),
+            byte_hash: blake3_hash(&oversized_bytes),
+            bytes: oversized_bytes,
+        };
+        let oversized_key = "blake3:oversized-dict-fallback";
+        let oversized_report = cache
+            .put_compressed_with_dictionary(oversized_key, &pack, Some(&oversized_dict))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(oversized_report.outcome, PackL2WriteOutcome::Stored);
+        assert_eq!(
+            oversized_report
+                .compression
+                .as_ref()
+                .and_then(|c| c.dictionary_id.as_deref()),
+            None
+        );
+
+        let now = system_time_seconds(SystemTime::now()).map_err(|error| error.to_string())?;
+        for key in [bad_key, oversized_key] {
+            match cache
+                .get_at(key, now.saturating_add(1))
+                .map_err(|error| error.to_string())?
+            {
+                PackL2CacheLookup::Hit(hit) => assert_eq!(hit.pack_json, pack),
+                PackL2CacheLookup::Miss(miss) => {
+                    return Err(format!("fallback entry {key} should hit: {miss:?}"));
+                }
             }
         }
         Ok(())

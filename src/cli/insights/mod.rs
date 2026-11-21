@@ -796,11 +796,24 @@ fn build_registry_section_with_runtime_gate(
         }
     }
 
-    let section = build_registry_section(display_name, builder, workspace, database_path)?;
+    let (section, degraded_signal) = match display_name {
+        "proximityHotspots" => {
+            let (reports, scale_degraded) =
+                load_proximity_hotspot_reports(workspace, database_path)?;
+            (
+                proximity_hotspots_section_from_reports(&reports),
+                scale_degraded.map(|signal| (display_name, signal)),
+            )
+        }
+        _ => (
+            build_registry_section(display_name, builder, workspace, database_path)?,
+            None,
+        ),
+    };
 
     Ok(BuiltSection {
         section,
-        degraded_signal: None,
+        degraded_signal,
     })
 }
 
@@ -860,7 +873,7 @@ fn build_registry_section(
             Ok(load_bearing_memories_section_from_items(&items))
         }
         "proximityHotspots" => {
-            let reports = load_proximity_hotspot_reports(workspace, database_path)?;
+            let (reports, _) = load_proximity_hotspot_reports(workspace, database_path)?;
             Ok(proximity_hotspots_section_from_reports(&reports))
         }
         "revisionFrontiers" => {
@@ -1422,12 +1435,12 @@ fn load_knowledge_skyline(
 fn load_proximity_hotspot_reports(
     workspace: Option<&Path>,
     database_path: Option<&Path>,
-) -> Result<Vec<ProximityHotspotInput>, DomainError> {
+) -> Result<(Vec<ProximityHotspotInput>, Option<DegradationReport>), DomainError> {
     let Some(workspace) = workspace else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     let links = connection
         .list_all_memory_links(None)
@@ -1436,7 +1449,7 @@ fn load_proximity_hotspot_reports(
             repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
 
-    proximity_hotspot_reports_from_links(&links)
+    proximity_hotspot_reports_from_links_with_scale_decision(&links)
 }
 
 fn load_causal_bottleneck_reports(
@@ -1564,16 +1577,23 @@ fn insights_workspace_id(
     .map(|row| row.map(|workspace| workspace.id))
 }
 
+#[cfg(test)]
 fn proximity_hotspot_reports_from_links(
     links: &[StoredMemoryLink],
 ) -> Result<Vec<ProximityHotspotInput>, DomainError> {
+    proximity_hotspot_reports_from_links_with_scale_decision(links).map(|(reports, _)| reports)
+}
+
+fn proximity_hotspot_reports_from_links_with_scale_decision(
+    links: &[StoredMemoryLink],
+) -> Result<(Vec<ProximityHotspotInput>, Option<DegradationReport>), DomainError> {
     if links.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let graph = proximity_graph_from_links(links)?;
     if graph.node_count() < 2 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let scale_decision = crate::graph::scale_policy::graph_scale_decision(
@@ -1585,15 +1605,26 @@ fn proximity_hotspot_reports_from_links(
         scale_decision.action,
         crate::graph::scale_policy::GraphScaleAction::Skip
     ) {
+        let degraded_code = scale_decision
+            .degraded_code
+            .unwrap_or("graph_scale_gomory_hu_skipped");
         tracing::info!(
             target: "ee::insights::scale_policy",
             algorithm = scale_decision.algorithm.as_str(),
             node_count = scale_decision.node_count,
             edge_count = scale_decision.edge_count,
-            degraded_code = scale_decision.degraded_code.unwrap_or("none"),
+            degraded_code,
             "skipping Gomory-Hu proximity tree build above scale threshold"
         );
-        return Ok(Vec::new());
+        return Ok((
+            Vec::new(),
+            Some(DegradationReport {
+                code: degraded_code,
+                severity: "low",
+                message: scale_decision.reason,
+                repair: "ee insights --section knowledgeSkyline --workspace . --json",
+            }),
+        ));
     }
 
     let tree = build_gomory_hu_tree(&graph).map_err(|error| DomainError::Graph {
@@ -1622,7 +1653,7 @@ fn proximity_hotspot_reports_from_links(
             });
         }
     }
-    Ok(reports)
+    Ok((reports, None))
 }
 
 fn bridge_inputs_from_links(
@@ -2449,21 +2480,18 @@ fn pagerank_scores_for_skyline(
 }
 
 fn minhash_fallback_scores(
-    graph: &crate::graph::DiGraph,
+    projection: &crate::graph::MemoryGraphProjection,
     top_k: usize,
 ) -> Result<std::collections::BTreeMap<String, f64>, DomainError> {
-    let policy = crate::graph::minhash_rank::MinHashRankPolicy {
-        top_k: top_k.max(1),
-        ..crate::graph::minhash_rank::MinHashRankPolicy::default()
-    };
-    let ranked = crate::graph::minhash_rank::compute_minhash_rank_with_policy(graph, policy)
-        .map_err(|error| DomainError::Graph {
+    let ranked = crate::graph::compute_minhash_rank_top_k(projection, top_k).map_err(|error| {
+        DomainError::Graph {
             message: format!("Failed to compute minhash-rank fallback scores: {error}"),
             repair: Some(
                 "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
                     .to_owned(),
             ),
-        })?;
+        }
+    })?;
     let total = ranked.scores.len().max(1) as f64;
     Ok(ranked
         .scores
@@ -2494,7 +2522,7 @@ fn pagerank_or_minhash_scores(
                 edge_count = projection.edge_count,
                 "PageRank exceeded budget; falling back to deterministic MinHashRank centrality"
             );
-            minhash_fallback_scores(&projection.graph, projection.node_count)
+            minhash_fallback_scores(projection, projection.node_count)
         }
         Err(error) => Err(DomainError::Graph {
             message: format!("Failed to compute knowledge-skyline PageRank scores: {error}"),
@@ -7392,11 +7420,16 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let reports = proximity_hotspot_reports_from_links(&links)
-            .map_err(|error| format!("unexpected error at scale threshold: {error:?}"))?;
+        let (reports, scale_degraded) =
+            proximity_hotspot_reports_from_links_with_scale_decision(&links)
+                .map_err(|error| format!("unexpected error at scale threshold: {error:?}"))?;
         assert!(
             reports.is_empty(),
             "Gomory-Hu must skip cleanly above GOMORY_HU_SKIP_THRESHOLD_NODES"
+        );
+        assert_eq!(
+            scale_degraded.map(|signal| signal.code),
+            Some("graph_scale_gomory_hu_skipped")
         );
         Ok(())
     }
@@ -7412,7 +7445,16 @@ mod tests {
                 .add_edge(src, "mem_hub")
                 .map_err(|error| format!("add edge: {error}"))?;
         }
-        let scores = minhash_fallback_scores(&graph, 10)
+        let node_count = graph.node_count();
+        let edge_count = graph.edge_count();
+        let projection = crate::graph::MemoryGraphProjection {
+            graph,
+            node_count,
+            edge_count,
+            build_ms: 0.0,
+            snapshot_version: 0,
+        };
+        let scores = minhash_fallback_scores(&projection, 10)
             .map_err(|error| format!("minhash fallback failed: {error:?}"))?;
         let hub_score = scores.get("mem_hub").copied().unwrap_or(0.0);
         let leaf_score = scores.get("mem_a").copied().unwrap_or(0.0);

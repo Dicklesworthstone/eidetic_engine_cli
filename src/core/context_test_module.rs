@@ -12530,6 +12530,7 @@ pub fn unrelated_context() -> u64 {{
         super::push_selected_context_memory_drift_degradations(
             &connection,
             workspace_path,
+            &std::collections::BTreeMap::new(),
             &mut draft,
             &mut degraded,
         );
@@ -12566,6 +12567,151 @@ pub fn unrelated_context() -> u64 {{
                 .map(|item| item.memory_id.to_string())
                 .collect::<Vec<_>>(),
             original_order
+        );
+
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn context_memory_drift_preloaded_memories_skips_global_rows_and_uses_local_rows()
+    -> Result<(), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789033344";
+        let workspace_path = Path::new("/tmp/ee-context-memory-drift-preloaded");
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("context memory drift preloaded".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let local_id = MemoryId::from_uuid(uuid::Uuid::from_u128(3311));
+        let global_id = MemoryId::from_uuid(uuid::Uuid::from_u128(3312));
+        connection
+            .insert_memory(
+                &local_id.to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Local memory with changed provenance.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("file://AGENTS.md#L1".to_string()),
+                    trust_class: TrustClass::AgentAssertion.as_str().to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_verification_status = 'mismatch', provenance_chain_hash = 'blake3:changed' WHERE id = '{}'",
+                local_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let local_stored = connection
+            .get_memory(&local_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "local memory must exist".to_string())?;
+        let mut global_stored = local_stored.clone();
+        global_stored.id = global_id.to_string();
+        global_stored.workspace_id = "wsp_global_9999999999999999999999".to_string();
+        global_stored.provenance_verification_status = Some("missing".to_string());
+
+        let mut preloaded = std::collections::BTreeMap::new();
+        preloaded.insert(local_id.to_string(), local_stored);
+        preloaded.insert(global_id.to_string(), global_stored);
+
+        let make_item =
+            |rank: u32, memory_id: MemoryId, content: &str| -> Result<PackDraftItem, String> {
+                Ok(PackDraftItem {
+                    rank,
+                    memory_id,
+                    section: PackSection::ProceduralRules,
+                    content: content.to_string(),
+                    estimated_tokens: 8,
+                    relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+                    utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+                    proximity_to_seed: None,
+                    score_breakdown: None,
+                    attempt_family_multiplicity: None,
+                    provenance: vec![
+                        PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test source")
+                            .map_err(|error| error.to_string())?,
+                    ],
+                    why: "selected for preloaded drift test".to_string(),
+                    diversity_key: None,
+                    trust: crate::pack::PackTrustSignal::new(TrustClass::AgentAssertion, None),
+                    redactions: Vec::new(),
+                    tombstoned_at: None,
+                    lifecycle: None,
+                    freshness_facets: Vec::new(),
+                    selected_in: PackSelectionPhase::StrictMmr,
+                    evidence_freshness: None,
+                    origin: None,
+                })
+            };
+
+        let budget = TokenBudget::default_context();
+        let mut draft = PackDraft {
+            query: "memory drift preloaded".to_string(),
+            budget,
+            used_tokens: 16,
+            items: vec![
+                make_item(1, local_id, "Local memory with changed provenance.")?,
+                make_item(2, global_id, "Global memory not present in local DB.")?,
+            ],
+            evidence_items: Vec::new(),
+            rule_items: Vec::new(),
+            omitted: Vec::new(),
+            selection_audit: PackSelectionAudit {
+                profile: ContextPackProfile::Balanced,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm_id: "test_preloaded_drift_selection",
+                algorithm_description: "Test-only preloaded context drift selection audit.",
+                candidate_count: 2,
+                selected_count: 2,
+                omitted_count: 0,
+                budget_limit: budget.max_tokens(),
+                budget_used: 16,
+                total_objective_value: 1.0,
+                monotone: false,
+                submodular: false,
+                selected_items: Vec::new(),
+                steps: Vec::new(),
+            },
+            hash: None,
+        };
+
+        let mut degraded = Vec::new();
+        super::push_selected_context_memory_drift_degradations(
+            &connection,
+            workspace_path,
+            &preloaded,
+            &mut draft,
+            &mut degraded,
+        );
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "memory_drift_source_changed");
+        assert!(degraded[0].message.contains(&local_id.to_string()));
+        assert!(!degraded[0].message.contains(&global_id.to_string()));
+        assert_eq!(draft.items[0].freshness_facets.len(), 1);
+        assert_eq!(draft.items[0].freshness_facets[0].freshness, "drifted");
+        assert!(
+            draft.items[1].freshness_facets.is_empty(),
+            "global-store preloaded memory absent from local connection must be skipped"
         );
 
         connection.close().map_err(|error| error.to_string())?;

@@ -124,6 +124,10 @@ pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_f
 pub(crate) const DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE: &str =
     "daemon_cached_local_embedder_unavailable";
 
+/// Error code returned when a client opts into failing fast while startup
+/// search warm-up is still in flight.
+pub const DAEMON_WARMING_CODE: &str = "daemon_warming";
+
 /// Warm-up posture of the daemon's process-cached search stack (GH #37).
 ///
 /// The semantic arm builds a ~500k-piece Unigram tokenizer and materialises a
@@ -2564,6 +2568,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             shutdown,
             &policy.read_pools,
             policy.request_runtime(),
+            Some(policy.search_warm_state.as_ref()),
         ),
         METHOD_SEARCH => dispatch_search_with_runtime(
             request,
@@ -2572,6 +2577,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             &policy.read_pools,
             defer_advisory_until_socket_write,
             policy.request_runtime(),
+            Some(policy.search_warm_state.as_ref()),
         ),
         METHOD_ORIENT_HOOK | METHOD_RECALL => dispatch_memory_read(request),
         METHOD_TELEMETRY => dispatch_telemetry(request),
@@ -2763,6 +2769,8 @@ pub struct DaemonSearchParams {
         skip_serializing_if = "daemon_search_cached_local_not_required"
     )]
     require_cached_local_embedder: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fail_if_warming: bool,
     #[serde(default)]
     include_tombstoned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2811,6 +2819,7 @@ impl DaemonSearchParams {
             explain: options.explain,
             explain_performance,
             require_cached_local_embedder: false,
+            fail_if_warming: false,
             include_tombstoned: options.include_tombstoned,
             as_of: options.as_of.as_ref().map(chrono::DateTime::to_rfc3339),
             include_expired: options.include_expired,
@@ -2830,6 +2839,12 @@ impl DaemonSearchParams {
     #[must_use]
     pub(crate) fn requiring_cached_local_embedder(mut self, required: bool) -> Self {
         self.require_cached_local_embedder = required;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn failing_if_warming(mut self, fail: bool) -> Self {
+        self.fail_if_warming = fail;
         self
     }
 
@@ -4426,12 +4441,13 @@ fn validate_canonical_search_rerank(value: &serde_json::Value) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn dispatch_pack_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     read_pools: &DaemonReadPools,
 ) -> DaemonResponse {
-    dispatch_pack_search_with_runtime(request, shutdown, read_pools, None)
+    dispatch_pack_search_with_runtime(request, shutdown, read_pools, None, None)
 }
 
 fn dispatch_pack_search_with_runtime(
@@ -4439,6 +4455,7 @@ fn dispatch_pack_search_with_runtime(
     shutdown: &AtomicBool,
     read_pools: &DaemonReadPools,
     request_runtime: Option<&asupersync::runtime::Runtime>,
+    search_warm_state: Option<&AtomicU8>,
 ) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_search_params_error(request, "daemon is shutting down");
@@ -4451,6 +4468,7 @@ fn dispatch_pack_search_with_runtime(
         return daemon_search_params_error(request, "authorized workspace_id is missing");
     };
     let require_cached_local = params.require_cached_local_embedder;
+    let fail_if_warming = params.fail_if_warming;
     let (options, kind, filters, _) = match params.into_search_parts(workspace_id) {
         Ok(parts) => parts,
         Err(message) => return daemon_search_params_error(request, &message),
@@ -4467,14 +4485,27 @@ fn dispatch_pack_search_with_runtime(
             "pack filters and agent-specific scope remain local",
         );
     }
+    if fail_if_warming
+        && options.execution_source_mode().uses_embeddings()
+        && search_warm_state
+            .is_some_and(|state| state.load(Ordering::Acquire) == warm_posture::WARMING)
+    {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_WARMING_CODE,
+            "daemon search stack is still warming",
+        );
+    }
     read_pools.retain(&options.resolve_database_path());
-    let loaded = if require_cached_local && options.execution_source_mode().uses_embeddings() {
+    let loaded = if options.execution_source_mode().uses_embeddings() {
         match crate::core::index::already_loaded_local_embedder_for_workspace(
             &options.workspace_path,
             &options.resolve_database_path(),
         ) {
             Ok(Some(loaded)) => Some(loaded),
-            _ => {
+            _ if require_cached_local => {
                 return DaemonResponse::err(
                     request.request_id.clone(),
                     request.agent_id.clone(),
@@ -4483,6 +4514,7 @@ fn dispatch_pack_search_with_runtime(
                     "Read-only pack requires an already-loaded verified local semantic model; use canonical local retrieval or warm the daemon first.",
                 );
             }
+            _ => None,
         }
     } else {
         None
@@ -4516,6 +4548,7 @@ fn dispatch_pack_search_with_runtime(
     }
 }
 
+#[cfg(test)]
 fn dispatch_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
@@ -4530,6 +4563,7 @@ fn dispatch_search(
         read_pools,
         defer_advisory_until_socket_write,
         None,
+        None,
     )
 }
 
@@ -4540,6 +4574,7 @@ fn dispatch_search_with_runtime(
     read_pools: &DaemonReadPools,
     defer_advisory_until_socket_write: bool,
     request_runtime: Option<&asupersync::runtime::Runtime>,
+    search_warm_state: Option<&AtomicU8>,
 ) -> DaemonResponse {
     let daemon_total_start = Instant::now();
     if shutdown.load(Ordering::SeqCst) {
@@ -4559,6 +4594,7 @@ fn dispatch_search_with_runtime(
             "requireCachedLocalEmbedder is supported only by pack retrieval",
         );
     }
+    let fail_if_warming = params.fail_if_warming;
     let Some(authorized_workspace_id) = request.workspace_id.as_deref() else {
         return daemon_search_params_error(
             request,
@@ -4578,6 +4614,19 @@ fn dispatch_search_with_runtime(
         // caller identity is carried into the canonical scope context, a
         // request agent_id must not silently use the daemon's own identity.
         return daemon_search_params_error(request, "agent-specific memory scopes remain local");
+    }
+    if fail_if_warming
+        && options.execution_source_mode().uses_embeddings()
+        && search_warm_state
+            .is_some_and(|state| state.load(Ordering::Acquire) == warm_posture::WARMING)
+    {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_WARMING_CODE,
+            "daemon search stack is still warming",
+        );
     }
     read_pools.retain(&options.resolve_database_path());
     // Reuse an already-loaded, workspace-verified local embedder when present
@@ -9196,6 +9245,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn daemon_fail_if_warming_blocks_only_embedding_requests_while_warming() {
+        let base = serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": "/tmp/ee-daemon-search-contract"
+        });
+        let params = DaemonSearchParams::from_value(&base).expect("compatible request");
+        assert!(!params.fail_if_warming);
+        assert!(
+            serde_json::to_value(&params)
+                .unwrap()
+                .get("failIfWarming")
+                .is_none()
+        );
+        let flagged = params.failing_if_warming(true);
+        assert_eq!(
+            serde_json::to_value(flagged).unwrap()["failIfWarming"],
+            true
+        );
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).expect("create .ee");
+        let database = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("warming-gate".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+
+        let warming_state = AtomicU8::new(warm_posture::WARMING);
+        let ready_state = AtomicU8::new(warm_posture::READY);
+        let shutdown = AtomicBool::new(false);
+        let pools = DaemonReadPools::default();
+        let advisory_session = Mutex::new(SearchAdvisorySession::default());
+
+        for method in [METHOD_SEARCH, METHOD_PACK_SEARCH] {
+            let mut hybrid_req = DaemonRequest::new(
+                "warming-hybrid",
+                TEST_AGENT_ID,
+                method,
+                serde_json::json!({
+                    "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                    "query": "release",
+                    "workspacePath": workspace_path,
+                    "sourceMode": "hybrid",
+                    "speed": "default",
+                    "failIfWarming": true,
+                }),
+            );
+            hybrid_req.workspace_id = Some(workspace_path.display().to_string());
+            let blocked = if method == METHOD_PACK_SEARCH {
+                dispatch_pack_search_with_runtime(
+                    &hybrid_req,
+                    &shutdown,
+                    &pools,
+                    None,
+                    Some(&warming_state),
+                )
+            } else {
+                dispatch_search_with_runtime(
+                    &hybrid_req,
+                    &shutdown,
+                    &advisory_session,
+                    &pools,
+                    false,
+                    None,
+                    Some(&warming_state),
+                )
+            };
+            assert_eq!(
+                blocked.error.as_ref().map(|error| error.code.as_str()),
+                Some(DAEMON_WARMING_CODE),
+                "{method} hybrid request must fail fast while WARMING"
+            );
+
+            for (speed, source_mode) in [("instant", "hybrid"), ("default", "lexical_only")] {
+                let mut non_embedding_req = DaemonRequest::new(
+                    "warming-non-embedding",
+                    TEST_AGENT_ID,
+                    method,
+                    serde_json::json!({
+                        "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                        "query": "release",
+                        "workspacePath": workspace_path,
+                        "sourceMode": source_mode,
+                        "speed": speed,
+                        "failIfWarming": true,
+                    }),
+                );
+                non_embedding_req.workspace_id = Some(workspace_path.display().to_string());
+                let allowed = if method == METHOD_PACK_SEARCH {
+                    dispatch_pack_search_with_runtime(
+                        &non_embedding_req,
+                        &shutdown,
+                        &pools,
+                        None,
+                        Some(&warming_state),
+                    )
+                } else {
+                    dispatch_search_with_runtime(
+                        &non_embedding_req,
+                        &shutdown,
+                        &advisory_session,
+                        &pools,
+                        false,
+                        None,
+                        Some(&warming_state),
+                    )
+                };
+                assert_ne!(
+                    allowed.error.as_ref().map(|error| error.code.as_str()),
+                    Some(DAEMON_WARMING_CODE),
+                    "{method} ({speed}/{source_mode}) must proceed while WARMING"
+                );
+                assert!(allowed.error.is_none(), "{allowed:?}");
+            }
+
+            let mut ready_non_embedding = DaemonRequest::new(
+                "ready-lexical",
+                TEST_AGENT_ID,
+                method,
+                serde_json::json!({
+                    "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                    "query": "release",
+                    "workspacePath": workspace_path,
+                    "sourceMode": "lexical_only",
+                    "speed": "default",
+                    "failIfWarming": true,
+                }),
+            );
+            ready_non_embedding.workspace_id = Some(workspace_path.display().to_string());
+            let ready_resp = if method == METHOD_PACK_SEARCH {
+                dispatch_pack_search_with_runtime(
+                    &ready_non_embedding,
+                    &shutdown,
+                    &pools,
+                    None,
+                    Some(&ready_state),
+                )
+            } else {
+                dispatch_search_with_runtime(
+                    &ready_non_embedding,
+                    &shutdown,
+                    &advisory_session,
+                    &pools,
+                    false,
+                    None,
+                    Some(&ready_state),
+                )
+            };
+            assert!(ready_resp.error.is_none(), "{ready_resp:?}");
+        }
+    }
+
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn daemon_pack_feedback_handoff_tracks_updates_without_writes() {
@@ -9456,6 +9669,7 @@ mod tests {
             &pools,
             false,
             Some(&runtime),
+            None,
         );
         assert!(search_resp.error.is_none(), "{search_resp:?}");
 
@@ -9473,7 +9687,7 @@ mod tests {
         );
         pack_req.workspace_id = Some(workspace_path.display().to_string());
         let pack_resp =
-            dispatch_pack_search_with_runtime(&pack_req, &shutdown, &pools, Some(&runtime));
+            dispatch_pack_search_with_runtime(&pack_req, &shutdown, &pools, Some(&runtime), None);
         assert!(pack_resp.error.is_none(), "{pack_resp:?}");
     }
 
@@ -10870,10 +11084,15 @@ mod tests {
         assert_eq!(capabilities(&restarted)["warm"]["posture"], "cold");
         // A stopped worker's actual shutdown branch may finish after restart.
         // It owns only the old instance, even at the identical socket path.
-        spawn_search_warm_thread(root.to_path_buf(), &ready.shutdown, Arc::clone(&old_state))
-            .expect("stopped-instance warm worker")
-            .join()
-            .expect("stopped-instance worker exits");
+        spawn_search_warm_thread(
+            root.to_path_buf(),
+            &ready.shutdown,
+            Arc::clone(&old_state),
+            None,
+        )
+        .expect("stopped-instance warm worker")
+        .join()
+        .expect("stopped-instance worker exits");
         assert_eq!(
             warm_posture_label(old_state.load(Ordering::Acquire)),
             "cold"

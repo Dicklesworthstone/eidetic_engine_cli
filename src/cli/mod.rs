@@ -10526,6 +10526,10 @@ pub struct NoteArgs {
     #[arg(long = "no-propose-candidates", action = ArgAction::SetTrue)]
     pub no_propose_candidates: bool,
 
+    /// Persist the memory to SQLite immediately and defer Tantivy/semantic index publication.
+    #[arg(long = "defer-index", action = ArgAction::SetTrue)]
+    pub defer_index: bool,
+
     /// Disable note inference and use remember's default episodic/fact classification.
     #[arg(long = "no-infer", action = ArgAction::SetTrue)]
     pub no_infer: bool,
@@ -51333,79 +51337,58 @@ fn search_daemon_response_before(
 ) -> Result<serde_json::Value, DaemonSearchFallbackReason> {
     use crate::daemon::protocol::DaemonRequest;
     use crate::daemon::server::{
-        ClientError, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-        DaemonSearchParams, METHOD_CAPABILITIES, METHOD_PACK_SEARCH, METHOD_SEARCH,
-        client_round_trip_before,
+        ClientError, DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE,
+        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
+        DAEMON_SEARCH_PARAMS_INVALID_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        DAEMON_UNKNOWN_METHOD_CODE, DAEMON_WARMING_CODE, DaemonSearchParams, METHOD_CAPABILITIES,
+        METHOD_PACK_SEARCH, METHOD_SEARCH, client_round_trip_before,
     };
 
     let agent_id = crate::core::memory_scope::current_agent_name()
         .unwrap_or_else(|| "ee-cli-search".to_owned());
-    let capabilities_request = DaemonRequest::new(
-        format!("search-capabilities-{}", std::process::id()),
-        agent_id.clone(),
-        METHOD_CAPABILITIES,
-        serde_json::json!({}),
-    );
-    let capabilities_response =
-        client_round_trip_before(socket_path, &capabilities_request, deadline).map_err(
-            |error| match error {
-                ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
-                ClientError::Connect(_) => DaemonSearchFallbackReason::SocketUnavailable,
-                _ => DaemonSearchFallbackReason::CapabilityRoundTripFailed,
-            },
-        )?;
-    if capabilities_response.error.is_some() {
-        return Err(DaemonSearchFallbackReason::CapabilityMethodError);
-    }
-    let capabilities = capabilities_response
-        .result
-        .as_ref()
-        .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
-    if pack_retrieval {
-        validate_daemon_method_capabilities(
-            capabilities,
-            METHOD_PACK_SEARCH,
-            DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
-        )?;
+    let method = if pack_retrieval {
+        METHOD_PACK_SEARCH
     } else {
-        validate_daemon_search_capabilities(capabilities)?;
-    }
-    // GH #37: semantic requests cannot wait for a tokenizer and embedding
-    // matrix to finish loading inside the bounded attempt window. Lexical and
-    // Instant searches can proceed while model warm-up is still in progress.
-    // A daemon with warm-up disabled reports `cold` and is attempted normally,
-    // because earlier requests may already have loaded its model.
-    if options.execution_source_mode().uses_embeddings()
-        && capabilities
-            .pointer("/warm/posture")
-            .and_then(serde_json::Value::as_str)
-            == Some("warming")
-    {
-        return Err(DaemonSearchFallbackReason::DaemonWarming);
-    }
-
-    let params = DaemonSearchParams::from_search_options(
-        options,
-        kind_filter,
-        field_filters,
-        explain_performance,
-    )
-    .requiring_cached_local_embedder(require_cached_local);
-    let params = serde_json::to_value(params)
-        .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
+        METHOD_SEARCH
+    };
     let workspace_id = options.workspace_path.display().to_string();
-    let mut request = DaemonRequest::new(
-        format!("search-{}", std::process::id()),
-        agent_id,
-        if pack_retrieval {
-            METHOD_PACK_SEARCH
+    let fail_if_warming = options.execution_source_mode().uses_embeddings();
+    let build_search_request = |request_suffix: &str, request_fail_if_warming: bool| {
+        let params = DaemonSearchParams::from_search_options(
+            options,
+            kind_filter,
+            field_filters,
+            explain_performance,
+        )
+        .requiring_cached_local_embedder(require_cached_local)
+        .failing_if_warming(request_fail_if_warming);
+        let params = serde_json::to_value(params)
+            .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
+        let mut request = DaemonRequest::new(
+            format!("search-{request_suffix}-{}", std::process::id()),
+            agent_id.clone(),
+            method,
+            params,
+        );
+        request.workspace_id = Some(workspace_id.clone());
+        Ok::<DaemonRequest, DaemonSearchFallbackReason>(request)
+    };
+    let map_search_error = |code: String| -> DaemonSearchFallbackReason {
+        if code == DAEMON_WARMING_CODE {
+            DaemonSearchFallbackReason::DaemonWarming
+        } else if code == DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE {
+            DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable
         } else {
-            METHOD_SEARCH
-        },
-        params,
-    );
-    request.workspace_id = Some(workspace_id);
+            DaemonSearchFallbackReason::SearchMethodError(code)
+        }
+    };
+
+    // GH #37: semantic requests cannot wait for a tokenizer and embedding
+    // matrix to finish loading inside the bounded attempt window. Send the
+    // query directly in 1 RTT with `failIfWarming` when embeddings are needed,
+    // and only fall back to `ee.daemon.capabilities` + retry if an older
+    // daemon rejects the new field/method contract.
+    let request = build_search_request("primary", fail_if_warming)?;
     let response =
         client_round_trip_before(socket_path, &request, deadline).map_err(|error| match error {
             ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
@@ -51413,13 +51396,70 @@ fn search_daemon_response_before(
             _ => DaemonSearchFallbackReason::SearchRoundTripFailed,
         })?;
     if let Some(error) = response.error {
-        return Err(
-            if error.code == crate::daemon::server::DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE {
-                DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable
-            } else {
-                DaemonSearchFallbackReason::SearchMethodError(error.code)
-            },
+        let legacy_fail_if_warming_rejected = fail_if_warming
+            && matches!(
+                error.code.as_str(),
+                DAEMON_SEARCH_PARAMS_INVALID_CODE
+                    | DAEMON_UNKNOWN_METHOD_CODE
+                    | DAEMON_REQUEST_SCHEMA_MISMATCH_CODE
+            );
+        if !legacy_fail_if_warming_rejected {
+            return Err(map_search_error(error.code));
+        }
+
+        let capabilities_request = DaemonRequest::new(
+            format!("search-capabilities-{}", std::process::id()),
+            agent_id.clone(),
+            METHOD_CAPABILITIES,
+            serde_json::json!({}),
         );
+        let capabilities_response =
+            client_round_trip_before(socket_path, &capabilities_request, deadline).map_err(
+                |error| match error {
+                    ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+                    ClientError::Connect(_) => DaemonSearchFallbackReason::SocketUnavailable,
+                    _ => DaemonSearchFallbackReason::CapabilityRoundTripFailed,
+                },
+            )?;
+        if capabilities_response.error.is_some() {
+            return Err(DaemonSearchFallbackReason::CapabilityMethodError);
+        }
+        let capabilities = capabilities_response
+            .result
+            .as_ref()
+            .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
+        if pack_retrieval {
+            validate_daemon_method_capabilities(
+                capabilities,
+                METHOD_PACK_SEARCH,
+                DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+            )?;
+        } else {
+            validate_daemon_search_capabilities(capabilities)?;
+        }
+        if fail_if_warming
+            && capabilities
+                .pointer("/warm/posture")
+                .and_then(serde_json::Value::as_str)
+                == Some("warming")
+        {
+            return Err(DaemonSearchFallbackReason::DaemonWarming);
+        }
+
+        let retry_request = build_search_request("retry", false)?;
+        let retry_response = client_round_trip_before(socket_path, &retry_request, deadline)
+            .map_err(|error| match error {
+                ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+                ClientError::Connect(_) => DaemonSearchFallbackReason::SocketUnavailable,
+                _ => DaemonSearchFallbackReason::SearchRoundTripFailed,
+            })?;
+        if let Some(retry_error) = retry_response.error {
+            return Err(map_search_error(retry_error.code));
+        }
+        return retry_response
+            .result
+            .ok_or(DaemonSearchFallbackReason::SearchResultMissing);
     }
     response
         .result
@@ -60019,7 +60059,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         workflow: args.workflow.clone(),
         no_auto_link: args.no_auto_link,
         no_propose_candidates: args.no_propose_candidates,
-        defer_index: false,
+        defer_index: args.defer_index,
         confidence: args.confidence,
         source: args.source.clone(),
         global: false,
@@ -96281,6 +96321,32 @@ mod tests {
     }
 
     #[test]
+    fn triad_note_supports_defer_index_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "note",
+            "Always run cargo fmt before release.",
+            "--defer-index",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse note --defer-index: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Note(ref args)) => {
+                ensure_equal(&args.defer_index, &true, "note defer_index flag")?;
+                let remember_args = super::note_to_remember_args(args);
+                ensure_equal(
+                    &remember_args.defer_index,
+                    &true,
+                    "note forwards defer_index to remember",
+                )?;
+                ensure_equal(&remember_args.dry_run, &true, "dry_run")
+            }
+            _ => Err("expected Note command".to_string()),
+        }
+    }
+
+    #[test]
     fn experimental_triad_note_infers_rule_and_allows_overrides() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -98664,9 +98730,9 @@ mod tests {
     fn daemon_warming_only_blocks_requests_that_need_embeddings() -> TestResult {
         use crate::daemon::protocol::{DaemonResponse, read_request, write_response};
         use crate::daemon::server::{
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_CAPABILITIES, METHOD_PACK_SEARCH,
-            METHOD_SEARCH,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_PARAMS_INVALID_CODE,
+            DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_WARMING_CODE,
+            METHOD_CAPABILITIES, METHOD_PACK_SEARCH, METHOD_SEARCH,
         };
         use std::os::unix::net::{UnixListener, UnixStream};
         use std::time::{Duration, Instant};
@@ -98731,63 +98797,58 @@ mod tests {
                     } else {
                         METHOD_SEARCH
                     };
-                    let response_schema = if pack_retrieval {
-                        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
-                    } else {
-                        DAEMON_SEARCH_RESPONSE_SCHEMA_V4
-                    };
-                    let mut capabilities_stream = accept_before(&listener, deadline)?;
-                    let request = read_request(&mut capabilities_stream)
-                        .map_err(|error| error.to_string())?;
-                    ensure_equal(
-                        &request.method.as_str(),
-                        &METHOD_CAPABILITIES,
-                        "warming daemon capability method",
-                    )?;
-                    let response = DaemonResponse::ok(
-                        request.request_id,
-                        request.agent_id,
-                        request.workspace_id,
-                        serde_json::json!({
-                            "protocol": "ee.daemon",
-                            "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
-                            "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
-                            "methods": [method],
-                            "authorization": {(method): "same_uid_workspace"},
-                            "method_schemas": {
-                                (method): {
-                                    "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                                    "response": response_schema
-                                }
-                            },
-                            "warm": {"posture": "warming"}
-                        }),
-                    );
-                    write_response(&mut capabilities_stream, &response)
-                        .map_err(|error| error.to_string())?;
-                    if !should_dispatch {
-                        return Ok(());
-                    }
                     let mut search_stream = accept_before(&listener, deadline)?;
                     let request =
                         read_request(&mut search_stream).map_err(|error| error.to_string())?;
                     ensure_equal(
                         &request.method.as_str(),
                         &method,
-                        "warming daemon retrieval method",
+                        "single-RTT warming daemon retrieval method",
                     )?;
                     ensure_equal(
                         &request.params["sourceMode"].as_str(),
                         &Some(source_mode.as_str()),
                         "requested source mode remains on the wire",
                     )?;
-                    let response = DaemonResponse::ok(
-                        request.request_id,
-                        request.agent_id,
-                        request.workspace_id,
-                        serde_json::json!({"served_during_warmup": true}),
-                    );
-                    write_response(&mut search_stream, &response).map_err(|error| error.to_string())
+                    if should_dispatch {
+                        ensure(
+                            request.params.get("failIfWarming").is_none(),
+                            "non-embedding request must omit failIfWarming",
+                        )?;
+                        let response = DaemonResponse::ok(
+                            request.request_id,
+                            request.agent_id,
+                            request.workspace_id,
+                            serde_json::json!({"served_during_warmup": true}),
+                        );
+                        write_response(&mut search_stream, &response)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        ensure_equal(
+                            &request
+                                .params
+                                .get("failIfWarming")
+                                .and_then(serde_json::Value::as_bool),
+                            &Some(true),
+                            "embedding request must send failIfWarming=true on RTT #1",
+                        )?;
+                        let response = DaemonResponse::err(
+                            request.request_id,
+                            request.agent_id,
+                            request.workspace_id,
+                            DAEMON_WARMING_CODE,
+                            "daemon search stack is still warming",
+                        );
+                        write_response(&mut search_stream, &response)
+                            .map_err(|error| error.to_string())?;
+                        ensure(
+                            matches!(
+                                listener.accept(),
+                                Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
+                            ),
+                            "single-RTT daemon_warming must not issue a follow-up capabilities RPC",
+                        )
+                    }
                 });
                 let options = SearchOptions {
                     workspace_path: temp.path().to_path_buf(),
@@ -98829,6 +98890,113 @@ mod tests {
                 };
                 ensure_equal(&result, &expected, "model warm-up request admission")?;
             }
+
+            // Legacy daemon compatibility: older daemon rejects `failIfWarming` with
+            // `daemon_search_params_invalid`; client falls back to `ee.daemon.capabilities`
+            // and reports `DaemonWarming` when `/warm/posture == "warming"`.
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let socket_path = temp.path().join("legacy-warming-daemon.sock");
+            let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|error| error.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let server = std::thread::spawn(move || -> TestResult {
+                let method = if pack_retrieval {
+                    METHOD_PACK_SEARCH
+                } else {
+                    METHOD_SEARCH
+                };
+                let response_schema = if pack_retrieval {
+                    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
+                } else {
+                    DAEMON_SEARCH_RESPONSE_SCHEMA_V4
+                };
+                let mut first_stream = accept_before(&listener, deadline)?;
+                let first_request =
+                    read_request(&mut first_stream).map_err(|error| error.to_string())?;
+                ensure_equal(
+                    &first_request.method.as_str(),
+                    &method,
+                    "legacy warming RTT #1 attempts search directly",
+                )?;
+                let reject = DaemonResponse::err(
+                    first_request.request_id,
+                    first_request.agent_id,
+                    first_request.workspace_id,
+                    DAEMON_SEARCH_PARAMS_INVALID_CODE,
+                    "unknown field `failIfWarming`",
+                );
+                write_response(&mut first_stream, &reject).map_err(|error| error.to_string())?;
+
+                let mut capabilities_stream = accept_before(&listener, deadline)?;
+                let cap_request =
+                    read_request(&mut capabilities_stream).map_err(|error| error.to_string())?;
+                ensure_equal(
+                    &cap_request.method.as_str(),
+                    &METHOD_CAPABILITIES,
+                    "legacy warming daemon capability method",
+                )?;
+                let cap_response = DaemonResponse::ok(
+                    cap_request.request_id,
+                    cap_request.agent_id,
+                    cap_request.workspace_id,
+                    serde_json::json!({
+                        "protocol": "ee.daemon",
+                        "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
+                        "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
+                        "methods": [method],
+                        "authorization": {(method): "same_uid_workspace"},
+                        "method_schemas": {
+                            (method): {
+                                "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                                "response": response_schema
+                            }
+                        },
+                        "warm": {"posture": "warming"}
+                    }),
+                );
+                write_response(&mut capabilities_stream, &cap_response)
+                    .map_err(|error| error.to_string())
+            });
+            let options = SearchOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+                query: "release".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Default,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: None,
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::Hybrid,
+                strict_source_mode: false,
+                memory_scope: MemoryScope::Swarm,
+                strict_scope: false,
+            };
+            let result = super::search_daemon_response_before(
+                &socket_path,
+                &options,
+                None,
+                &[],
+                false,
+                pack_retrieval,
+                pack_retrieval,
+                deadline,
+            );
+            server
+                .join()
+                .map_err(|_| "legacy warming daemon thread panicked".to_owned())??;
+            ensure_equal(
+                &result,
+                &Err(DaemonSearchFallbackReason::DaemonWarming),
+                "legacy warming daemon fallback",
+            )?;
         }
         Ok(())
     }
@@ -98872,13 +99040,37 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&socket_path)
             .map_err(|error| error.to_string())?;
         let server = std::thread::spawn(move || -> TestResult {
+            let (mut initial_stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let initial_request = read_request(&mut initial_stream)?;
+            ensure_equal(
+                &initial_request.method.as_str(),
+                &crate::daemon::server::METHOD_SEARCH,
+                "first RTT attempts search directly with failIfWarming",
+            )?;
+            ensure_equal(
+                &initial_request
+                    .params
+                    .get("failIfWarming")
+                    .and_then(serde_json::Value::as_bool),
+                &Some(true),
+                "first RTT sends failIfWarming=true",
+            )?;
+            let reject_response = crate::daemon::protocol::DaemonResponse::err(
+                initial_request.request_id,
+                initial_request.agent_id,
+                initial_request.workspace_id,
+                crate::daemon::server::DAEMON_SEARCH_PARAMS_INVALID_CODE,
+                "unknown field `failIfWarming`",
+            );
+            write_response(&mut initial_stream, &reject_response)?;
+
             let (mut capabilities_stream, _) =
                 listener.accept().map_err(|error| error.to_string())?;
             let capabilities_request = read_request(&mut capabilities_stream)?;
             ensure_equal(
                 &capabilities_request.method.as_str(),
                 &crate::daemon::server::METHOD_CAPABILITIES,
-                "first daemon search phase",
+                "legacy fallback capability negotiation phase",
             )?;
             std::thread::sleep(std::time::Duration::from_millis(200));
             let capabilities_response = crate::daemon::protocol::DaemonResponse::ok(
@@ -98908,7 +99100,11 @@ mod tests {
             ensure_equal(
                 &search_request.method.as_str(),
                 &crate::daemon::server::METHOD_SEARCH,
-                "second daemon search phase",
+                "legacy retry search phase",
+            )?;
+            ensure(
+                search_request.params.get("failIfWarming").is_none(),
+                "legacy retry must omit failIfWarming",
             )?;
             std::thread::sleep(std::time::Duration::from_millis(700));
             Ok(())
@@ -98954,6 +99150,46 @@ mod tests {
         ensure(
             elapsed < std::time::Duration::from_millis(700),
             "successful capability negotiation must not grant a fresh search timeout",
+        )?;
+
+        // Also verify single-RTT deadline enforcement without legacy fallback.
+        let single_socket = temp.path().join("slow-single-rtt.sock");
+        let single_listener = std::os::unix::net::UnixListener::bind(&single_socket)
+            .map_err(|error| error.to_string())?;
+        let single_server = std::thread::spawn(move || -> TestResult {
+            let (mut stream, _) = single_listener
+                .accept()
+                .map_err(|error| error.to_string())?;
+            let request = read_request(&mut stream)?;
+            ensure_equal(
+                &request.method.as_str(),
+                &crate::daemon::server::METHOD_SEARCH,
+                "single-RTT slow daemon request",
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            Ok(())
+        });
+        let single_started = std::time::Instant::now();
+        let single_result = super::search_via_daemon_before(
+            &single_socket,
+            &options,
+            None,
+            &[],
+            false,
+            single_started + std::time::Duration::from_millis(250),
+        );
+        let single_elapsed = single_started.elapsed();
+        single_server
+            .join()
+            .map_err(|_| "single-RTT slow daemon thread panicked".to_owned())??;
+        ensure_equal(
+            &single_result,
+            &Err(DaemonSearchFallbackReason::DeadlineExceeded),
+            "single-RTT daemon search deadline",
+        )?;
+        ensure(
+            single_elapsed < std::time::Duration::from_millis(500),
+            "single-RTT search must abort at the caller deadline",
         )
     }
 
