@@ -802,6 +802,12 @@ name = "Open-Coded Success Baseline Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+[[stage]]
+name = "Doc-Governance Invariants Contract"
+# Pure Python doc-governance check (1azkt.78); sub-100ms, floored at 1s.
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 # The two jq-vacuity stages (bd-9h1z5, 2026-10-22). Two seconds declared for a
 # pair of scans measured at 0.08s and 0.11s, following the convention of the
 # group above: a sub-second static check declares 1s.
