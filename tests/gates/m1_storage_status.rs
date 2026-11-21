@@ -8,7 +8,7 @@
 //! - Lock-contention behavior
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value as JsonValue;
 

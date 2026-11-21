@@ -1,4 +1,4 @@
-use std::process::{Command, Output};
+use std::process::Output;
 
 use chrono::DateTime;
 use ee::obs::{LOG_ENVELOPE_SCHEMA_V1, LogEnvelope};

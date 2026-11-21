@@ -5,7 +5,7 @@
 //! safety-critical contract that resource-admission advice is advisory only and
 //! cannot authorize claims or destructive follow-up commands.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 

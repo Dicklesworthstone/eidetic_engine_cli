@@ -127,7 +127,7 @@ fsqlite = { version = "=0.4.10", default-features = false, features = ["json"] }
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 getrandom = { version = "0.4.2" }
-zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.9.2", default-features = false, features = ["alloc"] }
 regex-lite = { version = "0.1" }
 # Direct libc remains available for low-level platform adapters; daemon gates
 # use safe wrappers in source to keep the crate-level unsafe-code ban intact.
@@ -633,3 +633,6 @@ while_let_loop = "allow"
 [[test]]
 name = "session_arc_learning_cli"
 path = "tests/session_arc_learning_cli.rs"
+
+[profile.release]
+opt-level = 3

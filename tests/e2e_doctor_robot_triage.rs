@@ -4,7 +4,7 @@
 //! Clap routing, JSON stdout discipline, and the agent-facing triage contract
 //! stay wired together.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 

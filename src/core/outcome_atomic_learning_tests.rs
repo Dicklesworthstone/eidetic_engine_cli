@@ -945,10 +945,11 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
     );
     assert_eq!(fixture.persisted_feedback_state(), before);
 
-    fixture
-        .db
+    let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+    cleanup
         .execute_raw("DROP TRIGGER reject_memory_index")
         .unwrap();
+    cleanup.close().unwrap();
     assert_eq!(
         record_outcome(&options).unwrap().status,
         OutcomeRecordStatus::Recorded
@@ -1163,10 +1164,11 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
         Some(profile_before)
     );
 
-    fixture
-        .db
+    let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+    cleanup
         .execute_raw("DROP TRIGGER reject_agent_profile_audit")
         .unwrap();
+    cleanup.close().unwrap();
     let recorded = record_outcome(&options).unwrap();
     assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
     let jobs = fixture.assert_pending_memory_jobs(1);

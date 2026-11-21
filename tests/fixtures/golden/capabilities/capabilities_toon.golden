@@ -1427,7 +1427,7 @@ data:
         package: tru
         version: 0.2.4
         sourceKind: registry
-      path: "https://crates.io/crates/tru"
+        path: "https://crates.io/crates/tru"
         defaultFeatures: false
       supportedOutputProfiles[4]: minimal,summary,standard,full
       defaultFormatEnv: TOON_DEFAULT_FORMAT

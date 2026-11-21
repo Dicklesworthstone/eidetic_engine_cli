@@ -22,7 +22,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{Value, json};
 

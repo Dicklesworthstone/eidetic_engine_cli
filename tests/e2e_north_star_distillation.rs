@@ -25,7 +25,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use ee::db::{CreateEvidenceSpanInput, DbConnection, EvidenceProducerKind, SearchIndexJobStatus};
 use serde_json::Value as JsonValue;

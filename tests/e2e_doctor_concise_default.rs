@@ -4,7 +4,7 @@
 //! binary so Clap routing, stdout/stderr discipline, and the concise/full JSON
 //! split stay wired together.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::{Value, json};
 

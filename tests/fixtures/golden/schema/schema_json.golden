@@ -61,6 +61,7 @@
         },
         "message": { "type": "string" },
         "repair": { "type": "string" },
+        "repairCommand": { "type": "string" },
         "repairKind": {
           "type": "string",
           "enum": ["actionable", "template", "placeholder", "unknown", "empty"]

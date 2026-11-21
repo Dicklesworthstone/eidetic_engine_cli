@@ -1509,7 +1509,6 @@ mod tests {
                                 prefetch_top_k: Some(1),
                                 prefetch_budget_ms: Some(5_000),
                                 similarity_threshold: Some(0.0),
-                                ..SwarmAdaptiveConfig::default()
                             }
                         });
                     Ok((tickets, false))
@@ -1599,7 +1598,7 @@ mod tests {
         assert_eq!(cool_decision.degraded_code, None);
         drop(state);
 
-        let mut srr5_cool_us = vec![warm_hit_1_us, warm_hit_2_us];
+        let mut srr5_cool_us = [warm_hit_1_us, warm_hit_2_us];
         srr5_cool_us.sort_unstable();
         let cool_p50_us = srr5_cool_us[0];
         let cool_p95_us = *srr5_cool_us.last().unwrap_or(&1);

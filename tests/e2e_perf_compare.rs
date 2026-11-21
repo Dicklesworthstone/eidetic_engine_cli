@@ -6,7 +6,7 @@
 //! NO MOCKS. Real ee binary, real fixture files.
 
 use std::fmt::Debug;
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 

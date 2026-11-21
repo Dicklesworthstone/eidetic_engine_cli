@@ -1,5 +1,33 @@
 # Dependency Upgrade Log
 
+## 2026-11-21 — v0.19.0 release dependency refresh
+
+Registry dependencies in `Cargo.toml`, `Cargo.lock`, and `fuzz/Cargo.lock` were refreshed to the latest compatible stable releases under the pinned `nightly-2026-08-31` toolchain while preserving all coordinated franken-stack pins and load-bearing forbidden-dependency caps.
+
+- **Security vulnerability remediation (`cargo audit`: 12 -> 0 vulnerabilities on both `Cargo.lock` and `fuzz/Cargo.lock`):**
+  - `zstd`: `0.14.0 -> 0.14.4` and transitive `0.13.3 -> 0.13.5` (RUSTSEC-2026-0391)
+  - `zstd-safe`: `8.0.0 -> 8.3.0` and transitive `7.3.0 -> 7.4.1` (RUSTSEC-2026-0396..0405)
+  - `zstd-sys`: `2.1.0+zstd.1.5.7 -> 2.1.3+zstd.1.5.7` (RUSTSEC-2026-0410)
+  - `pulldown-cmark` (dev): `0.13.4 -> 0.13.6` (RUSTSEC-2026-0414, RUSTSEC-2026-0433)
+  - `rustls-webpki`: `0.103.15 -> 0.103.17` (RUSTSEC-2026-0382)
+  - `webpki-roots`: `1.0.9 -> 1.0.12` (RUSTSEC-2026-0381)
+  - `ctutils`: `0.4.3 -> 0.4.8` (RUSTSEC-2026-0385)
+- **Direct & compatible dependency bumps:**
+  - `zeroize`: `=1.9.0 -> =1.9.2`
+  - `clap`: `4.6.7 -> 4.6.9`, `clap_complete`: `4.6.11 -> 4.6.12`
+  - `libc`: `0.2.190 -> 0.2.191`, `proptest`: `1.11.0 -> 1.12.0`
+  - `serde_json`: `1.0.151 -> 1.0.154`, `sha2`: `0.11.0 -> 0.11.1`
+  - `signal-hook`: `0.4.5 -> 0.4.6`, `toml_edit`: `0.25.16 -> 0.25.20`
+  - `unicode-normalization`: `0.1.25 -> 0.1.26`, `uuid`: `1.27.0 -> 1.29.3`
+  - `fuzz/Cargo.lock` synchronized in lockstep (`./scripts/check-forbidden-deps.sh --strict-fuzz-lock --json` passes with `root.status = "audited"` and `fuzz.status = "audited"`).
+- **Intentionally preserved pins:**
+  - Coordinated franken-stack pins (`asupersync =0.5.0`, `fsqlite =0.4.10` whole family, `sqlmodel-core/=frankensqlite =0.5.0`, `frankensearch =0.7.1`, `franken-agent-detection =0.3.8`, `tru =0.2.4`, `fnx-* =0.3.0` per GH #73 / `bd-lrymw`).
+  - `arc-swap =1.9.2` (required `=1.9.2` by `frankensearch-index 0.4.0`).
+  - `rustix 1.1.5` (required `=1.1.5` by `frankensearch-index 0.4.0`; `RUSTSEC-2026-0486` unsound warning remains upstream-constrained).
+  - `wasm-bindgen-futures >=0.4, <0.4.79` cap (blocks transitive `tokio`, `bd-iuybr`).
+  - `lru 0.16.4` (`RUSTSEC-2026-0253`, GH #40 — upstream-constrained by `tantivy 0.26.2`).
+  - `roaring 0.11.5` (`0.12.0` is a pre-1.0 major bump introducing `fearless_simd` / `fearless_simd_macros`).
+
 ## 2026-10-07 — verified smaller Model2Vec selections (#51)
 
 - **Frankensearch 0.6.1 -> 0.7.1.** Published source

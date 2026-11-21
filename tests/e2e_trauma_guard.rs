@@ -5,7 +5,7 @@
 //! then `ee preflight check` must surface it without denying the command.
 
 use std::fmt::Debug;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 

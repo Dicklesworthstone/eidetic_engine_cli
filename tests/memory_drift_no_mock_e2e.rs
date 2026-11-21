@@ -9,7 +9,6 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::db::{CreatePackItemInput, CreatePackRecordInput, DbConnection, StoredMemory};

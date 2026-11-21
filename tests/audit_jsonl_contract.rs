@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use chrono::DateTime;
 use ee::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection};

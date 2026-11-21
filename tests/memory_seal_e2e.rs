@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use ee::db::DbConnection;
 use ee::models::MEMORY_SEAL_PLACEHOLDER_CONTENT;

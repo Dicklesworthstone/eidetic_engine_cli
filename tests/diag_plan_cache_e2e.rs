@@ -5,7 +5,7 @@
 //! standard JSON response envelope.
 
 use serde_json::Value as JsonValue;
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 

@@ -11,7 +11,7 @@ use ee::search::SearchHotsetEntry;
 use serde_json::{Value as JsonValue, json};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
