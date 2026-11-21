@@ -15,8 +15,8 @@
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.sh -o "$f"
-export EE_VERSION=v0.18.0
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.19.0/install.sh -o "$f"
+export EE_VERSION=v0.19.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
@@ -346,9 +346,9 @@ Hard constraints. CI fails if any of them break.
 
 | Path | Status | Provenance | Tracking |
 |---|---|---|---|
-| GitHub release installer | available; latest published tag is v0.18.0 | SHA-256 required; v0.18.0 also publishes a minisign `.minisig` per archive. SLSA provenance JSON and its Sigstore bundle are still not published, so `--require-provenance` fails by design | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; formula version 0.18.0 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | available; package `eidetic-engine` 0.18.0; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
+| GitHub release installer | available; latest published tag is v0.19.0 | SHA-256 required; v0.19.0 also publishes a minisign `.minisig` per archive. SLSA provenance JSON and its Sigstore bundle are still not published, so `--require-provenance` fails by design | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | available; formula version 0.19.0 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | available; package `eidetic-engine` 0.19.0; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
 | Source build | available now | local build only | this README |
 
 When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
@@ -366,12 +366,12 @@ for systems without glibc.
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.sh -o "$f"
-export EE_VERSION=v0.18.0
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.19.0/install.sh -o "$f"
+export EE_VERSION=v0.19.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
-This fetches the installer and the matching `v0.18.0` release binary from GitHub
+This fetches the installer and the matching `v0.19.0` release binary from GitHub
 release assets, not from mutable `main`. To install a different published tag,
 change both the URL path and `EE_VERSION`.
 
@@ -424,11 +424,11 @@ compatible GNU build when that release does not include musl.
 
 ```powershell
 $f = Join-Path $env:TEMP 'install-ee.ps1'
-Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.ps1" -OutFile $f
-if (Test-Path $f) { & $f -Version "0.18.0" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
+Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.19.0/install.ps1" -OutFile $f
+if (Test-Path $f) { & $f -Version "0.19.0" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
 ```
 
-This pins both the installer script and the installed binary to the `v0.18.0`
+This pins both the installer script and the installed binary to the `v0.19.0`
 release assets. The mutable-`main` jsDelivr / `raw.githubusercontent.com`
 fallback remains for installer-script development only:
 
@@ -478,10 +478,10 @@ brew install Dicklesworthstone/tap/ee
 
 Use nightly Rust and the published lockfile. Version 0.15.1 has a read-only
 storage regression affecting native reranking and concurrent writes; install
-0.18.0, or any version after 0.15.1, from the registry:
+0.19.0, or any version after 0.15.1, from the registry:
 
 ```bash
-cargo +nightly install eidetic-engine --version 0.18.0 --locked
+cargo +nightly install eidetic-engine --version 0.19.0 --locked
 ```
 
 A `cargo install` build does not run `build.rs` (crates.io excludes it from the
@@ -3580,7 +3580,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.18.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.19.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
 | Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.82` (successor to closed `bd-reality-core-convergence-1azkt.15`) as an upstream dependency blocker. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |

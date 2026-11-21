@@ -25,24 +25,27 @@ checked-in Beads records. The durable research ledger is
 | 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh. |
 | 2026-09-26 → 2026-10-02 | **`0.17.0`** retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6. |
 | 2026-10-02 → 2026-10-14 | **`0.18.0`** readable CASS evidence and failure-to-fix recall, incremental index publication again, rules and evidence ranked with memories in packs, 0.17.0 imports keep refreshing (#70), FrankenSQLite 0.4.10, Frankensearch 0.7.1. |
+| 2026-10-14 → 2026-11-21 | **`0.19.0`** keyed CASS commitments (#71), workspace-only filesystem boundaries (`EE_FS_BOUNDARY`, #88), daemon retrieval transparency and warm pack reuse (#87), honest reranker attestation metadata (#76), unified capability/dependency metadata (#74), native Go/Rust/Vitest/Jest failure-to-fix recall, strict fuzz lock verification (#75), live user-global seal admission fix, and security dependency updates (`cargo audit` 12 → 0). |
 
-Release surface (as of 2026-10-14):
+Release surface (as of 2026-11-21):
 
-- Latest **published** GitHub Release: [`v0.18.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.18.0) (2026-10-14), with platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers (`install.sh`, `install.ps1`), `SHA256SUMS`, and `SHA256SUMS.minisig` (no `manifest.json` build manifest, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design).
+- Latest **published** GitHub Release: [`v0.19.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.19.0) (2026-11-21), with platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers (`install.sh`, `install.ps1`), `SHA256SUMS`, and `SHA256SUMS.minisig` (no `manifest.json` build manifest, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design).
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- [`eidetic-engine 0.18.0`](https://crates.io/crates/eidetic-engine/0.18.0)
+- [`eidetic-engine 0.19.0`](https://crates.io/crates/eidetic-engine/0.19.0)
   is published on crates.io. Its complete dependency graph resolves from the
   registry without sibling checkouts or Cargo patches.
-- Distribution paths: verified GitHub release installers and
-  `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  serves `0.18.0`). Cargo users should install `0.18.0` (earlier `0.15.1` had a
-  read-only WAL regression superseded in `0.15.2`). See
+- Distribution paths: verified GitHub release installers,
+  `brew install Dicklesworthstone/tap/ee` (formula refreshed by hand and
+  serves `0.19.0`), Scoop (`ee.json` serves `0.19.0`), and ACFS. Cargo users
+  should install `0.19.0` (earlier `0.15.1` had a read-only WAL regression
+  superseded in `0.15.2`). See
   [the dependency update record](UPGRADE_LOG.md#cratesio-publication-follow-through).
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
+| [0.19.0](#0190---2026-11-21) | 2026-11-21 | yes | Keyed CASS commitments (#71), `EE_FS_BOUNDARY` (#88), daemon `servingPath`/`retrievalPath` and warm pack reuse (#87), honest reranker attestation (#76), unified capabilities (#74), native Go/Rust/Vitest/Jest error recall, strict fuzz lock checks, security dep updates (`cargo audit` 12 → 0) |
 | [0.18.0](#0180---2026-10-14) | 2026-10-14 | yes | Readable CASS evidence and failure-to-fix recall, incremental index publication, rules and evidence ranked with memories, 0.17.0 refresh compatibility (#70), FrankenSQLite 0.4.10, Frankensearch 0.7.1 |
 | [0.17.0](#0170---2026-10-02) | 2026-10-02 | yes | Retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6 |
 | [0.16.0](#0160---2026-09-26) | 2026-09-26 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission, backups that keep ids by default |
@@ -77,26 +80,136 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-21
+
+Covers `v0.18.0..8e155f41b`: 1,647 commits (1,634 non-merge: 139 features, 489
+fixes, 51 performance changes, 161 test suites/hardening commits, 102 docs, 567
+tracker bookkeeping), including the 2026-11-21 security dependency updates
+(`cargo audit` 12 → 0), live user-global seal admission fix, and release-wave
+contract hardening.
+
+### Upgrade notes
+
+- **Forward-only migrations V132–V133:** `pack_rule_failure_sections` (V132,
+  rebuilding `pack_rule_items` to admit learned anti-pattern rules into the
+  reserved `failures` section alongside `procedural_rules`) and
+  `memory_code_anchor_sources` (V133, adding durable validated path/symbol
+  anchor bindings with workspace-generation triggers). There is no
+  down-migration: once a `0.19.0` command migrates a store, `0.18.0` reports it
+  as requiring migration. Run `ee backup create` first if you may need `0.18.0`
+  again.
+- **No forced full reindex from `0.18.0`:** the FrankenSQLite (`0.4.10`) and
+  Frankensearch (`0.7.1`) pins are unchanged from `0.18.0`. Existing `0.18.0`
+  stores only need `ee migrate run --workspace . --json` (which commands run
+  automatically on write paths).
+- **CASS source commitments (#71):** newly imported CASS lines write keyed
+  BLAKE3 commitments protected by the store authentication root rather than
+  unsalted raw content hashes. Existing `0.18.0` imports remain readable and
+  continue refreshing cleanly.
+- **Release optimization profile:** `[profile.release]` now explicitly pins
+  `opt-level = 3` in `Cargo.toml`.
+
+### Security
+
+- **Zero `cargo audit` advisories (12 → 0)** across both `Cargo.lock` and
+  `fuzz/Cargo.lock`: updated `zstd` (`0.14.0` → `0.14.4`, `0.13.3` → `0.13.5`),
+  `zstd-safe` (`8.0.0` → `8.3.0`, `7.3.0` → `7.4.1`), `zstd-sys` (`2.1.0` →
+  `2.1.3`), `pulldown-cmark` (`0.13.4` → `0.13.6`), `rustls-webpki`
+  (`0.103.15` → `0.103.17`), `webpki-roots` (`1.0.9` → `1.0.12`), `ctutils`
+  (`0.4.3` → `0.4.8`), and `zeroize` (`=1.9.0` → `=1.9.2`), alongside
+  semver-safe transitive updates (`clap 4.6.9`, `libc 0.2.191`,
+  `serde_json 1.0.154`, `uuid 1.29.3`). All Franken-stack pins and
+  forbidden-dependency caps are preserved and verified via
+  `scripts/check-forbidden-deps.sh --strict-fuzz-lock`.
+- **Keyed CASS source proofs (#71):** `ee import cass` now authenticates new
+  per-line CASS source commitments with the store's protected root key bound to
+  stable session and source identity, removing raw content digest persistence
+  from new withholding markers, reconciliation audits, and refresh snapshot
+  fingerprints.
+- **Workspace-only filesystem boundaries (#88):** opt-in `EE_FS_BOUNDARY`
+  restricts ancestor workspace discovery, canonicalization, and symlink
+  resolution to an operator-configured filesystem boundary for sandboxed
+  environments (`ee init` and read/write paths refuse outside/traversal targets
+  before writing).
+- **Honest reranker attestation metadata (#76):** the bundled reranker manifest
+  now records `signed_attestation.status = "unavailable"` with explicit `null`
+  bundle fields rather than naming an absent Sigstore bundle file.
+
 ### Added
 
 - `ee why <memory-id|rule-id>` (and `result:<rule-id>`) now explains native
-  procedural rules directly on `main` (post-`v0.16.0`), returning canonical
-  rule provenance under `data.entity` with `data.memoryId: null` rather than
-  requiring a memory ID.
-- Native Go terminal failures now feed imported-session error recall, interactive
-  `diagnose-error`, and `pack --error-log` with the same fingerprints as Go JSON.
-  Quiet failures remain recallable; repair attribution requires a complete
-  verbose retry with the same invocation, execution context, failed tests, and
-  passing controls. Cached, empty, narrowed, skipped, and incomplete retries do
-  not certify a repair. Existing imports are reconsidered under derivation v27.
+  procedural rules directly, returning canonical rule provenance under
+  `data.entity` with `data.memoryId: null` rather than requiring a memory ID.
+- Native Go terminal failures, native Rust syntax errors, native Vitest reports,
+  and native Jest reports now feed imported-session error recall, interactive
+  `diagnose-error`, and `pack --error-log` with verified repair-chain
+  attribution (complete retries with matching invocation, context, failed tests,
+  and passing controls; cached, narrowed, or incomplete retries do not certify
+  a repair).
+- Daemon retrieval transparency and warm pack reuse (#87): `ee.response.v2`
+  surfaces `servingPath` (`in_process`, `daemon`, `hybrid`,
+  `in_process_fallback`), `retrievalPath`, and `fallbackReason` while keeping
+  delivery metadata outside pack identity; daemon requests reuse warm pack
+  state and honor scope, temporal, and task-path controls across CLI, MCP, and
+  loopback HTTP `serve`.
+- ADR 0087 pack-identity binding to addressed stores and scope eligibility,
+  adaptive/delta/duplicate-work swarm briefs, read-pool FIFO fairness,
+  source-verified episodic summaries (`curate`), procedural promotion from
+  admitted evidence, and durable code-anchor source bindings (`V133`).
+- Mechanical doc-governance invariant gate
+  (`scripts/check-doc-governance-invariants.py`), strict fuzz lock auditing
+  (`scripts/check-forbidden-deps.sh --strict-fuzz-lock`, #75), zero-debt fleet
+  identifier census (`scripts/check-fleet-identifier-census.py`), and
+  own-corpus dogfood probe (`scripts/dogfood_own_corpus.sh`).
 
 ### Fixed
 
-- Passive index readiness on Unix now holds a shared generation lease across
-  metadata, corpus counts, and producer checks. Concurrent publication reports
-  an unmeasured state with a retry command, without inventing a missing or corrupt
-  index. Doctor repair, status watermarks, and structured recovery guidance retain
-  that distinction instead of recommending an unproven rebuild.
+- **Unified capability and dependency metadata (#74):** `ee capabilities`,
+  `ee version`, `ee diag dependencies`, and `ee doctor --franken-health` now
+  share canonical metadata (including registry `tru 0.2.4` for TOON output
+  instead of stale local paths) with synchronized JSON/TOON goldens.
+- **Global retrieval snapshot binding and live seal admission:** global memory
+  retrieval binds bodies, admission, feedback, and source generation to one
+  owned read-only snapshot, refills native global candidates past retired rows,
+  and uses `memory_lifecycle::load_memory_seals_for_admission` rather than the
+  backup-only recovery reader so a single damaged sealed row cannot knock out
+  unrelated public global memories.
+- **Coalesced remember indexing and model-free live fallback:** bounded
+  coalesced `remember` indexing shares a single monotonic publication deadline
+  across drain rounds and leadership retries; complete live-source lexical
+  fallback skips unnecessary embedding-model setup in search and read-only
+  context pack.
+- **Read-only inspection and passive readiness:** passive index readiness on
+  Unix holds a shared generation lease across metadata, corpus counts, and
+  producer checks so concurrent publication reports an unmeasured state with a
+  retry command rather than inventing a missing or corrupt index; read-only
+  inspection commands no longer open stores read-write or trigger migrations.
+- **Backup, curation, and test/clippy hygiene:** preserved attempt-family
+  markers alongside tombstoned terminal revisions in backup recovery, fixed
+  FrankenSQLite trigger-cleanup snapshot conflicts in atomic learning tests,
+  aligned `ee.workflow.create.v1` and `ee.diag.contention.v1` contract tests,
+  and cleared all workspace `--all-targets` `clippy -D warnings` diagnostics.
+
+### Performance
+
+- Batched memory revision authority reads, batched linked-evidence parent
+  admission, batched privacy audits during atomic CASS imports, reused evidence
+  hydration across pack candidate lanes, shared immutable lexical segments and
+  unchanged vector tiers across compatible generations, and cut redundant reads
+  across `memory`, `search`, `learn`, `orient`, and `resume`.
+
+### Known issues
+
+- `#87` (daemon cold-vs-warm latency validation at 10k scale) remains open for
+  large-corpus end-user timing confirmation; `v0.19.0` ships the serving-path
+  observability and warm pack reuse groundwork.
+- `#75` (full qualification of all 27 excluded fuzz harnesses) remains open for
+  fuzz-lane execution; `fuzz/Cargo.lock` is synchronized at `0.19.0` with zero
+  `cargo audit` advisories and enforced by `--strict-fuzz-lock`.
+- `#41` (deduplicating pre-0.15.0 unmanaged Claude Code hooks), `#73`
+  (`fnx 0.3.1+` Louvain API migration), `#72` (420s contract spawn timeouts
+  under heavy host load), `#40` (upstream Tantivy `lru 0.16.4` pin), and `#29`
+  (historical 128-thread contention SIGSEGV) remain open.
 
 ## [0.18.0] - 2026-10-14
 
