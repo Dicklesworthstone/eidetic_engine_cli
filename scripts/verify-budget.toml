@@ -1063,9 +1063,10 @@ expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
-name = "Lexical Relevance Contract (tracked red)"
+name = "Lexical Relevance Contract"
 # Restored to REQUIRED status now that both pins in
-# tests/lexical_relevance_contract.rs pass (bd-reality-core-convergence-1azkt.11)
+# tests/lexical_relevance_contract.rs pass and are un-ignored
+# (bd-reality-core-convergence-1azkt.11 / .75),
 # and the prebuilt binary lookup handles Cargo's build-dir layout (bd-iqg34).
 #
 # 1s because this arm executes the binary Gate 5 already built; the pins run in

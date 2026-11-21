@@ -58,6 +58,23 @@ pin_listed_test_count() {
     printf '%s\n' "$listing" | grep -c ': test$'
 }
 
+# Extract the passed-test count from a libtest `test result:` summary line.
+# Emits -1 when no summary line is present so vacuous/malformed output fails.
+pin_passed_test_count() {
+    local run_output="$1"
+    local summary_line
+    summary_line="$(printf '%s\n' "$run_output" | grep -E '^test result: ' | tail -n 1 || true)"
+    if [[ -z "$summary_line" ]]; then
+        printf '%s\n' "-1"
+        return
+    fi
+    if [[ "$summary_line" =~ ([0-9]+)[[:space:]]+passed ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '%s\n' "-1"
+    fi
+}
+
 # Resolve the directory cargo writes build artifacts to.
 #
 # Env first, because that is what overrides everything else and is how RCH
@@ -152,6 +169,26 @@ ${PIN_TWO}: test
 1 test, 0 benchmarks" \
         "1"
 
+    check_passed() {
+        local label="$1" input="$2" expected="$3"
+        local actual
+        actual="$(pin_passed_test_count "$input")"
+        if [[ "$actual" == "$expected" ]]; then
+            echo "ok   - $label"
+        else
+            echo "FAIL - $label: got '$actual', wanted '$expected'"
+            failures=$((failures + 1))
+        fi
+    }
+
+    check_passed "empty test run output is -1, not 2" "" "-1"
+    check_passed "0 passed test result counts 0 (fails >= ${EXPECTED_PIN_COUNT} check)" \
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s" \
+        "0"
+    check_passed "2 passed test result counts 2" \
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s" \
+        "2"
+
     if [[ $failures -ne 0 ]]; then
         echo "guard predicate is broken; ${failures} self-test(s) failed" >&2
         exit 1
@@ -230,6 +267,18 @@ BANNER
     exit 1
 }
 
-"$binary" --ignored --test-threads=1
+run_output="$("$binary" --test-threads=1 2>&1)"
 run_status=$?
-exit $run_status
+if [[ -n "$run_output" ]]; then
+    printf '%s\n' "$run_output"
+fi
+if [[ $run_status -ne 0 ]]; then
+    exit $run_status
+fi
+
+passed_count="$(pin_passed_test_count "$run_output")"
+if [[ "$passed_count" -lt "$EXPECTED_PIN_COUNT" ]]; then
+    echo "FAIL - expected at least ${EXPECTED_PIN_COUNT} tests executed and passed, got '${passed_count}'" >&2
+    exit 1
+fi
+exit 0

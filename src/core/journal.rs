@@ -2675,7 +2675,10 @@ fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
 fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainError> {
     let boundary = crate::util::fs_boundary().map_err(|error| DomainError::Configuration {
         message: format!("Invalid filesystem boundary for journal database: {error}"),
-        repair: Some("Verify EE_FS_BOUNDARY names an existing directory.".to_owned()),
+        repair: Some(
+            "Verify the configured filesystem boundary names an existing, non-symlink directory."
+                .to_owned(),
+        ),
     })?;
     if boundary.is_some() {
         let symlink = super::path_safety::first_existing_symlink_component(database_path).map_err(
@@ -2684,7 +2687,10 @@ fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainErr
                     "Invalid journal database path {}: {error}",
                     database_path.display()
                 ),
-                repair: Some("Select a database within EE_FS_BOUNDARY.".to_owned()),
+                repair: Some(
+                    "Select a journal database path within the configured filesystem boundary."
+                        .to_owned(),
+                ),
             },
         )?;
         if let Some(symlink) = symlink {

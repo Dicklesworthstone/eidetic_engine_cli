@@ -676,7 +676,7 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     // 0 remaining after bd-iqg34, bd-reality-core-convergence-1azkt.11, and
     // bd-5l8yh restored "Lexical Relevance Contract Harness Guard",
-    // "Lexical Relevance Contract (tracked red)", and
+    // "Lexical Relevance Contract", and
     // "ee doctor Safety Harness (bd-21joy)" to REQUIRED.
     assert_eq!(
         non_required, 0,

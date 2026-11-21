@@ -2752,7 +2752,8 @@ fn boundary_path_error(path: &Path, error: io::Error) -> DomainError {
             path.display()
         ),
         repair: Some(
-            "Select a path within EE_FS_BOUNDARY and verify that the boundary exists.".to_owned(),
+            "Select a path within the configured filesystem boundary and verify that the boundary directory exists."
+                .to_owned(),
         ),
     }
 }

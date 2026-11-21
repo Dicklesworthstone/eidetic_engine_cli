@@ -1,34 +1,11 @@
-//! Tracked-red pins for the lexical relevance contract
-//! (bd-reality-core-convergence-1azkt.11).
+//! Regression pins for the lexical relevance contract
+//! (bd-reality-core-convergence-1azkt.11, un-ignored under .75).
 //!
-//! WHY THIS IS ITS OWN TARGET, AND WHY EVERY TEST IS `#[ignore]`
-//!
-//! These tests are EXPECTED TO FAIL against the current product. They exist to
-//! document two live defects with assertions that actually fail on them, so the
-//! repair has a pre-existing red to be measured against. A repair that lands
-//! without one changed a label and a large golden set in a single motion, with
-//! nothing that failed before and passes after.
-//!
-//! `scripts/verify.sh` runs the required stage
-//! `cargo test --workspace --lib --bins --tests --examples`, which builds and
-//! runs every `[[test]]` target. A red here would therefore redden a REQUIRED
-//! stage that covers hundreds of unrelated tests, and — because a multi-target
-//! `cargo test` stops at the first failing target — would destroy the verdicts
-//! of everything scheduled behind it. `#[ignore]` keeps that stage honest: this
-//! target still compiles on every run (so the pins cannot rot) and reports
-//! `2 ignored`.
-//!
-//! They are executed by `scripts/lexical_relevance_pins.sh`, which runs the
-//! binary Gate 5 just built instead of re-entering cargo — measured on an RCH worker
-//! at 82926d4c5, these two pins run in 0.00s while the cargo wrapper around
-//! them cost 74s re-walking freshness over crates Gate 5 had already walked.
-//! That script is wired as two stages: a REQUIRED harness guard, and the
-//! tracked-red run arm that `scripts/verify-budget.toml` declares
-//! `requirement = "tracked_red"` against this bead. The guard exists because
-//! `run_stage` excuses ANY nonzero exit from a tracked-red stage, so a missing
-//! or stale binary would otherwise be recorded as the known red and be
-//! indistinguishable from it. A red nobody declared is indistinguishable from a
-//! regression; a red that is actually an infrastructure failure is worse.
+//! These pins document two defects that originally failed against the product
+//! and are now resolved (`scoreKind = "query_relative_pool_minmax"` and
+//! raw-domain relevance-floor admission for lexical hits). They remain in their
+//! own integration test target and are executed both by Gate 5 (`cargo test`)
+//! and by `scripts/lexical_relevance_pins.sh` against the prebuilt binary.
 //!
 //! WHAT EACH PIN ASSERTS, AND WHAT IS EXPECTED TO CLEAR IT
 //!
@@ -132,7 +109,6 @@ fn hit_for<'a>(hits: &'a [SearchHit], doc_id: &str) -> &'a SearchHit {
 /// sentence was corrected in the same commit as this pin, which leaves the
 /// machine-readable tag as the last place the label still overstates the thing.
 #[test]
-#[ignore = "regression guard, bd-reality-core-convergence-1azkt.11: lexical scoreKind must stay query_relative_pool_minmax, naming the projection that produced the value rather than asserting a property of it"]
 fn lexical_score_kind_names_the_projection_that_produced_it() {
     // The bead's own field numbers, plus a raw value three orders of magnitude
     // weaker, each alone in its pool.
@@ -182,7 +158,6 @@ fn lexical_score_kind_names_the_projection_that_produced_it() {
 /// absolute cosine values, which is acceptance bullet 4: cross-source values
 /// compared as one scale without explicit calibration.
 #[test]
-#[ignore = "tracked red, bd-reality-core-convergence-1azkt.11: relevance-floor admission for Lexical is decided in the query-relative domain, so an unrelated document's score flips it"]
 fn lexical_admission_does_not_invert_on_an_unrelated_documents_score() {
     const RAW_UNDER_TEST: f32 = 2.0;
 

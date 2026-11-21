@@ -2536,18 +2536,11 @@ run_stage "MCP Lib Unit Tests (bd-up1hk)" "./scripts/mcp_lib_tests.sh"
 # about the product rather than about this bead; `--ignored` is what executes
 # them here.
 #
-# Both arms run the binary Gate 5 just built rather than re-entering cargo.
-# Measured on an RCH fleet worker at 82926d4c5: the pins take 0.00s while the
-# cargo wrapper around them took 74s re-walking freshness across ~350 crates
-# that Gate 5 had walked moments earlier. Paying for that scan twice is waste in
-# the gate independent of anything being added to it.
-#
-# The guard is REQUIRED and the run arm is TRACKED_RED. That split is the point:
-# run_stage excuses ANY nonzero exit from a tracked-red stage, so without a
-# required arm a missing binary, a stale binary or a renamed test would be
-# recorded as the known red and be indistinguishable from it.
+# Both pins now pass and are un-ignored in tests/lexical_relevance_contract.rs
+# (bd-reality-core-convergence-1azkt.11 / .75); they run both in Gate 5 and in
+# this prebuilt-binary check (which fails if fewer than 2 tests execute).
 run_stage "Lexical Relevance Contract Harness Guard" "./scripts/lexical_relevance_pins.sh --guard"
-run_stage "Lexical Relevance Contract (tracked red)" "./scripts/lexical_relevance_pins.sh"
+run_stage "Lexical Relevance Contract" "./scripts/lexical_relevance_pins.sh"
 
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"

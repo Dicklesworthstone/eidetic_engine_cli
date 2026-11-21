@@ -50,6 +50,19 @@ where
     }
 }
 
+fn ensure_success(output: &Output, context: &str) -> TestResult {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{context} failed with status {:?} (code {:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
 fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
     let stdout = String::from_utf8(output.stdout.clone())
         .map_err(|error| format!("stdout was not UTF-8: {error}"))?;
@@ -705,7 +718,7 @@ fn cli_loop_focus_show_explain_remove_lifecycle() -> TestResult {
     let workspace = tempdir.path().to_string_lossy().to_string();
 
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure_equal(&init.status.code(), &Some(0), "focus init exit code")?;
+    ensure_success(&init, "focus init exit code")?;
 
     let mem1_out = run_ee(&[
         "--workspace",
@@ -718,7 +731,7 @@ fn cli_loop_focus_show_explain_remove_lifecycle() -> TestResult {
         "rule",
         "--json",
     ])?;
-    ensure_equal(&mem1_out.status.code(), &Some(0), "remember mem1 exit code")?;
+    ensure_success(&mem1_out, "remember mem1 exit code")?;
     let mem1_json = stdout_json(&mem1_out)?;
     let mem1_id = mem1_json["data"]["memoryId"]
         .as_str()
@@ -736,7 +749,7 @@ fn cli_loop_focus_show_explain_remove_lifecycle() -> TestResult {
         "rule",
         "--json",
     ])?;
-    ensure_equal(&mem2_out.status.code(), &Some(0), "remember mem2 exit code")?;
+    ensure_success(&mem2_out, "remember mem2 exit code")?;
     let mem2_json = stdout_json(&mem2_out)?;
     let mem2_id = mem2_json["data"]["memoryId"]
         .as_str()
@@ -810,7 +823,7 @@ fn cli_loop_focus_show_explain_remove_lifecycle() -> TestResult {
         "release staging gate",
         "--json",
     ])?;
-    ensure_equal(&set.status.code(), &Some(0), "focus set exit code")?;
+    ensure_success(&set, "focus set exit code")?;
 
     let show_active = run_ee(&["--workspace", &workspace, "focus", "show", "--json"])?;
     ensure_equal(
@@ -990,7 +1003,7 @@ fn cli_loop_workflow_create_storeless_dry_run_persist_and_close() -> TestResult 
 
     // Initialize workspace, create workflow durably, verify idempotence, attach memory, close.
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure_equal(&init.status.code(), &Some(0), "workflow init exit code")?;
+    ensure_success(&init, "workflow init exit code")?;
 
     let created = run_ee(&[
         "--workspace",
@@ -1071,7 +1084,7 @@ fn cli_loop_workflow_create_storeless_dry_run_persist_and_close() -> TestResult 
         "release-prep",
         "--json",
     ])?;
-    ensure_equal(&closed.status.code(), &Some(0), "workflow close exit code")
+    ensure_success(&closed, "workflow close exit code")
 }
 
 #[test]
@@ -1080,7 +1093,7 @@ fn cli_loop_diag_contention_default_triage_and_missing_daemon() -> TestResult {
     let workspace = tempdir.path().to_string_lossy().to_string();
 
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure_equal(&init.status.code(), &Some(0), "diag contention init")?;
+    ensure_success(&init, "diag contention init")?;
 
     let default_out = run_ee(&["--workspace", &workspace, "diag", "contention", "--json"])?;
     ensure_equal(
