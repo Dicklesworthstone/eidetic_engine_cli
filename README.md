@@ -313,7 +313,7 @@ Every promotion, consolidation, replacement, and tombstone produces an audit ent
 | Procedural rules with decay | ✅ | ❌ | ❌ | ❌ |
 | Anti-patterns + harmful feedback | ✅ | ❌ | ❌ | manual |
 | Explainable scores | ✅ | ❌ | partial | n/a |
-| Graph analytics (PPR, HITS, PageRank, proximity, causal paths) | ✅ | ❌ | ❌ | ❌ |
+| Graph analytics (HITS, PageRank, proximity, causal paths; PPR pending upstream) | ✅ | ❌ | ❌ | ❌ |
 | Deterministic JSON output | ✅ | varies | varies | n/a |
 | CASS session corpus import | ✅ | manual ETL | ❌ | manual |
 | Works without daemon | ✅ | ❌ | ❌ | ✅ |
@@ -2118,6 +2118,7 @@ Environment variable overrides:
 | `EE_SCIENCE_BACKEND_PATH` | optional science analytics backend health path |
 | `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | disables Frankensearch neighbors for remember-time curation proposal |
 | `EE_DISABLE_TOON` | disables TOON capability reporting and auto-selection |
+| `EE_FS_BOUNDARY` | opt-in workspace-only filesystem sandbox root directory (ancestors trusted without opening; descendants keep no-follow checks) |
 | `EE_NO_COLOR`      | disables ANSI styling on stderr |
 | `EE_TRACE`         | enables structured tracing to stderr |
 
@@ -3090,22 +3091,18 @@ samples are collected.
 
 **One row needs more than that blanket caveat, because hardware class cannot
 explain it.** `ee import cass --limit 50` is listed below at a 4.1 s p50, and
-the Quick Start above tells a first-time user to run exactly that command. A
-probe of the public v0.16.0 binary measured `ee import cass --limit 3` at
-**53.99 s** — about 18 s per session, for 3 real Claude Code sessions producing
-4,919 spans — which extrapolates to roughly **15 minutes** for the 50 the Quick
-Start suggests, around 200x the row. Moving between hardware classes does not
-produce a 200x gap; something in the per-session path does. Root-causing,
-batching and re-measurement are tracked at
-`bd-reality-core-convergence-1azkt.48`, whose acceptance includes updating or
-removing this row.
+the Quick Start above tells a first-time user to run that command. A probe of
+the public `v0.16.0` binary measured `ee import cass --limit 3` at **53.99 s**
+(about 18 s per session, for 3 real Claude Code sessions producing 4,919 spans).
+`bd-reality-core-convergence-1azkt.48` (closed 2026-11-15) batched initial CASS
+evidence preparation on `main`, measuring **`0.160 s/session`** (`1.60 s / 10 sessions`)
+in `cass::import::refresh::batch::preparation_tests` on `worker-01`.
 
-Stated precisely, because the correction deserves the same discipline as the
-claim: that 53.99 s measurement is from **v0.16.0** and has not been reproduced
-against this tree. So what is established is that the 4.1 s figure is not
-reproducible at the documented scale — NOT that the current cost is 18 s per
-session. If you are importing a real history for the first time, budget minutes
-and use `--limit 3` first to measure your own rate.
+The frozen historical `perf_v0_2.json` row below (`4.1 s` for 50 sessions)
+remains as the historical baseline snapshot (~8 s extrapolated at `0.160 s/session`).
+Pre-`.48` public release binaries still execute the unbatched path, so if you
+are importing a real history with an older release binary, test `--limit 3`
+first to measure your own rate.
 
 <!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
 | Operation | Hardware class | p50 | p99 |
@@ -3273,6 +3270,15 @@ ee workspace list
 ee workspace alias --pick <id> --as <name>
 ee --workspace <name> pack "..."
 ```
+
+### `EE_FS_BOUNDARY` sandbox errors
+
+When `ee` runs inside a workspace-only OS sandbox where ancestor directories above
+the workspace cannot be opened or synced, set `EE_FS_BOUNDARY` to an existing
+absolute directory path (see [`docs/env_vars.md`](docs/env_vars.md)). Empty or
+relative values, `..` traversal in the boundary or target path, paths outside
+the boundary, and symlink targets that escape the boundary fail closed; leaving
+`EE_FS_BOUNDARY` unset preserves ordinary filesystem walks.
 
 ### `error: embed model not loaded`
 
@@ -3575,7 +3581,7 @@ Boundaries to know:
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.18.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
-| Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.15` as an external blocker. |
+| Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.82` (successor to closed `bd-reality-core-convergence-1azkt.15`) as an upstream dependency blocker. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 

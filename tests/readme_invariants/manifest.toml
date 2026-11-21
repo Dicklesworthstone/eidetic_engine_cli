@@ -157,6 +157,7 @@ denylist_regexes = [
   '^`deterministic=false` for this backend\.',
   '^not widened to this command-only surface\. This r',
   '^from the latest GitHub release, always verifies ',
+  '^the workspace cannot be opened or synced, set `EE_FS_BOUNDARY` to an existing$',
 ]
 
 [[invariant]]
@@ -170,7 +171,7 @@ verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
 [[invariant]]
 id = "rfm-002-asupersync-cancellation-contract"
 readme_section = "Architecture"
-readme_line_anchor = 2183
+readme_line_anchor = 2184
 sentence_hash = "blake3:c05d0af84098e260b86cad6624db408d40ddc6adf39c35630714912378d7a2ba"
 classification = "invariant"
 verify = { type = "test", path = "tests/cancellation_graph.rs" }
@@ -178,7 +179,7 @@ verify = { type = "test", path = "tests/cancellation_graph.rs" }
 [[invariant]]
 id = "rfm-003-concurrent-writer-performance-row"
 readme_section = "Performance"
-readme_line_anchor = 3122
+readme_line_anchor = 3119
 sentence_hash = "blake3:b9bdf07e2ed0c10b141a3f35a7530f674158aa9f04a4ad00d8b9fad997277b62"
 classification = "quantitative"
 verify = { type = "test", path = "tests/readme_perf_sync.rs" }
@@ -186,7 +187,7 @@ verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 [[invariant]]
 id = "rfm-004-no-silent-memory-rewrite-faq"
 readme_section = "FAQ"
-readme_line_anchor = 3664
+readme_line_anchor = 3670
 sentence_hash = "blake3:935a24556f4d3cffd019528aae7efa59e2c4dba3abd93112a8f0e8f8e85ec4b2"
 classification = "promise"
 verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
@@ -290,7 +291,7 @@ verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
 [[invariant]]
 id = "rfm-017-source-of-truth-derived-assets"
 readme_section = "Architecture"
-readme_line_anchor = 2179
+readme_line_anchor = 2180
 sentence_hash = "blake3:0cd1c6fd5565f696b91a5f01127930c6ccb1943b0447c88c403081073ce2791e"
 classification = "invariant"
 verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
@@ -298,7 +299,7 @@ verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
 [[invariant]]
 id = "rfm-018-strict-dependency-direction"
 readme_section = "Architecture"
-readme_line_anchor = 2181
+readme_line_anchor = 2182
 sentence_hash = "blake3:f89e8c39222c1bfc3a4ece47fc4ac261202508a6d77beebf0a6e97e12cd06563"
 classification = "invariant"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -306,7 +307,7 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-019-secret-redaction-never-on-disk"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 2758
+readme_line_anchor = 2759
 sentence_hash = "blake3:eebb6a8aaa842756b7e3ff0aeea595201c28631b3bbb68e6247e1a1358ce99fd"
 classification = "promise"
 verify = { type = "test", path = "tests/redaction_fuzz.rs" }
@@ -314,7 +315,7 @@ verify = { type = "test", path = "tests/redaction_fuzz.rs" }
 [[invariant]]
 id = "rfm-020-prompt-injection-quarantine"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 2793
+readme_line_anchor = 2794
 sentence_hash = "blake3:e4d1857af79753026cbd737ed2948623dd8ba0a79e3415a09df0e2146c4dbb73"
 classification = "promise"
 verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs" }
@@ -322,7 +323,7 @@ verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs
 [[invariant]]
 id = "rfm-021-migration-atomicity"
 readme_section = "Troubleshooting"
-readme_line_anchor = 3263
+readme_line_anchor = 3260
 sentence_hash = "blake3:d2dc20f433b4ffa3639fb7ace57d4fc947841a76bef53ca8b7c03c2d4f2d6efe"
 classification = "promise"
 verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
@@ -330,7 +331,7 @@ verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
 [[invariant]]
 id = "rfm-022-tokio-forbidden-ci-audit"
 readme_section = "FAQ"
-readme_line_anchor = 3596
+readme_line_anchor = 3602
 sentence_hash = "blake3:2e498161dfcffd18f603f9839f366494f4bd887bf162d2cd6b74d9bbed78a371"
 classification = "constraint"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -338,7 +339,7 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-023-indexes-derived-from-db"
 readme_section = "FAQ"
-readme_line_anchor = 3622
+readme_line_anchor = 3628
 sentence_hash = "blake3:d57134fa7080b09c3954a8ff2e9055da2d5e70472f26c8bde42805d6164fbb9c"
 classification = "promise"
 verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
@@ -349,7 +350,7 @@ verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
 [[invariant]]
 id = "rfm-024-warm-daemon-read-only-pack-latency"
 readme_section = "Claude Code"
-readme_line_anchor = 2665
+readme_line_anchor = 2666
 sentence_hash = "blake3:6430dcca283570b80337493089515e35f85a2cb1d1b93e508096550aba9f04ad"
 classification = "quantitative"
 verify = { type = "test", path = "tests/readme_perf_sync.rs" }
@@ -391,7 +392,7 @@ verify = { type = "test", path = "tests/contracts/index_intake_schema.rs" }
 [[invariant]]
 id = "rfm-029-hooks-never-deny-shell-commands"
 readme_section = "Harness Hooks"
-readme_line_anchor = 2644
+readme_line_anchor = 2645
 sentence_hash = "blake3:ed7d8aae70ef924a7449e8fb4b4d10157f00e9e273d1ff00996346df24b41def"
 classification = "invariant"
 verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
@@ -399,7 +400,7 @@ verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
 [[invariant]]
 id = "rfm-030-restore-never-replaces-existing-store"
 readme_section = "Backup & Restore"
-readme_line_anchor = 2997
+readme_line_anchor = 2998
 sentence_hash = "blake3:be1b159840a5834e0d875000389fdbfd8a7d5b769ffa6fd982e86b96ed36aff6"
 classification = "invariant"
 verify = { type = "test", path = "tests/e2e_backup_restore_roundtrip.rs" }
@@ -407,7 +408,7 @@ verify = { type = "test", path = "tests/e2e_backup_restore_roundtrip.rs" }
 [[invariant]]
 id = "rfm-031-cass-binary-path-validation"
 readme_section = "CASS Integration"
-readme_line_anchor = 3245
+readme_line_anchor = 3242
 sentence_hash = "blake3:f9bcb3cf3d3d2214558cdaa706c7d0dbf96a6c162ab155bafafaf6bbe96aab18"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/cass_robot.rs" }
