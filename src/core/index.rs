@@ -6733,7 +6733,7 @@ pub mod retention_gc;
 mod delta;
 
 #[path = "index_download_backoff.rs"]
-mod download_backoff;
+pub mod download_backoff;
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
     retention_names::sequence(name, retained_prefix)

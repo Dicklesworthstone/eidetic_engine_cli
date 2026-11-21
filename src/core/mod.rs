@@ -85,6 +85,7 @@ pub mod hygiene_coordination;
 pub mod impact;
 pub mod incident_card;
 pub mod index;
+pub use index::download_backoff as index_download_backoff;
 pub mod influence;
 pub mod init;
 pub mod install;

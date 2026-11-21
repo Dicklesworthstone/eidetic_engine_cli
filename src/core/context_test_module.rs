@@ -12627,44 +12627,46 @@ pub fn unrelated_context() -> u64 {{
         let mut global_stored = local_stored.clone();
         global_stored.id = global_id.to_string();
         global_stored.workspace_id = "wsp_global_9999999999999999999999".to_string();
-        global_stored.provenance_verification_status = Some("missing".to_string());
+        global_stored.provenance_verification_status = "missing".to_string();
 
         let mut preloaded = std::collections::BTreeMap::new();
         preloaded.insert(local_id.to_string(), local_stored);
         preloaded.insert(global_id.to_string(), global_stored);
 
-        let make_item =
-            |rank: u32, memory_id: MemoryId, content: &str| -> Result<PackDraftItem, String> {
-                Ok(PackDraftItem {
-                    rank,
-                    memory_id,
-                    section: PackSection::ProceduralRules,
-                    content: content.to_string(),
-                    estimated_tokens: 8,
-                    relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
-                    utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
-                    proximity_to_seed: None,
-                    score_breakdown: None,
-                    attempt_family_multiplicity: None,
-                    provenance: vec![
-                        PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test source")
-                            .map_err(|error| error.to_string())?,
-                    ],
-                    why: "selected for preloaded drift test".to_string(),
-                    diversity_key: None,
-                    trust: crate::pack::PackTrustSignal::new(TrustClass::AgentAssertion, None),
-                    redactions: Vec::new(),
-                    tombstoned_at: None,
-                    lifecycle: None,
-                    freshness_facets: Vec::new(),
-                    selected_in: PackSelectionPhase::StrictMmr,
-                    evidence_freshness: None,
-                    origin: None,
-                })
-            };
+        let make_item = |rank: u32,
+                         memory_id: MemoryId,
+                         content: &str|
+         -> Result<crate::pack::PackDraftItem, String> {
+            Ok(crate::pack::PackDraftItem {
+                rank,
+                memory_id,
+                section: PackSection::ProceduralRules,
+                content: content.to_string(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+                proximity_to_seed: None,
+                score_breakdown: None,
+                attempt_family_multiplicity: None,
+                provenance: vec![
+                    PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test source")
+                        .map_err(|error| error.to_string())?,
+                ],
+                why: "selected for preloaded drift test".to_string(),
+                diversity_key: None,
+                trust: crate::pack::PackTrustSignal::new(TrustClass::AgentAssertion, None),
+                redactions: Vec::new(),
+                tombstoned_at: None,
+                lifecycle: None,
+                freshness_facets: Vec::new(),
+                selected_in: crate::pack::PackSelectionPhase::StrictMmr,
+                evidence_freshness: None,
+                origin: None,
+            })
+        };
 
         let budget = TokenBudget::default_context();
-        let mut draft = PackDraft {
+        let mut draft = crate::pack::PackDraft {
             query: "memory drift preloaded".to_string(),
             budget,
             used_tokens: 16,
@@ -12675,9 +12677,9 @@ pub fn unrelated_context() -> u64 {{
             evidence_items: Vec::new(),
             rule_items: Vec::new(),
             omitted: Vec::new(),
-            selection_audit: PackSelectionAudit {
+            selection_audit: crate::pack::PackSelectionAudit {
                 profile: ContextPackProfile::Balanced,
-                objective: PackSelectionObjective::MmrRedundancy,
+                objective: crate::pack::PackSelectionObjective::MmrRedundancy,
                 algorithm_id: "test_preloaded_drift_selection",
                 algorithm_description: "Test-only preloaded context drift selection audit.",
                 candidate_count: 2,

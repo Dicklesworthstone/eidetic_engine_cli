@@ -9625,21 +9625,16 @@ mod tests {
                     level: "semantic".to_owned(),
                     kind: "fact".to_owned(),
                     content: "Daemon runtime reuse parity check memory".to_owned(),
+                    workflow_id: None,
                     tags: vec![],
                     confidence: 0.9,
                     importance: 0.8,
                     utility: 0.7,
-                    source_type: "agent".to_owned(),
-                    source_id: None,
+                    provenance_uri: None,
                     trust_class: "agent_validated".to_owned(),
                     trust_subclass: None,
                     valid_from: None,
                     valid_to: None,
-                    metadata_json: None,
-                    content_hash: format!(
-                        "blake3:{}",
-                        blake3::hash(b"Daemon runtime reuse parity check memory").to_hex()
-                    ),
                 },
             )
             .expect("insert memory");

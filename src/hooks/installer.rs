@@ -4961,7 +4961,7 @@ SCHEMA = "ee.ambient_context.v1"
 SURFACE = "pre_risky_preflight"
 cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
 "#,
-            "/old/ee",
+            Path::new("/old/ee"),
         );
         let custom_hook = serde_json::json!({
             "type": "command",
@@ -4983,7 +4983,7 @@ cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
                 ]
             }
         });
-        let snippets = harness_hook_snippets(HarnessHookTarget::ClaudeCode, "ee");
+        let snippets = harness_hook_snippets(HarnessHookTarget::ClaudeCode, Path::new("ee"));
         merge_harness_hooks(HarnessHookTarget::ClaudeCode, &mut document, &snippets)
             .map_err(|error| error.to_string())?;
 
