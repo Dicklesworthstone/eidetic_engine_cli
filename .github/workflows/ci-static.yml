@@ -188,7 +188,7 @@ jobs:
 
       - name: Forbidden dependency audit
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.forbidden_deps_self_test.outcome == 'success' }}
-        run: ./scripts/check-forbidden-deps.sh
+        run: ./scripts/check-forbidden-deps.sh --strict-fuzz-lock
 
       # bd-reality-core-convergence-1azkt.18 C4. deny.toml's [advisories]
       # (yanked = "deny"), [bans] and [sources] (unknown-registry and

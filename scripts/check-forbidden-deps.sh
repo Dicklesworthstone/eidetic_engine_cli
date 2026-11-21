@@ -18,6 +18,7 @@
 #   1 — usage error
 #   2 — forbidden crate(s) detected
 #   3 — missing tool, invalid policy/metadata, or metadata fetch failed
+#   4 — fuzz/Cargo.lock is out of sync when --strict-fuzz-lock is set
 
 set -euo pipefail
 
@@ -40,7 +41,7 @@ FORBIDDEN=(
 MINIMUM_FORBIDDEN_LIST=$(printf '%s\n' "${FORBIDDEN[@]}")
 
 usage() {
-    echo "usage: $0 [--self-test]" >&2
+    echo "usage: $0 [--self-test] | [--json] [--strict-fuzz-lock]" >&2
 }
 
 load_forbidden_list() {
@@ -282,12 +283,41 @@ for name in hits:
 '
 }
 
-if [[ $# -gt 1 ]]; then
+JSON_OUTPUT=0
+STRICT_FUZZ_LOCK=0
+SELF_TEST=0
+
+while (( $# > 0 )); do
+    case "$1" in
+        --self-test)
+            SELF_TEST=1
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT=1
+            shift
+            ;;
+        --strict-fuzz-lock)
+            STRICT_FUZZ_LOCK=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+if (( SELF_TEST == 1 )) && (( JSON_OUTPUT == 1 || STRICT_FUZZ_LOCK == 1 )); then
     usage
     exit 1
 fi
 
-if [[ "${1:-}" == "--self-test" ]]; then
+if (( SELF_TEST == 1 )); then
     if ! command -v python3 >/dev/null 2>&1; then
         echo "error: python3 is required but was not found on PATH" >&2
         exit 3
@@ -496,11 +526,143 @@ CAPFIXTURE
     fi
     echo "ok: cap still found when declared in a different dependency table"
 
-    echo "ok: forbidden dependency scanner self-test passed"
+    # bd-reality-core-convergence-1azkt.81: --strict-fuzz-lock and --json controls.
+    # Build a self-contained offline synthetic workspace + fuzz crate so cargo
+    # metadata --locked runs with zero network access and proves:
+    #   1. synced fuzz/Cargo.lock passes --strict-fuzz-lock --json (exit 0, root.status=audited, fuzz.status=audited)
+    #   2. stale fuzz/Cargo.lock warns & exits 0 without --strict-fuzz-lock (fuzz.status=stale_skipped)
+    #   3. stale fuzz/Cargo.lock fails closed with exit 4 under --strict-fuzz-lock (fuzz.status=stale_skipped)
+    if command -v cargo >/dev/null 2>&1; then
+        fuzz_root="${fixture_dir}/fuzz-fixture"
+        mkdir -p "${fuzz_root}/src" "${fuzz_root}/fuzz/src"
+        write_policy_fixture > "${fuzz_root}/deny.toml"
+
+        for spec in \
+            "wasm-bindgen-futures:0.4.78" \
+            "fnx-algorithms:0.3.0" \
+            "fnx-classes:0.3.0" \
+            "fnx-runtime:0.3.0"
+        do
+            cname="${spec%%:*}"
+            cver="${spec##*:}"
+            mkdir -p "${fuzz_root}/vendor/${cname}/src"
+            cat > "${fuzz_root}/vendor/${cname}/Cargo.toml" <<EOF
+[package]
+name = "${cname}"
+version = "${cver}"
+edition = "2024"
+EOF
+            printf 'pub fn stub() {}\n' > "${fuzz_root}/vendor/${cname}/src/lib.rs"
+        done
+
+        cat > "${fuzz_root}/Cargo.toml" <<'EOF'
+[package]
+name = "ee-fixture"
+version = "0.18.0"
+edition = "2024"
+
+[dependencies]
+fnx-algorithms = { version = "=0.3.0", path = "vendor/fnx-algorithms" }
+fnx-classes = { version = "=0.3.0", path = "vendor/fnx-classes" }
+fnx-runtime = { version = "=0.3.0", path = "vendor/fnx-runtime" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { version = ">=0.4, <0.4.79", path = "vendor/wasm-bindgen-futures" }
+EOF
+        printf 'pub fn root_stub() {}\n' > "${fuzz_root}/src/lib.rs"
+
+        cat > "${fuzz_root}/fuzz/Cargo.toml" <<'EOF'
+[package]
+name = "ee-fuzz-fixture"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+ee-fixture = { path = ".." }
+EOF
+        printf 'pub fn fuzz_stub() {}\n' > "${fuzz_root}/fuzz/src/lib.rs"
+
+        # Generate valid lockfiles for the synthetic offline fixture only.
+        cargo metadata --offline --format-version=1 --manifest-path "${fuzz_root}/Cargo.toml" > /dev/null
+        cargo metadata --offline --format-version=1 --manifest-path "${fuzz_root}/fuzz/Cargo.toml" > /dev/null
+
+        # Positive arm: synced fuzz/Cargo.lock with --strict-fuzz-lock --json
+        set +e
+        EE_FORBIDDEN_DEPS_ROOT="${fuzz_root}" "${BASH_SOURCE[0]}" --strict-fuzz-lock --json \
+            > "${fixture_dir}/fuzz-synced.out" 2> "${fixture_dir}/fuzz-synced.err"
+        synced_rc=$?
+        set -e
+        if (( synced_rc != 0 )); then
+            cat "${fixture_dir}/fuzz-synced.out" >&2
+            cat "${fixture_dir}/fuzz-synced.err" >&2
+            echo "error: self-test synced fuzz/Cargo.lock failed under --strict-fuzz-lock (rc=${synced_rc})" >&2
+            exit 2
+        fi
+        python3 - "${fixture_dir}/fuzz-synced.out" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["schema"] == "ee.forbidden_deps.v1", data
+assert data["verdict"] == "pass", data
+assert data["exitCode"] == 0, data
+assert data["root"]["status"] == "audited", data
+assert data["fuzz"]["status"] == "audited", data
+PY
+        echo "ok: synced fuzz/Cargo.lock passed --strict-fuzz-lock --json (root=audited, fuzz=audited)"
+
+        # Make fuzz/Cargo.lock stale relative to fuzz/Cargo.toml
+        python3 - "${fuzz_root}/fuzz/Cargo.toml" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text(encoding="utf-8").replace('version = "0.0.0"', 'version = "0.0.1"'), encoding="utf-8")
+PY
+
+        # Negative arm 1: stale fuzz/Cargo.lock without --strict-fuzz-lock -> exit 0 + stale_skipped
+        set +e
+        EE_FORBIDDEN_DEPS_ROOT="${fuzz_root}" "${BASH_SOURCE[0]}" --json \
+            > "${fixture_dir}/fuzz-stale-warn.out" 2> "${fixture_dir}/fuzz-stale-warn.err"
+        warn_rc=$?
+        set -e
+        if (( warn_rc != 0 )); then
+            cat "${fixture_dir}/fuzz-stale-warn.out" >&2
+            cat "${fixture_dir}/fuzz-stale-warn.err" >&2
+            echo "error: self-test stale fuzz/Cargo.lock without --strict-fuzz-lock expected exit 0, got ${warn_rc}" >&2
+            exit 2
+        fi
+        python3 - "${fixture_dir}/fuzz-stale-warn.out" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["verdict"] == "pass", data
+assert data["exitCode"] == 0, data
+assert data["root"]["status"] == "audited", data
+assert data["fuzz"]["status"] == "stale_skipped", data
+PY
+        echo "ok: stale fuzz/Cargo.lock without --strict-fuzz-lock exited 0 with fuzz.status=stale_skipped"
+
+        # Negative arm 2: stale fuzz/Cargo.lock with --strict-fuzz-lock -> exit 4 + stale_skipped
+        set +e
+        EE_FORBIDDEN_DEPS_ROOT="${fuzz_root}" "${BASH_SOURCE[0]}" --strict-fuzz-lock --json \
+            > "${fixture_dir}/fuzz-stale-strict.out" 2> "${fixture_dir}/fuzz-stale-strict.err"
+        strict_rc=$?
+        set -e
+        if (( strict_rc != 4 )); then
+            cat "${fixture_dir}/fuzz-stale-strict.out" >&2
+            cat "${fixture_dir}/fuzz-stale-strict.err" >&2
+            echo "error: self-test stale fuzz/Cargo.lock with --strict-fuzz-lock expected exit 4, got ${strict_rc}" >&2
+            exit 2
+        fi
+        python3 - "${fixture_dir}/fuzz-stale-strict.out" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["verdict"] == "fail", data
+assert data["exitCode"] == 4, data
+assert data["root"]["status"] == "audited", data
+assert data["fuzz"]["status"] == "stale_skipped", data
+PY
+        echo "ok: stale fuzz/Cargo.lock with --strict-fuzz-lock exited 4 with fuzz.status=stale_skipped"
+    fi
+
+    echo "ok: forbidden dependency scanner self-test passed (EE_FORBIDDEN_DEPS_RC=0)"
     exit 0
-elif [[ -n "${1:-}" ]]; then
-    usage
-    exit 1
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -513,18 +675,81 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 3
 fi
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${EE_FORBIDDEN_DEPS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MANIFEST="${REPO_ROOT}/Cargo.toml"
 POLICY="${REPO_ROOT}/deny.toml"
 
+ROOT_STATUS="pending"
+ROOT_HITS=""
+ROOT_CAPS_VERIFIED="false"
+FUZZ_STATUS="not_present"
+FUZZ_HITS=""
+ERROR_MESSAGE=""
+WARNING_MESSAGE=""
+
+emit_json_and_exit() {
+    local code="$1"
+    if (( JSON_OUTPUT == 1 )); then
+        JSON_EXIT_CODE="${code}" \
+        JSON_STRICT_FUZZ="${STRICT_FUZZ_LOCK}" \
+        JSON_FORBIDDEN_LIST="${FORBIDDEN_LIST:-}" \
+        JSON_ROOT_STATUS="${ROOT_STATUS}" \
+        JSON_ROOT_HITS="${ROOT_HITS}" \
+        JSON_ROOT_CAPS="${ROOT_CAPS_VERIFIED}" \
+        JSON_FUZZ_STATUS="${FUZZ_STATUS}" \
+        JSON_FUZZ_HITS="${FUZZ_HITS}" \
+        JSON_ERROR="${ERROR_MESSAGE}" \
+        JSON_WARNING="${WARNING_MESSAGE}" \
+        python3 -c '
+import json, os
+
+rc = int(os.environ["JSON_EXIT_CODE"])
+strict = os.environ["JSON_STRICT_FUZZ"] == "1"
+checked = [x for x in os.environ["JSON_FORBIDDEN_LIST"].splitlines() if x]
+root_hits = [x for x in os.environ["JSON_ROOT_HITS"].splitlines() if x]
+fuzz_hits = [x for x in os.environ["JSON_FUZZ_HITS"].splitlines() if x]
+
+payload = {
+    "schema": "ee.forbidden_deps.v1",
+    "strictFuzzLock": strict,
+    "verdict": "pass" if rc == 0 else "fail",
+    "exitCode": rc,
+    "controlMarker": f"EE_FORBIDDEN_DEPS_RC={rc}",
+    "checked": checked,
+    "root": {
+        "manifest": "Cargo.toml",
+        "status": os.environ["JSON_ROOT_STATUS"],
+        "hits": root_hits,
+        "capsVerified": os.environ["JSON_ROOT_CAPS"] == "true",
+    },
+    "fuzz": {
+        "manifest": "fuzz/Cargo.toml",
+        "status": os.environ["JSON_FUZZ_STATUS"],
+        "hits": fuzz_hits,
+    },
+}
+if os.environ["JSON_WARNING"]:
+    payload["warning"] = os.environ["JSON_WARNING"]
+if os.environ["JSON_ERROR"]:
+    payload["error"] = os.environ["JSON_ERROR"]
+print(json.dumps(payload, indent=2))
+'
+    fi
+    exit "${code}"
+}
+
 if ! FORBIDDEN_LIST=$(load_forbidden_list "${POLICY}"); then
-    echo "error: forbidden-dependency policy could not be enforced" >&2
-    exit 3
+    ERROR_MESSAGE="forbidden-dependency policy could not be enforced"
+    echo "error: ${ERROR_MESSAGE}" >&2
+    ROOT_STATUS="error"
+    emit_json_and_exit 3
 fi
 
 if [[ ! -f "${MANIFEST}" ]]; then
-    echo "error: manifest not found at ${MANIFEST}" >&2
-    exit 1
+    ERROR_MESSAGE="manifest not found at ${MANIFEST}"
+    echo "error: ${ERROR_MESSAGE}" >&2
+    ROOT_STATUS="error"
+    emit_json_and_exit 1
 fi
 
 report_hits() {
@@ -540,23 +765,36 @@ report_hits() {
 }
 
 # Audit one manifest's resolved graph. Returns 0 clean, 2 on a hit, 3 on an
-# infrastructure failure, so a broken toolchain can never be mistaken for a pass.
+# infrastructure failure, 4 on stale fuzz lockfile when --strict-fuzz-lock is set.
 audit_manifest() {
     local label="$1" manifest="$2" stale_is_fatal="${3:-yes}" metadata hits stderr_file status
     if [[ ! -f "${manifest}" ]]; then
-        echo "error: ${label} manifest not found at ${manifest}" >&2
+        ERROR_MESSAGE="${label} manifest not found at ${manifest}"
+        echo "error: ${ERROR_MESSAGE}" >&2
         return 1
     fi
     stderr_file=$(mktemp)
+    set +e
     metadata=$(cargo metadata --locked --format-version=1 --manifest-path "${manifest}" 2>"${stderr_file}")
     status=$?
+    set -e
     if (( status != 0 )); then
         # A lockfile that no longer matches its manifest is a DIFFERENT defect
         # from a forbidden dependency, and conflating them would make this gate
         # red for a reason it is not named for. Distinguish exactly that one
         # signature; anything else is still a hard infrastructure failure, so a
         # broken toolchain can never be mistaken for a pass.
-        if [[ "${stale_is_fatal}" == "no" ]] && grep -q 'because --locked was passed' "${stderr_file}"; then
+        if [[ "${stale_is_fatal}" != "yes" ]] && grep -q 'because --locked was passed' "${stderr_file}"; then
+            rm -f "${stderr_file}"
+            if [[ "${label}" == "fuzz" ]]; then
+                FUZZ_STATUS="stale_skipped"
+            fi
+            if [[ "${stale_is_fatal}" == "strict" ]]; then
+                ERROR_MESSAGE="${label} lockfile is out of sync with its manifest (--strict-fuzz-lock); regenerate it with: (cd fuzz && cargo generate-lockfile)"
+                echo "error: ${ERROR_MESSAGE}" >&2
+                return 4
+            fi
+            WARNING_MESSAGE="${label} lockfile is out of sync with its manifest, so its graph could not be audited"
             echo "warning: ${label} lockfile is out of sync with its manifest, so its graph could not be" >&2
             echo "         audited. This is NOT a forbidden-dependency finding." >&2
             echo "         Regenerate it with: (cd fuzz && cargo generate-lockfile)" >&2
@@ -567,12 +805,17 @@ audit_manifest() {
             echo "         wasm-bindgen-futures 0.4.79 -- no longer applies: the root now caps that" >&2
             echo "         crate below 0.4.79 (bd-iuybr) and fuzz inherits the cap through the path" >&2
             echo "         dependency, so a regenerated lock resolves 0.4.78 and stays tokio-free." >&2
-            rm -f "${stderr_file}"
             return 0
         fi
         cat "${stderr_file}" >&2
         rm -f "${stderr_file}"
-        echo "error: cargo metadata failed for ${label}; its lockfile was left unchanged" >&2
+        ERROR_MESSAGE="cargo metadata failed for ${label}; its lockfile was left unchanged"
+        echo "error: ${ERROR_MESSAGE}" >&2
+        if [[ "${label}" == "root" ]]; then
+            ROOT_STATUS="error"
+        elif [[ "${label}" == "fuzz" ]]; then
+            FUZZ_STATUS="error"
+        fi
         return 3
     fi
     rm -f "${stderr_file}"
@@ -581,19 +824,44 @@ audit_manifest() {
     LAST_AUDIT_METADATA_FILE=$(mktemp)
     printf '%s\n' "${metadata}" > "${LAST_AUDIT_METADATA_FILE}"
     if ! hits=$(printf '%s\n' "${metadata}" | scan_metadata); then
-        echo "error: dependency metadata scan failed for ${label}" >&2
+        ERROR_MESSAGE="dependency metadata scan failed for ${label}"
+        echo "error: ${ERROR_MESSAGE}" >&2
+        if [[ "${label}" == "root" ]]; then
+            ROOT_STATUS="error"
+        elif [[ "${label}" == "fuzz" ]]; then
+            FUZZ_STATUS="error"
+        fi
         return 3
     fi
     if [[ -n "${hits}" ]]; then
         report_hits "${label}" "${hits}"
+        if [[ "${label}" == "root" ]]; then
+            ROOT_STATUS="forbidden_hits"
+            ROOT_HITS="${hits}"
+        elif [[ "${label}" == "fuzz" ]]; then
+            FUZZ_STATUS="forbidden_hits"
+            FUZZ_HITS="${hits}"
+        fi
         return 2
     fi
-    echo "ok: no forbidden dependencies detected in the ${label} resolved tree"
+    if [[ "${label}" == "root" ]]; then
+        ROOT_STATUS="audited"
+    elif [[ "${label}" == "fuzz" ]]; then
+        FUZZ_STATUS="audited"
+    fi
+    if (( JSON_OUTPUT == 0 )); then
+        echo "ok: no forbidden dependencies detected in the ${label} resolved tree"
+    fi
     return 0
 }
 
 LAST_AUDIT_METADATA_FILE=""
-audit_manifest "root" "${MANIFEST}" || exit $?
+root_rc=0
+audit_manifest "root" "${MANIFEST}" "yes" || root_rc=$?
+if (( root_rc != 0 )); then
+    rm -f "${LAST_AUDIT_METADATA_FILE}"
+    emit_json_and_exit "${root_rc}"
+fi
 
 # A clean scan above means "no forbidden crate is in the graph", which is exactly
 # as true when a cap is holding one out as when nothing wants it. Say which,
@@ -601,14 +869,22 @@ audit_manifest "root" "${MANIFEST}" || exit $?
 # it from a red gate after their `cargo update`.
 if [[ -n "${LAST_AUDIT_METADATA_FILE}" && -f "${LAST_AUDIT_METADATA_FILE}" ]]; then
     caps_status=0
-    check_load_bearing_caps "${MANIFEST}" "${LAST_AUDIT_METADATA_FILE}" || caps_status=$?
+    if (( JSON_OUTPUT == 1 )); then
+        check_load_bearing_caps "${MANIFEST}" "${LAST_AUDIT_METADATA_FILE}" > /dev/null || caps_status=$?
+    else
+        check_load_bearing_caps "${MANIFEST}" "${LAST_AUDIT_METADATA_FILE}" || caps_status=$?
+    fi
     rm -f "${LAST_AUDIT_METADATA_FILE}"
     if (( caps_status != 0 )); then
-        exit "${caps_status}"
+        ERROR_MESSAGE="a load-bearing version cap is missing or ineffective"
+        emit_json_and_exit "${caps_status}"
     fi
+    ROOT_CAPS_VERIFIED="true"
 else
-    echo "error: root audit produced no metadata to verify caps against" >&2
-    exit 3
+    ERROR_MESSAGE="root audit produced no metadata to verify caps against"
+    echo "error: ${ERROR_MESSAGE}" >&2
+    ROOT_STATUS="error"
+    emit_json_and_exit 3
 fi
 
 # bd-mj18x: fuzz/ is EXCLUDED from the workspace and resolves its own lockfile, so
@@ -623,10 +899,23 @@ fi
 # is exactly how this surface went unwatched.
 FUZZ_MANIFEST="${REPO_ROOT}/fuzz/Cargo.toml"
 if [[ -f "${FUZZ_MANIFEST}" ]]; then
-    audit_manifest "fuzz" "${FUZZ_MANIFEST}" "no" || exit $?
+    fuzz_stale_mode="no"
+    if (( STRICT_FUZZ_LOCK == 1 )); then
+        fuzz_stale_mode="strict"
+    fi
+    fuzz_rc=0
+    audit_manifest "fuzz" "${FUZZ_MANIFEST}" "${fuzz_stale_mode}" || fuzz_rc=$?
+    if (( fuzz_rc != 0 )); then
+        emit_json_and_exit "${fuzz_rc}"
+    fi
 else
-    echo "note: no fuzz manifest at ${FUZZ_MANIFEST}; nothing to audit there"
+    FUZZ_STATUS="not_present"
+    if (( JSON_OUTPUT == 0 )); then
+        echo "note: no fuzz manifest at ${FUZZ_MANIFEST}; nothing to audit there"
+    fi
 fi
 
-echo "checked: ${FORBIDDEN_LIST//$'\n'/ }"
-exit 0
+if (( JSON_OUTPUT == 0 )); then
+    echo "checked: ${FORBIDDEN_LIST//$'\n'/ }"
+fi
+emit_json_and_exit 0

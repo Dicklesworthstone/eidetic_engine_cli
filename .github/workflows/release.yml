@@ -132,7 +132,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Forbidden dependency audit
-        run: ./scripts/check-forbidden-deps.sh
+        run: ./scripts/check-forbidden-deps.sh --strict-fuzz-lock
 
       # Supply-chain RustSec advisory gate (bd-2efax). Runs before the
       # build/sign matrix so a release cannot ship a Sigstore-signed binary whose resolved tree
