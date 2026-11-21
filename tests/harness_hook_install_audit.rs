@@ -749,6 +749,88 @@ fn install_audit_preserves_mixed_groups_and_near_matching_user_hooks() -> TestRe
 }
 
 #[test]
+fn install_audit_preserves_explicit_user_ownership_of_copied_ee_commands() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let generated =
+            generate_harness_hook_install(&options(target, &settings_path, false, false))
+                .map_err(|error| error.message())?;
+        let snippet = generated
+            .snippets
+            .iter()
+            .find(|snippet| snippet.event == "SessionStart")
+            .ok_or("missing SessionStart snippet")?;
+        let user_group = serde_json::json!({
+            "eeManaged": "user-owned",
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": snippet.command, "timeout": 77}]
+        });
+        let user_hook = serde_json::json!({
+            "eeManaged": false,
+            "type": "command",
+            "command": snippet.command,
+            "timeout": 91
+        });
+        let mixed_group = serde_json::json!({
+            "eeManaged": generated.markers.entry_marker,
+            "matcher": "compact",
+            "hooks": [
+                user_hook,
+                {"type": "command", "command": snippet.command, "timeout": snippet.timeout_seconds}
+            ]
+        });
+        let original = serde_json::to_vec_pretty(&serde_json::json!({
+            "hooks": {"SessionStart": [user_group, mixed_group]}
+        }))
+        .map_err(|error| error.to_string())?;
+        fs::write(&settings_path, &original).map_err(|error| error.to_string())?;
+
+        let before = generate_harness_hook_install(&options(target, &settings_path, false, false))
+            .map_err(|error| error.message())?;
+        assert_eq!(fs::read(&settings_path).unwrap(), original);
+        assert!(
+            before
+                .install_audit
+                .findings
+                .iter()
+                .all(|finding| finding.code != "duplicate_hook"),
+            "user-owned copies must not be counted as managed duplicates"
+        );
+
+        let install = options(target, &settings_path, true, false);
+        let installed = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert_eq!(installed.install_audit.status, "fresh");
+        assert_eq!(installed.install_audit.hook_fresh_count, 4);
+        let installed_bytes = fs::read(&settings_path).map_err(|error| error.to_string())?;
+        let document: Value =
+            serde_json::from_slice(&installed_bytes).map_err(|error| error.to_string())?;
+        let groups = document["hooks"]["SessionStart"]
+            .as_array()
+            .ok_or("missing installed SessionStart groups")?;
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0], user_group);
+        assert_eq!(
+            groups[1],
+            serde_json::json!({"matcher": "compact", "hooks": [user_hook]})
+        );
+        assert_eq!(groups[2]["eeManaged"], generated.markers.entry_marker);
+        assert_eq!(groups[2]["hooks"][0]["command"], snippet.command);
+
+        let repeated = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert!(repeated.written_paths.is_empty());
+        assert_eq!(fs::read(&settings_path).unwrap(), installed_bytes);
+
+        generate_harness_hook_install(&options(target, &settings_path, false, true))
+            .map_err(|error| error.message())?;
+        let restored = fs::read(&settings_path).map_err(|error| error.to_string())?;
+        assert_eq!(sha256_hex(&restored), sha256_hex(&original));
+        assert_eq!(restored, original);
+    }
+    Ok(())
+}
+
+#[test]
 fn install_audit_rejects_malformed_settings_without_rewriting_them() -> TestResult {
     for (contents, message) in [
         ("{invalid", "not valid JSON"),
