@@ -29,14 +29,14 @@ whether the gate is exercised.
 | -------------------- | ---------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------- |
 | `default`            | active     | `["fts5", "json", "embed-fast", "lexical-bm25", "graph"]` | Composite — enables `fts5`, `json`, `embed-fast`, `lexical-bm25`, `graph` by default.                                     | core build             | 0.1.0         |
 | `fts5`               | active     | `["frankensearch/fts5"]`                 | Enables the Frankensearch FTS5 lexical fallback dependency.                                                               | `bd-17c65.2` (B-series) | 0.1.0         |
-| `json`               | reserved   | `[]`                                     | No cfg-gates in `src/`. Reserved for a future "JSON-only minimal output" build profile; today JSON output is unconditional (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.77` (successor to closed `bd-17c65.11.7`) | 0.1.0         |
+| `json`               | reserved   | `[]`                                     | No cfg-gates in `src/`. Reserved for a future "JSON-only minimal output" build profile; today JSON output is unconditional (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.22` (successor to `.77` and closed `bd-17c65.11.7`) | 0.1.0         |
 | `embed-fast`         | active     | `["frankensearch/model2vec", "frankensearch/download"]` | Enables the Frankensearch `model2vec` fast semantic embedder and the asupersync-backed bundled-model download path.        | `bd-17c65.2` (B-series), `bd-1et0v.1` | 0.1.0         |
 | `lexical-bm25`       | active     | `["frankensearch/lexical-tantivy"]`      | Enables the Frankensearch Tantivy-backed BM25 lexical scorer.                                                             | `bd-17c65.2` (B-series) | 0.1.0         |
 | `graph`              | active     | `[]`                                     | Gates `src/graph/mod.rs` graph analytics surface (42 cfg-gated functions including PageRank, centrality refresh, neighborhood expansion). Default-on so `ee graph *` works out of the box. | `bd-17c65` (graph subsystem) | 0.1.0   |
 | `differential-networkx` | active  | `[]`                                     | Test-only gate for the heavyweight Python NetworkX differential suite. It pulls no Rust dependencies and is intended for nightly CI or explicit RCH runs where Python + networkx are installed. | `bd-8jvg.6` (F4.networkx) | 0.1.0 |
-| `mcp`                | active     | `[]`                                     | Gates the optional stdio/server adapter module at `src/lib.rs:24`. The CLI discovery surfaces `ee mcp manifest`, `ee mcp serve-stdio`, and `ee mcp validate` remain available in default builds; manifest and serve-stdio report `mcp_feature_disabled` as a capability gap when the adapter is not compiled. Opt-in via `cargo install eidetic-engine --features mcp` per README §Agent Harness Integration. | `bd-17c65` (MCP adapter) | 0.1.0       |
-| `serve`              | reserved   | `[]`                                     | No cfg-gates in `src/`; the loopback-only HTTP/SSE adapter (`src/serve.rs`, `src/serve_api.rs`) is compiled unconditionally in every build, and this flag only toggles capability reporting until made opt-in or retired (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.77` (successor to closed `bd-17c65.11.7`) | 0.1.0         |
-| `science-analytics`  | reserved   | `[]`                                     | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics, and `ee analyze science-status` is a read-only status surface (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.77` (successor to closed `bd-17c65.11.7`) | 0.1.0         |
+| `mcp`                | active     | `[]`                                     | Gates the optional stdio/server adapter module at `src/lib.rs:43`. The CLI discovery surfaces `ee mcp manifest`, `ee mcp serve-stdio`, and `ee mcp validate` remain available in default builds; manifest and serve-stdio report `mcp_feature_disabled` as a capability gap when the adapter is not compiled. Opt-in via `cargo install eidetic-engine --features mcp` per README §Agent Harness Integration. | `bd-17c65` (MCP adapter) | 0.1.0       |
+| `serve`              | reserved   | `[]`                                     | No cfg-gates in `src/`; the loopback-only HTTP/SSE adapter (`src/serve.rs`, `src/serve_api.rs`) is compiled unconditionally in every build, and this flag only toggles capability reporting until made opt-in or retired (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.22` (successor to `.77` and closed `bd-17c65.11.7`) | 0.1.0         |
+| `science-analytics`  | reserved   | `[]`                                     | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics, and `ee analyze science-status` is a read-only status surface (renewed `2026-11-21`, review by `2027-02-19`). | `bd-reality-core-convergence-1azkt.22` (successor to `.77` and closed `bd-17c65.11.7`) | 0.1.0         |
 
 ## Reserved-flag contract
 
@@ -49,14 +49,14 @@ without an active tracking bead or an unexpired renewal/disposition date
 accrue technical debt.
 
 Active reservation renewal: `2026-11-21` (next 90-day disposition review by
-`2027-02-19`, tracked on `bd-reality-core-convergence-1azkt.77`).
+`2027-02-19`, tracked on `bd-reality-core-convergence-1azkt.22`).
 
 ## Cross-references
 
 - `docs/silent-fallback-inventory.md` — the `science-analytics` flag is
   cross-referenced there because the empty flag remains reserved while
   lightweight science diagnostics are available in default builds.
-- `bd-reality-core-convergence-1azkt.77` (successor to closed
+- `bd-reality-core-convergence-1azkt.22` (and `.77`, successor to closed
   `bd-17c65.11.7` K7) — tracks reconciling Cargo feature flags (`json`,
   `serve`, `science-analytics`) and capability reporting.
 - `Cargo.toml` `[features]` section — the source of truth for flag

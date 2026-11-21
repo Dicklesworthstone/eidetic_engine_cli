@@ -54,24 +54,29 @@ impl Fixture {
         let mut evidence = Vec::new();
         for line in 1..=3 {
             let id = EvidenceId::now().to_string();
+            let (producer_kind, span_kind, role) = if line == 3 {
+                (
+                    EvidenceProducerKind::DocsBootstrap,
+                    "file",
+                    "docs_bootstrap",
+                )
+            } else {
+                (EvidenceProducerKind::CassImport, "message", "assistant")
+            };
             db.insert_evidence_span(
                 &id,
                 &CreateEvidenceSpanInput {
                     workspace_id: workspace.clone(),
                     session_id: session.clone(),
                     memory_id: None,
-                    producer_kind: if line == 3 {
-                        EvidenceProducerKind::DocsBootstrap
-                    } else {
-                        EvidenceProducerKind::CassImport
-                    },
+                    producer_kind,
                     cass_span_id: format!("withdraw-session-cli:{line}"),
-                    span_kind: "message".to_owned(),
+                    span_kind: span_kind.to_owned(),
                     start_line: line,
                     end_line: line,
                     start_byte: None,
                     end_byte: None,
-                    role: Some("assistant".to_owned()),
+                    role: Some(role.to_owned()),
                     excerpt: SOURCE.to_owned(),
                     content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())),
                     metadata_json: None,

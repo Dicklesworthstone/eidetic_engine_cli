@@ -879,7 +879,13 @@ mod tests {
             assert_ne!(exit, ProcessExitCode::Success);
             if format == "json" {
                 let error: serde_json::Value = serde_json::from_str(&stdout)?;
-                assert_eq!(error["success"], false);
+                assert_eq!(error["schema"], crate::models::ERROR_SCHEMA_V2);
+                assert_eq!(error["error"]["code"], "usage");
+                assert!(
+                    error["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("nonempty reason"))
+                );
                 assert!(stderr.is_empty());
             } else {
                 assert!(stdout.is_empty());

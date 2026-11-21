@@ -52,6 +52,11 @@ impl Fixture {
             },
         )?;
         let evidence = EvidenceId::now().to_string();
+        let (span_kind, role) = if producer == EvidenceProducerKind::DocsBootstrap {
+            ("file", "docs_bootstrap")
+        } else {
+            ("message", "assistant")
+        };
         db.insert_evidence_span(
             &evidence,
             &CreateEvidenceSpanInput {
@@ -60,12 +65,12 @@ impl Fixture {
                 memory_id: None,
                 producer_kind: producer,
                 cass_span_id: "withdraw-fixture:1".to_owned(),
-                span_kind: "message".to_owned(),
+                span_kind: span_kind.to_owned(),
                 start_line: 1,
                 end_line: 1,
                 start_byte: None,
                 end_byte: None,
-                role: Some("assistant".to_owned()),
+                role: Some(role.to_owned()),
                 excerpt: SOURCE.to_owned(),
                 content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())),
                 metadata_json: None,

@@ -77,7 +77,7 @@ ADR updates the dependency contract.
 - `petgraph`, `hyper`, `axum`, `reqwest`: not pulled in by default.
 
 **EE wiring guidance (research only):**
-- For EE-001, the accepted profile is the no-default `=0.4.10` registry pin plus
+- For EE-001, the accepted profile is the no-default `=0.5.0` registry pin plus
   `tracing-integration`.
 - `deterministic-mode` and `test-internals` are explicit test-only or
   diagnostics-only choices; they are not part of the default `ee` release
