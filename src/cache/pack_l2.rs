@@ -380,9 +380,18 @@ impl PackL2Cache {
         key: &str,
         pack_json: &JsonValue,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        self.put_compressed_with_dictionary(key, pack_json, None)
+    }
+
+    pub fn put_compressed_with_dictionary(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+        dictionary: Option<&PackL2CompressionDictionary>,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
         let now = system_time_seconds(SystemTime::now())
             .inspect_err(|error| trace_write_unavailable(key, error))?;
-        self.put_compressed_with_dictionary_at(key, pack_json, None, now)
+        self.put_compressed_with_dictionary_at(key, pack_json, dictionary, now)
     }
 
     pub fn put_compressed_at(
@@ -1015,6 +1024,65 @@ struct EvictionCandidate {
     stored_epoch_seconds: u64,
     last_used_epoch_seconds: u64,
     expired: bool,
+}
+
+const MAX_LOADED_PACK_DICTIONARY_BYTES: u64 = 16 * 1024 * 1024;
+
+#[must_use]
+pub fn load_workspace_compression_dictionary(
+    workspace_root: &std::path::Path,
+) -> Option<PackL2CompressionDictionary> {
+    let dictionaries_dir =
+        super::pack_compression::pack_compression_derived_root(workspace_root).join("dictionaries");
+    let entries = fs::read_dir(&dictionaries_dir).ok()?;
+    let mut best: Option<(SystemTime, String, PackL2CompressionDictionary)> = None;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("dict") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() == 0 || metadata.len() > MAX_LOADED_PACK_DICTIONARY_BYTES {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let hex = blake3::hash(&bytes).to_hex().to_string();
+        let expected_id = format!("zstd_dict_{hex}");
+        if path
+            != super::pack_compression::pack_compression_dictionary_path(
+                workspace_root,
+                &expected_id,
+            )
+        {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let candidate = PackL2CompressionDictionary {
+            id: expected_id.clone(),
+            byte_hash: format!("blake3:{hex}"),
+            bytes,
+        };
+        let replace = best.as_ref().is_none_or(|(best_modified, best_id, _)| {
+            modified > *best_modified || (modified == *best_modified && expected_id > *best_id)
+        });
+        if replace {
+            best = Some((modified, expected_id, candidate));
+        }
+    }
+    best.map(|(_, _, dictionary)| dictionary)
 }
 
 /// Structured phase tracing for the L2 pack cache surface. bd-ndzfg.4.
@@ -3262,6 +3330,97 @@ mod tests {
                 .mode()
                 & 0o777;
             assert_eq!(mode, 0o700, "cache directory should be owner-only");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_trained_compression_dictionary_round_trips_l2_cache() -> TestResult {
+        use super::super::pack_compression::{
+            PackCompressionDictionaryTrainingOutcome, PackCompressionSample,
+            PackCompressionSampleSourceKind, PackCompressionTrainingOptions,
+            pack_compression_dictionary_path, train_pack_compression_dictionary,
+        };
+
+        let samples: Vec<PackCompressionSample> = (0..96_u64)
+            .map(|index| {
+                let payload = format!(
+                    "{{\"schema\":\"ee.pack.v2\",\"pack\":\"release\",\"index\":{index},\"items\":[\"mem_alpha\",\"mem_beta\"],\"provenance\":\"deterministic-pack-corpus\"}}"
+                );
+                PackCompressionSample::new(
+                    PackCompressionSampleSourceKind::PackRecord,
+                    format!("pack-{index:03}"),
+                    Some(index),
+                    payload.into_bytes(),
+                )
+            })
+            .collect();
+        let options = PackCompressionTrainingOptions {
+            max_dictionary_bytes: 8192,
+            max_sample_count: 128,
+            max_sample_bytes: 256 * 1024,
+            ..PackCompressionTrainingOptions::default()
+        };
+        let trained = match train_pack_compression_dictionary(&samples, &options)
+            .map_err(|error| error.to_string())?
+        {
+            PackCompressionDictionaryTrainingOutcome::Trained(report) => report,
+            PackCompressionDictionaryTrainingOutcome::NoEligibleSamples(_) => {
+                return Err("fixture corpus should train a dictionary".to_owned());
+            }
+        };
+        let dict_id = trained
+            .dictionary_id
+            .ok_or_else(|| "trained dictionary must carry id".to_owned())?;
+
+        let (workspace_temp, cache) = cache(64 * 1024, Duration::from_secs(60))?;
+        let dict_path = pack_compression_dictionary_path(workspace_temp.path(), &dict_id);
+        let dict_parent = dict_path
+            .parent()
+            .ok_or_else(|| "dictionary path must have parent".to_owned())?;
+        fs::create_dir_all(dict_parent).map_err(|error| error.to_string())?;
+        fs::write(&dict_path, &trained.dictionary_bytes).map_err(|error| error.to_string())?;
+
+        let loaded = load_workspace_compression_dictionary(workspace_temp.path())
+            .ok_or_else(|| "workspace dictionary should load when verified".to_owned())?;
+        assert_eq!(loaded.id, dict_id);
+        assert_eq!(loaded.bytes, trained.dictionary_bytes);
+
+        let key = "blake3:workspace-dict-wired";
+        let pack = json!({
+            "schema": "ee.pack.v2",
+            "pack": "release",
+            "items": ["mem_alpha", "mem_beta"],
+            "provenance": "deterministic-pack-corpus"
+        });
+        let report = cache
+            .put_compressed_with_dictionary(key, &pack, Some(&loaded))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            report
+                .compression
+                .as_ref()
+                .and_then(|compression| compression.dictionary_id.as_deref()),
+            Some(dict_id.as_str())
+        );
+
+        let now = system_time_seconds(SystemTime::now()).map_err(|error| error.to_string())?;
+        let lookup = cache
+            .get_at(key, now.saturating_add(1))
+            .map_err(|error| error.to_string())?;
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.pack_json, pack);
+                assert_eq!(
+                    hit.compression
+                        .as_ref()
+                        .and_then(|compression| compression.dictionary_id.as_deref()),
+                    Some(dict_id.as_str())
+                );
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!("dictionary-compressed entry should hit: {miss:?}"));
+            }
         }
         Ok(())
     }

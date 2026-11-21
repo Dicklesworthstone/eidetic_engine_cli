@@ -8663,23 +8663,48 @@ pub(crate) fn run_search_with_embedder(
 /// suppress the debt signal. Reconcile and index behaviour are identical to
 /// `run_search`; only the audit write is withheld.
 pub fn run_search_unaudited(options: &SearchOptions) -> Result<SearchReport, SearchError> {
+    run_search_unaudited_with_runtime(options, None)
+}
+
+pub(crate) fn run_search_unaudited_with_runtime(
+    options: &SearchOptions,
+    runtime: Option<&asupersync::runtime::Runtime>,
+) -> Result<SearchReport, SearchError> {
     let request_timeout = search_request_timeout();
     let reconcile_timeout = search_index_auto_reconcile_timeout();
-    let run = crate::core::run_cli_with_cx(request_timeout, |cx| async move {
-        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
-            &cx,
-            options,
-            None,
-            &[],
-            reconcile_timeout,
-            request_timeout,
-            None,
-            false,
-            false,
-        )
-        .await
-    })
-    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?;
+    let run = match runtime {
+        Some(runtime) => {
+            crate::core::run_with_runtime_cx(runtime, request_timeout, |cx| async move {
+                run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                    &cx,
+                    options,
+                    None,
+                    &[],
+                    reconcile_timeout,
+                    request_timeout,
+                    None,
+                    false,
+                    false,
+                )
+                .await
+            })
+        }
+        None => crate::core::run_cli_with_cx(request_timeout, |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                options,
+                None,
+                &[],
+                reconcile_timeout,
+                request_timeout,
+                None,
+                false,
+                false,
+            )
+            .await
+        })
+        .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?,
+    };
     run.map(|value| value.report)
 }
 
@@ -8718,27 +8743,54 @@ pub(crate) fn run_pack_search_with_cached_local_embedder(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
 ) -> Result<PackSearchHandoff, SearchError> {
+    run_pack_search_with_runtime_and_cached_local_embedder(options, loaded, None)
+}
+
+pub(crate) fn run_pack_search_with_runtime_and_cached_local_embedder(
+    options: &SearchOptions,
+    loaded: Option<crate::core::index::CachedLocalEmbedder>,
+    runtime: Option<&asupersync::runtime::Runtime>,
+) -> Result<PackSearchHandoff, SearchError> {
     #[cfg(test)]
     PACK_SEARCH_RETRIEVAL_CALLS.set(PACK_SEARCH_RETRIEVAL_CALLS.get().saturating_add(1));
     let attestation = loaded.as_ref().map(|loaded| loaded.attestation.clone());
+    let embedder = loaded.map(|loaded| loaded.embedder);
     let timeout = search_request_timeout();
-    let run = crate::core::run_cli_with_cx(timeout, |cx| async move {
-        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
-            &cx,
-            options,
-            None,
-            &[],
-            Duration::ZERO,
-            timeout,
-            loaded.map(|loaded| loaded.embedder),
-            true,
-            // Pack path: the context writer records these facts against its own
-            // write connection (context.rs), so recording here would double-count.
-            false,
-        )
-        .await
-    })
-    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))??;
+    let run = match runtime {
+        Some(runtime) => crate::core::run_with_runtime_cx(runtime, timeout, |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                options,
+                None,
+                &[],
+                Duration::ZERO,
+                timeout,
+                embedder,
+                true,
+                // Pack path: the context writer records these facts against its own
+                // write connection (context.rs), so recording here would double-count.
+                false,
+            )
+            .await
+        }),
+        None => crate::core::run_cli_with_cx(timeout, |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                options,
+                None,
+                &[],
+                Duration::ZERO,
+                timeout,
+                embedder,
+                true,
+                // Pack path: the context writer records these facts against its own
+                // write connection (context.rs), so recording here would double-count.
+                false,
+            )
+            .await
+        })
+        .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?,
+    }?;
     let mut report = run.report;
     // The receiving pack resolves bodies and provenance from its own stores.
     // Keep internal scope/mesh routing metadata, but never make this internal
@@ -8780,23 +8832,52 @@ pub fn run_search_with_performance_and_filters(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
+    run_search_for_daemon_with_runtime(options, kind_filter, typed_field_filters, None, None)
+}
+
+pub(crate) fn run_search_for_daemon_with_runtime(
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+    runtime: Option<&asupersync::runtime::Runtime>,
+    loaded: Option<crate::core::index::CachedLocalEmbedder>,
+) -> Result<SearchPerformanceRun, SearchError> {
     let request_timeout = search_request_timeout();
     let reconcile_timeout = search_index_auto_reconcile_timeout();
-    crate::core::run_cli_with_cx(request_timeout, |cx| async move {
-        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
-            &cx,
-            options,
-            kind_filter,
-            typed_field_filters,
-            reconcile_timeout,
-            request_timeout,
-            None,
-            false,
-            true,
-        )
-        .await
-    })
-    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?
+    let embedder = loaded.map(|loaded| loaded.embedder);
+    match runtime {
+        Some(runtime) => {
+            crate::core::run_with_runtime_cx(runtime, request_timeout, |cx| async move {
+                run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                    &cx,
+                    options,
+                    kind_filter,
+                    typed_field_filters,
+                    reconcile_timeout,
+                    request_timeout,
+                    embedder,
+                    false,
+                    true,
+                )
+                .await
+            })
+        }
+        None => crate::core::run_cli_with_cx(request_timeout, |cx| async move {
+            run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+                &cx,
+                options,
+                kind_filter,
+                typed_field_filters,
+                reconcile_timeout,
+                request_timeout,
+                embedder,
+                false,
+                true,
+            )
+            .await
+        })
+        .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?,
+    }
 }
 
 /// Execute search with the caller-owned Asupersync request context.
@@ -14603,17 +14684,8 @@ pub(crate) fn apply_quality_scoring_with_feedback(
         && read_connection.is_some()
         && preloaded_memories
             .is_some_and(|preloaded| memory_refs.iter().all(|id| preloaded.contains_key(*id)));
-    let local_memories = if memory_refs.is_empty() {
+    let fetched_local_memories = if memory_refs.is_empty() || preloaded_covers_local_only {
         BTreeMap::new()
-    } else if let Some(preloaded) = preloaded_memories.filter(|_| preloaded_covers_local_only) {
-        memory_refs
-            .iter()
-            .filter_map(|id| {
-                preloaded
-                    .get(*id)
-                    .map(|memory| ((*id).to_owned(), memory.clone()))
-            })
-            .collect()
     } else if let Some(connection) = read_connection {
         match connection.get_memories_by_id_seeks(&memory_refs) {
             Ok(rows) => rows,
@@ -14626,13 +14698,18 @@ pub(crate) fn apply_quality_scoring_with_feedback(
         unavailable = true;
         BTreeMap::new()
     };
+    let resolve_local_memory = |id: &str| -> Option<&StoredMemory> {
+        if preloaded_covers_local_only {
+            preloaded_memories.and_then(|preloaded| preloaded.get(id))
+        } else {
+            fetched_local_memories.get(id)
+        }
+    };
     let local_ids: Vec<&str> = memory_refs
         .iter()
         .copied()
         .filter(|id| {
-            local_memories
-                .get(*id)
-                .is_some_and(|memory| memory.workspace_id == workspace_id)
+            resolve_local_memory(id).is_some_and(|memory| memory.workspace_id == workspace_id)
         })
         .collect();
     let harmful_counts = if local_ids.is_empty() {
@@ -14704,8 +14781,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
         let mut scope_match = None;
         let mut anchor_match = None;
         let entity_type;
-        if let Some(memory) = local_memories
-            .get(&hit.doc_id)
+        if let Some(memory) = resolve_local_memory(&hit.doc_id)
             .or_else(|| preloaded_memories.and_then(|memories| memories.get(&hit.doc_id)))
         {
             entity_type = "memory";
@@ -14728,7 +14804,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
                     .as_ref()
                     .and_then(|counts| counts.get(&hit.doc_id).copied());
                 scope_match = Some(true);
-            } else if !local_memories.contains_key(&hit.doc_id)
+            } else if resolve_local_memory(&hit.doc_id).is_none()
                 && admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id))
             {
                 harmful_count = global_feedback_snapshot
@@ -14737,7 +14813,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
                 scope_match = Some(options.memory_scope == MemoryScope::Global);
             }
             let admitted_anchor_source = local_ids.contains(hit.doc_id.as_str())
-                || (!local_memories.contains_key(&hit.doc_id)
+                || (resolve_local_memory(&hit.doc_id).is_none()
                     && admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)));
             if admitted_anchor_source && !query_anchors.is_cold_start() {
                 // Source, revision, seal and scope admission already ran. Reuse
@@ -17252,15 +17328,6 @@ fn apply_tombstone_visibility_with_connection(
             None
         }
     };
-    if let (Some(memories), Some(preloaded)) =
-        (batch_memories.as_ref(), preloaded_memories.as_deref_mut())
-    {
-        for (memory_id, memory) in memories {
-            // Local rows decide admission below and must also supply the body
-            // consumed by pack assembly when a global preload has the same ID.
-            preloaded.insert(memory_id.clone(), memory.clone());
-        }
-    }
     let mut visible_hits = Vec::with_capacity(hits.len());
     let mut filtered = 0usize;
     let mut expired_filtered = 0usize;
@@ -17348,7 +17415,7 @@ fn apply_tombstone_visibility_with_connection(
                 }
             };
 
-        if let Some(memories) = batch_memories.as_ref() {
+        if let Some(memories) = batch_memories {
             for mut hit in hits {
                 if !hit.doc_id.starts_with("mem_") {
                     visible_hits.push(hit);
@@ -17366,6 +17433,13 @@ fn apply_tombstone_visibility_with_connection(
                     }
                 } else {
                     orphaned_filtered = orphaned_filtered.saturating_add(1);
+                }
+            }
+            if let Some(preloaded) = preloaded_memories.as_deref_mut() {
+                for (memory_id, memory) in memories {
+                    // Local rows decide admission and must also supply the body
+                    // consumed by pack assembly when a global preload has the same ID.
+                    preloaded.insert(memory_id, memory);
                 }
             }
         } else {

@@ -64,14 +64,16 @@ use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextSearchAdvisorySnapshot,
     attach_context_cached_search_advisories_for_delivery,
-    attach_context_search_advisories_for_delivery, run_context_pack_with_performance_controlled,
+    attach_context_search_advisories_for_delivery,
+    run_context_pack_with_runtime_and_performance_controlled,
 };
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
     SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchAdvisorySettlement,
     SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    run_search_unaudited, run_search_with_performance_and_filters,
+    run_pack_search_with_runtime_and_cached_local_embedder, run_search_for_daemon_with_runtime,
+    run_search_unaudited_with_runtime,
 };
 use crate::db::DatabaseConfig;
 use crate::db::read_pool::{ProcessReadPoolResidency, retain_process_read_pools};
@@ -243,6 +245,16 @@ const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 const SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
 
+#[derive(Clone)]
+struct DaemonRequestRuntime(Arc<asupersync::runtime::Runtime>);
+
+impl std::fmt::Debug for DaemonRequestRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DaemonRequestRuntime")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Per-daemon dispatch policy that is resolved at daemon start and
 /// then shared by every accepted connection. Connection-level peer
 /// credentials still gate local UID; this policy gates method-specific
@@ -272,6 +284,10 @@ pub struct DaemonDispatchPolicy {
     cass_prefetch_worker: Option<CassPrefetchWorker>,
     /// Shared context admission and config ordering for both adaptive features.
     adaptive_scheduler: Arc<DaemonAdaptiveScheduler>,
+    /// Shared asupersync runtime + blocking pool reused by request dispatch
+    /// handlers (`ee.daemon.search`, `ee.daemon.pack_search`, `ee.daemon.context`)
+    /// so warm requests do not construct and drop a fresh runtime per call.
+    request_runtime: Option<DaemonRequestRuntime>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
     /// runtime + a clone of the actor's submit handle to `dispatch_write`
@@ -348,6 +364,12 @@ impl DaemonDispatchPolicy {
 
     fn write_router(&self) -> Option<&DaemonWriteRouter> {
         self.write_router.as_ref()
+    }
+
+    fn request_runtime(&self) -> Option<&asupersync::runtime::Runtime> {
+        self.request_runtime
+            .as_ref()
+            .map(|runtime| runtime.0.as_ref())
     }
 
     fn search_advisory_session(&self) -> &Mutex<SearchAdvisorySession> {
@@ -1320,6 +1342,17 @@ fn start_server_with_dispatch_policy(
         )
     });
 
+    let request_runtime =
+        Arc::new(
+            crate::core::build_cli_runtime().map_err(|error| DaemonStartError::Bind {
+                path: socket_path.clone(),
+                source: io::Error::other(format!(
+                    "failed to build daemon request runtime: {error}"
+                )),
+            })?,
+        );
+    dispatch_policy.request_runtime = Some(DaemonRequestRuntime(Arc::clone(&request_runtime)));
+
     // Host the long-lived write-owner actor when bound to a workspace (Inc 2,
     // bd-wx6ou.3): a current_thread asupersync runtime drives the actor task;
     // a `DaemonWriteRouter` (shared runtime + handle clone) is stashed in the
@@ -1456,6 +1489,7 @@ fn start_server_with_dispatch_policy(
                 PathBuf::from(workspace),
                 &shutdown,
                 Arc::clone(&dispatch_policy.search_warm_state),
+                Some(Arc::clone(&request_runtime)),
             )
         });
 
@@ -1509,7 +1543,10 @@ fn daemon_warm_enabled_from_env_value(value: Option<&str>) -> bool {
 /// every daemon start, refreshing it forever and suppressing the
 /// `never_retrieved` debt ADR 0071 exists to surface. Nobody read that memory;
 /// a warm-up is not a retrieval.
-fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::search::SearchError> {
+fn warm_daemon_search_stack(
+    workspace_path: &Path,
+    runtime: Option<&asupersync::runtime::Runtime>,
+) -> Result<(), crate::core::search::SearchError> {
     let options = SearchOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: None,
@@ -1530,7 +1567,7 @@ fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::se
         memory_scope: MemoryScope::default(),
         strict_scope: false,
     };
-    run_search_unaudited(&options).map(|_| ())
+    run_search_unaudited_with_runtime(&options, runtime).map(|_| ())
 }
 
 /// Spawn the startup warm-up thread for a workspace-bound daemon.
@@ -1541,6 +1578,7 @@ fn spawn_search_warm_thread(
     workspace_path: PathBuf,
     shutdown: &Arc<AtomicBool>,
     warm_state: Arc<AtomicU8>,
+    runtime: Option<Arc<asupersync::runtime::Runtime>>,
 ) -> Option<JoinHandle<()>> {
     let shutdown = Arc::clone(shutdown);
     warm_state.store(warm_posture::WARMING, Ordering::Release);
@@ -1556,7 +1594,7 @@ fn spawn_search_warm_thread(
             // A panic in the warm path must not take the daemon down: it is a
             // pure optimisation, and the accept loop is already serving.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                warm_daemon_search_stack(&workspace_path)
+                warm_daemon_search_stack(&workspace_path, runtime.as_deref())
             }));
             match outcome {
                 Ok(Ok(())) => {
@@ -2521,13 +2559,19 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             defer_advisory_until_socket_write,
             permit,
         ),
-        METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown, &policy.read_pools),
-        METHOD_SEARCH => dispatch_search(
+        METHOD_PACK_SEARCH => dispatch_pack_search_with_runtime(
+            request,
+            shutdown,
+            &policy.read_pools,
+            policy.request_runtime(),
+        ),
+        METHOD_SEARCH => dispatch_search_with_runtime(
             request,
             shutdown,
             search_advisory_session,
             &policy.read_pools,
             defer_advisory_until_socket_write,
+            policy.request_runtime(),
         ),
         METHOD_ORIENT_HOOK | METHOD_RECALL => dispatch_memory_read(request),
         METHOD_TELEMETRY => dispatch_telemetry(request),
@@ -4387,6 +4431,15 @@ fn dispatch_pack_search(
     shutdown: &AtomicBool,
     read_pools: &DaemonReadPools,
 ) -> DaemonResponse {
+    dispatch_pack_search_with_runtime(request, shutdown, read_pools, None)
+}
+
+fn dispatch_pack_search_with_runtime(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    read_pools: &DaemonReadPools,
+    request_runtime: Option<&asupersync::runtime::Runtime>,
+) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_search_params_error(request, "daemon is shutting down");
     }
@@ -4437,12 +4490,8 @@ fn dispatch_pack_search(
     // Retrieval captures a complete feedback/calibration witness from its
     // source snapshot. The client verifies that witness before any writes;
     // legitimate feedback history does not require a second, cold retrieval.
-    let retrieval = match loaded {
-        Some(loaded) => {
-            crate::core::search::run_pack_search_with_cached_local_embedder(&options, Some(loaded))
-        }
-        None => crate::core::search::run_pack_search(&options),
-    };
+    let retrieval =
+        run_pack_search_with_runtime_and_cached_local_embedder(&options, loaded, request_runtime);
     match retrieval {
         Ok(handoff) => {
             let response = DaemonResponse::ok(
@@ -4473,6 +4522,24 @@ fn dispatch_search(
     search_advisory_session: &Mutex<SearchAdvisorySession>,
     read_pools: &DaemonReadPools,
     defer_advisory_until_socket_write: bool,
+) -> DaemonResponse {
+    dispatch_search_with_runtime(
+        request,
+        shutdown,
+        search_advisory_session,
+        read_pools,
+        defer_advisory_until_socket_write,
+        None,
+    )
+}
+
+fn dispatch_search_with_runtime(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    search_advisory_session: &Mutex<SearchAdvisorySession>,
+    read_pools: &DaemonReadPools,
+    defer_advisory_until_socket_write: bool,
+    request_runtime: Option<&asupersync::runtime::Runtime>,
 ) -> DaemonResponse {
     let daemon_total_start = Instant::now();
     if shutdown.load(Ordering::SeqCst) {
@@ -4513,19 +4580,38 @@ fn dispatch_search(
         return daemon_search_params_error(request, "agent-specific memory scopes remain local");
     }
     read_pools.retain(&options.resolve_database_path());
-    let search_run =
-        match run_search_with_performance_and_filters(&options, kind.as_deref(), &field_filters) {
-            Ok(run) => run,
-            Err(error) => {
-                return DaemonResponse::err(
-                    request.request_id.clone(),
-                    request.agent_id.clone(),
-                    request.workspace_id.clone(),
-                    DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-                    format!("ee.daemon.search could not execute canonical search: {error}"),
-                );
-            }
-        };
+    // Reuse an already-loaded, workspace-verified local embedder when present
+    // (parity with `dispatch_pack_search`) so warm daemon searches skip
+    // per-request model registry/disk admission and empty-generation probing,
+    // while cold daemons still fall back to canonical preparation.
+    let loaded = if options.execution_source_mode().uses_embeddings() {
+        crate::core::index::already_loaded_local_embedder_for_workspace(
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        )
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    let search_run = match run_search_for_daemon_with_runtime(
+        &options,
+        kind.as_deref(),
+        &field_filters,
+        request_runtime,
+        loaded,
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+                format!("ee.daemon.search could not execute canonical search: {error}"),
+            );
+        }
+    };
     let advisory_workspace_id =
         crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
     let performance = explain_performance.then(|| {
@@ -6271,11 +6357,12 @@ fn dispatch_context_with_admission(
         );
     };
     let execution_started = Instant::now();
-    let context_result = run_context_pack_with_performance_controlled(
+    let context_result = run_context_pack_with_runtime_and_performance_controlled(
         &options,
         "pack",
         Some(deadline),
         Some(shutdown),
+        policy.request_runtime(),
     );
     policy
         .adaptive_scheduler
@@ -9295,6 +9382,99 @@ mod tests {
         assert_eq!(connection.count_table_rows("pack_records").unwrap(), packs);
         assert_eq!(connection.count_table_rows("audit_log").unwrap(), audits);
         assert!(!workspace.path().join(".ee/index").exists());
+    }
+
+    #[test]
+    fn dispatch_search_and_pack_search_reuse_shared_daemon_runtime() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).expect("create .ee");
+        let database = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("runtime-reuse".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        let memory_id = "mem_01J00000000000000000000099";
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Daemon runtime reuse parity check memory".to_owned(),
+                    tags: vec![],
+                    confidence: 0.9,
+                    importance: 0.8,
+                    utility: 0.7,
+                    source_type: "agent".to_owned(),
+                    source_id: None,
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    valid_from: None,
+                    valid_to: None,
+                    metadata_json: None,
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"Daemon runtime reuse parity check memory").to_hex()
+                    ),
+                },
+            )
+            .expect("insert memory");
+
+        let runtime = crate::core::build_cli_runtime().expect("shared runtime");
+        let pools = DaemonReadPools::default();
+        let advisory_session = Mutex::new(SearchAdvisorySession::default());
+        let shutdown = AtomicBool::new(false);
+
+        let mut search_req = DaemonRequest::new(
+            "runtime-search",
+            "test-agent",
+            METHOD_SEARCH,
+            serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "runtime reuse parity",
+                "workspacePath": workspace_path,
+                "sourceMode": "lexical_only",
+                "speed": "instant",
+            }),
+        );
+        search_req.workspace_id = Some(workspace_path.display().to_string());
+        let search_resp = dispatch_search_with_runtime(
+            &search_req,
+            &shutdown,
+            &advisory_session,
+            &pools,
+            false,
+            Some(&runtime),
+        );
+        assert!(search_resp.error.is_none(), "{search_resp:?}");
+
+        let mut pack_req = DaemonRequest::new(
+            "runtime-pack-search",
+            "test-agent",
+            METHOD_PACK_SEARCH,
+            serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "runtime reuse parity",
+                "workspacePath": workspace_path,
+                "sourceMode": "lexical_only",
+                "speed": "instant",
+            }),
+        );
+        pack_req.workspace_id = Some(workspace_path.display().to_string());
+        let pack_resp =
+            dispatch_pack_search_with_runtime(&pack_req, &shutdown, &pools, Some(&runtime));
+        assert!(pack_resp.error.is_none(), "{pack_resp:?}");
     }
 
     #[test]

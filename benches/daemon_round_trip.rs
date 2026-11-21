@@ -129,6 +129,12 @@ const PACK_MIN_P50_SPEEDUP: f64 = 2.0;
 const BENCH_OPERATING_PROFILE: &str = "portable";
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 const BENCH_PACK_PROFILE: &str = "balanced";
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const DAEMON_MAX_RSS_BYTES: u64 = 1_500_000_000;
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const BOOTSTRAP_RESAMPLES: usize = 2_000;
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+const DEFAULT_TRIAL_SEED: u64 = 0x5EED_DAEA_0052_0079;
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 #[derive(Clone, Copy)]
@@ -204,6 +210,10 @@ impl RunningDaemon {
 
     fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 }
 
@@ -462,6 +472,10 @@ impl RunningPublicDaemon {
 
     fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 }
 
@@ -1392,10 +1406,152 @@ fn run_search_process(
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn p50(mut samples: Vec<f64>) -> f64 {
+fn p50_slice(samples: &[f64]) -> f64 {
+    assert!(!samples.is_empty(), "p50 requires at least one sample");
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn p50(samples: Vec<f64>) -> f64 {
     assert_eq!(samples.len(), SEARCH_MEASURE_SAMPLES);
-    samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
+    p50_slice(&samples)
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+struct SplitMix64(u64);
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn gen_index(&mut self, upper: usize) -> usize {
+        usize::try_from(self.next_u64() % (upper as u64)).expect("modulo fits usize")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn randomized_order_from_args(args: &[String]) -> (bool, u64) {
+    let randomized = args.iter().any(|arg| arg == "--randomized-order");
+    let seed = args
+        .iter()
+        .position(|arg| arg == "--seed")
+        .map_or(DEFAULT_TRIAL_SEED, |pos| {
+            args.get(pos + 1)
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .unwrap_or_else(|| panic!("--seed requires an unsigned 64-bit integer"))
+        });
+    (randomized, seed)
+}
+
+/// Returns `true` when cold runs first in pair `i`, `false` when warm runs first.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn paired_trial_order(samples: usize, randomized: bool, seed: u64) -> Vec<bool> {
+    if !randomized {
+        return (0..samples).map(|sample| sample % 2 == 0).collect();
+    }
+    let cold_first_count = samples / 2;
+    let mut order = Vec::with_capacity(samples);
+    order.resize(cold_first_count, true);
+    order.resize(samples, false);
+    let mut rng = SplitMix64(seed);
+    for i in (1..order.len()).rev() {
+        let j = rng.gen_index(i + 1);
+        order.swap(i, j);
+    }
+    order
+}
+
+/// Paired percentile bootstrap 95% CI on `p50(cold) / p50(warm)`.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn bootstrap_speedup_ci_95(cold: &[f64], warm: &[f64], resamples: usize, seed: u64) -> (f64, f64) {
+    assert_eq!(cold.len(), warm.len(), "paired bootstrap lengths differ");
+    assert!(!cold.is_empty(), "bootstrap requires at least one pair");
+    assert!(resamples > 0, "bootstrap requires positive resample count");
+    let n = cold.len();
+    let mut rng = SplitMix64(seed ^ 0xA5A5_5A5A_1234_5678);
+    let mut ratios = Vec::with_capacity(resamples);
+    let mut cold_boot = Vec::with_capacity(n);
+    let mut warm_boot = Vec::with_capacity(n);
+    for _ in 0..resamples {
+        cold_boot.clear();
+        warm_boot.clear();
+        for _ in 0..n {
+            let idx = rng.gen_index(n);
+            cold_boot.push(cold[idx]);
+            warm_boot.push(warm[idx]);
+        }
+        let ratio = p50_slice(&cold_boot) / p50_slice(&warm_boot);
+        ratios.push(ratio);
+    }
+    ratios.sort_by(f64::total_cmp);
+    let low_idx = ((resamples as f64) * 0.025).floor() as usize;
+    let high_idx = (((resamples as f64) * 0.975).ceil() as usize).min(resamples - 1);
+    (ratios[low_idx], ratios[high_idx])
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessRssMeasurement {
+    rss_bytes: u64,
+    peak_rss_bytes: Option<u64>,
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn parse_proc_status_rss_bytes(status_text: &str) -> Option<ProcessRssMeasurement> {
+    let mut rss_kb = None;
+    let mut hwm_kb = None;
+    for line in status_text.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            rss_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok());
+        } else if let Some(rest) = line.strip_prefix("VmHWM:") {
+            hwm_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok());
+        }
+    }
+    rss_kb.map(|kb| ProcessRssMeasurement {
+        rss_bytes: kb.saturating_mul(1024),
+        peak_rss_bytes: hwm_kb.map(|h| h.saturating_mul(1024)),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn measure_daemon_rss_bytes(pid: u32) -> Option<ProcessRssMeasurement> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        parse_proc_status_rss_bytes(&status)
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        let output = Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let kb = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+        Some(ProcessRssMeasurement {
+            rss_bytes: kb.saturating_mul(1024),
+            peak_rss_bytes: None,
+        })
+    }
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1470,6 +1626,9 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         assert_result_parity(&expected_results, &warm, "daemon warmup");
     }
 
+    let args: Vec<String> = std::env::args().collect();
+    let (randomized_order, trial_seed) = randomized_order_from_args(&args);
+    let pair_order = paired_trial_order(SEARCH_MEASURE_SAMPLES, randomized_order, trial_seed);
     let mut cold_wall = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut cold_core = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut cold_overhead = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
@@ -1480,14 +1639,21 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     let mut embedder_preparation = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut index_open = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut query = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
-    for sequence in 0..SEARCH_MEASURE_SAMPLES {
-        let cold = run_search_process(&ee_binary, &fixture, None);
+    for (sequence, cold_first) in pair_order.iter().copied().enumerate() {
+        let (cold, warm) = if cold_first {
+            let cold = run_search_process(&ee_binary, &fixture, None);
+            let warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
+            (cold, warm)
+        } else {
+            let warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
+            let cold = run_search_process(&ee_binary, &fixture, None);
+            (cold, warm)
+        };
         assert_result_parity(&expected_results, &cold, "cold measured");
         cold_wall.push(cold.wall_ms);
         cold_core.push(cold.core_search_ms);
         cold_overhead.push((cold.wall_ms - cold.core_search_ms).max(0.0));
 
-        let warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
         assert_result_parity(&expected_results, &warm, "warm measured");
         warm_wall.push(warm.wall_ms);
         warm_core.push(warm.core_search_ms);
@@ -1504,7 +1670,10 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         index_open.push(timing.index_open_ms);
         query.push(timing.query_ms);
     }
+    let daemon_rss = measure_daemon_rss_bytes(daemon.pid());
 
+    let (speedup_ci_low, speedup_ci_high) =
+        bootstrap_speedup_ci_95(&cold_wall, &warm_wall, BOOTSTRAP_RESAMPLES, trial_seed);
     let cold_p50_ms = p50(cold_wall);
     let cold_core_p50_ms = p50(cold_core);
     let cold_overhead_p50_ms = p50(cold_overhead);
@@ -1515,10 +1684,26 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     let embedder_preparation_p50_ms = p50(embedder_preparation);
     let index_open_p50_ms = p50(index_open);
     let query_p50_ms = p50(query);
-    let passed = cold_p50_ms < SEARCH_COLD_P50_BUDGET_MS && warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS;
+    let speedup = cold_p50_ms / warm_p50_ms;
+    let rss_within_budget = daemon_rss
+        .map(|rss| rss.peak_rss_bytes.unwrap_or(rss.rss_bytes) <= DAEMON_MAX_RSS_BYTES)
+        .unwrap_or(true);
+    let passed = cold_p50_ms < SEARCH_COLD_P50_BUDGET_MS
+        && warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS
+        && rss_within_budget;
 
     println!("ee_search_cli_cold_10k_p50_ms={cold_p50_ms:.3}");
     println!("ee_search_daemon_warm_10k_p50_ms={warm_p50_ms:.3}");
+    println!("ee_search_daemon_10k_p50_speedup={speedup:.3}");
+    println!("ee_search_daemon_10k_p50_speedup_ci95_low={speedup_ci_low:.3}");
+    println!("ee_search_daemon_10k_p50_speedup_ci95_high={speedup_ci_high:.3}");
+    if let Some(rss) = daemon_rss {
+        println!("ee_search_daemon_10k_rss_bytes={}", rss.rss_bytes);
+        println!(
+            "ee_search_daemon_10k_peak_rss_bytes={}",
+            rss.peak_rss_bytes.unwrap_or(rss.rss_bytes)
+        );
+    }
     println!("ee_search_cli_cold_10k_core_p50_ms={cold_core_p50_ms:.3}");
     println!("ee_search_cli_cold_10k_overhead_p50_ms={cold_overhead_p50_ms:.3}");
     println!("ee_search_daemon_warm_10k_core_p50_ms={warm_core_p50_ms:.3}");
@@ -1600,8 +1785,26 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
                 "warmupPerPath": SEARCH_WARMUP_SAMPLES,
                 "measuredPerPath": SEARCH_MEASURE_SAMPLES,
                 "deepTimingProbes": SEARCH_MEASURE_SAMPLES,
-                "executionOrder": "cold_then_warm_then_deep_timing_probe_interleaved",
+                "executionOrder": if randomized_order {
+                    "randomized_paired_cold_warm"
+                } else {
+                    "cold_then_warm_then_deep_timing_probe_interleaved"
+                },
+                "pairOrderSeed": randomized_order.then_some(trial_seed),
             },
+            "p50Speedup": speedup,
+            "p50SpeedupCi95": {
+                "low": speedup_ci_low,
+                "high": speedup_ci_high,
+                "resamples": BOOTSTRAP_RESAMPLES,
+                "confidenceLevel": 0.95,
+            },
+            "daemonRss": daemon_rss.map(|rss| json!({
+                "rssBytes": rss.rss_bytes,
+                "peakRssBytes": rss.peak_rss_bytes,
+                "maxRssBytes": DAEMON_MAX_RSS_BYTES,
+                "withinBudget": rss_within_budget,
+            })),
             "cold": {
                 "process": "fresh_per_sample",
                 "p50Ms": cold_p50_ms,
@@ -1642,6 +1845,11 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         assert!(
             warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS,
             "warm-daemon ee search p50 {warm_p50_ms:.3}ms must be below the exclusive {SEARCH_WARM_P50_BUDGET_MS:.3}ms budget"
+        );
+        assert!(
+            rss_within_budget,
+            "warm daemon RSS {:?} exceeded maximum {DAEMON_MAX_RSS_BYTES} bytes",
+            daemon_rss
         );
     }
 }
@@ -2360,7 +2568,10 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
             "ADR 0052 gate measures ordinary persisted pack; use observation for read-only"
         );
     }
-    let feedback_scenario = feedback_scenario_from_args(&std::env::args().collect::<Vec<_>>());
+    let args: Vec<String> = std::env::args().collect();
+    let feedback_scenario = feedback_scenario_from_args(&args);
+    let (randomized_order, trial_seed) = randomized_order_from_args(&args);
+    let pair_order = paired_trial_order(SEARCH_MEASURE_SAMPLES, randomized_order, trial_seed);
     let fixture = build_prebuilt_search_fixture(&ee_binary, size, feedback_scenario);
     let mut persistence =
         PackPersistenceVerifier::new(&fixture.database, stable_workspace_id(&fixture.workspace));
@@ -2393,10 +2604,8 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     let mut cold = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut warm = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut raw = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
-    for sample in 0..SEARCH_MEASURE_SAMPLES {
-        // Alternate path order so a monotonic host-load/thermal trend does not
-        // systematically favour the daemon path.
-        let (direct, resident) = if sample % 2 == 0 {
+    for (sample, cold_first_in_pair) in pair_order.iter().copied().enumerate() {
+        let (direct, resident) = if cold_first_in_pair {
             let direct = run_pack_process(&ee_binary, &fixture, None, read_only, &mut persistence);
             let resident = run_pack_process(
                 &ee_binary,
@@ -2428,7 +2637,8 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
         cold.push(direct.wall_ms);
         warm.push(resident.wall_ms);
         raw.push(json!({
-            "sample": sample, "coldMs": direct.wall_ms, "warmMs": resident.wall_ms,
+            "sample": sample, "coldFirst": cold_first_in_pair,
+            "coldMs": direct.wall_ms, "warmMs": resident.wall_ms,
             "coldServingPath": direct.serving_path, "warmServingPath": resident.serving_path,
             "coldHash": direct.hash, "warmHash": resident.hash,
             "coldPackRecordId": direct.record_id, "warmPackRecordId": resident.record_id,
@@ -2439,10 +2649,16 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
         2 * (1 + SEARCH_WARMUP_SAMPLES + SEARCH_MEASURE_SAMPLES),
         "persistence qualification must cover first, warmup and measured calls"
     );
+    let daemon_rss = measure_daemon_rss_bytes(daemon.pid());
+    let (speedup_ci_low, speedup_ci_high) =
+        bootstrap_speedup_ci_95(&cold, &warm, BOOTSTRAP_RESAMPLES, trial_seed);
     let cold_p50_ms = p50(cold);
     let warm_p50_ms = p50(warm);
     let speedup = cold_p50_ms / warm_p50_ms;
-    let passed = speedup >= PACK_MIN_P50_SPEEDUP;
+    let rss_within_budget = daemon_rss
+        .map(|rss| rss.peak_rss_bytes.unwrap_or(rss.rss_bytes) <= DAEMON_MAX_RSS_BYTES)
+        .unwrap_or(true);
+    let passed = speedup >= PACK_MIN_P50_SPEEDUP && rss_within_budget;
     let verified_normal_calls = persistence.calls;
     let normal_persisted_records = persistence.record_ids.len();
     // Diagnostic rendering changes the measured workload. Collect it only
@@ -2467,6 +2683,15 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     println!("ee_pack_cli_cold_p50_ms={cold_p50_ms:.3}");
     println!("ee_pack_daemon_warm_p50_ms={warm_p50_ms:.3}");
     println!("ee_pack_daemon_p50_speedup={speedup:.3}");
+    println!("ee_pack_daemon_p50_speedup_ci95_low={speedup_ci_low:.3}");
+    println!("ee_pack_daemon_p50_speedup_ci95_high={speedup_ci_high:.3}");
+    if let Some(rss) = daemon_rss {
+        println!("ee_pack_daemon_rss_bytes={}", rss.rss_bytes);
+        println!(
+            "ee_pack_daemon_peak_rss_bytes={}",
+            rss.peak_rss_bytes.unwrap_or(rss.rss_bytes)
+        );
+    }
     println!(
         "ee_pack_daemon_result_json={}",
         json!({
@@ -2510,11 +2735,28 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
                 "daemon": daemon_performance,
             },
             "coldP50Ms": cold_p50_ms, "warmP50Ms": warm_p50_ms, "p50Speedup": speedup,
+            "p50SpeedupCi95": {
+                "low": speedup_ci_low,
+                "high": speedup_ci_high,
+                "resamples": BOOTSTRAP_RESAMPLES,
+                "confidenceLevel": 0.95,
+            },
+            "daemonRss": daemon_rss.map(|rss| json!({
+                "rssBytes": rss.rss_bytes,
+                "peakRssBytes": rss.peak_rss_bytes,
+                "maxRssBytes": DAEMON_MAX_RSS_BYTES,
+                "withinBudget": rss_within_budget,
+            })),
             "minimumP50Speedup": PACK_MIN_P50_SPEEDUP,
             "warmupPerPath": SEARCH_WARMUP_SAMPLES, "measuredPerPath": SEARCH_MEASURE_SAMPLES,
             "resultParity": "selected_entities_order_content_trust_provenance_budget",
             "packHashesCompared": false,
-            "executionOrder": "alternating_cold_warm_pairs",
+            "executionOrder": if randomized_order {
+                "randomized_paired_cold_warm"
+            } else {
+                "alternating_cold_warm_pairs"
+            },
+            "pairOrderSeed": randomized_order.then_some(trial_seed),
             "filesystemCache": "shared_warm_no_eviction",
             "budgetEnforcement": if enforce_budgets { "hard_gate" } else { "observation_only" },
             "passed": passed, "samples": raw,
@@ -2522,8 +2764,13 @@ fn run_warm_pack_measurement(enforce_budgets: bool) {
     );
     if enforce_budgets {
         assert!(
-            passed,
+            speedup >= PACK_MIN_P50_SPEEDUP,
             "ADR 0052 requires >= {PACK_MIN_P50_SPEEDUP}x p50 improvement at 10k memories; measured {speedup:.3}x (cold {cold_p50_ms:.3}ms, warm {warm_p50_ms:.3}ms)"
+        );
+        assert!(
+            rss_within_budget,
+            "warm daemon RSS {:?} exceeded maximum {DAEMON_MAX_RSS_BYTES} bytes",
+            daemon_rss
         );
     }
 }
@@ -3087,6 +3334,41 @@ mod pack_benchmark_contracts {
             "fallbackReason": "daemon_handoff_rejected"
         }});
         let _ = verified_pack_serving_path(&fallback, true);
+    }
+
+    #[test]
+    fn randomized_pair_order_is_balanced_and_deterministic() {
+        let alternating = paired_trial_order(21, false, DEFAULT_TRIAL_SEED);
+        assert!(alternating[0]);
+        assert!(!alternating[1]);
+
+        let first = paired_trial_order(21, true, 42);
+        let second = paired_trial_order(21, true, 42);
+        assert_eq!(first, second);
+        let cold_first_count = first.iter().filter(|flag| **flag).count();
+        assert_eq!(cold_first_count, 10);
+        assert_ne!(first, alternating);
+    }
+
+    #[test]
+    fn bootstrap_speedup_ci_brackets_sample_ratio() {
+        let cold = vec![1000.0; 21];
+        let mut warm = vec![400.0; 21];
+        warm[0] = 380.0;
+        warm[20] = 420.0;
+        let (low, high) = bootstrap_speedup_ci_95(&cold, &warm, 500, DEFAULT_TRIAL_SEED);
+        assert!(low.is_finite() && high.is_finite());
+        assert!(low <= 2.5 && high >= 2.5, "got CI [{low}, {high}]");
+        assert!(low <= high);
+    }
+
+    #[test]
+    fn proc_status_rss_parser_extracts_rss_and_hwm_bytes() {
+        let sample = "Name:\tee\nVmPeak:\t  512000 kB\nVmRSS:\t  262144 kB\nVmHWM:\t  300000 kB\n";
+        let parsed = parse_proc_status_rss_bytes(sample).expect("parse /proc status RSS");
+        assert_eq!(parsed.rss_bytes, 262_144 * 1024);
+        assert_eq!(parsed.peak_rss_bytes, Some(300_000 * 1024));
+        assert!(300_000 * 1024 <= DAEMON_MAX_RSS_BYTES);
     }
 }
 

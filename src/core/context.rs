@@ -2666,23 +2666,58 @@ pub fn run_context_pack_with_performance_controlled(
     deadline: Option<Duration>,
     cancellation_flag: Option<&AtomicBool>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    run_context_pack_with_runtime_and_performance_controlled(
+        options,
+        command,
+        deadline,
+        cancellation_flag,
+        None,
+    )
+}
+
+pub(crate) fn run_context_pack_with_runtime_and_performance_controlled(
+    options: &ContextPackOptions,
+    command: &'static str,
+    deadline: Option<Duration>,
+    cancellation_flag: Option<&AtomicBool>,
+    runtime: Option<&asupersync::runtime::Runtime>,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let runtime_timeout = deadline
         .unwrap_or(Duration::from_secs(60))
         .max(Duration::from_secs(60));
-    crate::core::run_cli_with_cx(runtime_timeout, |cx| async move {
-        let mut determinism = Deterministic::from_seed(0);
-        run_context_pack_with_performance_inner(
-            options,
-            command,
-            &mut determinism,
-            PackRecordPersistence::Ambient,
-            ContextPackControl::new(&cx, deadline, cancellation_flag),
-            None,
-            None,
-        )
-        .await
-    })
-    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
+    match runtime {
+        Some(runtime) => {
+            crate::core::run_with_runtime_cx(runtime, runtime_timeout, |cx| async move {
+                let mut determinism = Deterministic::from_seed(0);
+                run_context_pack_with_performance_inner(
+                    options,
+                    command,
+                    &mut determinism,
+                    PackRecordPersistence::Ambient,
+                    ContextPackControl::new(&cx, deadline, cancellation_flag),
+                    None,
+                    None,
+                )
+                .await
+            })
+        }
+        None => crate::core::run_cli_with_cx(runtime_timeout, |cx| async move {
+            let mut determinism = Deterministic::from_seed(0);
+            run_context_pack_with_performance_inner(
+                options,
+                command,
+                &mut determinism,
+                PackRecordPersistence::Ambient,
+                ContextPackControl::new(&cx, deadline, cancellation_flag),
+                None,
+                None,
+            )
+            .await
+        })
+        .map_err(|error| {
+            ContextPackError::Pack(format!("Failed to start pack runtime: {error}"))
+        })?,
+    }
 }
 
 pub fn run_context_pack_with_performance_seeded(
@@ -4394,6 +4429,7 @@ async fn run_context_pack_attempt(
     push_selected_context_memory_drift_degradations(
         read_connection,
         &options.workspace_path,
+        &search_preloaded_memories,
         &mut draft,
         &mut degraded,
     );
@@ -5390,26 +5426,39 @@ pub(crate) fn attach_context_cached_search_advisories_for_delivery(
 fn push_selected_context_memory_drift_degradations(
     connection: &DbConnection,
     workspace_path: &Path,
+    preloaded_memories: &BTreeMap<String, StoredMemory>,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
+    if draft.items.is_empty() {
+        return;
+    }
     let mut hints = Vec::new();
     let mut read_errors = 0usize;
     // GH #49: one git probe per pack, so HEAD, commit distances, and captured
     // blobs are resolved once for all selected items instead of per item.
     let git = GitDriftProbe::new(workspace_path);
     for item in &mut draft.items {
-        match connection.get_memory(&item.memory_id.to_string()) {
-            Ok(Some(memory)) => {
-                match memory_drift_selection_hint_for_memory(connection, &git, &memory) {
-                    Ok(Some(hint)) => {
-                        item.freshness_facets
-                            .push(pack_freshness_facet_from_memory_drift_hint(&hint));
-                        hints.push(hint);
-                    }
-                    Ok(None) => {}
-                    Err(_) => read_errors = read_errors.saturating_add(1),
+        let memory_id = item.memory_id.to_string();
+        let fetched = if preloaded_memories.contains_key(&memory_id) {
+            None
+        } else {
+            match connection.get_memory(&memory_id) {
+                Ok(row) => row,
+                Err(_) => {
+                    read_errors = read_errors.saturating_add(1);
+                    continue;
                 }
+            }
+        };
+        let Some(memory) = preloaded_memories.get(&memory_id).or(fetched.as_ref()) else {
+            continue;
+        };
+        match memory_drift_selection_hint_for_memory(connection, &git, memory) {
+            Ok(Some(hint)) => {
+                item.freshness_facets
+                    .push(pack_freshness_facet_from_memory_drift_hint(&hint));
+                hints.push(hint);
             }
             Ok(None) => {}
             Err(_) => read_errors = read_errors.saturating_add(1),
@@ -8644,7 +8693,13 @@ fn context_pack_l2_store(
         },
     });
 
-    match l2_context.cache.put_compressed(&store_key, &payload) {
+    let workspace_dictionary =
+        crate::cache::pack_l2::load_workspace_compression_dictionary(&options.workspace_path);
+    match l2_context.cache.put_compressed_with_dictionary(
+        &store_key,
+        &payload,
+        workspace_dictionary.as_ref(),
+    ) {
         Ok(report) => {
             tracing::info!(
                 target: "ee::pack_l2",
@@ -11501,10 +11556,41 @@ fn candidates_from_search_for_task_paths(
         usize::from(!memory_ids_refs.is_empty() && !used_preloaded_memories);
     metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
     // Phase 3: Build candidates from preloaded data.
+    let hot_path_filter = hot_path_allowed_candidate_indices(
+        &filters.tags,
+        hit_resolutions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (_, resolution, _))| {
+                let (memory_id, artifact_id) = resolution.as_ref()?;
+                let promoted_rule = artifact_id.as_deref().and_then(|id| rules_map.get(id));
+                let tags = promoted_rule.map_or_else(
+                    || {
+                        tags_map
+                            .get(&memory_id.to_string())
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[])
+                    },
+                    RuleIndexProjection::tags,
+                );
+                Some((idx as u64, tags))
+            }),
+    );
+    if let Some((ref allowed_ids, ref diagnostics)) = hot_path_filter {
+        tracing::debug!(
+            target: "ee::pack::hot_path",
+            tags = diagnostics.tags,
+            negation_prefilter = diagnostics.negation_prefilter,
+            scoring = diagnostics.scoring,
+            candidate_count = diagnostics.candidate_count,
+            allowed_count = allowed_ids.len(),
+            "applied search hot-path tag bitmap filter"
+        );
+    }
     let mut candidates = Vec::new();
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
     let mut rule_source_seals = BTreeMap::new();
-    for (hit, resolution, mesh_provenance) in hit_resolutions {
+    for (idx, (hit, resolution, mesh_provenance)) in hit_resolutions.into_iter().enumerate() {
         match resolution {
             Some((memory_id, artifact_id)) => {
                 let memory_key = memory_id.to_string();
@@ -11538,6 +11624,15 @@ fn candidates_from_search_for_task_paths(
                     continue;
                 }
                 if !filters.tags.is_empty() {
+                    if hot_path_filter
+                        .as_ref()
+                        .is_some_and(|(allowed_ids, _)| !allowed_ids.contains(&(idx as u64)))
+                    {
+                        metrics.tag_filtered_candidates =
+                            metrics.tag_filtered_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
+                        continue;
+                    }
                     let tags = promoted_rule.map_or_else(
                         || tags_map.get(&memory_key).map(Vec::as_slice).unwrap_or(&[]),
                         RuleIndexProjection::tags,
@@ -19549,6 +19644,107 @@ mod relevance_floor_tests {
             assert_eq!(candidates.rules.len(), 1);
             assert_eq!(candidates.evidence.len(), 1);
         }
+    }
+}
+
+fn hot_path_allowed_candidate_indices<'a, I>(
+    tag_filters: &crate::models::query::TagFilters,
+    candidate_tags: I,
+) -> Option<(
+    BTreeSet<u64>,
+    crate::search::hot_path::SearchHotPathDiagnostics,
+)>
+where
+    I: IntoIterator<Item = (u64, &'a [String])>,
+{
+    if tag_filters.require.is_empty() {
+        return None;
+    }
+    let query = crate::search::tag_bitmaps::TagBitmapQuery::new(
+        tag_filters.require.iter().map(String::as_str),
+        tag_filters.exclude.iter().map(String::as_str),
+    );
+    if query.includes().is_empty() {
+        return None;
+    }
+    let mut index = crate::search::tag_bitmaps::TagBitmapIndex::default();
+    let mut has_candidates = false;
+    for (idx, tags) in candidate_tags {
+        has_candidates = true;
+        index.insert(idx, tags.iter().map(String::as_str));
+    }
+    if !has_candidates {
+        return None;
+    }
+    let prefilter = if !query.excludes().is_empty() {
+        let mut bloom = crate::search::bloom_prefilter::CountingBloomPrefilter::with_capacity(
+            query.excludes().len().max(1),
+        );
+        for excluded in query.excludes() {
+            bloom.insert(excluded);
+        }
+        Some(bloom)
+    } else {
+        None
+    };
+    let result = crate::search::hot_path::filter_candidates_with_negation_prefilter(
+        &index,
+        &query,
+        prefilter.as_ref(),
+    );
+    Some((
+        result.candidate_ids.into_iter().collect(),
+        result.diagnostics,
+    ))
+}
+
+#[cfg(test)]
+mod hot_path_filter_tests {
+    use super::hot_path_allowed_candidate_indices;
+    use crate::models::query::TagFilters;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn hot_path_bitmap_and_bloom_filter_matches_tag_filter_semantics() {
+        let filters = TagFilters {
+            require: vec!["Rust".to_string()],
+            require_any: Vec::new(),
+            exclude: vec!["Archived".to_string()],
+        };
+        let rows: Vec<(u64, Vec<String>)> = vec![
+            (0, vec!["rust".to_string(), "cli".to_string()]),
+            (1, vec!["rust".to_string(), "archived".to_string()]),
+            (2, vec!["docs".to_string()]),
+            (3, vec!["rust".to_string(), "search".to_string()]),
+        ];
+        let (allowed, diagnostics) = hot_path_allowed_candidate_indices(
+            &filters,
+            rows.iter().map(|(idx, tags)| (*idx, tags.as_slice())),
+        )
+        .expect("non-empty require filters must activate hot_path bitmap index");
+
+        assert_eq!(allowed, BTreeSet::from([0_u64, 3_u64]));
+        assert_eq!(diagnostics.tags, "bitmap");
+        assert_eq!(diagnostics.negation_prefilter, "counting_bloom");
+        assert_eq!(diagnostics.candidate_count, 2);
+    }
+
+    #[test]
+    fn hot_path_filter_defers_when_require_is_empty() {
+        let filters = TagFilters {
+            require: Vec::new(),
+            require_any: vec!["rust".to_string()],
+            exclude: vec!["archived".to_string()],
+        };
+        let rows: Vec<(u64, Vec<String>)> = vec![(0, vec!["rust".to_string()])];
+        assert!(
+            hot_path_allowed_candidate_indices(
+                &filters,
+                rows.iter().map(|(idx, tags)| (*idx, tags.as_slice())),
+            )
+            .is_none(),
+            "TagBitmapQuery requires non-empty includes; empty require should defer to scalar TagFilters"
+        );
     }
 }
 

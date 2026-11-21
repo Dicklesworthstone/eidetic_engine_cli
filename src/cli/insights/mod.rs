@@ -1576,6 +1576,26 @@ fn proximity_hotspot_reports_from_links(
         return Ok(Vec::new());
     }
 
+    let scale_decision = crate::graph::scale_policy::graph_scale_decision(
+        crate::graph::scale_policy::GraphScaleAlgorithm::GomoryHu,
+        graph.node_count(),
+        graph.edge_count(),
+    );
+    if matches!(
+        scale_decision.action,
+        crate::graph::scale_policy::GraphScaleAction::Skip
+    ) {
+        tracing::info!(
+            target: "ee::insights::scale_policy",
+            algorithm = scale_decision.algorithm.as_str(),
+            node_count = scale_decision.node_count,
+            edge_count = scale_decision.edge_count,
+            degraded_code = scale_decision.degraded_code.unwrap_or("none"),
+            "skipping Gomory-Hu proximity tree build above scale threshold"
+        );
+        return Ok(Vec::new());
+    }
+
     let tree = build_gomory_hu_tree(&graph).map_err(|error| DomainError::Graph {
         message: format!("Failed to build Gomory-Hu proximity tree: {error}"),
         repair: Some(
@@ -2425,21 +2445,65 @@ fn pagerank_scores_for_skyline(
         build_ms: 0.0,
         snapshot_version: 0,
     };
-    crate::graph::compute_pagerank(&projection)
-        .map(|report| {
-            report
-                .scores
-                .into_iter()
-                .map(|score| (score.node, score.score))
-                .collect()
-        })
+    pagerank_or_minhash_scores(&projection)
+}
+
+fn minhash_fallback_scores(
+    graph: &crate::graph::DiGraph,
+    top_k: usize,
+) -> Result<std::collections::BTreeMap<String, f64>, DomainError> {
+    let policy = crate::graph::minhash_rank::MinHashRankPolicy {
+        top_k: top_k.max(1),
+        ..crate::graph::minhash_rank::MinHashRankPolicy::default()
+    };
+    let ranked = crate::graph::minhash_rank::compute_minhash_rank_with_policy(graph, policy)
         .map_err(|error| DomainError::Graph {
+            message: format!("Failed to compute minhash-rank fallback scores: {error}"),
+            repair: Some(
+                "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
+                    .to_owned(),
+            ),
+        })?;
+    let total = ranked.scores.len().max(1) as f64;
+    Ok(ranked
+        .scores
+        .into_iter()
+        .enumerate()
+        .map(|(idx, score)| {
+            // Preserve strict monotonic order from deterministic minhash rank while
+            // staying in (0.0, 1.0].
+            let rank_score = (total - (idx as f64)) / total;
+            (score.node, rank_score)
+        })
+        .collect())
+}
+
+fn pagerank_or_minhash_scores(
+    projection: &crate::graph::MemoryGraphProjection,
+) -> Result<std::collections::BTreeMap<String, f64>, DomainError> {
+    match crate::graph::compute_pagerank(projection) {
+        Ok(report) => Ok(report
+            .scores
+            .into_iter()
+            .map(|score| (score.node, score.score))
+            .collect()),
+        Err(crate::graph::GraphError::AlgorithmTimeout { .. }) => {
+            tracing::warn!(
+                target: "ee::insights::minhash_rank",
+                node_count = projection.node_count,
+                edge_count = projection.edge_count,
+                "PageRank exceeded budget; falling back to deterministic MinHashRank centrality"
+            );
+            minhash_fallback_scores(&projection.graph, projection.node_count)
+        }
+        Err(error) => Err(DomainError::Graph {
             message: format!("Failed to compute knowledge-skyline PageRank scores: {error}"),
             repair: Some(
                 "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
                     .to_owned(),
             ),
-        })
+        }),
+    }
 }
 
 fn add_skyline_pagerank_edge(
@@ -7312,6 +7376,50 @@ mod tests {
         let inputs = load_revision_frontier_inputs(Some(&workspace), None)
             .map_err(|error| format!("{error:?}"))?;
         assert!(inputs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn proximity_hotspot_reports_respect_scale_policy_skip_threshold() -> TestResult {
+        let count = crate::graph::scale_policy::GOMORY_HU_SKIP_THRESHOLD_NODES + 2;
+        let links = (0..(count - 1))
+            .map(|idx| {
+                stored_memory_link(
+                    &format!("link_{idx:05}"),
+                    &format!("mem_{idx:026}"),
+                    &format!("mem_{:026}", idx + 1),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let reports = proximity_hotspot_reports_from_links(&links)
+            .map_err(|error| format!("unexpected error at scale threshold: {error:?}"))?;
+        assert!(
+            reports.is_empty(),
+            "Gomory-Hu must skip cleanly above GOMORY_HU_SKIP_THRESHOLD_NODES"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn minhash_fallback_scores_orders_densely_linked_target_first() -> TestResult {
+        let mut graph = crate::graph::DiGraph::new(CompatibilityMode::Strict);
+        for node in ["mem_hub", "mem_a", "mem_b", "mem_c"] {
+            graph.add_node(node.to_owned());
+        }
+        for src in ["mem_a", "mem_b", "mem_c"] {
+            graph
+                .add_edge(src, "mem_hub")
+                .map_err(|error| format!("add edge: {error}"))?;
+        }
+        let scores = minhash_fallback_scores(&graph, 10)
+            .map_err(|error| format!("minhash fallback failed: {error:?}"))?;
+        let hub_score = scores.get("mem_hub").copied().unwrap_or(0.0);
+        let leaf_score = scores.get("mem_a").copied().unwrap_or(0.0);
+        assert!(
+            hub_score > leaf_score,
+            "dense target mem_hub ({hub_score}) must outrank leaf mem_a ({leaf_score})"
+        );
         Ok(())
     }
 }

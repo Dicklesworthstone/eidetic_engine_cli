@@ -2912,6 +2912,19 @@ pub fn compute_betweenness(
     )
 }
 
+/// Compute deterministic integer minhash-rank centrality for top-K nodes on a
+/// memory graph projection.
+pub fn compute_minhash_rank_top_k(
+    projection: &MemoryGraphProjection,
+    top_k: usize,
+) -> GraphResult<minhash_rank::MinHashRankResult> {
+    let policy = minhash_rank::MinHashRankPolicy {
+        top_k: top_k.max(1),
+        ..minhash_rank::MinHashRankPolicy::default()
+    };
+    minhash_rank::compute_minhash_rank_with_policy(&projection.graph, policy)
+}
+
 // ---------------------------------------------------------------------------
 // Centrality Refresh Job (EE-165)
 // ---------------------------------------------------------------------------

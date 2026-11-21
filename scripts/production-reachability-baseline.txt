@@ -114,9 +114,5 @@ fix_policy_safety_inconsistent
 fix_snapshot_backup_owed
 fix_state_file_permission_drift
 fix_workspace_config_atomic_rewrite
-module:hot_path
-module:minhash_rank
-module:pack_compression
 module:remote_evidence
-module:scale_policy
 module:tailscale_transport

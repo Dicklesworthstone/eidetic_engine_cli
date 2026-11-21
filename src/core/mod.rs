@@ -627,13 +627,32 @@ where
     Fut: Future<Output = T>,
 {
     let runtime = build_cli_runtime()?;
+    Ok(run_with_runtime_cx(&runtime, timeout, operation))
+}
+
+/// Run a synchronous operation against a caller-supplied
+/// [`asupersync::runtime::Runtime`] with a request-scoped [`asupersync::Cx`]
+/// bounded by `timeout`.
+///
+/// Long-lived hosts such as the daemon reuse a single runtime and its blocking
+/// pool across requests rather than constructing and tearing down a fresh
+/// runtime per call.
+pub fn run_with_runtime_cx<F, Fut, T>(
+    runtime: &asupersync::runtime::Runtime,
+    timeout: Duration,
+    operation: F,
+) -> T
+where
+    F: FnOnce(asupersync::Cx) -> Fut,
+    Fut: Future<Output = T>,
+{
     let bootstrap = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
     let budget = bootstrap.budget_for_timeout(timeout);
     let cx = runtime.request_cx_with_budget(budget);
-    Ok(runtime.block_on(async move {
+    runtime.block_on(async move {
         let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
         operation(cx).await
-    }))
+    })
 }
 
 /// Single-quote a repair-hint argument whenever it contains
@@ -1597,6 +1616,27 @@ mod tests {
             .map_err(|error| format!("failed to build Asupersync runtime: {error}"))?;
 
         ensure_equal(&result, &42, "runtime future result")
+    }
+
+    #[test]
+    fn run_with_runtime_cx_reuses_runtime_and_installs_bounded_cx() -> TestResult {
+        use super::run_with_runtime_cx;
+
+        let runtime = build_cli_runtime().map_err(|error| format!("build runtime: {error}"))?;
+        let (first_has_current, first_has_deadline) =
+            run_with_runtime_cx(&runtime, Duration::from_secs(5), |cx| async move {
+                let current = asupersync::Cx::current().is_some();
+                let has_deadline = cx.budget().deadline.is_some();
+                (current, has_deadline)
+            });
+        let second = run_with_runtime_cx(&runtime, Duration::from_secs(5), |cx| async move {
+            (cx.checkpoint().is_ok(), 99_u8)
+        });
+
+        ensure(first_has_current, "ambient Cx::current() must be installed")?;
+        ensure(first_has_deadline, "request Cx must carry timeout deadline")?;
+        ensure(second.0, "reused runtime Cx must be uncancelled")?;
+        ensure_equal(&second.1, &99_u8, "reused runtime operation result")
     }
 
     #[test]
