@@ -935,7 +935,7 @@ PY
     output="$(json_text_field "$admission_probe" output)"
     exit_code="$(json_text_field "$admission_probe" status)"
     admission_timed_out="$(json_text_field "$admission_probe" timed_out)"
-    if [ "$exit_code" -eq 2 ] && printf '%s' "$output" | grep -q -- '--mode'; then
+    if { [ "$exit_code" -eq 1 ] || [ "$exit_code" -eq 2 ]; } && [ "$admission_timed_out" != "true" ] && printf '%s' "$output" | grep -q -- '--mode'; then
         local legacy_args=(
             "$ee_bin" "--workspace" "$PROJECT_ROOT" "diag" "build-admission" "--json"
             "--min-free-bytes" "$BUILD_ADMISSION_MIN_FREE_BYTES"

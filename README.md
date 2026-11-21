@@ -2137,8 +2137,8 @@ Feature flags:
 | `graph` | active | Default-on graph analytics surface |
 | `differential-networkx` | active test gate | Heavy Python NetworkX differential suite |
 | `mcp` | active optional adapter | Stdio adapter module; default builds keep manifest discovery |
-| `serve` | reserved | The loopback-only `ee serve` adapter is compiled unconditionally; the flag only changes how `ee capabilities` reports the feature |
-| `science-analytics` | reserved | Future analytics subsystem; current CLI reports degraded/unavailable posture |
+| `serve` | reserved | The loopback-only `ee serve` adapter is compiled unconditionally; the flag only flips its `features[]` `enabled` boolean in `ee capabilities` / `ee version` |
+| `science-analytics` | reserved | Future heavier analytics backends (EE-171); default builds include lightweight metrics (`ee analyze science-status`) and the flag only flips its `features[]` `enabled` boolean |
 
 See [`docs/feature_flag_registry.md`](docs/feature_flag_registry.md) for the
 tracked owner and status of each flag.
@@ -3582,7 +3582,7 @@ Boundaries to know:
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.19.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
 | Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking with `--ppr-weight 0` as the repair. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.82` (successor to closed `bd-reality-core-convergence-1azkt.15`) as an upstream dependency blocker. |
-| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
+| Reserved adapters | Lightweight deterministic science metrics are built in (`ee analyze science-status`), while `science-analytics` is an empty reservation for heavier backends; the loopback-only `serve` adapter is compiled into every build, and both Cargo feature flags only flip their `features[]` `enabled` boolean in `ee capabilities` / `ee version`. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
 ---

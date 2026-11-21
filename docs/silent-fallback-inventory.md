@@ -417,11 +417,11 @@ Current reservations:
 | Flag                | Status   | Notes |
 | ------------------- | -------- | ----- |
 | `json`              | reserved | Future "JSON-only minimal output" build profile. No current cfg-gates. |
-| `serve`             | reserved | Loopback-only HTTP/SSE adapter (`src/serve.rs`) is compiled unconditionally in every build; this empty flag toggles capability reporting until made opt-in or retired. |
-| `science-analytics` | reserved | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics, and `ee analyze science-status` is a read-only status surface. |
+| `serve`             | reserved | Loopback-only HTTP/SSE adapter (`src/serve.rs`) is compiled unconditionally in every build; this empty flag flips its `features[]` `enabled` boolean in `ee capabilities` / `ee version` until made opt-in or retired. |
+| `science-analytics` | reserved | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics (`ee analyze science-status`), and this empty flag flips its `features[]` `enabled` boolean in `ee capabilities` / `ee version`. |
 
 `tests/feature_flag_registry_in_sync.rs` enforces 1:1 correspondence
 between `Cargo.toml` and the registry; a flag in either without a
 matching entry in the other fails CI.
 
-Owner: `bd-reality-core-convergence-1azkt.77` (successor to closed `bd-17c65.11.7` K7).
+Owner: `bd-reality-core-convergence-1azkt.22` (successor to `.77` and closed `bd-17c65.11.7` K7).

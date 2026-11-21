@@ -1982,7 +1982,7 @@ run_stage "EE Binary Resolution Contract" "./scripts/lib/ee_binary_resolution_te
 run_stage "Forbidden Dependency Contract" "./scripts/check-forbidden-deps.sh --self-test"
 
 # Gate 1: Check Forbidden Dependencies
-run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
+run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh --strict-fuzz-lock"
 
 # Gate 2: Closure Discipline
 run_stage "Closure Linter" "closure_lint_or_tracked_drift"

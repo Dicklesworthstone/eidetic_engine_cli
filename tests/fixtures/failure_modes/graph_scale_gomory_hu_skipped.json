@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_scale_gomory_hu_skipped",
+  "introduced_by": {
+    "bead": "bd-bife.17",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "insights"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The memory_links graph exceeds the Gomory-Hu exact-build node threshold (2,000 nodes), so ee insights skips Gomory-Hu proximity tree construction per the scale degradation policy and records the degradation explicitly.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# populate more than 2,000 linked memories in memory_links"
+    ],
+    "invocation": "ee insights --section proximityHotspots --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_scale_gomory_hu_skipped",
+    "severity": "low",
+    "message_contains": [
+      "Gomory-Hu tree construction is skipped above the node threshold"
+    ],
+    "repair_contains": "ee insights --section knowledgeSkyline",
+    "repair_string": "ee insights --section knowledgeSkyline --workspace . --json",
+    "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

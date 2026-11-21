@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_cached_local_embedder_unavailable",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-search-warm-latency-0bh05",
+    "epic_letter": "daemon"
+  },
+  "surfaces": [
+    "daemon",
+    "pack --use-daemon",
+    "context --use-daemon"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An ee.daemon.context read-only pack request sets requireCachedLocalEmbedder=true on a cold daemon whose process-cached verified local semantic model is not loaded. The daemon refuses to load the model on demand so read-only pack clients fall back to canonical local retrieval or warm the daemon first.",
+    "setup_commands": [
+      "ee daemon start --no-warm --json"
+    ],
+    "invocation": "DaemonRequest{method=\"ee.daemon.context\", params={\"requireCachedLocalEmbedder\":true}} sent to a cold daemon"
+  },
+  "expected_emission": {
+    "code": "daemon_cached_local_embedder_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "already-loaded verified local semantic model",
+      "warm the daemon first"
+    ],
+    "repair_contains": "warm the daemon"
+  }
+}

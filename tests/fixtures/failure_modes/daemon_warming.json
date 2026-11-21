@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_warming",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.79",
+    "epic_letter": "daemon"
+  },
+  "surfaces": [
+    "daemon",
+    "search --use-daemon",
+    "pack --use-daemon"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A client sends ee.daemon.search or ee.daemon.context with failIfWarming=true while the daemon startup search warm-up is still in flight (warm.posture == \"warming\"). The daemon refuses the request in 1 RTT with DAEMON_WARMING_CODE so the CLI falls back immediately to canonical local retrieval without waiting for warm-up or issuing a separate capabilities round-trip.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "DaemonRequest{method=\"ee.daemon.search\", params={\"failIfWarming\":true}} sent while warm.posture == \"warming\""
+  },
+  "expected_emission": {
+    "code": "daemon_warming",
+    "severity": "warning",
+    "message_contains": [
+      "daemon search stack is still warming"
+    ],
+    "repair_contains": "ee daemon status"
+  }
+}

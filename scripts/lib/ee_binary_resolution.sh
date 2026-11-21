@@ -120,17 +120,51 @@ ee_source_version() {
 # scripts/e2e_session_budget.sh ran against one and reported 15 assert_fails
 # whose single real cause was `exec format error` behind a 126 exit -- which
 # reads as fifteen product defects rather than one environment fault.
+_ee_run_with_timeout() {
+    local timeout_sec="${EE_BINARY_EXEC_TIMEOUT_SEC:-5}"
+    local status=0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_sec" "$@" || status=$?
+        return "$status"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$timeout_sec" "$@" || status=$?
+        return "$status"
+    elif [ -x /opt/homebrew/bin/timeout ]; then
+        /opt/homebrew/bin/timeout "$timeout_sec" "$@" || status=$?
+        return "$status"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$timeout_sec" "$@" <<'PY' || status=$?
+import subprocess, sys
+t = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    proc = subprocess.run(cmd, timeout=t)
+    sys.exit(proc.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+except OSError:
+    sys.exit(126)
+PY
+        return "$status"
+    else
+        "$@" || status=$?
+        return "$status"
+    fi
+}
+
 ee_binary_executes_here() {
     local binary="${1:?ee_binary_executes_here: binary path required}"
     local status=0
-    "$binary" --version >/dev/null 2>&1 || status=$?
-    # 126 = found but not executable here (foreign architecture or format,
-    # missing interpreter); 127 = not found. Every other status means the
-    # binary RAN, and a non-zero exit from an unsupported flag is not this
-    # helper's concern -- widening the case list would turn a product failure
-    # into an environment excuse.
+    _ee_run_with_timeout "$binary" --version >/dev/null 2>&1 || status=$?
+    # 124 = timed out (e.g. stalled volume), 126 = found but not executable here
+    # (foreign architecture or format, missing interpreter), 127 = not found.
+    # Every other status means the binary RAN, and a non-zero exit from an
+    # unsupported flag is not this helper's concern -- widening the case list
+    # would turn a product failure into an environment excuse.
     case "$status" in
-        126 | 127) return 1 ;;
+        124 | 126 | 127) return 1 ;;
         *) return 0 ;;
     esac
 }
@@ -138,7 +172,7 @@ ee_binary_executes_here() {
 # Version reported by a built binary. `ee --version` prints `ee <semver>`.
 ee_binary_version() {
     local binary="${1:?ee_binary_version: binary path required}"
-    "$binary" --version 2>/dev/null | awk 'NR==1 {print $NF}'
+    _ee_run_with_timeout "$binary" --version 2>/dev/null | awk 'NR==1 {print $NF}' || true
 }
 
 # Echo provenance, then refuse anything that is missing or not the current

@@ -1053,7 +1053,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Graph accretion sentinels (11 — response_time variants of graph_unavailable)
+#### Graph accretion sentinels (12 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_ppr_snapshot_stale` | medium | bd-bife.6 |
@@ -1067,6 +1067,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_dominance_no_revision_chain` | info | bd-bife.6 |
 | `graph_skyline_degenerate_communities` | info | bd-bife.6 |
 | `graph_hits_convergence_failure` | warning | bd-bife.6 |
+| `graph_scale_gomory_hu_skipped` | low | bd-bife.17 / bd-reality-core-convergence-1azkt.83 — Gomory-Hu proximity tree construction is skipped above `GOMORY_HU_SKIP_THRESHOLD_NODES` in `ee insights` |
 
 #### Graph NUMA pinning (4 — response_time)
 
@@ -1146,6 +1147,7 @@ the closed daemon hot-mode surface.
 | Code | Severity | Bead |
 |------|----------|------|
 | `daemon_ann_warmload_not_yet_implemented` | medium | bd-oja31 |
+| `daemon_cached_local_embedder_unavailable` | warning | bd-search-warm-latency-0bh05 — `ee.daemon.context` refused a `requireCachedLocalEmbedder` read-only pack request on a cold daemon without a verified resident local semantic model |
 | `daemon_context_deadline_exceeded` | warning | bd-oja31 / bd-nnheo — `ee.daemon.context` refused a request whose explicit deadline had already expired |
 | `daemon_context_execution_failed` | high | bd-oja31 / bd-nnheo — `ee.daemon.context` pack execution failed before producing a response envelope |
 | `daemon_context_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.context` parameters failed strict request mapping |
@@ -1164,6 +1166,7 @@ the closed daemon hot-mode surface.
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
 | `daemon_telemetry_encode_failed` | high | bd-oja31 / bd-nnheo — `ee.daemon.telemetry` snapshot serialization failed |
 | `daemon_unknown_method` | medium | bd-oja31 |
+| `daemon_warming` | warning | bd-reality-core-convergence-1azkt.79 — `ee.daemon.search` / `ee.daemon.context` refused a `failIfWarming` request in 1 RTT while startup search warm-up is still in flight |
 | `daemon_write_params_invalid` | medium | bd-oja31 / bd-nnheo — `ee.daemon.write` parameters failed strict decoding |
 
 #### Integrity / schema (17)

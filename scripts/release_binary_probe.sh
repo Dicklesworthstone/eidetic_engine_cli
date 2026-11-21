@@ -1147,6 +1147,30 @@ EOF
         failures=$((failures + 1))
     fi
 
+    local rdir_compile_empty_sha="$root/rel-compile-only-empty-sha"
+    mkdir -p "$rdir_compile_empty_sha"
+    cp "$rdir_cap/ee-aarch64-apple-darwin.tar.xz" "$rdir_compile_empty_sha/"
+    jq '.verdict = "compile_only" | .binary.gitCommit = ""' \
+        "$rdir/release-probe-aarch64-apple-darwin.json" \
+        >"$rdir_compile_empty_sha/release-probe-aarch64-apple-darwin.json"
+    ( "$0" --verify-release-dir "$rdir_compile_empty_sha" --allow-compile-only aarch64-apple-darwin --proof-capsule "$cap_good" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir compile_only empty sha" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir compile_only empty sha" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
+    ( "$0" --verify-release-dir "$rdir_cap" --proof-capsule ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 3 ]; then
+        printf '  ok    %-40s -> exit 3\n' "missing --proof-capsule arg refuses" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 3\n' "missing --proof-capsule arg refuses" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
     # Checksum refusal: a mismatched digest must stop before anything executes.
     local blob="$root/archive.tar.xz" rc
     printf 'not an archive' >"$blob"
@@ -1248,8 +1272,11 @@ verify_release_dir() {
                     printf 'release_binary_probe: %s verdict is %s (want pass or compile_only)\n' "$probe_file" "${got_verdict:-<absent>}" >&2
                     failures=$((failures + 1))
                 fi
-                if [ -n "${PROOF_CAPSULE:-}" ] && [ -n "$got_commit" ]; then
-                    if ! python3 "$ROOT/scripts/lib/emit_proof_capsule.py" --verify-capsule "$PROOF_CAPSULE" --expected-sha "$got_commit" >&2; then
+                if [ -n "${PROOF_CAPSULE:-}" ]; then
+                    if ! printf '%s' "$got_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+                        printf 'release_binary_probe: %s binary.gitCommit %s is not a 40-hex commit SHA required for --proof-capsule\n' "$probe_file" "${got_commit:-<absent>}" >&2
+                        failures=$((failures + 1))
+                    elif ! python3 "$ROOT/scripts/lib/emit_proof_capsule.py" --verify-capsule "$PROOF_CAPSULE" --expected-sha "$got_commit" >&2; then
                         printf 'release_binary_probe: %s binary.gitCommit %s failed proof capsule verification (%s)\n' "$probe_file" "$got_commit" "$PROOF_CAPSULE" >&2
                         failures=$((failures + 1))
                     else
@@ -1299,16 +1326,56 @@ ARCHIVE="" SHA="" EXPECTED_TARGET="" OUTPUT_FILE="" VERIFY_RELEASE_DIR="" PROOF_
 ALLOW_COMPILE_ONLY=() MODEL_CACHE="" WORKDIR="" REPLAY="" JSON=0 SELF_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --archive) ARCHIVE="${2:-}"; shift 2 ;;
-        --sha256) SHA="${2:-}"; shift 2 ;;
-        --expected-target) EXPECTED_TARGET="${2:-}"; shift 2 ;;
-        --output) OUTPUT_FILE="${2:-}"; shift 2 ;;
-        --verify-release-dir) VERIFY_RELEASE_DIR="${2:-}"; shift 2 ;;
-        --proof-capsule) PROOF_CAPSULE="${2:-}"; shift 2 ;;
-        --allow-compile-only) ALLOW_COMPILE_ONLY+=("${2:-}"); shift 2 ;;
-        --model-cache) MODEL_CACHE="${2:-}"; shift 2 ;;
-        --workdir) WORKDIR="${2:-}"; shift 2 ;;
-        --replay) REPLAY="${2:-}"; shift 2 ;;
+        --archive)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--archive requires a non-empty URL or path"
+            ARCHIVE="$2"
+            shift 2
+            ;;
+        --sha256)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--sha256 requires a non-empty hex digest"
+            SHA="$2"
+            shift 2
+            ;;
+        --expected-target)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--expected-target requires a non-empty target triple"
+            EXPECTED_TARGET="$2"
+            shift 2
+            ;;
+        --output)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--output requires a non-empty file path"
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --verify-release-dir)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--verify-release-dir requires a non-empty directory path"
+            VERIFY_RELEASE_DIR="$2"
+            shift 2
+            ;;
+        --proof-capsule)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--proof-capsule requires a non-empty file path"
+            PROOF_CAPSULE="$2"
+            shift 2
+            ;;
+        --allow-compile-only)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--allow-compile-only requires a target triple"
+            ALLOW_COMPILE_ONLY+=("$2")
+            shift 2
+            ;;
+        --model-cache)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--model-cache requires a non-empty directory path"
+            MODEL_CACHE="$2"
+            shift 2
+            ;;
+        --workdir)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--workdir requires a non-empty directory path"
+            WORKDIR="$2"
+            shift 2
+            ;;
+        --replay)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--replay requires a non-empty directory path"
+            REPLAY="$2"
+            shift 2
+            ;;
         --json) JSON=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
         -h | --help) sed -n '2,48p' "$0"; exit 0 ;;

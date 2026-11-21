@@ -36,6 +36,7 @@ import datetime
 import hashlib
 import hmac
 import json
+import math
 import pathlib
 import platform
 import re
@@ -49,7 +50,18 @@ SCHEMA = REPO / "docs" / "schemas" / "ee.release_candidate_proof.v1.json"
 
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 ZERO_SHA40 = "0" * 40
+
+
+def _reject_json_constant(const: str) -> Any:
+    raise ValueError(f"invalid non-standard JSON constant {const!r}")
+
+
+def _is_strict_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 sys.path.insert(0, str(HERE))
 
@@ -109,7 +121,9 @@ def compute_capsule_hash(capsule: dict[str, Any]) -> str:
         for key, value in capsule.items()
         if key not in ("capsuleHash", "generatedAt")
     }
-    encoded = json.dumps(hash_input, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        hash_input, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
     return hashlib.blake2b(encoded, digest_size=32).hexdigest()
 
 
@@ -335,13 +349,30 @@ def populate_candidate_capsule(
             )
         )
 
-    dirty_val = (
-        dirty_override
-        if dirty_override is not None
-        else int(candidate_manifest.get("dirty", 0) or 0)
-    )
-    dirty = bool(dirty_val)
-    if dirty:
+    if dirty_override is not None:
+        dirty_val: Any = dirty_override
+        dirty = bool(dirty_val)
+    else:
+        raw_dirty = candidate_manifest.get("dirty", 0)
+        if raw_dirty is None:
+            dirty_val = 0
+            dirty = False
+        elif isinstance(raw_dirty, bool):
+            dirty_val = int(raw_dirty)
+            dirty = raw_dirty
+        elif _is_strict_int(raw_dirty) and raw_dirty >= 0:
+            dirty_val = raw_dirty
+            dirty = bool(raw_dirty)
+        else:
+            dirty_val = raw_dirty
+            dirty = True
+            unestablished.append(
+                _unestablished(
+                    "source.dirty",
+                    f"invalid dirty value {raw_dirty!r}; expected non-negative integer or boolean",
+                )
+            )
+    if dirty and not any(u["item"] == "source.dirty" for u in unestablished):
         unestablished.append(
             _unestablished(
                 "source.dirty",
@@ -362,13 +393,37 @@ def populate_candidate_capsule(
             )
         )
 
-    manifest_rel = str(candidate_manifest.get("manifestPath") or "scripts/verify-budget.toml")
+    raw_manifest_path = candidate_manifest.get("manifestPath")
+    manifest_rel = (
+        raw_manifest_path
+        if isinstance(raw_manifest_path, str) and raw_manifest_path
+        else "scripts/verify-budget.toml"
+    )
+    if raw_manifest_path is not None and not isinstance(raw_manifest_path, str):
+        unestablished.append(
+            _unestablished(
+                "manifest.manifestPath",
+                f"manifestPath must be a string, got {type(raw_manifest_path).__name__}",
+            )
+        )
     manifest_file = (
         pathlib.Path(manifest_rel)
         if pathlib.Path(manifest_rel).is_absolute()
         else (repo_root / manifest_rel)
     )
-    required_stages = [str(s) for s in candidate_manifest.get("requiredStages", [])]
+    raw_required_stages = candidate_manifest.get("requiredStages", [])
+    if isinstance(raw_required_stages, list) and all(
+        isinstance(s, str) for s in raw_required_stages
+    ):
+        required_stages = list(raw_required_stages)
+    else:
+        required_stages = []
+        unestablished.append(
+            _unestablished(
+                "manifest.requiredStages",
+                "requiredStages must be a list of strings",
+            )
+        )
     if manifest_file.is_file():
         manifest_payload = {
             "manifestPath": manifest_rel,
@@ -376,7 +431,9 @@ def populate_candidate_capsule(
             "requiredStages": sorted(required_stages),
         }
         manifest_hash = _sha256_bytes(
-            json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(
+                manifest_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
         )
     else:
         manifest_hash = None
@@ -388,13 +445,31 @@ def populate_candidate_capsule(
         )
 
     binaries: list[dict[str, Any]] = []
-    for idx, entry in enumerate(candidate_manifest.get("binaries", [])):
+    raw_binaries = candidate_manifest.get("binaries", [])
+    if not isinstance(raw_binaries, list):
+        unestablished.append(
+            _unestablished(
+                "binaries",
+                f"binaries must be a list, got {type(raw_binaries).__name__}",
+            )
+        )
+        raw_binaries = []
+    for idx, entry in enumerate(raw_binaries):
         if not isinstance(entry, dict):
             unestablished.append(
                 _unestablished(f"binaries[{idx}]", "binary entry must be an object")
             )
             continue
-        raw_path = str(entry.get("path", ""))
+        raw_path_val = entry.get("path", "")
+        if not isinstance(raw_path_val, str):
+            unestablished.append(
+                _unestablished(
+                    f"binaries[{idx}].path",
+                    f"binary path must be a string, got {type(raw_path_val).__name__}",
+                )
+            )
+            continue
+        raw_path = raw_path_val
         bin_path = (
             pathlib.Path(raw_path)
             if pathlib.Path(raw_path).is_absolute()
@@ -410,7 +485,9 @@ def populate_candidate_capsule(
             continue
         computed_sha = _sha256_file(bin_path)
         declared_sha = entry.get("sha256")
-        if declared_sha is not None and str(declared_sha).lower() != computed_sha:
+        if declared_sha is not None and (
+            not isinstance(declared_sha, str) or declared_sha.lower() != computed_sha
+        ):
             unestablished.append(
                 _unestablished(
                     f"binaries[{idx}].sha256",
@@ -433,17 +510,52 @@ def populate_candidate_capsule(
         )
 
     evidence_hashes: list[dict[str, str]] = []
-    for raw_ev in candidate_manifest.get("evidencePaths", []):
-        rel_str = str(raw_ev)
-        if rel_str.startswith("/"):
+    repo_resolved = repo_root.resolve()
+    raw_evidence_paths = candidate_manifest.get("evidencePaths", [])
+    if not isinstance(raw_evidence_paths, list):
+        unestablished.append(
+            _unestablished(
+                "evidenceHashes",
+                f"evidencePaths must be a list of strings, got {type(raw_evidence_paths).__name__}",
+            )
+        )
+        raw_evidence_paths = []
+    for raw_ev in raw_evidence_paths:
+        if not isinstance(raw_ev, str):
             unestablished.append(
                 _unestablished(
                     "evidenceHashes",
-                    f"evidence path must be repo-relative, got absolute path {rel_str!r}",
+                    f"evidence path must be a string, got {type(raw_ev).__name__}",
                 )
             )
             continue
-        ev_path = repo_root / rel_str
+        rel_str = raw_ev
+        rel_posix = pathlib.PurePosixPath(rel_str)
+        if (
+            not rel_str
+            or rel_str.startswith("/")
+            or pathlib.Path(rel_str).is_absolute()
+            or ".." in rel_posix.parts
+            or "\\" in rel_str
+        ):
+            unestablished.append(
+                _unestablished(
+                    "evidenceHashes",
+                    f"evidence path must stay repo-relative without traversal, got {rel_str!r}",
+                )
+            )
+            continue
+        ev_path = (repo_root / rel_str).resolve()
+        try:
+            ev_path.relative_to(repo_resolved)
+        except ValueError:
+            unestablished.append(
+                _unestablished(
+                    "evidenceHashes",
+                    f"evidence path resolves outside repo root: {rel_str!r}",
+                )
+            )
+            continue
         if not ev_path.is_file():
             unestablished.append(
                 _unestablished(
@@ -454,8 +566,28 @@ def populate_candidate_capsule(
             continue
         evidence_hashes.append({"path": rel_str, "sha256": _sha256_file(ev_path)})
 
-    approved_ignored = {str(s) for s in candidate_manifest.get("approvedIgnoredStages", [])}
+    raw_approved_ignored = candidate_manifest.get("approvedIgnoredStages", [])
+    if isinstance(raw_approved_ignored, list) and all(
+        isinstance(s, str) for s in raw_approved_ignored
+    ):
+        approved_ignored = set(raw_approved_ignored)
+    else:
+        approved_ignored = set()
+        unestablished.append(
+            _unestablished(
+                "manifest.approvedIgnoredStages",
+                "approvedIgnoredStages must be a list of strings",
+            )
+        )
     raw_stages = candidate_manifest.get("stages", [])
+    if not isinstance(raw_stages, list):
+        unestablished.append(
+            _unestablished(
+                "results",
+                f"stages must be a list, got {type(raw_stages).__name__}",
+            )
+        )
+        raw_stages = []
     results: list[dict[str, Any]] = []
     shards: list[dict[str, Any]] = []
     logical_tests = 0
@@ -473,6 +605,14 @@ def populate_candidate_capsule(
                 _unestablished(f"results[{idx}].stage", "stage name is missing")
             )
             continue
+        if stage_name in seen_stages:
+            unestablished.append(
+                _unestablished(
+                    f"results[{idx}].stage",
+                    f"duplicate stage name {stage_name!r} in candidate stages",
+                )
+            )
+            continue
         seen_stages.add(stage_name)
 
         stage_commit = st.get("commit") or st.get("headSha")
@@ -488,7 +628,7 @@ def populate_candidate_capsule(
         exit_code = st.get("exitCode")
         no_verdict_cause = st.get("noVerdictCause")
         terminator_class = st.get("terminatorClass") or classify_terminator(
-            int(exit_code) if isinstance(exit_code, int) else 1,
+            int(exit_code) if _is_strict_int(exit_code) else 1,
             no_verdict_cause,
         )
 
@@ -537,7 +677,7 @@ def populate_candidate_capsule(
                     f"stage {stage_name} status is {status!r}, expected 'PASS'",
                 )
             )
-        if exit_code != 0:
+        if not _is_strict_int(exit_code) or exit_code != 0:
             unestablished.append(
                 _unestablished(
                     f"results[{stage_name}].exitCode",
@@ -558,15 +698,33 @@ def populate_candidate_capsule(
                     f"stage {stage_name} carries noVerdictCause={no_verdict_cause!r}",
                 )
             )
+        if failed is not None and (not _is_strict_int(failed) or failed != 0):
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].failed",
+                    f"test stage {stage_name} reported failed={failed!r}",
+                )
+            )
+        if (
+            ignored is not None
+            and (not _is_strict_int(ignored) or ignored != 0)
+            and stage_name not in approved_ignored
+        ):
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].ignored",
+                    f"test stage {stage_name} reported unapproved ignored={ignored!r}",
+                )
+            )
         if announced is not None or executed is not None:
-            if not isinstance(announced, int) or isinstance(announced, bool) or announced <= 0:
+            if not _is_strict_int(announced) or announced <= 0:
                 unestablished.append(
                     _unestablished(
                         f"results[{stage_name}].announced",
                         f"test stage {stage_name} has invalid/zero announced count: {announced!r}",
                     )
                 )
-            elif executed != announced:
+            elif not _is_strict_int(executed) or executed != announced:
                 unestablished.append(
                     _unestablished(
                         f"results[{stage_name}].executed",
@@ -576,25 +734,11 @@ def populate_candidate_capsule(
             else:
                 logical_tests += announced
                 shards.append({"name": stage_name, "tests": announced})
-            if failed is not None and failed != 0:
-                unestablished.append(
-                    _unestablished(
-                        f"results[{stage_name}].failed",
-                        f"test stage {stage_name} reported failed={failed!r}",
-                    )
-                )
-            if ignored is not None and ignored != 0 and stage_name not in approved_ignored:
-                unestablished.append(
-                    _unestablished(
-                        f"results[{stage_name}].ignored",
-                        f"test stage {stage_name} reported unapproved ignored={ignored!r}",
-                    )
-                )
 
         row: dict[str, Any] = {
             "stage": stage_name,
             "status": status or "INFRA_ERROR",
-            "exitCode": exit_code if isinstance(exit_code, int) else None,
+            "exitCode": exit_code if _is_strict_int(exit_code) else None,
             "durationSeconds": st.get("durationSeconds"),
             "attempts": st.get("attempts"),
             "reason": st.get("reason"),
@@ -616,6 +760,13 @@ def populate_candidate_capsule(
         unestablished.append(
             _unestablished("results", "at least one executed stage result is required")
         )
+    if logical_tests <= 0 or not shards or logical_tests != sum(s["tests"] for s in shards):
+        unestablished.append(
+            _unestablished(
+                "testInventory.logicalTests",
+                "at least one executed test stage with announced == executed > 0 is required",
+            )
+        )
     for req_stage in required_stages:
         if req_stage not in seen_stages:
             unestablished.append(
@@ -625,7 +776,8 @@ def populate_candidate_capsule(
                 )
             )
 
-    tc_in = candidate_manifest.get("toolchain") or {}
+    raw_tc = candidate_manifest.get("toolchain")
+    tc_in = raw_tc if isinstance(raw_tc, dict) else {}
     default_host = candidate_manifest.get("host")
     local_host = platform.node().split(".")[0]
     evaluated_cfg = tc_in.get("evaluatedUnderCfg")
@@ -642,26 +794,30 @@ def populate_candidate_capsule(
         toolchain["features"] = [str(f) for f in tc_in["features"]]
 
     sibling_pins: list[dict[str, Any]] = []
-    for pin in candidate_manifest.get("siblingPins", []):
-        if isinstance(pin, dict) and "crate" in pin and "resolved" in pin:
-            sibling_pins.append(
-                {
-                    "crate": str(pin["crate"]),
-                    "resolved": str(pin["resolved"]),
-                    "path": pin.get("path"),
-                }
-            )
+    raw_sibling_pins = candidate_manifest.get("siblingPins", [])
+    if isinstance(raw_sibling_pins, list):
+        for pin in raw_sibling_pins:
+            if isinstance(pin, dict) and "crate" in pin and "resolved" in pin:
+                sibling_pins.append(
+                    {
+                        "crate": str(pin["crate"]),
+                        "resolved": str(pin["resolved"]),
+                        "path": pin.get("path"),
+                    }
+                )
 
-    run_ids_in = candidate_manifest.get("runIdentifiers") or {}
+    raw_run_ids = candidate_manifest.get("runIdentifiers")
+    run_ids_in = raw_run_ids if isinstance(raw_run_ids, dict) else {}
     run_identifiers = {
         "rch": run_ids_in.get("rch"),
         "hostedCi": None,
     }
-    perf_samples = [
-        sample
-        for sample in candidate_manifest.get("performanceSamples", [])
-        if isinstance(sample, dict)
-    ]
+    raw_perf_samples = candidate_manifest.get("performanceSamples", [])
+    perf_samples = (
+        [sample for sample in raw_perf_samples if isinstance(sample, dict)]
+        if isinstance(raw_perf_samples, list)
+        else []
+    )
 
     capsule: dict[str, Any] = {
         "schema": "ee.release_candidate_proof.v1",
@@ -752,13 +908,20 @@ def _validate_node(
                 f"{path}: value {value!r} does not match pattern {spec['pattern']!r}"
             )
         if spec.get("format") == "date-time":
-            try:
-                datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                problems.append(f"{path}: invalid RFC3339/ISO date-time {value!r}")
+            if not RFC3339_RE.fullmatch(value):
+                problems.append(f"{path}: invalid RFC3339 date-time {value!r}")
+            else:
+                try:
+                    dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        problems.append(f"{path}: RFC3339 date-time missing timezone {value!r}")
+                except ValueError:
+                    problems.append(f"{path}: invalid RFC3339/ISO date-time {value!r}")
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in spec and value < spec["minimum"]:
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            problems.append(f"{path}: non-finite number {value!r} not permitted in JSON")
+        elif "minimum" in spec and value < spec["minimum"]:
             problems.append(f"{path}: value {value} < minimum {spec['minimum']}")
 
     if isinstance(value, dict):
@@ -798,6 +961,7 @@ def verify_capsule(
     expected_binary: pathlib.Path | None = None,
     verify_logs: bool = False,
     repo_root: pathlib.Path = REPO,
+    approved_ignored_stages: set[str] | None = None,
 ) -> list[str]:
     """Fail-closed cryptographic + completeness verification of a proof capsule."""
     problems = validate(capsule)
@@ -838,18 +1002,51 @@ def verify_capsule(
         problems.append("effectiveDependencies.lockfileHash must be non-null when populated")
     if not capsule["manifest"].get("manifestHash"):
         problems.append("manifest.manifestHash must be non-null when populated")
-    if capsule["testInventory"].get("logicalTests") is None:
-        problems.append("testInventory.logicalTests must be non-null when populated")
 
+    test_inv = capsule["testInventory"]
+    logical_tests = test_inv.get("logicalTests")
+    shards = test_inv.get("shards") or []
+    if not _is_strict_int(logical_tests) or logical_tests <= 0:
+        problems.append(f"testInventory.logicalTests must be > 0 when populated, got {logical_tests!r}")
+    if not shards:
+        problems.append("testInventory.shards must be non-empty when populated")
+    shard_map: dict[str, int] = {}
+    for s_idx, shard in enumerate(shards):
+        s_name = shard.get("name", "")
+        s_tests = shard.get("tests")
+        if not isinstance(s_name, str) or not s_name.strip():
+            problems.append(f"testInventory.shards[{s_idx}].name must be non-empty")
+        elif s_name in shard_map:
+            problems.append(f"testInventory.shards[{s_name!r}] is duplicated")
+        elif not _is_strict_int(s_tests) or s_tests <= 0:
+            problems.append(f"testInventory.shards[{s_name!r}].tests must be > 0, got {s_tests!r}")
+        else:
+            shard_map[s_name] = s_tests
+    if _is_strict_int(logical_tests) and shards and sum(shard_map.values()) != logical_tests:
+        problems.append(
+            f"testInventory.logicalTests ({logical_tests}) != sum(shards[].tests) ({sum(shard_map.values())})"
+        )
+
+    approved_ignored = approved_ignored_stages or set()
     results = capsule["results"]
     if not results:
         problems.append("results[] must be non-empty")
+    seen_stages: set[str] = set()
+    test_stage_counts: dict[str, int] = {}
     for idx, row in enumerate(results):
-        stage = row.get("stage", f"#{idx}")
+        raw_stage = row.get("stage", "")
+        stage = raw_stage if isinstance(raw_stage, str) and raw_stage.strip() else f"#{idx}"
+        if not isinstance(raw_stage, str) or not raw_stage.strip():
+            problems.append(f"results[{idx}].stage must be a non-empty string")
+        elif raw_stage in seen_stages:
+            problems.append(f"results[{raw_stage}] is duplicated in results[]")
+        else:
+            seen_stages.add(raw_stage)
         if row.get("status") != "PASS":
             problems.append(f"results[{stage}].status is {row.get('status')!r}, want 'PASS'")
-        if row.get("exitCode") != 0:
-            problems.append(f"results[{stage}].exitCode is {row.get('exitCode')!r}, want 0")
+        exit_code = row.get("exitCode")
+        if not _is_strict_int(exit_code) or exit_code != 0:
+            problems.append(f"results[{stage}].exitCode is {exit_code!r}, want 0")
         if row.get("terminatorClass") != "product_verdict":
             problems.append(
                 f"results[{stage}].terminatorClass is {row.get('terminatorClass')!r}, want 'product_verdict'"
@@ -858,19 +1055,33 @@ def verify_capsule(
             problems.append(
                 f"results[{stage}].noVerdictCause must be null, got {row.get('noVerdictCause')!r}"
             )
-        if row.get("failed") not in (None, 0):
-            problems.append(f"results[{stage}].failed is {row.get('failed')!r}, want 0")
+        failed = row.get("failed")
+        if failed is not None and (not _is_strict_int(failed) or failed != 0):
+            problems.append(f"results[{stage}].failed is {failed!r}, want 0")
+        ignored = row.get("ignored")
+        if (
+            ignored is not None
+            and (not _is_strict_int(ignored) or ignored != 0)
+            and stage not in approved_ignored
+        ):
+            problems.append(
+                f"results[{stage}].ignored is {ignored!r} without approval"
+            )
         announced = row.get("announced")
         executed = row.get("executed")
         if announced is not None or executed is not None:
-            if not isinstance(announced, int) or announced <= 0:
+            if not _is_strict_int(announced) or announced <= 0:
                 problems.append(f"results[{stage}].announced must be > 0, got {announced!r}")
-            elif executed != announced:
+            elif not _is_strict_int(executed) or executed != announced:
                 problems.append(
                     f"results[{stage}].executed ({executed!r}) != announced ({announced!r})"
                 )
+            elif isinstance(raw_stage, str) and raw_stage.strip():
+                test_stage_counts[raw_stage] = announced
         log_sha = row.get("logSha256")
         log_path = row.get("logPath")
+        if not log_sha:
+            problems.append(f"results[{stage}].logSha256 must be non-null when populated")
         if log_path is not None:
             lp = (
                 pathlib.Path(str(log_path))
@@ -885,6 +1096,25 @@ def verify_capsule(
                     )
             elif verify_logs:
                 problems.append(f"results[{stage}].logPath missing on disk: {log_path}")
+        elif verify_logs:
+            problems.append(f"results[{stage}].logPath must be non-null under --verify-logs")
+
+    if shard_map != test_stage_counts:
+        problems.append(
+            f"testInventory.shards ({shard_map}) does not match executed test stages ({test_stage_counts})"
+        )
+
+    for ev_idx, ev in enumerate(capsule.get("evidenceHashes", [])):
+        ev_rel = ev.get("path", "")
+        if (
+            not isinstance(ev_rel, str)
+            or not ev_rel
+            or ev_rel.startswith("/")
+            or pathlib.Path(ev_rel).is_absolute()
+            or ".." in pathlib.PurePosixPath(ev_rel).parts
+            or "\\" in ev_rel
+        ):
+            problems.append(f"evidenceHashes[{ev_idx}].path {ev_rel!r} is invalid or uses traversal")
 
     binaries = capsule["binaries"]
     if not binaries:
@@ -1123,6 +1353,151 @@ def self_test() -> int:
             missing_stage_cand["completeness"]["populated"] is False,
         )
 
+        # Fresh-Eyes Pass 1 (.76) hardened negative controls:
+        zero_test_manifest = copy.deepcopy(manifest)
+        zero_test_manifest["stages"][0].pop("announced", None)
+        zero_test_manifest["stages"][0].pop("executed", None)
+        zero_test_cand = populate_candidate_capsule(zero_test_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate forces populated=false when logicalTests == 0",
+            zero_test_cand["completeness"]["populated"] is False,
+        )
+
+        dup_stage_manifest = copy.deepcopy(manifest)
+        dup_stage_manifest["stages"].append(copy.deepcopy(manifest["stages"][0]))
+        dup_stage_cand = populate_candidate_capsule(dup_stage_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate forces populated=false on duplicate stage names",
+            dup_stage_cand["completeness"]["populated"] is False,
+        )
+
+        traversal_manifest = copy.deepcopy(manifest)
+        traversal_manifest["evidencePaths"] = ["../escape.txt"]
+        traversal_cand = populate_candidate_capsule(traversal_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate rejects .. traversal in evidencePaths",
+            traversal_cand["completeness"]["populated"] is False,
+        )
+
+        bool_exit_manifest = copy.deepcopy(manifest)
+        bool_exit_manifest["stages"][0]["exitCode"] = False
+        bool_exit_cand = populate_candidate_capsule(bool_exit_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate rejects bool exitCode=False",
+            bool_exit_cand["completeness"]["populated"] is False,
+        )
+
+        zero_tests_cap = copy.deepcopy(populated)
+        zero_tests_cap["testInventory"] = {"logicalTests": 0, "shards": []}
+        zero_tests_cap["results"][0]["announced"] = None
+        zero_tests_cap["results"][0]["executed"] = None
+        zero_tests_cap["capsuleHash"] = compute_capsule_hash(zero_tests_cap)
+        check(
+            "verify_capsule rejects logicalTests == 0",
+            bool(verify_capsule(zero_tests_cap, sha_a, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+
+        shard_sum_cap = copy.deepcopy(populated)
+        shard_sum_cap["testInventory"]["logicalTests"] = 99
+        shard_sum_cap["capsuleHash"] = compute_capsule_hash(shard_sum_cap)
+        check(
+            "verify_capsule rejects shard sum != logicalTests",
+            bool(verify_capsule(shard_sum_cap, sha_a, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+
+        dup_stage_cap = copy.deepcopy(populated)
+        dup_stage_cap["results"].append(copy.deepcopy(populated["results"][0]))
+        dup_stage_cap["capsuleHash"] = compute_capsule_hash(dup_stage_cap)
+        check(
+            "verify_capsule rejects duplicate stage names",
+            bool(verify_capsule(dup_stage_cap, sha_a, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+
+        null_log_cap = copy.deepcopy(populated)
+        null_log_cap["results"][0]["logPath"] = None
+        null_log_cap["results"][0]["logSha256"] = None
+        null_log_cap["capsuleHash"] = compute_capsule_hash(null_log_cap)
+        check(
+            "verify_capsule rejects logPath=null under --verify-logs",
+            bool(verify_capsule(null_log_cap, sha_a, expected_binary=bin_path, verify_logs=True, repo_root=cand_repo)),
+        )
+
+        ignored_cap = copy.deepcopy(populated)
+        ignored_cap["results"][0]["ignored"] = 2
+        ignored_cap["capsuleHash"] = compute_capsule_hash(ignored_cap)
+        check(
+            "verify_capsule rejects unapproved ignored > 0",
+            bool(verify_capsule(ignored_cap, sha_a, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+        check(
+            "verify_capsule allows approved ignored stage when explicitly listed",
+            not verify_capsule(
+                ignored_cap,
+                sha_a,
+                expected_binary=bin_path,
+                repo_root=cand_repo,
+                approved_ignored_stages={"lib"},
+            ),
+        )
+
+        bad_dt_cap = copy.deepcopy(populated)
+        bad_dt_cap["generatedAt"] = "2026-11-21"
+        check("validate() rejects date-only generatedAt", bool(validate(bad_dt_cap)))
+        bad_dt_cap["generatedAt"] = "2026-11-21T00:00:00"
+        check("validate() rejects naive generatedAt without timezone", bool(validate(bad_dt_cap)))
+
+        nan_cap = copy.deepcopy(populated)
+        nan_cap["performance"]["samples"] = [{"metric": "x", "value": float("nan"), "unit": "ms"}]
+        check("validate() rejects NaN sample values", bool(validate(nan_cap)))
+
+        malformed_manifest = root / "malformed.json"
+        malformed_manifest.write_text("{bad json", encoding="utf-8")
+        proc_bad = subprocess.run(
+            [
+                sys.executable,
+                str(pathlib.Path(__file__).resolve()),
+                "--populate-candidate",
+                "--candidate-manifest",
+                str(malformed_manifest),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        check("CLI --populate-candidate rejects malformed JSON cleanly", proc_bad.returncode != 0)
+        list_manifest = root / "list.json"
+        list_manifest.write_text("[1, 2, 3]", encoding="utf-8")
+        proc_list = subprocess.run(
+            [
+                sys.executable,
+                str(pathlib.Path(__file__).resolve()),
+                "--populate-candidate",
+                "--candidate-manifest",
+                str(list_manifest),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        check("CLI --populate-candidate rejects non-object manifest cleanly", proc_list.returncode != 0)
+
+        malformed_fields_cap = populate_candidate_capsule(
+            {
+                "base": sha_a,
+                "dirty": "not-an-int",
+                "stages": "not-a-list",
+                "binaries": {"path": "x"},
+                "evidencePaths": [123, "nonexistent.txt"],
+                "requiredStages": "lib",
+                "approvedIgnoredStages": 42,
+            },
+            repo_root=cand_repo,
+        )
+        check(
+            "populate_candidate_capsule rejects malformed field types cleanly without traceback",
+            malformed_fields_cap["completeness"]["populated"] is False
+            and not validate(malformed_fields_cap)
+            and len(malformed_fields_cap["completeness"]["unestablished"]) >= 5,
+        )
+
     if failures:
         print(f"[emit-proof-capsule] SELF-TEST FAILED: {failures} arm(s)")
         return 1
@@ -1165,9 +1540,16 @@ def main() -> int:
             print("EE_CAPSULE_RC=1")
             return 1
         try:
-            capsule = json.loads(cap_path.read_text(encoding="utf-8"))
+            capsule = json.loads(
+                cap_path.read_text(encoding="utf-8"),
+                parse_constant=_reject_json_constant,
+            )
         except Exception as exc:
             print(f"[emit-proof-capsule] invalid capsule JSON: {exc}", file=sys.stderr)
+            print("EE_CAPSULE_RC=1")
+            return 1
+        if not isinstance(capsule, dict):
+            print("[emit-proof-capsule] capsule root must be a JSON object", file=sys.stderr)
             print("EE_CAPSULE_RC=1")
             return 1
         exp_bin = pathlib.Path(args.expected_binary) if args.expected_binary else None
@@ -1204,7 +1586,17 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        try:
+            manifest_data = json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except Exception as exc:
+            print(f"[emit-proof-capsule] invalid candidate manifest JSON: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(manifest_data, dict):
+            print("[emit-proof-capsule] candidate manifest root must be a JSON object", file=sys.stderr)
+            return 1
         base_override = args.base if args.base != "unknown" else None
         dirty_override = args.dirty if args.dirty != 0 else None
         capsule = populate_candidate_capsule(
@@ -1229,9 +1621,11 @@ def main() -> int:
         for problem in problems:
             print(f"[emit-proof-capsule] INVALID: {problem}", file=sys.stderr)
         return 1
-    text = json.dumps(capsule, indent=2) + "\n"
+    text = json.dumps(capsule, indent=2, allow_nan=False) + "\n"
     if args.out:
-        pathlib.Path(args.out).write_text(text, encoding="utf-8")
+        out_path = pathlib.Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
         print(f"[emit-proof-capsule] wrote {args.out}")
     else:
         print(text)

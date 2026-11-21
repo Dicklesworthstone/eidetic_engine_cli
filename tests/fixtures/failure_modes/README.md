@@ -392,6 +392,9 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_projection_failed` | focus suggest | warning | bd-1idcb (G) |
 | `duplicate_hook` | hook status | warning | bd-reality-core-convergence-1azkt.80 |
 | `stale_hook` | hook status | warning | bd-reality-core-convergence-1azkt.80 |
+| `daemon_warming` | daemon, search --use-daemon, pack --use-daemon | warning | bd-reality-core-convergence-1azkt.79 |
+| `daemon_cached_local_embedder_unavailable` | daemon, pack --use-daemon, context --use-daemon | warning | bd-search-warm-latency-0bh05 |
+| `graph_scale_gomory_hu_skipped` | insights | low | bd-bife.17 / bd-reality-core-convergence-1azkt.83 |
 
 ## Adding a fixture
 
