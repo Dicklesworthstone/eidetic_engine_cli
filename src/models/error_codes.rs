@@ -198,6 +198,22 @@ pub const DATABASE_UNAVAILABLE: ErrorCode = ErrorCode {
     ),
 };
 
+pub const STATE_PERMISSIONS_TOO_PERMISSIVE: ErrorCode = ErrorCode {
+    id: "EE-E208",
+    category: ErrorCategory::Storage,
+    description: "Private workspace state is accessible to group or other users",
+    default_repair: Some("ee doctor --fix --workspace . --json"),
+};
+
+pub const STATE_PERMISSIONS_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E209",
+    category: ErrorCategory::Storage,
+    description: "Private workspace state permissions could not be safely inspected",
+    default_repair: Some(
+        "Inspect the reported state path and access failure; resolve symlinks or unexpected file types explicitly before rerunning doctor",
+    ),
+};
+
 // Search index errors (EE-E300 - EE-E399)
 pub const INDEX_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E300",
@@ -398,6 +414,8 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     WAL_EXCEEDS_DATABASE,
     DATABASE_EMPTY,
     DATABASE_UNAVAILABLE,
+    STATE_PERMISSIONS_TOO_PERMISSIVE,
+    STATE_PERMISSIONS_UNAVAILABLE,
     // Search index
     INDEX_NOT_FOUND,
     INDEX_STALE,

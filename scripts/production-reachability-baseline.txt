@@ -112,7 +112,6 @@ fix_agent_coordination_stale_lease
 fix_beads_jsonl_drift
 fix_policy_safety_inconsistent
 fix_snapshot_backup_owed
-fix_state_file_permission_drift
 fix_workspace_config_atomic_rewrite
 module:remote_evidence
 module:tailscale_transport

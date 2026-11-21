@@ -907,20 +907,27 @@ fn undo_create_dir_all_reports_partial_when_created_dir_gains_content() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn doctor_fix_reclaims_abandoned_staging_dir_under_ee_embed_model_dir() {
     use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     let root = fresh_workspace();
-    let ws = root.path().join("workspace");
-    let home = root.path().join("home");
-    let model_dir = root.path().join("custom-models");
+    let root_path = root.path().canonicalize().expect("canonical fixture root");
+    let ws = root_path.join("workspace");
+    let home = root_path.join("home");
+    let model_dir = root_path.join("custom-models");
     fs::create_dir_all(&ws).unwrap();
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&model_dir).unwrap();
 
-    let staging = model_dir.join(".potion-multilingual-128M-download-999999-0000000000000001");
+    let mut owner = Command::new("true").spawn().expect("spawn staging owner");
+    let dead_pid = owner.id();
+    owner.wait().expect("reap staging owner");
+    let staging = model_dir.join(format!(
+        ".potion-multilingual-128M-download-{dead_pid}-0000000000000001"
+    ));
     fs::create_dir_all(&staging).unwrap();
     let aged = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
     fs::File::open(&staging)
@@ -996,6 +1003,6 @@ fn doctor_fix_reclaims_abandoned_staging_dir_under_ee_embed_model_dir() {
     assert_eq!(reclaim_result["outcome"], "applied");
     assert!(
         !staging.exists(),
-        "doctor --fix must reclaim abandoned staging dir under EE_EMBED_MODEL_DIR"
+        "doctor --fix must quarantine abandoned staging dir under EE_EMBED_MODEL_DIR"
     );
 }

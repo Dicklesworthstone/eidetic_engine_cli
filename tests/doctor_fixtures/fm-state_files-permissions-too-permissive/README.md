@@ -17,12 +17,13 @@ Per `bd-2oh15`, the fixture lifecycle is:
    `.fixture_baseline/before.sha256`.
 2. `assert.sh` requires `EE_DOCTOR_FIXTURE_RUN_EE=1` (it exits 2 without
    it). Its independent witness is the mode string from `ls -ld`: `.ee` and
-   `.ee/ee.db` must both still be group- and other-readable (and the directory
-   traversable). It then runs `doctor_fixture_assert_pinned_gap` in `lib.sh`:
-   `ee doctor` must report the workspace healthy, an unscoped
-   `ee doctor --fix` must take 0 actions, and `.ee/ee.db` must be
-   byte-identical and still exposed afterwards. No undo step runs because
-   nothing is written.
+   `.ee/ee.db` start at 0755 and 0644. Read-only `ee doctor` must report
+   `state_directory_permissions` and `state_file_permissions` with EE-E208
+   while preserving the bytes and modes. An unscoped `ee doctor --fix`
+   must apply both `chmod` repairs, resulting in 0700 and 0600. The database
+   bytes must remain unchanged, and a second fix must dispatch neither
+   permission repair. Undo restores the exact original 0755 and 0644 modes
+   and verifies the complete content digest.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -32,10 +33,13 @@ state on disk.
 
 ## Wiring status
 
-Label: **NOT-DETECTED** (pinned gap; NOT coverage; repair spec and
-`manifest.json`). Doctor reports this damage as healthy, so `ee doctor --fix`
-dispatches nothing for it. A passing run means the gap is still there; when a
-detector lands the fixture goes red on purpose and is relabelled.
+Label: **REPAIR** (executable repair contract; RCH runtime verification is
+pending for this implementation). The detector and fixed-path dispatch now
+reach `TightenPermissions`, recorded as the existing reversible `chmod` action.
+No permission bits are added, so deliberately more restrictive owner modes
+survive repair. Symlinks and unexpected file types receive EE-E209 and no
+automatic permission fixer. Database access failures remain independently
+unresolved; changing permissions does not claim to restore missing or damaged data.
 There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
 because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`

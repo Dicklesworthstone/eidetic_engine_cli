@@ -435,21 +435,33 @@ fn shell_quote_arg(value: &str) -> String {
     quoted
 }
 
-/// FM-SF-04: state file permission drift (a sensitive file is
-/// world-readable). Auto-fix dispatches a chmod to the canonical mode.
+/// FM-SF-04: group/other access to a sensitive state file. The runtime caps
+/// its mode at 0600 without adding permissions, and journals the exact old mode.
 #[must_use]
 pub fn fix_state_file_permission_drift(path: impl Into<PathBuf>) -> FixerDispatch {
     FixerDispatch {
         finding_code: "state_file_permission_drift",
         severity: "warning",
         path: path.into(),
-        op: Op::Chmod { mode: 0o600 },
+        op: Op::TightenPermissions { mode: 0o600 },
     }
 }
 
-/// GH #75 (bd-reality-core-convergence-1azkt.81): reclaim abandoned model
-/// download staging directories (`empty >= 1h` or `non-empty dead-PID >= 24h`)
-/// under the resolved model store root.
+/// FM-SF-04: group/other access to the private state directory. Preserve
+/// deliberately restrictive owner permissions while removing external access.
+#[must_use]
+pub fn fix_state_directory_permission_drift(workspace_root: &Path) -> FixerDispatch {
+    FixerDispatch {
+        finding_code: "state_directory_permission_drift",
+        severity: "warning",
+        path: workspace_root.join(".ee"),
+        op: Op::TightenPermissions { mode: 0o700 },
+    }
+}
+
+/// GH #75 (bd-reality-core-convergence-1azkt.81): quarantine sufficiently old
+/// abandoned model download staging directories with a confirmed dead PID.
+/// Live or unknown PIDs are preserved; the rename is reversible through undo.
 #[must_use]
 pub fn fix_model_staging_dirs_abandoned(workspace_root: &Path) -> FixerDispatch {
     let workspace = shell_quote_arg(&workspace_root.to_string_lossy());
@@ -460,7 +472,7 @@ pub fn fix_model_staging_dirs_abandoned(workspace_root: &Path) -> FixerDispatch 
         op: Op::ReclaimModelStagingDirs {
             steps: vec![
                 format!("ee model status --workspace {workspace} --json"),
-                "Reclaim empty (>=1h) and dead-PID non-empty (>=24h) model staging directories."
+                "Quarantine abandoned directories with a confirmed dead PID; live or unknown PIDs are preserved. Use ee doctor --undo <run-id> to restore."
                     .to_owned(),
             ],
         },
@@ -493,6 +505,7 @@ pub const FIXER_FINDING_CODES: &[&str] = &[
     "policy_safety_inconsistent",
     "snapshot_backup_owed",
     "state_file_permission_drift",
+    "state_directory_permission_drift",
     "database_missing",
     "model_staging_dirs_abandoned",
 ];
@@ -520,6 +533,8 @@ pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "workspace_config_malformed_toml",
     // bd-reality-core-convergence-1azkt.81.
     "model_staging_dirs_abandoned",
+    "state_file_permission_drift",
+    "state_directory_permission_drift",
 ];
 
 /// How `ee doctor --fix` treats one failing doctor check.
@@ -672,6 +687,16 @@ pub fn fix_finding_for_check(
         Some("EE-E305") if check_name == "model_staging_dirs" => {
             Some("model_staging_dirs_abandoned")
         }
+        // These findings concern filesystem metadata, so an unreadable store
+        // does not suppress them or turn them into a database repair. Guard
+        // each path separately: the same code from another check must never
+        // authorize chmod of an unrelated state artifact.
+        Some("EE-E208") if check_name == "state_directory_permissions" => {
+            Some("state_directory_permission_drift")
+        }
+        Some("EE-E208") if check_name == "state_file_permissions" => {
+            Some("state_file_permission_drift")
+        }
         Some(_) if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
     }
@@ -717,6 +742,12 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
             Some(fix_workspace_config_malformed_toml(workspace_root))
         }
         "model_staging_dirs_abandoned" => Some(fix_model_staging_dirs_abandoned(workspace_root)),
+        "state_directory_permission_drift" => {
+            Some(fix_state_directory_permission_drift(workspace_root))
+        }
+        "state_file_permission_drift" => Some(fix_state_file_permission_drift(
+            workspace_root.join(".ee").join("ee.db"),
+        )),
         _ => None,
     }
 }
@@ -898,6 +929,8 @@ mod tests {
             (Some("EE-E207"), "database", true),
             (Some("EE-E702"), "database", true),
             (Some("EE-E200"), "database", true),
+            (Some("EE-E208"), "state_directory_permissions", false),
+            (Some("EE-E208"), "state_file_permissions", false),
         ];
         for (code, name, unreadable) in checks {
             let finding =
@@ -975,6 +1008,8 @@ mod tests {
                 "runtime",
                 "workspace",
                 "model_staging_dirs",
+                "state_directory_permissions",
+                "state_file_permissions",
             ] {
                 for unreadable in [false, true] {
                     if let Some(finding) = fix_finding_for_check(code, name, unreadable) {
@@ -1434,13 +1469,89 @@ mod tests {
     }
 
     #[test]
-    fn state_file_permission_drift_dispatches_chmod_0600() {
+    fn state_file_permission_drift_caps_permissions_at_0600() {
         let dispatch = fix_state_file_permission_drift(root().join(".ee/secrets.json"));
-        let Op::Chmod { mode } = dispatch.op else {
-            panic!("expected Chmod");
+        let Op::TightenPermissions { mode } = dispatch.op else {
+            panic!("expected TightenPermissions");
         };
         assert_eq!(mode, 0o600);
         assert!(dispatch.op.is_writing());
+    }
+
+    #[test]
+    fn private_state_permission_findings_are_constrained_to_canonical_paths() {
+        for (check, finding, relative_path, mode) in [
+            (
+                "state_directory_permissions",
+                "state_directory_permission_drift",
+                ".ee",
+                0o700,
+            ),
+            (
+                "state_file_permissions",
+                "state_file_permission_drift",
+                ".ee/ee.db",
+                0o600,
+            ),
+        ] {
+            for unreadable in [false, true] {
+                assert_eq!(
+                    fix_finding_for_check(Some("EE-E208"), check, unreadable),
+                    Some(finding)
+                );
+                assert_eq!(
+                    fix_mode_for_check(Some("EE-E208"), check, unreadable),
+                    (FixMode::AutoRepair, Some(finding))
+                );
+                assert_eq!(
+                    fix_finding_for_check(Some("EE-E209"), check, unreadable),
+                    None
+                );
+            }
+            let dispatch =
+                fix_dispatch_for_finding(&root(), finding).expect("canonical permission dispatch");
+            assert_eq!(dispatch.path, root().join(relative_path));
+            assert_eq!(dispatch.op, Op::TightenPermissions { mode });
+        }
+        for unrelated_check in ["database", "workspace", "runtime", "arbitrary_state_file"] {
+            assert_eq!(
+                fix_finding_for_check(Some("EE-E208"), unrelated_check, false),
+                None
+            );
+        }
+        assert!(
+            fix_dispatch_for_finding(&root(), "state_file_permission_drift/../../outside")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn permission_repair_does_not_claim_to_repair_an_unreadable_store() {
+        use crate::core::doctor::CheckResult;
+        use crate::models::error_codes::{DATABASE_UNAVAILABLE, STATE_PERMISSIONS_TOO_PERMISSIVE};
+
+        let checks = [
+            CheckResult::error(
+                "database",
+                "store could not be inspected",
+                DATABASE_UNAVAILABLE,
+            ),
+            CheckResult::warning(
+                "state_directory_permissions",
+                "exposed directory",
+                STATE_PERMISSIONS_TOO_PERMISSIVE,
+            ),
+            CheckResult::warning(
+                "state_file_permissions",
+                "exposed database",
+                STATE_PERMISSIONS_TOO_PERMISSIVE,
+            ),
+        ];
+        let pending = unresolved_core_checks(&checks);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "database");
+        assert_eq!(pending[0].fix_finding, Some("database_unavailable"));
+        assert_eq!(pending[0].fix_mode, "auto_guidance");
     }
 
     #[test]
@@ -1466,6 +1577,8 @@ mod tests {
             fix_policy_safety_inconsistent(&workspace).finding_code,
             fix_snapshot_backup_owed(&workspace, "x").finding_code,
             fix_state_file_permission_drift(workspace.join("a")).finding_code,
+            fix_state_directory_permission_drift(&workspace).finding_code,
+            fix_model_staging_dirs_abandoned(&workspace).finding_code,
         ];
         let mut sorted = dispatches.clone();
         sorted.sort();

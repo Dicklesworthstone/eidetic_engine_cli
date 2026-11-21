@@ -118,6 +118,18 @@ expression: canonical_json_text(value)
         "name": "model_staging_dirs",
         "severity": "ok",
         "tier": "advisory"
+      },
+      {
+        "message": "Private state at [WORKSPACE]/.ee grants no group or other permissions.",
+        "name": "state_directory_permissions",
+        "severity": "ok",
+        "tier": "core"
+      },
+      {
+        "message": "Private state at [DATABASE] grants no group or other permissions.",
+        "name": "state_file_permissions",
+        "severity": "ok",
+        "tier": "core"
       }
     ],
     "command": "doctor",

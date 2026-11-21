@@ -72,6 +72,11 @@
       "effect": "guidance"
     },
     {
+      "finding": "graph_snapshot_stale",
+      "op_kind": "run_graph_refresh",
+      "effect": "guidance"
+    },
+    {
       "finding": "cass_integration_drift",
       "op_kind": "manual",
       "effect": "guidance"
@@ -89,6 +94,16 @@
     {
       "finding": "model_staging_dirs_abandoned",
       "op_kind": "reclaim_model_staging_dirs",
+      "effect": "repair"
+    },
+    {
+      "finding": "state_file_permission_drift",
+      "op_kind": "chmod",
+      "effect": "repair"
+    },
+    {
+      "finding": "state_directory_permission_drift",
+      "op_kind": "chmod",
       "effect": "repair"
     }
   ],
