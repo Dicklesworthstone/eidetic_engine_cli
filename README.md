@@ -352,10 +352,10 @@ Hard constraints. CI fails if any of them break.
 | Source build | available now | local build only | this README |
 
 When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
-`ee index rebuild --workspace .` and reinstall managed hooks for the new snippets.
-Inspect Claude Code settings before and after reinstalling: existing EE hooks
-without `eeManaged` metadata can be duplicated, and `ee hook status` does not
-detect those duplicates ([#41](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/41)).
+`ee index rebuild --workspace .` and reinstall managed hooks (`ee hook claude-code --install`,
+or `ee hook codex --install` for Codex) so legacy unmanaged EE hooks are deduplicated into
+`eeManaged` entries while custom user hooks stay intact
+([#41](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/41)).
 
 ### Release installer
 

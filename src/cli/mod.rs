@@ -16204,6 +16204,54 @@ fn hook_harness_response_json(
     })
 }
 
+fn hook_status_degraded_json(report: &crate::hooks::HarnessHookInstallReport) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = report
+        .install_audit
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding.code.as_str(), "duplicate_hook" | "stale_hook"))
+        .map(|finding| {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "code".to_owned(),
+                serde_json::Value::String(finding.code.clone()),
+            );
+            obj.insert(
+                "severity".to_owned(),
+                serde_json::Value::String("warning".to_owned()),
+            );
+            obj.insert(
+                "message".to_owned(),
+                serde_json::Value::String(finding.message.clone()),
+            );
+            obj.insert(
+                "repair".to_owned(),
+                serde_json::Value::String(finding.repair.clone()),
+            );
+            obj.insert(
+                "repairCommand".to_owned(),
+                serde_json::Value::String(format!(
+                    "ee hook {} --install --workspace . --json",
+                    report.harness
+                )),
+            );
+            if let Some(event) = &finding.event {
+                obj.insert(
+                    "details".to_owned(),
+                    serde_json::json!({
+                        "event": event,
+                        "harness": &report.harness,
+                    }),
+                );
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    crate::output::response_degraded_from_data(&serde_json::json!({
+        "degraded": entries,
+    }))
+}
+
 fn hook_status_response_json(report: &crate::hooks::HarnessHookInstallReport) -> serde_json::Value {
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
@@ -16225,7 +16273,7 @@ fn hook_status_response_json(report: &crate::hooks::HarnessHookInstallReport) ->
                 })
             }).collect::<Vec<_>>(),
         },
-        "degraded": [],
+        "degraded": hook_status_degraded_json(report),
     })
 }
 
@@ -93228,6 +93276,74 @@ mod tests {
             &response["data"]["installAudit"]["readOnly"],
             &serde_json::json!(true),
             "status audit read-only",
+        )?;
+        ensure_equal(
+            &response["degraded"],
+            &serde_json::json!([]),
+            "clean missing status has no duplicate/stale degraded entries",
+        )
+    }
+
+    #[test]
+    fn hook_status_json_surfaces_duplicate_and_stale_degraded_entries() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let report =
+            crate::hooks::generate_harness_hook_install(&crate::hooks::HarnessHookInstallOptions {
+                target: crate::hooks::HarnessHookTarget::ClaudeCode,
+                workspace: temp.path().to_path_buf(),
+                settings_path: Some(settings_path.clone()),
+                install: true,
+                undo: false,
+                ee_binary_path: Some(PathBuf::from("/usr/local/bin/ee")),
+            })
+            .map_err(|error| error.message())?;
+        ensure_equal(
+            &report.install_audit.status.as_str(),
+            &"fresh",
+            "initial install status",
+        )?;
+
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let dup_group = document["hooks"]["PreToolUse"][0].clone();
+        let mut legacy_group = dup_group;
+        legacy_group.as_object_mut().unwrap().remove("eeManaged");
+        document["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(legacy_group);
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+        let status_report =
+            crate::hooks::generate_harness_hook_install(&crate::hooks::HarnessHookInstallOptions {
+                target: crate::hooks::HarnessHookTarget::ClaudeCode,
+                workspace: temp.path().to_path_buf(),
+                settings_path: Some(settings_path),
+                install: false,
+                undo: false,
+                ee_binary_path: Some(PathBuf::from("/usr/local/bin/ee")),
+            })
+            .map_err(|error| error.message())?;
+        let response = hook_status_response_json(&status_report);
+        let degraded = response["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded must be an array".to_owned())?;
+        ensure_equal(&degraded.len(), &1, "one duplicate_hook degraded entry")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("duplicate_hook"),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["repairCommand"],
+            &serde_json::json!("ee hook claude-code --install --workspace . --json"),
+            "degraded repairCommand",
         )
     }
 

@@ -390,6 +390,8 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_pagerank_failed` | focus suggest | warning | bd-1idcb (G) |
 | `graph_empty` | focus suggest | info | bd-1idcb (G) |
 | `graph_projection_failed` | focus suggest | warning | bd-1idcb (G) |
+| `duplicate_hook` | hook status | warning | bd-reality-core-convergence-1azkt.80 |
+| `stale_hook` | hook status | warning | bd-reality-core-convergence-1azkt.80 |
 
 ## Adding a fixture
 

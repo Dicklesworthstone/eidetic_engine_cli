@@ -44,7 +44,6 @@ denylist_regexes = [
   '^provenance but never indexed, and instruction-ri',
   '^`relevanceScore` is the only cross-source compar',
   '^Optional reranking has a 20-second inference bud',
-  '^detect those duplicates \(\[#41\]\(https://github\.co',
   '^per request defeats the CDN and forces an origin',
   '^confusing shell error from running a file that w',
   '^This downloads the latest release binary for you',

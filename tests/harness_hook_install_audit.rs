@@ -864,3 +864,228 @@ fn install_audit_reports_unsupported_and_unwritable_config() -> TestResult {
     }
     Ok(())
 }
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn legacy_pre_015_hook_command(event: &str, legacy_ee_bin: &str) -> String {
+    let script = match event {
+        "PreToolUse" => {
+            r#"import hashlib, json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "pre_edit_recall"
+cmd = [ee, "recall", "--path", "src/lib.rs", "--budget-tokens", "400", "--format", "markdown"]
+subprocess.run(cmd, text=True, capture_output=True, timeout=10)
+"#
+        }
+        "PostToolUse" => {
+            r#"import json, subprocess, sys
+ee = sys.argv[1]
+body = "Harness observed a non-zero Bash exit code."
+cmd = [ee, "journal", "append", body, "--source", "hook", "--kind", "command_failure", "--exit-code", "1", "--json"]
+subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+"#
+        }
+        "SessionStart" => {
+            r#"import hashlib, json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "session_start_orient"
+cmd = [ee, "--max-output-tokens", "1200", "orient", "session start", "--workspace", ".", "--include-primer", "--fast", "--json"]
+subprocess.run(cmd, text=True, capture_output=True, timeout=10)
+"#
+        }
+        "Stop" | "SessionEnd" => {
+            r#"import hashlib, json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "session_end_capture_suggest"
+cmd = [ee, "capture", "suggest", "--from-recent", "--max", "2", "--json"]
+subprocess.run(cmd, text=True, capture_output=True, timeout=10)
+"#
+        }
+        other => panic!("unexpected legacy hook event {other}"),
+    };
+    let escaped = script.replace('\'', "'\\''");
+    format!("python3 -c '{escaped}' '{legacy_ee_bin}'")
+}
+
+#[test]
+fn install_audit_deduplicates_pre_015_legacy_unmanaged_ee_hooks_across_targets() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let capture_event = match target {
+            HarnessHookTarget::ClaudeCode => "Stop",
+            HarnessHookTarget::Codex => "SessionEnd",
+            HarnessHookTarget::Gemini => unreachable!(),
+        };
+        let pre_edit_matcher = match target {
+            HarnessHookTarget::ClaudeCode => "Edit|Write|MultiEdit|NotebookEdit",
+            HarnessHookTarget::Codex => "Edit|Write|apply_patch",
+            HarnessHookTarget::Gemini => unreachable!(),
+        };
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+
+        let legacy_pre_edit = legacy_pre_015_hook_command("PreToolUse", "/opt/ee-0.14.4/bin/ee");
+        let legacy_post_bash = legacy_pre_015_hook_command("PostToolUse", "/opt/ee-0.14.4/bin/ee");
+        let legacy_session_start =
+            legacy_pre_015_hook_command("SessionStart", "/opt/ee-0.14.4/bin/ee");
+        let legacy_capture = legacy_pre_015_hook_command(capture_event, "/opt/ee-0.14.4/bin/ee");
+
+        let user_extension = serde_json::json!({
+            "type": "command",
+            "command": format!("{legacy_session_start} # user extension"),
+            "timeout": 77
+        });
+        let user_echo = serde_json::json!({
+            "type": "command",
+            "command": "echo ee-managed-harness-hook:bd-u875s.4"
+        });
+        let user_prompt = serde_json::json!({
+            "type": "prompt",
+            "command": legacy_session_start.clone(),
+            "prompt": "Preserve this prompt",
+            "timeout": 73
+        });
+        let custom_marker_group = serde_json::json!({
+            "eeManaged": "ee-managed-harness-hook:bd-u875s.4-user",
+            "hooks": [{"type": "command", "command": "echo user-custom", "timeout": 91}]
+        });
+
+        // PreToolUse has 2 legacy unmanaged EE hooks (duplicate_hook),
+        // PostToolUse has 1 legacy unmanaged EE hook (stale_hook),
+        // SessionStart has 1 legacy unmanaged EE hook mixed with user hooks (stale_hook),
+        // Stop/SessionEnd has 2 legacy unmanaged EE hooks in the same group (duplicate_hook).
+        let legacy_document = serde_json::json!({
+            "userSettings": {"theme": "user-choice"},
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": pre_edit_matcher,
+                        "hooks": [{"type": "command", "command": legacy_pre_edit.clone(), "timeout": 10}]
+                    },
+                    {
+                        "matcher": pre_edit_matcher,
+                        "hooks": [{"type": "command", "command": legacy_pre_edit, "timeout": 10}]
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": legacy_post_bash, "timeout": 10}]
+                    }
+                ],
+                "SessionStart": [
+                    {
+                        "matcher": "compact",
+                        "hooks": [user_extension.clone(), {"type": "command", "command": legacy_session_start, "timeout": 10}, user_echo.clone(), user_prompt.clone()]
+                    },
+                    custom_marker_group.clone()
+                ],
+                capture_event: [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": legacy_capture.clone(), "timeout": 10},
+                            {"type": "command", "command": legacy_capture, "timeout": 10}
+                        ]
+                    }
+                ]
+            }
+        });
+        let pre_install_bytes =
+            serde_json::to_vec_pretty(&legacy_document).map_err(|error| error.to_string())?;
+        let pre_install_sha256 = sha256_hex(&pre_install_bytes);
+        fs::write(&settings_path, &pre_install_bytes).map_err(|error| error.to_string())?;
+
+        // 1. Read-only audit detects both duplicate_hook and stale_hook on legacy unmanaged hooks.
+        let audit = generate_harness_hook_install(&options(target, &settings_path, false, false))
+            .map_err(|error| error.message())?;
+        assert!(audit.read_only);
+        assert_eq!(audit.install_audit.status, "stale_hook");
+        assert_eq!(audit.install_audit.hook_fresh_count, 0);
+        assert_eq!(audit.install_audit.hook_stale_count, 4);
+        let duplicate_events: Vec<&str> = audit
+            .install_audit
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "duplicate_hook")
+            .filter_map(|finding| finding.event.as_deref())
+            .collect();
+        assert_eq!(duplicate_events, vec!["PreToolUse", capture_event]);
+        let stale_events: Vec<&str> = audit
+            .install_audit
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "stale_hook")
+            .filter_map(|finding| finding.event.as_deref())
+            .collect();
+        assert_eq!(stale_events, vec!["PostToolUse", "SessionStart"]);
+        assert_eq!(
+            sha256_hex(&fs::read(&settings_path).map_err(|e| e.to_string())?),
+            pre_install_sha256,
+            "read-only audit must not mutate settings"
+        );
+
+        // 2. --install deduplicates legacy unmanaged EE hooks while preserving user hooks untouched.
+        let install_opts = options(target, &settings_path, true, false);
+        let installed =
+            generate_harness_hook_install(&install_opts).map_err(|error| error.message())?;
+        assert_eq!(installed.install_audit.status, "fresh");
+        assert_eq!(installed.install_audit.hook_fresh_count, 4);
+        assert_eq!(installed.install_audit.hook_stale_count, 0);
+        let installed_bytes = fs::read(&settings_path).map_err(|error| error.to_string())?;
+        let installed_doc: Value =
+            serde_json::from_slice(&installed_bytes).map_err(|error| error.to_string())?;
+        for snippet in &installed.snippets {
+            let groups = installed_doc["hooks"][&snippet.event].as_array().unwrap();
+            if snippet.event == "SessionStart" {
+                assert_eq!(groups.len(), 3);
+                assert_eq!(
+                    groups[0]["hooks"],
+                    serde_json::json!([user_extension, user_echo, user_prompt])
+                );
+                assert_eq!(groups[1], custom_marker_group);
+                assert_eq!(groups[2]["hooks"].as_array().unwrap().len(), 1);
+                assert_eq!(groups[2]["hooks"][0]["command"], snippet.command);
+            } else {
+                assert_eq!(
+                    groups.len(),
+                    1,
+                    "event {} must deduplicate to 1 group",
+                    snippet.event
+                );
+                assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+                assert_eq!(groups[0]["hooks"][0]["command"], snippet.command);
+            }
+        }
+
+        // 3. Double --install is idempotent and byte-identical.
+        let repeated =
+            generate_harness_hook_install(&install_opts).map_err(|error| error.message())?;
+        assert!(repeated.written_paths.is_empty());
+        assert_eq!(
+            fs::read(&settings_path).map_err(|e| e.to_string())?,
+            installed_bytes
+        );
+
+        // 4. --undo restores the exact pre-install SHA-256 bytes.
+        let undo_report =
+            generate_harness_hook_install(&options(target, &settings_path, false, true))
+                .map_err(|error| error.message())?;
+        assert_eq!(undo_report.written_paths.len(), 1);
+        let restored_bytes = fs::read(&settings_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            sha256_hex(&restored_bytes),
+            pre_install_sha256,
+            "undo must restore exact pre-install SHA-256 bytes for {}",
+            target.as_str()
+        );
+    }
+    Ok(())
+}

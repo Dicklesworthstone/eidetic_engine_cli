@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "duplicate_hook",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.80",
+    "epic_letter": "HOOK"
+  },
+  "surfaces": ["hook status"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Harness settings contain two or more ee-managed or legacy unmanaged EE hook entries for the same event, causing duplicate hook execution.",
+    "setup_commands": [
+      "ee hook claude-code --install --workspace . --json",
+      "# duplicate a hook entry (with or without eeManaged) in settings.json"
+    ],
+    "invocation": "ee hook status --harness claude-code --json"
+  },
+  "expected_emission": {
+    "code": "duplicate_hook",
+    "severity": "warning",
+    "message_contains": ["ee-managed", "duplicate hooks can run more than once per event"],
+    "repair_contains": "ee hook",
+    "repair_string": "ee hook claude-code --install --workspace . --json"
+  }
+}

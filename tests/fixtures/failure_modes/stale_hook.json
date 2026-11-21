@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "stale_hook",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.80",
+    "epic_letter": "HOOK"
+  },
+  "surfaces": ["hook status"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An ee-managed or legacy unmanaged EE hook entry in harness settings differs from the current generated snippet (missing eeManaged metadata or outdated command).",
+    "setup_commands": [
+      "# configure a pre-0.15.0 unmanaged EE hook or modified ee-managed hook in settings.json"
+    ],
+    "invocation": "ee hook status --harness claude-code --json"
+  },
+  "expected_emission": {
+    "code": "stale_hook",
+    "severity": "warning",
+    "message_contains": ["hook is present"],
+    "repair_contains": "ee hook",
+    "repair_string": "ee hook claude-code --install --workspace . --json"
+  }
+}

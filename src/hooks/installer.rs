@@ -2256,25 +2256,33 @@ fn audit_harness_hook_snippet(
         };
     };
 
-    let managed_hook_count: usize = entries
-        .iter()
-        .filter_map(|entry| {
-            let hooks = entry.get("hooks")?.as_array()?;
-            Some(
-                hooks
-                    .iter()
-                    .filter(|hook| {
-                        harness_hook_is_managed(
-                            hook,
-                            has_harness_hook_marker(entry),
-                            hooks.len(),
-                            snippet,
-                        )
-                    })
-                    .count(),
-            )
-        })
-        .sum();
+    let mut managed_hook_count = 0usize;
+    let mut legacy_unmanaged_count = 0usize;
+    for entry in entries {
+        let Some(hooks) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let group_managed = has_harness_hook_marker(entry);
+        let group_custom_marker = has_custom_harness_hook_marker(entry);
+        for hook in hooks {
+            match classify_harness_hook(
+                hook,
+                group_managed,
+                group_custom_marker,
+                hooks.len(),
+                snippet,
+            ) {
+                HarnessHookOwnership::Managed => {
+                    managed_hook_count += 1;
+                }
+                HarnessHookOwnership::LegacyUnmanagedEe => {
+                    managed_hook_count += 1;
+                    legacy_unmanaged_count += 1;
+                }
+                HarnessHookOwnership::UserCustom => {}
+            }
+        }
+    }
     if managed_hook_count == 0 {
         return HarnessHookInstallAuditFinding {
             code: "missing_hook".to_owned(),
@@ -2291,6 +2299,11 @@ fn audit_harness_hook_snippet(
     }
 
     if managed_hook_count > 1 {
+        let legacy_note = if legacy_unmanaged_count > 0 {
+            format!(" ({legacy_unmanaged_count} legacy unmanaged)")
+        } else {
+            String::new()
+        };
         return HarnessHookInstallAuditFinding {
             code: "duplicate_hook".to_owned(),
             status: "stale_hook".to_owned(),
@@ -2298,18 +2311,18 @@ fn audit_harness_hook_snippet(
             matcher: snippet.matcher.clone(),
             target_path,
             message: format!(
-                "{managed_hook_count} ee-managed {} hooks are configured; duplicate hooks can run more than once per event.",
+                "{managed_hook_count} ee-managed {} hooks are configured{legacy_note}; duplicate hooks can run more than once per event.",
                 snippet.event
             ),
             repair: format!(
-                "Run `ee hook {} --install` to replace duplicates with one current hook.",
+                "Run `ee hook {} --install --workspace . --json` to replace duplicates with one current hook.",
                 target.as_str()
             ),
         };
     }
 
     let expected = harness_hook_entry(target, snippet);
-    if entries.iter().any(|entry| entry == &expected) {
+    if legacy_unmanaged_count == 0 && entries.iter().any(|entry| entry == &expected) {
         HarnessHookInstallAuditFinding {
             code: "hook_present_fresh".to_owned(),
             status: "fresh".to_owned(),
@@ -2320,14 +2333,25 @@ fn audit_harness_hook_snippet(
             repair: "No repair needed.".to_owned(),
         }
     } else {
+        let message = if legacy_unmanaged_count > 0 {
+            format!(
+                "Legacy unmanaged ee {} hook is present without eeManaged metadata.",
+                snippet.event
+            )
+        } else {
+            format!("ee-managed {} hook is present but stale.", snippet.event)
+        };
         HarnessHookInstallAuditFinding {
             code: "stale_hook".to_owned(),
             status: "stale_hook".to_owned(),
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
-            message: format!("ee-managed {} hook is present but stale.", snippet.event),
-            repair: format!("Run `ee hook {} --install` to refresh it.", target.as_str()),
+            message,
+            repair: format!(
+                "Run `ee hook {} --install --workspace . --json` to refresh it.",
+                target.as_str()
+            ),
         }
     }
 }
@@ -3125,6 +3149,7 @@ fn merge_harness_hooks(
             .expect("checked hook event array above");
         array.retain_mut(|group| {
             let group_managed = has_harness_hook_marker(group);
+            let group_custom_marker = has_custom_harness_hook_marker(group);
             let Some(group_hooks) = group
                 .get_mut("hooks")
                 .and_then(serde_json::Value::as_array_mut)
@@ -3133,7 +3158,13 @@ fn merge_harness_hooks(
             };
             let original_count = group_hooks.len();
             group_hooks.retain(|hook| {
-                !harness_hook_is_managed(hook, group_managed, original_count, snippet)
+                classify_harness_hook(
+                    hook,
+                    group_managed,
+                    group_custom_marker,
+                    original_count,
+                    snippet,
+                ) == HarnessHookOwnership::UserCustom
             });
             if group_hooks.len() == original_count {
                 return true;
@@ -3182,23 +3213,157 @@ fn harness_hook_entry(
     entry
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HarnessHookOwnership {
+    Managed,
+    LegacyUnmanagedEe,
+    UserCustom,
+}
+
 fn has_harness_hook_marker(value: &serde_json::Value) -> bool {
     value.get("eeManaged").and_then(serde_json::Value::as_str) == Some(HARNESS_HOOK_MARKER)
 }
 
-fn harness_hook_is_managed(
+fn has_custom_harness_hook_marker(value: &serde_json::Value) -> bool {
+    value
+        .get("eeManaged")
+        .is_some_and(|marker| marker.as_str() != Some(HARNESS_HOOK_MARKER))
+}
+
+fn classify_harness_hook(
     hook: &serde_json::Value,
     group_managed: bool,
+    group_custom_marker: bool,
     group_hook_count: usize,
     snippet: &HarnessHookSnippet,
-) -> bool {
-    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
-        && (has_harness_hook_marker(hook)
-            || hook.get("command").and_then(serde_json::Value::as_str)
-                == Some(snippet.command.as_str())
-            // Older installs mark the group, not its single command. A mixed
-            // group is not blanket ownership of unrelated user commands.
-            || (group_managed && group_hook_count == 1))
+) -> HarnessHookOwnership {
+    if hook.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+        return HarnessHookOwnership::UserCustom;
+    }
+    if has_harness_hook_marker(hook)
+        || hook.get("command").and_then(serde_json::Value::as_str) == Some(snippet.command.as_str())
+        // Older installs mark the group, not its single command. A mixed
+        // group is not blanket ownership of unrelated user commands.
+        || (group_managed && group_hook_count == 1)
+    {
+        return HarnessHookOwnership::Managed;
+    }
+    if !group_custom_marker
+        && !has_custom_harness_hook_marker(hook)
+        && hook
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| is_legacy_unmanaged_ee_hook_command(command, snippet))
+    {
+        return HarnessHookOwnership::LegacyUnmanagedEe;
+    }
+    HarnessHookOwnership::UserCustom
+}
+
+fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
+    let mut rest = command.strip_prefix("python3 -c '")?;
+    let mut script = String::new();
+    let mut closed = false;
+    while !rest.is_empty() {
+        if let Some(after_escape) = rest.strip_prefix("'\\''") {
+            script.push('\'');
+            rest = after_escape;
+        } else if let Some(after_quote) = rest.strip_prefix('\'') {
+            rest = after_quote;
+            closed = true;
+            break;
+        } else if let Some(ch) = rest.chars().next() {
+            script.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    if !closed {
+        return None;
+    }
+    let after_script = rest.strip_prefix(' ')?;
+    let after_bin = if let Some(mut bin_rest) = after_script.strip_prefix('\'') {
+        let mut bin_closed = false;
+        let mut bin_non_empty = false;
+        while !bin_rest.is_empty() {
+            if let Some(after_escape) = bin_rest.strip_prefix("'\\''") {
+                bin_non_empty = true;
+                bin_rest = after_escape;
+            } else if let Some(after_quote) = bin_rest.strip_prefix('\'') {
+                bin_rest = after_quote;
+                bin_closed = true;
+                break;
+            } else if let Some(ch) = bin_rest.chars().next() {
+                bin_non_empty = true;
+                bin_rest = &bin_rest[ch.len_utf8()..];
+            }
+        }
+        if !bin_closed || !bin_non_empty {
+            return None;
+        }
+        bin_rest
+    } else {
+        let bin_len = after_script
+            .bytes()
+            .take_while(|byte| !byte.is_ascii_whitespace())
+            .count();
+        if bin_len == 0 {
+            return None;
+        }
+        let bin = &after_script[..bin_len];
+        if !bin.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':' | '\\')
+        }) {
+            return None;
+        }
+        &after_script[bin_len..]
+    };
+
+    if after_bin.is_empty() || after_bin == " 2>/dev/null || :" {
+        Some(script)
+    } else {
+        None
+    }
+}
+
+fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnippet) -> bool {
+    let Some(script) = extract_python_inline_script_from_ee_hook(command) else {
+        return false;
+    };
+    if !script.contains("ee = sys.argv[1]")
+        || !script.contains("import ")
+        || !script.contains("subprocess")
+    {
+        return false;
+    }
+    match snippet.id.as_str() {
+        "ee-ambient-pre-edit-recall" => {
+            (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
+                && script.contains("SURFACE = \"pre_edit_recall\"")
+                && script.contains("\"recall\""))
+                || (script.contains("\"PreToolUse\"")
+                    && script.contains("cmd = [ee, \"recall\"]")
+                    && script.contains("\"--budget-tokens\""))
+        }
+        "ee-journal-bash-failure" => {
+            script.contains("body = \"Harness observed a non-zero Bash exit code.\"")
+                && script.contains("\"journal\"")
+                && script.contains("\"append\"")
+                && script.contains("\"--source\"")
+                && script.contains("\"hook\"")
+        }
+        "ee-ambient-session-orient" => {
+            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
+                && script.contains("SURFACE = \"session_start_orient\"")
+                && script.contains("\"orient\"")
+        }
+        "ee-ambient-session-capture-suggest" => {
+            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
+                && script.contains("SURFACE = \"session_end_capture_suggest\"")
+                && script.contains("\"capture\"")
+                && script.contains("\"suggest\"")
+        }
+        _ => false,
+    }
 }
 
 fn validate_harness_conformance_case(case: &HarnessConformanceCase) -> Result<(), DomainError> {
