@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -153,6 +153,7 @@ fn capabilities_json_contract_reports_inventory_counts_and_registry() -> TestRes
             "commands": commands.len(),
         }),
     )?;
+    assert_version_and_dependency_parity(&workspace, data)?;
 
     for command in [
         "capabilities",
@@ -324,6 +325,99 @@ fn capabilities_json_reports_non_utf8_secret_env_as_set_without_value() -> TestR
     }
 
     Ok(())
+}
+
+fn assert_version_and_dependency_parity(
+    workspace: &E2eWorkspace,
+    capabilities: &Map<String, Value>,
+) -> TestResult {
+    let version_output = run_ee(workspace, "act_version_json", &["version", "--json"])?;
+    ensure_success(&version_output, "ee version --json")?;
+    let version = stdout_json(&version_output, "ee version --json")?;
+    let states = |entries: &[Value]| -> TestResult<BTreeMap<String, bool>> {
+        entries
+            .iter()
+            .map(|entry| {
+                let entry = entry
+                    .as_object()
+                    .ok_or_else(|| "feature must be an object".to_owned())?;
+                Ok((
+                    string_member(entry, "name")?.to_owned(),
+                    bool_member(entry, "enabled")?,
+                ))
+            })
+            .collect()
+    };
+    let capability_features = states(array_member(capabilities, "features")?)?;
+    let version_features = states(array_member(object_value(&version, "data")?, "features")?)?;
+    if capability_features != version_features {
+        return Err(format!(
+            "capabilities and version disagree on compiled features: {capability_features:?} vs {version_features:?}"
+        ));
+    }
+
+    let dependency_output = run_ee(
+        workspace,
+        "act_dependency_json",
+        &["diag", "dependencies", "--json"],
+    )?;
+    ensure_success(&dependency_output, "ee diag dependencies --json")?;
+    let dependencies = stdout_json(&dependency_output, "ee diag dependencies --json")?;
+    let diagnostic = find_object_by_string(
+        array_member(object_value(&dependencies, "data")?, "entries")?,
+        "entries",
+        "name",
+        "toon_rust",
+    )?;
+    let source = object_member(diagnostic, "source")?;
+    let capability = object_member(
+        object_member(object_member(capabilities, "output")?, "toon")?,
+        "dependency",
+    )?;
+    for (capability_field, diagnostic_field) in [
+        ("version", "version"),
+        ("sourceKind", "kind"),
+        ("path", "path"),
+    ] {
+        ensure_eq_str(
+            string_member(capability, capability_field)?,
+            string_member(source, diagnostic_field)?,
+            &format!("TOON cross-surface {capability_field}"),
+        )?;
+    }
+    ensure_eq_bool(
+        bool_member(capability, "defaultFeatures")?,
+        bool_member(
+            object_member(diagnostic, "defaultFeatureProfile")?,
+            "defaultFeatures",
+        )?,
+        "TOON cross-surface default features",
+    )?;
+    for gap in array_member(capabilities, "unimplemented")? {
+        let gap = gap
+            .as_object()
+            .ok_or_else(|| "gap must be an object".to_owned())?;
+        let target = string_member(gap, "shipTarget")?;
+        if !matches!(target, "opt-in" | "included" | "planned") {
+            return Err(format!(
+                "capability gap still promises an obsolete release: {target}"
+            ));
+        }
+        if gap.get("trackingBead") != Some(&Value::Null) {
+            return Err(
+                "disabled/unlinked capabilities must not name completed implementation beads"
+                    .to_owned(),
+            );
+        }
+    }
+    workspace.log(
+        "assert_cross_surface_metadata",
+        json!({
+            "event": "capability_version_dependency_parity",
+            "features": capability_features,
+            "toon": capability,
+        }),
+    )
 }
 
 fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Output> {

@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::models::CapabilityStatus;
 
 use super::build_info;
+use super::doctor::TOON_DEPENDENCY_CONTRACT;
 use super::index::{EmbeddingPosture, IndexStatusOptions, IndexStatusReport, get_index_status};
 use super::status::{
     default_workspace_path, probe_cass_capability, probe_graph_capability, probe_mesh_capability,
@@ -73,6 +74,29 @@ impl FeatureEntry {
             description,
         }
     }
+
+    /// Use the same compile-time inventory as `ee version`.
+    #[must_use]
+    pub fn gather() -> Vec<Self> {
+        super::build_features()
+            .into_iter()
+            .map(|feature| {
+                let description = match feature.name {
+                    "fts5" => "FTS5 full-text search",
+                    "json" => "Reserved JSON output build profile",
+                    "embed-fast" => "Fast embedding via model2vec",
+                    "lexical-bm25" => "BM25 lexical scoring",
+                    "graph" => "FrankenNetworkX graph analytics",
+                    "differential-networkx" => "Python NetworkX differential tests",
+                    "mcp" => "MCP server adapter",
+                    "serve" => "Reserved HTTP serve build profile",
+                    "science-analytics" => "Reserved heavyweight science analytics profile",
+                    _ => "Cargo build feature",
+                };
+                Self::new(feature.name, feature.enabled, description)
+            })
+            .collect()
+    }
 }
 
 /// Build-time gap surfaced once through `ee capabilities`.
@@ -81,7 +105,9 @@ pub struct UnimplementedCapabilityEntry {
     pub code: &'static str,
     pub feature_flag: &'static str,
     pub ship_target: &'static str,
-    pub tracking_bead: &'static str,
+    /// An active implementation owner, if this gap has one. Disabled build
+    /// features need opt-in configuration, not a fictitious future release.
+    pub tracking_bead: Option<&'static str>,
     pub user_message: &'static str,
 }
 
@@ -91,7 +117,7 @@ impl UnimplementedCapabilityEntry {
         code: &'static str,
         feature_flag: &'static str,
         ship_target: &'static str,
-        tracking_bead: &'static str,
+        tracking_bead: Option<&'static str>,
         user_message: &'static str,
     ) -> Self {
         Self {
@@ -143,14 +169,16 @@ pub struct ToonDependencySource {
 
 impl ToonDependencySource {
     #[must_use]
-    pub const fn local() -> Self {
+    pub const fn from_contract() -> Self {
         Self {
             crate_name: "toon",
             package: "tru",
-            version: "0.2.3",
-            source_kind: "path",
-            path: "/data/projects/toon_rust",
-            default_features: false,
+            version: TOON_DEPENDENCY_CONTRACT.source.version,
+            source_kind: TOON_DEPENDENCY_CONTRACT.source.kind,
+            path: TOON_DEPENDENCY_CONTRACT.source.path,
+            default_features: TOON_DEPENDENCY_CONTRACT
+                .default_feature_profile
+                .default_features,
         }
     }
 }
@@ -172,7 +200,7 @@ impl ToonOutputCapability {
         Self {
             available: crate::output::toon_output_available(),
             canonical_source_format: "json",
-            dependency: ToonDependencySource::local(),
+            dependency: ToonDependencySource::from_contract(),
             supported_output_profiles: vec!["minimal", "summary", "standard", "full"],
             default_format_env: "TOON_DEFAULT_FORMAT",
             error_codes: vec!["toon_decode_failed", "toon_encoding_failed"],
@@ -331,36 +359,15 @@ impl CapabilitiesReport {
             CapabilityEntry::new("cass", cass_status, "CASS session import adapter"),
         ];
 
-        let features = vec![
-            FeatureEntry::new("fts5", cfg!(feature = "fts5"), "FTS5 full-text search"),
-            FeatureEntry::new("json", cfg!(feature = "json"), "JSON extension support"),
-            FeatureEntry::new(
-                "embed-fast",
-                cfg!(feature = "embed-fast"),
-                "Fast embedding via model2vec",
-            ),
-            FeatureEntry::new(
-                "embed-quality",
-                false, // Feature blocked: pulls forbidden deps (reqwest/tokio/hyper)
-                "Quality embedding via fastembed",
-            ),
-            FeatureEntry::new(
-                "lexical-bm25",
-                cfg!(feature = "lexical-bm25"),
-                "BM25 lexical scoring",
-            ),
-            FeatureEntry::new("mcp", cfg!(feature = "mcp"), "MCP server adapter"),
-            FeatureEntry::new("mesh", false, "Optional mesh memory cache"),
-            FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter"),
-        ];
+        let features = FeatureEntry::gather();
 
         let mut unimplemented = Vec::new();
         if runtime_status == CapabilityStatus::Unimplemented {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "runtime_unavailable",
                 "asupersync",
-                "v0.2",
-                "bd-17c65.5.5",
+                "included",
+                None,
                 "Asupersync runtime support is not available in this binary.",
             ));
         }
@@ -368,8 +375,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "storage_unimplemented",
                 "fsqlite",
-                "v0.2",
-                "bd-17c65.5.5",
+                "included",
+                None,
                 "Storage support is not available in this binary.",
             ));
         }
@@ -377,8 +384,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "search_unimplemented",
                 "frankensearch",
-                "v0.2",
-                "bd-17c65.5.5",
+                "included",
+                None,
                 "Search support is not available in this binary.",
             ));
         }
@@ -386,8 +393,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "lexical_unavailable",
                 "lexical-bm25",
-                "v0.2",
-                "bd-17c65.5.5",
+                "opt-in",
+                None,
                 "BM25 lexical search is disabled in this build.",
             ));
         }
@@ -398,8 +405,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "embed_model_unavailable",
                 "embed-fast",
-                "v0.2",
-                "bd-3qs2i.4.1",
+                "opt-in",
+                None,
                 "Dense embedding models are disabled in this build; semantic search falls back to hash similarity.",
             ));
         }
@@ -407,8 +414,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "graph_feature_disabled",
                 "graph",
-                "v0.2",
-                "bd-17c65.5.5",
+                "opt-in",
+                None,
                 "Graph algorithm execution is disabled in this build.",
             ));
         }
@@ -416,8 +423,8 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "mcp_feature_disabled",
                 "mcp",
-                "v0.2",
-                "bd-17c65.5.5",
+                "opt-in",
+                None,
                 "MCP stdio adapter support is disabled in this build.",
             ));
         }
@@ -425,16 +432,16 @@ impl CapabilitiesReport {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "mesh_feature_disabled",
                 "mesh",
-                "post-v0.5",
-                "bd-x4hn7",
+                "opt-in",
+                None,
                 "Optional mesh memory surfaces are disabled or not linked in this build.",
             ));
         }
         unimplemented.push(UnimplementedCapabilityEntry::new(
             "diagram_backend_unavailable",
             "franken-mermaid-adapter",
-            "v0.3",
-            "bd-17c65.5.5",
+            "planned",
+            None,
             "Diagram backend support is not linked in this build.",
         ));
         unimplemented.sort_by(|left, right| left.code.cmp(right.code));
@@ -590,12 +597,11 @@ mod tests {
             "mesh defaults to pending",
         )?;
 
-        let feature = report
-            .features
-            .iter()
-            .find(|feature| feature.name == "mesh")
-            .unwrap_or_else(|| panic!("mesh feature must exist")); // ubs:ignore
-        ensure(feature.enabled, false, "mesh feature defaults off")
+        ensure(
+            report.features.iter().any(|feature| feature.name == "mesh"),
+            false,
+            "runtime mesh configuration must not masquerade as a Cargo feature",
+        )
     }
 
     #[test]
@@ -635,6 +641,18 @@ mod tests {
                 "embed_model_unavailable gap should be in capabilities.unimplemented when embed-fast is not built; got {codes:?}"
             ));
         }
+        for gap in &report.unimplemented {
+            ensure(
+                gap.tracking_bead,
+                None,
+                "no fictitious implementation owner",
+            )?;
+            ensure(
+                matches!(gap.ship_target, "opt-in" | "included" | "planned"),
+                true,
+                "gap describes current build posture instead of an obsolete release target",
+            )?;
+        }
         ensure(report.unimplemented_count(), codes.len(), "gap count")
     }
 
@@ -669,9 +687,19 @@ mod tests {
             "toon dependency package",
         )?;
         ensure(
+            report.toon.dependency.version,
+            TOON_DEPENDENCY_CONTRACT.source.version,
+            "toon dependency version comes from the diagnostic contract",
+        )?;
+        ensure(
+            report.toon.dependency.source_kind,
+            TOON_DEPENDENCY_CONTRACT.source.kind,
+            "toon dependency source comes from the diagnostic contract",
+        )?;
+        ensure(
             report.toon.dependency.path,
-            "/data/projects/toon_rust",
-            "toon dependency path",
+            TOON_DEPENDENCY_CONTRACT.source.path,
+            "toon dependency path comes from the diagnostic contract",
         )?;
         ensure_at_least(
             report.toon.supported_output_profiles.len(),

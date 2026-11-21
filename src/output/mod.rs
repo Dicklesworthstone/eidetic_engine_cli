@@ -10622,7 +10622,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_str("code", gap.code);
             obj.field_str("featureFlag", gap.feature_flag);
             obj.field_str("shipTarget", gap.ship_target);
-            obj.field_str("trackingBead", gap.tracking_bead);
+            field_optional_str(obj, "trackingBead", gap.tracking_bead);
             obj.field_str("userMessage", gap.user_message);
         });
         d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
@@ -16664,7 +16664,7 @@ pub fn render_capabilities_json_filtered(
                 obj.field_str("code", gap.code);
                 obj.field_str("featureFlag", gap.feature_flag);
                 obj.field_str("shipTarget", gap.ship_target);
-                obj.field_str("trackingBead", gap.tracking_bead);
+                field_optional_str(obj, "trackingBead", gap.tracking_bead);
                 if profile.include_verbose_details() {
                     obj.field_str("userMessage", gap.user_message);
                 }

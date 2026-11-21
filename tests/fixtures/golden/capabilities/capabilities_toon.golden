@@ -11,18 +11,19 @@ data:
     graph,ready
     mesh,pending
     cass,degraded
-  features[8]{name,enabled}:
+  features[9]{name,enabled}:
     fts5,true
     json,true
     embed-fast,true
-    embed-quality,false
     lexical-bm25,true
+    graph,true
+    differential-networkx,false
     mcp,false
-    mesh,false
     serve,false
+    science-analytics,false
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
-    diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5
-    mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5
+    diagram_backend_unavailable,franken-mermaid-adapter,planned,null
+    mcp_feature_disabled,mcp,opt-in,null
   commands[564]{name,available}:
     agent,true
     agent detect,true
@@ -1424,9 +1425,9 @@ data:
       dependency:
         crate: toon
         package: tru
-        version: 0.2.3
-        sourceKind: path
-        path: /data/projects/toon_rust
+        version: 0.2.4
+        sourceKind: registry
+      path: "https://crates.io/crates/tru"
         defaultFeatures: false
       supportedOutputProfiles[4]: minimal,summary,standard,full
       defaultFormatEnv: TOON_DEFAULT_FORMAT
@@ -1480,8 +1481,8 @@ data:
   summary:
     readySubsystems: 2
     totalSubsystems: 6
-    enabledFeatures: 4
-    totalFeatures: 8
+    enabledFeatures: 5
+    totalFeatures: 9
     unimplementedCapabilities: 2
     availableCommands: 563
     totalCommands: 564

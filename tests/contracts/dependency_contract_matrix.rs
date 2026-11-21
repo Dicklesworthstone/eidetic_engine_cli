@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use ee::cli::Cli;
+use ee::core::capabilities::{FeatureEntry, ToonOutputCapability};
 use ee::core::doctor::{DEPENDENCY_CONTRACT_ENTRIES, DEPENDENCY_MATRIX_REVISION};
 use serde_json::{Map, Value};
 
@@ -561,6 +562,106 @@ fn local_path_rows_record_release_pin_decisions() -> TestResult {
 }
 
 #[test]
+fn registry_dependency_versions_match_exact_cargo_pins() -> TestResult {
+    let manifest = read_text(CARGO_TOML_PATH)?
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("{CARGO_TOML_PATH} is invalid TOML: {error}"))?;
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .ok_or_else(|| "Cargo dependencies must be a table".to_owned())?;
+    for entry in DEPENDENCY_CONTRACT_ENTRIES {
+        if entry.source.kind != "registry" {
+            continue;
+        }
+        let aliases: &[&str] = match entry.name {
+            "asupersync" => &["asupersync"],
+            "frankensqlite" => &["fsqlite"],
+            "sqlmodel_rust" => &["sqlmodel-core", "sqlmodel-frankensqlite"],
+            "frankensearch" => &["frankensearch"],
+            "franken_networkx" => &["fnx-algorithms", "fnx-classes", "fnx-runtime"],
+            "toon_rust" => &["toon"],
+            "franken_agent_detection" => &["franken-agent-detection"],
+            name => {
+                return Err(format!(
+                    "registry row `{name}` has no checked Cargo mapping"
+                ));
+            }
+        };
+        for alias in aliases {
+            let dependency = dependencies
+                .get(alias)
+                .and_then(toml_edit::Item::as_inline_table)
+                .ok_or_else(|| format!("Cargo dependency `{alias}` must be an inline table"))?;
+            let version = dependency
+                .get("version")
+                .and_then(toml_edit::Value::as_str)
+                .ok_or_else(|| format!("Cargo dependency `{alias}` is missing its pin"))?;
+            ensure(
+                version == format!("={}", entry.source.version),
+                format!(
+                    "{} version {} disagrees with Cargo {alias} {version}",
+                    entry.name, entry.source.version
+                ),
+            )?;
+            for non_registry in ["path", "git", "registry"] {
+                ensure(
+                    !dependency.contains_key(non_registry),
+                    format!("{alias} no longer uses the default crates.io registry"),
+                )?;
+            }
+        }
+    }
+
+    let toon = ToonOutputCapability::gather().dependency;
+    let cargo_toon = dependencies[toon.crate_name]
+        .as_inline_table()
+        .ok_or_else(|| "Cargo TOON alias must be an inline table".to_owned())?;
+    ensure(
+        cargo_toon.get("package").and_then(toml_edit::Value::as_str) == Some(toon.package)
+            && cargo_toon.get("version").and_then(toml_edit::Value::as_str)
+                == Some(format!("={}", toon.version).as_str())
+            && cargo_toon
+                .get("default-features")
+                .and_then(toml_edit::Value::as_bool)
+                == Some(toon.default_features)
+            && toon.source_kind == "registry"
+            && toon.path == format!("https://crates.io/crates/{}", toon.package),
+        "TOON output capability must describe the actual Cargo dependency",
+    )
+}
+
+#[test]
+fn capabilities_and_version_features_match_the_cargo_inventory() -> TestResult {
+    let manifest = read_text(CARGO_TOML_PATH)?
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("{CARGO_TOML_PATH} is invalid TOML: {error}"))?;
+    let expected: BTreeSet<&str> = manifest["features"]
+        .as_table()
+        .ok_or_else(|| "Cargo features must be a table".to_owned())?
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| *name != "default")
+        .collect();
+    let capabilities = FeatureEntry::gather();
+    let actual: BTreeSet<&str> = capabilities.iter().map(|feature| feature.name).collect();
+    ensure(
+        actual == expected && capabilities.len() == expected.len(),
+        format!("capability features {actual:?} must exactly match Cargo {expected:?}"),
+    )?;
+    ensure(
+        capabilities
+            .iter()
+            .map(|feature| (feature.name, feature.enabled))
+            .collect::<Vec<_>>()
+            == ee::core::build_features()
+                .iter()
+                .map(|feature| (feature.name, feature.enabled))
+                .collect::<Vec<_>>(),
+        "capabilities and version must report identical compiled feature states",
+    )
+}
+
+#[test]
 fn markdown_artifact_mentions_every_golden_dependency() -> TestResult {
     let matrix = load_matrix()?;
     let root = object(&matrix, "matrix root")?;
@@ -582,10 +683,32 @@ fn markdown_artifact_mentions_every_golden_dependency() -> TestResult {
     for (index, entry) in array(root, "entries")?.iter().enumerate() {
         let entry = object(entry, &format!("entries[{index}]"))?;
         let name = string(entry, "name")?;
+        let prefix = format!("| `{name}` |");
+        let rows: Vec<&str> = docs
+            .lines()
+            .filter(|line| line.starts_with(&prefix))
+            .collect();
         ensure(
-            docs.contains(name),
-            format!("Markdown artifact does not mention dependency `{name}`"),
+            rows.len() == 1,
+            format!("Markdown artifact needs one matrix row for `{name}`"),
         )?;
+        let row = rows[0];
+        let source = object(
+            entry
+                .get("source")
+                .ok_or_else(|| format!("{name}.source is required"))?,
+            &format!("{name}.source"),
+        )?;
+        if string(source, "kind")? == "registry" {
+            let default_profile = row.split('|').nth(3).unwrap_or_default();
+            let pin = format!("`={}`", string(source, "version")?);
+            ensure(
+                default_profile.contains("registry") && default_profile.contains(&pin),
+                format!(
+                    "Markdown `{name}` default profile must include registry {pin}: {default_profile}"
+                ),
+            )?;
+        }
     }
 
     Ok(())
