@@ -28,6 +28,7 @@ and actual test results are recorded in
    publish the GitHub release without Actions/dispatch, and verify every public
    asset before updating the four Homebrew archive URLs and hashes.
 
-The current manual releases carry SHA-256 checksums and a build manifest. They
+The current manual releases carry SHA-256 checksums and minisign `.minisig`
+signatures (without a release `manifest.json` build manifest; see `AGENTS.md`). They
 do not carry Sigstore bundles or SLSA attestations; `--require-provenance` remains
 unsatisfied. Do not describe unsigned metadata as signed provenance.

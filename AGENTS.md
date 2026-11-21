@@ -141,6 +141,8 @@ test. If you are about to paste diagnostic output into a bead, scan it first.
 
 **The default branch is `main`.** All work happens on `main` — commits, PRs, feature branches all merge to `main`. Never reference `master` in code or docs. If you see `master` anywhere, it's a bug that needs fixing.
 
+**Disposition note (RULE 1):** Legacy `master` and `origin/master` refs still exist on the remote/local repo at `4cda4cec1aab592aaab951e08375808f3a272c2f` (parity with `main` prior to subsequent `main` commits). Because **RULE 1** forbids deleting any branch without express written user permission, agents must **not** delete them automatically. Operators may verify parity non-destructively with `git rev-parse master origin/master main && git branch -a --contains master` and, once approved in writing, remove them with `git branch -d master && git push origin --delete master`.
+
 ---
 
 ## RULE NUMBER 2: NO WORKTREES. EVER. NO EXCEPTIONS.
@@ -1037,14 +1039,17 @@ deliberate as of 2026-09-17 (`bd-o7wh0`). Enabling `ci.yml` on `push: main`
 during the unguarded window (988 commits since the last hosted run,
 `575b8c80` on 2026-08-27, conclusion=failure) would queue 90-minute cargo
 shards against a predicted-red tree. Cargo tests and clippy therefore stay
-on the pinned RCH lane (`scripts/rch_verify.sh`). The hosted executing gate
-for cargo-free invariants is `.github/workflows/ci-static.yml` (`CI Static`):
-forbidden-deps, migration-registry, closure-lint, vision-coverage, MCP
-lib-test vacuity guard, contract-drift-radar, and `cargo fmt --check`. A
-green `CI Static` run is not "CI restored." Releases are cut by
-hand with `dsr` / the local cross-compile flow (see
-`docs/` release notes and the `dsr` skill), then uploaded. Expected assets per
-release:
+on the pinned RCH lane (`scripts/rch_verify.sh`). Under the permanent
+**Standing Policy: DSR Only — Never GitHub Actions** at the top of this file,
+hosted GitHub Actions are disabled repo-wide (`actions/permissions` `enabled: false`);
+cargo-free invariants (forbidden-deps, migration-registry, closure-lint,
+vision-coverage, MCP lib-test vacuity guard, contract-drift-radar,
+doc-governance invariants, and `cargo fmt --check`) execute via
+`./scripts/verify.sh --static-only` and local `dsr` / `act` runs over
+`.github/workflows/ci-static.yml` (never hosted GitHub Actions). A green static
+run is not "CI restored." Releases are cut by hand with `dsr` / the local
+cross-compile flow (see `docs/` release notes and the `dsr` skill), then
+uploaded. Expected assets per release:
 
 - `ee-{target}.tar.xz`
 - `ee-{target}.tar.xz.sha256`
@@ -1083,8 +1088,9 @@ a reading of the release flow:
   "publish `signed: false` in the manifest" described a field in a file that
   does not exist. Signing status is visible from whether `.minisig` assets are
   present, which is how v0.16.0 (none) differs from v0.17.0 and v0.18.0.
-- A Sigstore/SLSA asset has never appeared, consistent with the Actions signing
-  job being disabled repo-wide.
+- A Sigstore/SLSA asset has never appeared, consistent with the DSR-only
+  policy and hosted GitHub Actions (including the Actions signing job) being
+  disabled repo-wide.
 
 Homebrew (`Dicklesworthstone/homebrew-tap`) is updated by the disabled
 `update-homebrew` job, so a hand-cut release must also bump the formula by

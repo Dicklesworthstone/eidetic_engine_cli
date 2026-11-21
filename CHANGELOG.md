@@ -26,26 +26,25 @@ checked-in Beads records. The durable research ledger is
 | 2026-09-26 → 2026-10-02 | **`0.17.0`** retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6. |
 | 2026-10-02 → 2026-10-14 | **`0.18.0`** readable CASS evidence and failure-to-fix recall, incremental index publication again, rules and evidence ranked with memories in packs, 0.17.0 imports keep refreshing (#70), FrankenSQLite 0.4.10, Frankensearch 0.7.1. |
 
-Release surface (as of 2026-09-12):
+Release surface (as of 2026-10-14):
 
-- Latest **published** GitHub Release: [`v0.15.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.2) (2026-09-12), with six platform archives, checksums, a build manifest, and both installers. All 16 public asset downloads were verified.
+- Latest **published** GitHub Release: [`v0.18.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.18.0) (2026-10-14), with platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers (`install.sh`, `install.ps1`), `SHA256SUMS`, and `SHA256SUMS.minisig` (no `manifest.json` build manifest, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design).
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- [`eidetic-engine 0.15.2`](https://crates.io/crates/eidetic-engine/0.15.2)
-  is published on crates.io from tagged source
-  `1478b2f3b0a912d5302808f6dc6de9e56e589c05`. Its complete dependency graph
-  resolves from the registry without sibling checkouts or Cargo patches.
+- [`eidetic-engine 0.18.0`](https://crates.io/crates/eidetic-engine/0.18.0)
+  is published on crates.io. Its complete dependency graph resolves from the
+  registry without sibling checkouts or Cargo patches.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  serves v0.15.2 as of 2026-09-12). Cargo users should install 0.15.2 or newer;
-  the 0.15.1 crate has a read-only WAL regression. See
+  serves `0.18.0`). Cargo users should install `0.18.0` (earlier `0.15.1` had a
+  read-only WAL regression superseded in `0.15.2`). See
   [the dependency update record](UPGRADE_LOG.md#cratesio-publication-follow-through).
-- This release has SHA-256 checksums and a build manifest, without Sigstore
-  signatures or SLSA attestations. Its assets do not satisfy `--require-provenance`.
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
+| [0.18.0](#0180---2026-10-14) | 2026-10-14 | yes | Readable CASS evidence and failure-to-fix recall, incremental index publication, rules and evidence ranked with memories, 0.17.0 refresh compatibility (#70), FrankenSQLite 0.4.10, Frankensearch 0.7.1 |
+| [0.17.0](#0170---2026-10-02) | 2026-10-02 | yes | Retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6 |
 | [0.16.0](#0160---2026-09-26) | 2026-09-26 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission, backups that keep ids by default |
 | [0.15.2](#0152---2026-09-12) | 2026-09-12 | yes | Registry-only Cargo installation, read-only WAL correction and rerank storage-failure handling |
 | 0.15.1 | 2026-09-12 | withheld | Crate published; superseded by 0.15.2 after runtime qualification exposed a storage regression |
