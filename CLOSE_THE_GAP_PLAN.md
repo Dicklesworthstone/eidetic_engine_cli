@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22, 2026-10-31, 2026-11-05, 2026-11-10)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22, 2026-10-31, 2026-11-05, 2026-11-10, 2026-11-20)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -9,7 +9,48 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-11-10 end-to-end reality check (§21, read this first).** Both external
+> **2026-11-20 end-to-end reality check (§22, read this first).** Three realities
+> diverge sharply at `HEAD = 60f756136969e0c6b9c55f52037b448e9afc1705`:
+> - **Code Reality (Substantial):** ~1.32M LOC of Rust across `src/` with `0`
+>   `todo!()`/`unimplemented!()` placeholders, `148/148` documented CLI surfaces
+>   implemented and behaviorally exercised (`vision-coverage.sh`: `0%` gap), clean
+>   forbidden-dependency trees (`root` + `fuzz`), and `4,922/4,962` historical
+>   beads closed (`99.19%`).
+> - **Verification Reality (RED `main` + Unverified Candidate):** `./scripts/verify.sh --static-only`
+>   **FAILS (exit 1)** at `check-degraded-repair-actionability.py` (3 violations in
+>   `src/core/journal.rs:2678,2687` and `src/core/workspace.rs:2755` introduced by
+>   `a2a99dabd`), and `scripts/check-open-coded-success-baseline.py` **FAILS (exit 1)**
+>   on 3 grown rows / 7 sites in `tests/cli_loop_e2e.rs` (`4f926dd1d`). Seven
+>   consecutive 2026-11-20 commits (`586441516..60f756136`, ~3,500+ LOC) landed on
+>   `main` completely uncompiled and untested. `bd-reality-core-convergence-1azkt.19`
+>   closed prematurely on 2026-11-17 citing only 4 targets (56 tests out of ~12,000+)
+>   while `scripts/lib/emit_proof_capsule.py` STILL never sets
+>   `completeness.populated = true` (`populated: False`, `manifestHash: None`,
+>   `logicalTests: None`, `shards: []`).
+> - **Shipped & Local Binary Reality (Stale):** Public `v0.18.0` (GitHub, Homebrew,
+>   crates.io; 2026-10-14) is **1,642 commits behind `HEAD`** while `Cargo.toml` is
+>   still `0.18.0`. On this Mac host, `~/.local/bin/ee` is `0.14.2`,
+>   `$CARGO_TARGET_DIR/debug/ee` is Nov 5 `a1e0a079b` (**246 commits stale**), and
+>   `$CARGO_TARGET_DIR/release/ee` is a Linux x86_64 ELF binary.
+> - **Live Contract Lies, Doc Drift, & Open Issues:** Live `ee capabilities --json`
+>   (`src/core/capabilities.rs:144-156,334-355`) still emits `tru 0.2.3` from path
+>   `"/data/projects/toon_rust"` and phantom features `embed-quality`/`mesh` while
+>   omitting `graph`/`differential-networkx`/`science-analytics`, and
+>   `docs/dependency-contract-matrix.md` lines 36/38/43/44 are stale — missed by
+>   BOTH `dependency_contract_matrix.rs` and `contract-drift-radar.sh` (GH `#74`).
+>   Seven internal doc/governance contradictions (`AGENTS.md:1040` hosted CI claim,
+>   stray `master`/`origin/master` branch, `README.md` PPR row & closed `.15`/`.48`
+>   references, `CHANGELOG.md` stuck on `v0.15.2`, `PUBLISH_CHECKLIST.md:31`
+>   phantom manifest claim, `docs/feature_flag_registry.md:38` stale `serve` + 180d
+>   expired reservations, `COMPREHENSIVE_PLAN.md:7` `0.14.x` banner), the unverified
+>   ADR 0052 10k-memory `>=2x` warm-daemon gate (GH `#87`), Claude Code unmanaged
+>   hook duplication (GH `#41`), silent `fuzz/Cargo.lock` stale-skip + 414 local
+>   model staging dirs (GH `#75`), 84 compile-only/uncited behavioural closures in
+>   `.closure-quality-report.json` + 6 unwired doctor fixers + 41 orphaned E2Es,
+>   and 30 external RCH/`br`/`bv` infra beads (75% of open backlog) are now tracked
+>   in 11 dependency-wired beads **`.75`–`.85`** (§22) with `0` active cycles.
+>
+> **2026-11-10 end-to-end reality check (§21, historical).** Both external
 > volumes (`/Volumes/USBNVME16TB` and `/Volumes/EERCHExport` APFS) and the
 > pinned nightly toolchain are mounted, every local non-Cargo gate in
 > `verify.sh` / `ci-static.yml` passes (including `build_degraded_codes_doc.sh --check`
@@ -1213,29 +1254,29 @@ candidate before `.2` changes the implementation.
 | # | Controlling promise | Status | Evidence / gap owner |
 | ---: | --- | --- | --- |
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
-| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
-| 3 | Manual memory → DB → search → pack → why | **WORKING (bounded release proof)** | Fresh v0.14.4 isolated serial offline probe returns the exact memory, pack provenance, and persisted ledger through why. Current-source and concurrent acceptance remain `.10`, `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING on the oracle corpus; first-run onboarding still fails** | 2026-10-22 (§17.2): on the `.43` oracle, v0.18.0 imports 308 sessions / 4,009 spans at 0.60 s per session, admits 988 and quarantines 3,021 by kind, and search/pack return **projected** `assistant:` / `user:` text at **UTR 1.0000**. The `[cass] binary` opt-in is live at all three former dead sites and executes. Remaining: a standard `~/.local/bin/cass` is still refused by default so README Quick Start step 2 exits 5 (the refusal is now actionable and names both opt-ins) — `.44`; and **N1**, where a CASS-populated store can return zero results under the default download policy — `.66`. Measured against the emulator, not real transcripts: this host has no cass index. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING at 4k spans; one default-policy path returns nothing (N1)** | 2026-10-22: at 4,009 spans search is 0.83–1.19 s and pack 1.14 s (were 11.1 s / 8.7 s), with `degraded: []` under a coherent neural index. The scale cliff is gone. But under the **default** model-download policy the same corpus answers every query with 0 results and `index_incompatible` while three health surfaces report healthy (§17.3 N1) — `.66`. Whole-process concurrency still `.2`, `.3`. |
-| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **WORKING (bounded, released binary)** | 2026-10-01: v0.16.0 serial packs are byte-stable; 6/6 concurrent packs equal the serial hash; packs and searches racing a writer report one coherent stale-flagged snapshot (§16.2). The 100-run, linearizability and crash matrix remain `.3`. ADR 0087 identity slices remain `bd-pack-identity-*`. |
-| 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
-| 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
-| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WORKING on the oracle; packable-rule identity still partial** | 2026-10-22 (§17.2): **PAP is precision 1.00 / recall 0.833** on the oracle (5 proposals, 0 polluted by any `must_not_propose` substring), against 0/10 on 2026-10-01 — target ≥ 0.70/0.70 **MET**. Rule hits now resolve into packs (`resolve_rule_hit` / `RuleHitResolution`, `src/core/context.rs:14188`) and README documents `entityKind: "rule"`. Remaining: typed `RuleId`/`EvidenceId` pack identity (`bd-vp087`, in progress; `ee.pack.v3` consumer sweep still pending at `src/pack/mod.rs:1247`), incident cards `.59`, fingerprints `.60`. |
-| 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
-| 11 | Complete durable backup, verify, migration, restore, and rebuild | **WORKING on a fresh store; evolved-store proof open** | 2026-10-01: v0.16.0 `recoveryInventory` reports complete schema and snapshot coverage with 0 uncovered required tables; verify passes; side-path restore selects identical pack items (§16.2). `.13` is proof-owed (commented). Evolved, CASS-populated stores remain `.14`. |
-| 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
-| 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
-| 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN as a complete set** | The focused CASS loop now passes its retained pinned-source test (§A); this does not prove all eight. `bd-2mpct`, `bd-2mpct.1`, and `.17` own exact complete coverage. |
-| 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **PARTIAL / UNPROVEN** | ADR 0085 and source screening are strong; cross-source live admission, retained-generation, proof-sink, and recovery negatives remain. |
-| 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
-| 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
-| 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The 2026-09-17 amendment, decided on delegated authority, resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
-| 19 | Canonical readiness verification and green CI | **REGRESSED (hosted verification dark) / UNPROVEN** | 2026-10-22 (§17.3 N3): **Actions is `enabled: false` repo-wide.** The last run of any workflow was 2026-10-08T22:58Z and it failed on an allowed-actions policy, not on code — `actions/checkout@v4`, `dtolnay/rust-toolchain@nightly` and `cargo-deny-action` are rejected because "all actions must be from a repository owned by Dicklesworthstone". ~994 non-tracker commits carry no hosted verdict. `.41` closed honestly on `CI Static` run 37056106739 (`c211215a7`, 2026-10-02); that green is now 20 days stale and cannot be re-established while the policy stands. Workflow files grew to 88, of which **47** publish to main (N8). Local static gates are all green and prove presence, not behavior — none of them sees N1. Owners: `bd-actions-disabled-repo-wide-33mfm`, `bd-479c6`, `.5`, `.58`, `bd-fy92m`. |
-| 20 | Reproducible performance and usable first-agent latency | **MEETING its targets at 4k spans; 50k and README rows still unproven** | 2026-10-22 (§17.2): at 4,009 spans search 0.83–1.19 s, pack 1.14 s, status 0.37 s, `ask` 0.89 s, import 0.60 s/session, `why` 0.079 s. `remember` is 0.92–1.07 s at 10 memories and 1.24–1.33 s at 4,009 spans, a log-log slope of ≈ 0.04 against the ≤ 0.15 WCS target. Caveats that keep this row open: the slope is a two-point estimate and the 50k point is unmeasured; `single_document_as_full_rebuild` is still the intake label (`src/core/index.rs:4485`) so `.57`'s wiring is unlanded and the risk is structural; `bd-xayfm` remains open with a colder cold-start basis (2.5–3 s, tokenizer build) than this host measured, and `.61` closed as a duplicate of it with no work done. README rows remain historical; `.6` owns evidence. |
-| 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
-| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **WORKING (released binary, serial)** | 2026-10-01: public v0.16.0 init → remember → search → pack → why → replay → outcome → ask passes black-box in an isolated store (§16.2). Readiness-gate wiring remains `.5`/`.17`. |
-| 23 | Recommended agent journey is coherent and fast without a daemon | **WORKING at 4k spans; the journey's own first step can still fail silently** | 2026-10-22: TTFUC is 1.14 s cold at 4,009 imported spans (was 8.7 s), inside the ≤ 2 s target, with no daemon. The journey's weak link is no longer latency but N1: a user who follows README Quick Start (`init` → `import cass` → `pack`) under the default download policy can reach a store that reports healthy and packs nothing. `.66` owns that; the metric program still runs through `.63`/`.50`, which `.67` must first make trustworthy. |
-| 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
+| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL (runtime clean; capabilities/doc truth & upstream pins open)** | 2026-11-20 (§22): `check-forbidden-deps.sh` passes on both `root` and `fuzz` (`wasm-bindgen-futures` capped `<0.4.79` -> `0.4.45`), `.4`/`.15` closed honestly (local PPR removed with explicit `ppr_algorithm_unavailable`). Remaining: `ee capabilities --json` still lies (`tru 0.2.3 path /data/projects/toon_rust`, phantom features) and `docs/dependency-contract-matrix.md` lines 36/38/43/44 are stale (`.77`, GH `#74`); `check-forbidden-deps.sh` silently passes stale `fuzz/Cargo.lock` (`.81`, GH `#75`); upstream `lru 0.16.4` (`RUSTSEC-2026-0253`, GH `#40`), `fnx 0.3.1+` Louvain (GH `#73`), and upstream weighted PPR are tracked non-blocking in `.82`. |
+| 3 | Manual memory → DB → search → pack → why | **WORKING (code & prior binary); current-HEAD uncompiled** | 2026-11-20 (§22): core loop works on `a1e0a079b` and `e2e_core_workflow` 16/16 passed at `.19` (pre-Nov-20), but 7 consecutive 2026-11-20 commits (`586441516..60f756136`) have zero compile/test proof and must converge at one clean SHA via `.75` → `.85` → `.76`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING on the oracle corpus; first-run onboarding still fails** | 2026-10-22 (§17.2): on the `.43` oracle, v0.18.0 imports 308 sessions / 4,009 spans at 0.60 s per session, admits 988 and quarantines 3,021 by kind, and search/pack return **projected** `assistant:` / `user:` text at **UTR 1.0000**. The `[cass] binary` opt-in is live at all three former dead sites and executes. 2026-11-20 (§22): `.44`/`.48`/`.66` closed in source (`.48` measured `0.160s/session`, GH `#71` salted `ee.cass.source.v2` hash landed), but `README.md:3100` still cites closed `.48` (`.78`), changes are unreleased behind `v0.18.0` (`.7`/`.20`), and current-HEAD full proof awaits `.76`. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING in source; unreleased & current-HEAD unverified** | 2026-11-20 (§22): `.66` closed in source (`ee index status` mirrors `.data.degraded` into top-level `.degraded`), and `7808d3355` / `f53320496` touched live-source fallback & snapshot-generation binding today without compiling. Current-HEAD compile/test proof belongs to `.75` → `.76`; `bd-xayfm` (`~2.5–3s` upstream tokenizer cold-start) remains open and blocks `.22`. |
+| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **WORKING (bounded); single-SHA candidate proof open** | 2026-10-01: v0.16.0 serial & 6/6 concurrent packs equal serial hash (§16.2). 2026-11-20 (§22): `.1`/`.2`/`.3` closed in source, but `f53320496` modified global retrieval snapshot-generation binding today uncompiled — single-SHA candidate verification belongs to `.75` → `.76`. |
+| 7 | Retrieval scores and pack quality mean what their names claim | **WORKING in source; stale `#[ignore]` pins remain** | 2026-11-20 (§22): `.11` and `.12` closed (`src/core/search.rs:1088` fixes lexical floor inversion), but `tests/lexical_relevance_contract.rs:135,185` STILL carries `#[ignore = "tracked red..."]` on both passing tests and `verify.sh:2550` / `verify-budget.toml:1066` still label the stage `(tracked red)`. Un-ignoring and running live belongs to `.75` → `.85`. |
+| 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **WORKING in source; full-HEAD convergence open** | 2026-11-20 (§22): ADR 0085 typed identity (`MemoryId`/`RuleId`/`EvidenceId`), `why-not` (`.52`), and rule recovery ledger rebinding (`.71`) landed in source; `pack_quality_contracts` passed 9/9 pre-Nov-20. Single-SHA verification across `HEAD` belongs to `.75` → `.76`. |
+| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WORKING on the oracle; unreleased & current-HEAD proof open** | 2026-10-22 (§17.2): **PAP is precision 1.00 / recall 0.833** on the oracle. 2026-11-20 (§22): `.59`/`.60`/`.71` closed in source, `6d03d2823` modified native rule admission across diagnostic rankings today uncompiled — compile/test convergence belongs to `.75` → `.76`, release via `.7`/`.20`. |
+| 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL (code landed; 6 doctor fixers unwired & 84 legacy closures suspect)** | 2026-11-20 (§22): `bd-1oep7` closed, but `scripts/production-reachability-baseline.txt` still freezes 6 test-only `ee doctor --fix` fixers + 6 staged-only modules (`.83`), and `ee doctor` neither reports nor reclaims abandoned model staging dirs (414 empty dirs on local Mac; `.81`). |
+| 11 | Complete durable backup, verify, migration, restore, and rebuild | **WORKING (pre-Nov-20); today's tombstone commit uncompiled** | 2026-11-20 (§22): `.13`, `.14`, `.71` (rule recovery ledger rebinding) closed and `e2e_backup_restore_roundtrip` passed 24/24 before today, but `9ce7e50d1` (`fix(backup): preserve attempt families on tombstoned terminal revisions`) landed today uncompiled/untested — owned by `.75` → `.76`. |
+| 12 | Graceful offline degradation remains useful and truthful | **REGRESSED on static actionability gate (`a2a99dabd`)** | 2026-11-20 (§22): `a2a99dabd` (`EE_FS_BOUNDARY`, GH `#88`) broke `check-degraded-repair-actionability.py` on 3 flag-only repair hints (`src/core/journal.rs:2678,2687`, `src/core/workspace.rs:2755`), stopping `verify.sh --static-only` at exit 1. Owned by `.75` → `.85`. |
+| 13 | Stable machine envelopes and truthful repair exits | **PARTIAL (`capabilities` & `cli_loop_e2e` regressions)** | 2026-11-20 (§22): `ee capabilities --json` emits false `tru 0.2.3 path` and phantom features contradicting `ee diag dependencies --json` and `Cargo.toml` (`.77`, GH `#74`), and `4f926dd1d` regressed `check-open-coded-success-baseline.py` at 7 sites in `tests/cli_loop_e2e.rs` (`.75`). |
+| 14 | Exact eight North Star public-CLI scenarios | **WORKING pre-Nov-20 (`integration_north_star` 7/7); single-SHA HEAD proof open** | 2026-11-20 (§22): `.17` and `bd-2mpct` closed, and `.19` ran `integration_north_star` 7/7 before the 8 subsequent commits; full single-SHA populated capsule verification belongs to `.76`. |
+| 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **WORKING in source (GH `#71`/`#88` landed); uncompiled & unreleased** | 2026-11-20 (§22): keyed `ee.cass.source.v2` `sourceCommitment` (GH `#71`) and `EE_FS_BOUNDARY` workspace-only sandbox (GH `#88`, `a2a99dabd`) landed in source, but `a2a99dabd` is uncompiled/untested and broke static actionability (`.75`), and neither fix has shipped publicly (`.7`/`.20`). |
+| 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL (code real; docs/capabilities contradict reality)** | 2026-11-20 (§22): 247 KB `src/mcp.rs` and 255 KB `src/serve.rs` exist and PPR explicitly degrades (`ppr_algorithm_unavailable`), but `README.md:316` still gives PPR a green `✅`, `README.md:3578` points to closed `.15`, `docs/dependency-contract-matrix.md:44` calls `mcp` an empty gate, and `docs/feature_flag_registry.md:38` calls `serve` unimplemented in v0.1 + carries 180d expired reservations (`.77`, `.78`, `.82`). |
+| 17 | Multi-agent local writes preserve integrity and truthful freshness | **WORKING pre-Nov-20; today's coalesced-remember commit uncompiled** | 2026-11-20 (§22): `60f756136` (`fix(memory): bound coalesced remember indexing across leadership retries`) landed today uncompiled/untested; `e2e_multi_agent_writers` must run at one clean `HEAD` SHA under `.75` → `.76`. |
+| 18 | Unix team-confederation and documented environment posture | **PARTIAL (amended two-host boundary; docs & hook reinstall gaps open)** | 2026-11-20 (§22): `.8` two-host amendment stands; Claude Code unmanaged duplicate hook reinstall bug (GH `#41`, actively warned in `README.md:356-358`) had zero open owner and is now owned by `.80` → `.85`. |
+| 19 | Canonical readiness verification and green CI | **RED `main` + STUBBED PROOF CAPSULE + 84 LEGACY SUSPECT CLOSURES** | 2026-11-20 (§22): `AGENTS.md` permanently mandates DSR-Only (zero GitHub Actions; `actions/permissions` `enabled: false`), yet `AGENTS.md:1040` still claims hosted `CI Static` executes (`.78`). Locally, `verify.sh --static-only` FAILS (exit 1) on `check-degraded-repair-actionability.py` and `check-open-coded-success-baseline.py` FAILS (`.75`). `.19` closed prematurely on 56 tests while `emit_proof_capsule.py` STILL never sets `completeness.populated = true` (`.76`). Full `--lib` (GH `#29`) and `contracts` (GH `#72`) have no current-SHA green run (`.76`). `.closure-quality-report.json` flags 84 compile-only/uncited behavioural closures (2 P0, 33 P1) and `orphan_baseline.txt` hides 41/210 orphaned E2E scripts (`.83`). 30/40 non-closed beads are external RCH/`br`/`bv` infra noise (`.84`). |
+| 20 | Reproducible performance and usable first-agent latency | **PARTIAL (4k oracle met; ADR 0052 10k warm-daemon >=2x gate UNVERIFIED)** | 2026-11-20 (§22): 4k-span oracle metrics met and `.48` measured `0.160s/session` import, but **ADR 0052 10,000-memory `>=2x` warm-daemon speedup gate remains explicitly unverified (`README.md:2697-2698`, GH `#87`)** with zero prior open owner → now owned by `.79` (blocking `.76`, `.7`, `.22`). `bd-xayfm` (~2.5–3s upstream tokenizer cold-start) and `bd-l2271` remain open. |
+| 21 | Hermetic multi-platform release/install chain | **STALE SHIPPED (`v0.18.0`, 1,642 commits behind) / UNATTESTED** | 2026-11-20 (§22): Live GitHub `v0.18.0` (2026-10-14), Homebrew `0.18.0`, and crates.io `0.18.0` are 1,642 commits behind `HEAD` (`Cargo.toml` still `0.18.0`), carrying 22 assets / 7 `.minisig` and **0** manifests/Sigstore/SLSA bundles (`PUBLISH_CHECKLIST.md:31` falsely claims manual releases carry a manifest → `.78`). Release staging `.7` is now mechanically blocked on `.76` (populated capsule), `.79` (10k daemon gate), and `.81` (`--strict-fuzz-lock` + staging dir cleanup), ahead of human approval `.20` → signed/attested `.27` → post-public audit `.21`. |
+| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **WORKING (pre-Nov-20); current-HEAD single-SHA proof open** | 2026-11-20 (§22): verified on released `v0.16.0` and `a1e0a079b`; current-HEAD single-SHA capsule proof including `EE_FS_BOUNDARY` belongs to `.75` → `.85` → `.76`. |
+| 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL (source fixes unreleased; Mac dev binary 246 commits stale; GH `#41` hook dupes)** | 2026-11-20 (§22): `.66` fixed silent zero-result health hiding in source, but `v0.18.0` users do not have it yet (`.7`/`.20`), upgrading Claude Code users hit unmanaged hook duplication (`.80`, GH `#41`), and this Mac host has no current native `ee` binary (`~/.local/bin/ee` is `0.14.2`, `debug/ee` is `a1e0a079b`, `release/ee` is Linux ELF — `bd-no-runnable-current-ee-binary-on-the-mac-wu6ay`). |
+| 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL (machinery in source; single-SHA proof & legacy closure audit open)** | 2026-11-20 (§22): feedback/decay/pack-hash machinery is implemented and `.9`/`.17` closed, but single-SHA full-suite convergence (`.76`) and P0/P1 compile-only closure clearance (`.83`) remain required before `.22` archives Part III. |
 
 ---
 
@@ -1316,6 +1357,20 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.63` | P0 | Gate would be built last | Report-mode probe first; v0.16.0 baselines |
 | `bd-reality-core-convergence-1azkt.64` | P0 | Triple admission scans plus N+1 | No-contract-change read-path hotfix |
 | `bd-reality-core-convergence-1azkt.65` | P1 | 0.16.0 users carry R1/R4/R5 | 0.16.1 candidate; publication only with explicit human approval |
+| `bd-reality-core-convergence-1azkt.71`–`.74` | P0/P1 | Rule backup rebinding, DSR-only policy reconciliation, constant-green closure-lint guard, 7 unwired Python static gates | Closed in 2026-11-11 execution pass (§21.7) |
+| `bd-reality-core-convergence-1azkt.75` | P0 | RED `main` static gates (`check-degraded-repair-actionability.py`, `check-open-coded-success-baseline.py`), 7 uncompiled 2026-11-20 commits, stale `#[ignore]` on `.11` lexical pins | Green `verify.sh --static-only`, clean pinned RCH `check`/`clippy -D warnings`, passing tests for all 7 commits + `2 passed / 0 ignored` lexical pins |
+| `bd-reality-core-convergence-1azkt.76` | P0 | `.19` closed prematurely on 56 tests while `emit_proof_capsule.py` still hardcodes `completeness.populated = False` | Cryptographic `--populate-candidate` + `--verify-capsule` enforcement wired into `release_binary_probe.sh` + full single-SHA green convergence (`--lib`, `contracts`, `integration_*`, `mcp`, `clippy`, `probe.py --enforce`, local `dsr`/`act`) |
+| `bd-reality-core-convergence-1azkt.77` | P1 | Live `ee capabilities --json` lies (`tru 0.2.3 path`, phantom features) & stale `docs/dependency-contract-matrix.md` missed by 2 gates (GH `#74`) | Single source of truth for dependency/feature metadata + fail-closed `dependency_contract_matrix` and `contract-drift-radar.sh` version checks |
+| `bd-reality-core-convergence-1azkt.78` | P1 | 7 internal doc/governance contradictions (`AGENTS.md`, `README.md`, `CHANGELOG.md`, `PUBLISH_CHECKLIST.md`, `feature_flag_registry.md`, `COMPREHENSIVE_PLAN.md`, stray `master` branch) | Reconcile all 7 doc/governance surfaces + wire `scripts/check-doc-governance-invariants.py` into `verify.sh` |
+| `bd-reality-core-convergence-1azkt.79` | P1 | ADR 0052 10,000-memory `>=2x` warm-daemon speedup gate explicitly unverified (GH `#87`) | Paired randomized `N=10,000` release-profile benchmark (`>=20` pairs, `servingPath != in_process_fallback`, 100% `packHash` parity, 95% CI lower bound `>=2.0x`), profiling & fixing hotspots if below target |
+| `bd-reality-core-convergence-1azkt.80` | P1 | Claude Code hook reinstall duplicates legacy unmanaged EE hooks undetected by `ee hook status` (GH `#41`) | Conservative legacy EE signature recognizer + in-place deduplication on `ee hook claude-code --install` (exact `--undo` backup) + `ee hook status` duplicate detection across `claude-code`/`codex` twins |
+| `bd-reality-core-convergence-1azkt.81` | P1 | `check-forbidden-deps.sh` silently skips stale `fuzz/Cargo.lock` (GH `#75`) + 414 leaked model staging dirs with no `ee doctor` visibility/reclamation | `--strict-fuzz-lock` fail-closed mode (`exit 4`) + `ee doctor` / `ee doctor --fix` safe reclamation of empty and aged dead-PID model staging dirs |
+| `bd-reality-core-convergence-1azkt.82` | P2 | Upstream `lru 0.16.4` (`RUSTSEC-2026-0253`, GH `#40`), `fnx =0.3.0` pin blocking `0.3.1+` Louvain (GH `#73`), and no open upstream PPR tracker after `.15` closed | Non-blocking (`external-upstream`) modernization tracker for `lru`, `fnx 0.3.1+`, and upstream weighted PPR |
+| `bd-reality-core-convergence-1azkt.83` | P1 | 84 compile-only/uncited behavioural closures (`.closure-quality-report.json`, 2 P0 + 33 P1), 6 unwired doctor fixers + 6 staged modules, 41/210 orphaned E2Es | Clear P0/P1 suspects with executed behavioral test proof (or reopen), wire or propose RULE-1-compliant retirement of baseline/orphan debt |
+| `bd-reality-core-convergence-1azkt.84` | P2 | 30/40 (75%) non-closed beads are external RCH / `br` / `bv` / Agent-Mail fleet infra bugs drowning `bv --robot-triage` | Non-blocking tracker-hygiene quarantine (`external-infra` + `deferred`/handoff) restoring 100% actionable `ee` top-10 triage signal |
+| `bd-reality-core-convergence-1azkt.85` | P1 | Cross-surface twins can silently break across `.75`, `.77`, `.78`, `.80`, `.81` | Companion black-box E2E + cross-surface twin-sweep verification suite (`ee.test_event.v1` JSONL + namespaced `EE_RC20261120_85_RC=`) gating `.76` |
+
+**2026-11-20 coverage result (§22).** Every empirical gap uncovered at `HEAD = 60f756136` now has an explicit, self-contained bead owner (`.75`–`.85`) with structured acceptance criteria, positive/negative twin arms, and zero active dependency cycles (`br dep cycles --json` → `count: 0`). Mandatory product/verification slices block `.76`, `.7`, and `.22`; external-upstream (`.82`) and external-infra tracker hygiene (`.84`) stay cleanly non-blocking so external schedules cannot deadlock Part III convergence.
 
 **2026-08-24 coverage result (historical).** At that audit's start, closing all 122 nonclosed records would
 still have left determinism attribution, score truth, complete recovery,
@@ -3854,5 +3909,145 @@ Following the §21.1–§21.6 reality check, the highest-leverage verification a
     - Replaced broken `format!("{:x}", sha2::Sha256::digest(...))` calls (`E0277: LowerHex is not implemented for hybrid_array::Array`) with `crate::models::sha256_hex(...)` in `src/core/verify.rs:2520,3401`, `src/core/outcome_harvest.rs:1339`, and `src/cli/outcome_harvest_tests.rs:139`.
     - Updated `src/cli/cass_import_proposal_tests.rs:87,171,172` to pass `&Cx` and await `reconcile_cass_import_index` via `reconcile_index_for_test`.
     - Fixed unused variable warning `_workspace_path: &Path` in `src/core/context.rs:12514`.
+
+---
+
+## 22. Comprehensive reality check — 2026-11-20
+
+**Audit baseline:** `HEAD = 60f756136969e0c6b9c55f52037b448e9afc1705` (2026-11-20, `main`), **1,642 commits ahead of shipped `v0.18.0`** (`2026-10-14T16:25:25Z`; `Cargo.toml` still `0.18.0`). Both external volumes (`/Volumes/USBNVME16TB` ExFAT and `/Volumes/EERCHExport` APFS) are mounted, `dsr 0.1.0` and `act 0.2.89` are installed, and the RCH daemon (`2.1.36`, 11/12 workers healthy, 21/28 slots) is live.
+
+### 22.1 The five brutal reality-check questions
+
+1. **Where does the project REALLY stand relative to its full vision (separating Code vs Verification vs Shipped Reality)?**
+   - **Code Reality:** `ee` is a remarkably complete, genuine Rust codebase (~1.32M LOC across `src/`, `0` `todo!()`/`unimplemented!()`, `148/148` documented CLI surfaces implemented and behaviorally exercised in `vision-coverage.sh`, clean root and fuzz forbidden-dependency trees, 247 KB `src/mcp.rs`, 255 KB `src/serve.rs`, ADR 0085 typed identity, and `4,922/4,962` closed beads).
+   - **Verification Reality (RED & UNCONVERGED):** `main` is **currently RED** on `./scripts/verify.sh --static-only` (`check-degraded-repair-actionability.py` fails with 3 violations from `a2a99dabd`) and `scripts/check-open-coded-success-baseline.py` fails (3 grown rows / 7 sites from `4f926dd1d`). Seven consecutive 2026-11-20 commits (`586441516..60f756136`, ~3,500+ LOC) landed on `main` completely uncompiled and untested. Worse, `bd-reality-core-convergence-1azkt.19` closed on 2026-11-17 citing only 4 targets (56 tests out of ~12,000+) while `scripts/lib/emit_proof_capsule.py` STILL never sets `completeness.populated = true` (`populated: False`, `manifestHash: None`, `logicalTests: None`, `shards: []`). Zero populated single-SHA candidate proof capsules exist.
+   - **Shipped & Local Binary Reality (STALE):** Every public channel (GitHub `v0.18.0`, Homebrew `0.18.0`, crates.io `eidetic-engine 0.18.0`) is **1,642 commits behind `HEAD`**, shipping 22 assets / 7 `.minisig` and 0 manifests/SLSA/Sigstore bundles. On this Mac dev host, `~/.local/bin/ee` is `0.14.2` (Aug 22, missing V119..V133), `$CARGO_TARGET_DIR/debug/ee` is Nov 5 `a1e0a079b` (**246 commits stale**, rightly refused by `ee_require_current_binary`), and `$CARGO_TARGET_DIR/release/ee` is a Linux x86_64 ELF binary (`exec format error`).
+2. **What actually works end-to-end RIGHT NOW if a user or agent runs it?**
+   - On the Nov 5 native `debug/ee` (`a1e0a079b`), read-only JSON contracts (`version`, `capabilities`, `diag dependencies`, `analyze science-status`, `mcp manifest`, `lens list`) execute cleanly in pure stdout `ee.response.v2` (with `fsqlite` tracing on stderr) and `probe.py --self-test` passes 43/43 binary-free arms.
+   - However, **running live `ee capabilities --json` exposes active production lies** (`tru 0.2.3` from path `"/data/projects/toon_rust"` contradicting `ee diag dependencies --json` in the exact same binary, plus phantom features `embed-quality`/`mesh` and closed `bd-17c65.5.5`), upgrading Claude Code users still hit unmanaged hook duplication (`#41`), `v0.18.0` users still hit unverified `--use-daemon` regressions (`#87`) and pre-`.66`/pre-`#71`/pre-`#88` gaps, and current `HEAD` has not even compiled.
+3. **What is broken, stubbed, unverified, or silently drifting despite passing gates?**
+   - **2 live static gate failures:** `check-degraded-repair-actionability.py` (exit 1, `a2a99dabd`) and `check-open-coded-success-baseline.py` (exit 1, `4f926dd1d`).
+   - **3 false-green gate blind spots:** (a) `emit_proof_capsule.py` self-test asserts `populated is False` while `.19` closed anyway; (b) `dependency_contract_matrix.rs` only checks `docs.contains(name)` and `contract-drift-radar.sh` reported `dependencyProfileViolations: 0` despite `capabilities.rs` saying `tru 0.2.3 path` and `docs/dependency-contract-matrix.md` saying `fsqlite 0.4.1`/`frankensearch 0.6.0`/`FAD 0.2.3`; (c) `check-forbidden-deps.sh:559` returns exit `0` on stale `fuzz/Cargo.lock` with no strict release flag.
+   - **Hidden legacy debt:** `tests/lexical_relevance_contract.rs` still `#[ignore]`s both now-passing `.11` tests; `.closure-quality-report.json` flags **84 suspect closed behavioural beads** (2 P0, 33 P1, 39 P2, 10 P3); `scripts/production-reachability-baseline.txt` freezes 6 unwired `ee doctor --fix` fixers + 6 staged modules; `tests/fixtures/e2e_invocation/orphan_baseline.txt` grandfathers **41/210 orphaned E2E scripts (19.5%)**; `~/.local/share/ee/models/` holds **414** empty abandoned staging dirs; and **30/40 (75%)** of non-closed beads are external RCH/`br`/`bv`/Agent-Mail infra bugs drowning `bv --robot-triage`.
+4. **What internal documentation & governance contradictions exist?**
+   - Seven concrete contradictions across tracked governance docs: `AGENTS.md:1040` hosted `CI Static` claim vs `AGENTS.md:3-14` DSR-Only policy; stray `master` and `origin/master` branches violating `AGENTS.md:140`; `README.md:316` green PPR `✅` vs lines 78/3578 degraded notice + closed `.15`/`.48` cited as open trackers + missing `EE_FS_BOUNDARY`; `CHANGELOG.md:29-49` frozen on `v0.15.2` (2026-09-12) omitting `0.17.0`/`0.18.0`; `PUBLISH_CHECKLIST.md:31` phantom manual-release manifest claim contradicting `AGENTS.md:1077` & live `v0.18.0`; `docs/feature_flag_registry.md:38` claiming `serve` is unimplemented in v0.1 + 180-day expired reserved flags; `COMPREHENSIVE_PLAN.md:7` frozen on `0.14.x`.
+5. **What is the shortest, honest critical path to a verified, shippable Part III convergence?**
+   - Fix RED `main` and compile/test the 7 unverified commits + un-ignore `.11` pins (`.75`, P0) → in parallel close capabilities/doc/hook/fuzz-lock/daemon-10k gaps (`.77`, `.78`, `.80`, `.81`, and `.79` after `.75`) → run companion black-box cross-surface E2E verification (`.85`) → implement `completeness.populated=true` & `--verify-capsule` and execute ONE clean single-SHA green convergence across `--lib`, `contracts`, `integration_*`, `mcp`, `clippy -D warnings`, `probe.py --enforce`, and local `dsr`/`act` (`.76`, P0) → stage hermetic signed/attested draft (`.7`) → human publish authorization (`.20`) → signed/attested publish (`.27`) → post-public audit (`.21`) + clear P0/P1 legacy closure/reachability/orphan debt (`.83`) → archive Part III (`.22`).
+
+---
+
+### 22.2 Empirical verification, live binary, & GitHub issue scorecard (`HEAD = 60f756136`)
+
+| Surface / Gate | Command / Source | 2026-11-20 Observed Result | Owner |
+| --- | --- | --- | --- |
+| Local formatting | `cargo fmt --check` | **PASS** (exit 0) | — |
+| Forbidden dependencies | `./scripts/check-forbidden-deps.sh` | **PASS** (root + fuzz clean; `wasm-bindgen-futures` `0.4.45`; caveat: stale fuzz lock non-fatal) | `.81` |
+| Full static gate runner | `./scripts/verify.sh --static-only` | **FAIL (exit 1)** at `ee Spawn Isolation Ratchet` (`check-degraded-repair-actionability.py`) | `.75` |
+| Python static fleet (25 scripts) | `scripts/check-*.py` (all 25 run individually) | **23 PASS / 2 FAIL**: `check-degraded-repair-actionability.py` (3 problems, `a2a99dabd`) and `check-open-coded-success-baseline.py` (3 grown rows / 7 sites, `4f926dd1d`) | `.75` |
+| Shell & fixture static gates (17 suites) | `closure-lint`, `verification-drift-guard`, `contract-drift-radar`, `vision-coverage`, `build_degraded_codes_doc` (623 fixtures), `emit_proof_capsule --self-test`, `probe.py --self-test` (43/43), `e2e_invocation_audit` (41/210 baselined), `check-migration-registry` (V133), `check-toolchain-pins` (84/84), etc. | **17/17 PASS** (with documented blind spots on `emit_proof_capsule` `populated=False` and `contract-drift-radar` version check) | `.76`, `.77`, `.83` |
+| Live binary (`debug/ee` `a1e0a079b`) | `capabilities`, `diag dependencies`, `analyze science-status`, `mcp manifest`, `lens list`, `version` | Runs clean stdout `ee.response.v2` (246 commits stale); **exposes `tru 0.2.3 path` + phantom features lie in `capabilities`** | `.77`, `wu6ay` |
+| Open GH `#88` (`EE_FS_BOUNDARY`) | `a2a99dabd` (2026-11-20) | Landed in source, **UNCOMPILED/UNTESTED**, broke `check-degraded-repair-actionability.py` | `.75` |
+| Open GH `#87` (`--use-daemon` slow) | `README.md:2697-2698`, `benches/daemon_round_trip.rs` | Routing telemetry landed, **10k `>=2x` gate explicitly UNVERIFIED** | `.79` |
+| Open GH `#76` (rerank Sigstore) | `src/data/rerank_model_manifest.json` | Fixed in source (`"status": "unavailable"`), **unreleased** (`v0.18.0` stale) | `.7` / `.20` |
+| Open GH `#75` (`fuzz/Cargo.lock` stale) | `fuzz/Cargo.lock`, `scripts/check-forbidden-deps.sh:559` | Lock refreshed in-tree, **residual non-fatal skip blind spot** remains | `.81` |
+| Open GH `#74` (dependency matrix drift) | `src/core/capabilities.rs`, `docs/dependency-contract-matrix.md` | **HALF-FIXED** (`doctor.rs` updated; `capabilities.rs` & markdown doc still lie) | `.77` |
+| Open GH `#73` (`fnx 0.3.1+` Louvain) | `Cargo.toml` (`fnx-* = "=0.3.0"`) | Still hard-pinned at `=0.3.0` | `.82` |
+| Open GH `#72` (`contracts` 420s timeout / 11.5s fsync) | Full `contracts` suite | **Not executed at `HEAD` or in `.19`** | `.76` |
+| Open GH `#71` (unsalted CASS hash) | `src/cass/import.rs`, `src/cass/refresh.rs` | Fixed in source (keyed `ee.cass.source.v2` `sourceCommitment`), **unreleased** | `.7` / `.20` |
+| Open GH `#41` (Claude Code dup hooks) | `src/hooks/installer.rs:3139-3195`, `README.md:356-358` | **OPEN & UNFIXED** (had zero open bead!) | `.80` |
+| Open GH `#40` (`lru 0.16.4` `RUSTSEC-2026-0253`) | `Cargo.lock:3559`, `fuzz/Cargo.lock:3455` | Still resolves `lru 0.16.4` via `tantivy` | `.82` |
+| Open GH `#29` (`--lib` SIGSEGV / exit 139) | Full `--lib` suite (~9,800+ tests) | **Not executed at `HEAD` or in `.19`** | `.76` |
+
+---
+
+### 22.3 Newly uncovered gaps (`.75`–`.85`) & premature `.19` closure analysis
+
+Prior to this audit, **8 of the 12 active gaps had `NO_BEAD`** (only `.7`/`.20`/`.27`/`.21`/`.22`, `bd-no-runnable-current-ee-binary-on-the-mac-wu6ay`, `bd-xayfm`, and `bd-l2271` existed). All newly uncovered gaps are now tracked in `bd-reality-core-convergence-1azkt.75`–`.85`:
+
+- **`.75` (P0, bug):** Fix the 3 `EE_FS_BOUNDARY` actionability violations (`src/core/journal.rs:2678,2687`, `src/core/workspace.rs:2755`), fix the 7 open-coded success assertions in `tests/cli_loop_e2e.rs`, un-ignore both passing `.11` lexical pins (`tests/lexical_relevance_contract.rs:135,185`) and retire `(tracked red)` stage labels, and compile/clippy/test all 7 unverified 2026-11-20 commits via pinned RCH.
+- **`.76` (P0, task — supersedes `.19`'s partial 56-test closure):** Implement `--populate-candidate` (`completeness.populated = true` ONLY when every mandatory stage passes at one clean `HEAD` SHA with `terminatorClass == "product_verdict"` and matching log digests) and `--verify-capsule` in `scripts/lib/emit_proof_capsule.py`, wire mechanical capsule verification into `scripts/release_binary_probe.sh`, and execute full single-SHA green convergence (`verify.sh --static-only`, `clippy -D warnings`, full `--lib`, full `contracts`, `integration_a_d..s_z`, `e2e_*`, `mcp_lib_tests.sh`, `probe.py --enforce`, local `dsr`/`act` dry-run).
+- **`.77` (P1, bug — GH `#74`):** Eliminate 4-way metadata drift structurally by deriving `ToonDependencySource` and `CapabilitiesReport.features` from shared canonical definitions matching `Cargo.toml` / `DEPENDENCY_CONTRACT_ENTRIES`, update `docs/dependency-contract-matrix.md` rows 36/38/43/44, and close the version-check blind spots in BOTH `tests/contracts/dependency_contract_matrix.rs` and `scripts/contract-drift-radar.sh`.
+- **`.78` (P1, docs):** Reconcile all 7 internal doc/governance contradictions (`AGENTS.md`, `README.md`, `CHANGELOG.md`, `PUBLISH_CHECKLIST.md`, `docs/feature_flag_registry.md`, `COMPREHENSIVE_PLAN.md`, and stray `master`/`origin/master` branch disposition under RULE 1) and wire a fast (<100ms) mechanical `scripts/check-doc-governance-invariants.py` gate into `verify.sh --static-only`.
+- **`.79` (P1, task — GH `#87`):** Execute a statistically rigorous paired randomized `N = 10,000`-memory cold vs warm `--use-daemon` release-profile benchmark (`>= 20` pairs, `servingPath != in_process_fallback`, 100% `packHash` parity, RSS `<= 1.5 GB`, 95% bootstrap CI lower bound `>= 2.0x`), profiling and fixing any bottleneck if below target, and replacing the `README.md:2697-2698` unverified caveat.
+- **`.80` (P1, bug — GH `#41`):** Add conservative legacy unmanaged EE hook signature recognition, in-place deduplication on `ee hook claude-code --install` (preserving custom user hooks byte-for-byte with exact SHA-256 `--undo` restoration), duplicate detection with actionable repair in `ee hook status --json`, and cross-surface twin audit across `ee hook codex`.
+- **`.81` (P1, task — GH `#75`):** Add `--json` and `--strict-fuzz-lock` (`exit 4` on stale `fuzz/Cargo.lock`) to `scripts/check-forbidden-deps.sh` wired into release preflight/local `act`, plus `ee doctor` / `ee model status` visibility and `ee doctor --fix` safe reclamation of empty and aged dead-PID non-empty model staging directories (clearing the 414 orphaned local Mac dirs once rebuilt).
+- **`.82` (P2, `external-upstream` — GH `#40`, `#73`, post-`.15` PPR):** Non-blocking upstream dependency modernization tracker (`lru > 0.16.4`, `fnx >= 0.3.1` 7-arg `PythonSum` + `Option` native-decline Louvain, upstream weighted PPR).
+- **`.83` (P1, task):** Clear the 84 compile-only/uncited behavioural closures in `.closure-quality-report.json` (starting with 2 P0 + 33 P1 via executed test proof or reopen — never rubber-stamping), and wire or propose RULE-1-compliant retirement for the 6 unwired doctor fixers, 6 staged modules (`scripts/production-reachability-baseline.txt`), and 41 orphaned E2E scripts (`tests/fixtures/e2e_invocation/orphan_baseline.txt`).
+- **`.84` (P2, chore):** Non-blocking quarantine of the 30 external RCH / `br` / `bv` / Agent-Mail fleet infra beads (`external-infra` + tool label + `deferred` / verified upstream handoff) so `bv --robot-triage` top-10 recommendations are 100% actionable `ee` work.
+- **`.85` (P1, task — companion verification suite):** Black-box, no-mock E2E and cross-surface twin-sweep suite (`bd-p1b4e`) proving `.75`, `.77`, `.78`, `.80`, and `.81` together against a single compiled `HEAD` binary with `ee.test_event.v1` JSONL logs and namespaced `EE_RC20261120_85_RC=` control markers.
+
+---
+
+### 22.4 Bridge plan summary & architectural principles
+
+1. **Restore baseline truth first (`.75`):** Never layer new verification or release work atop a red `main` or 7 uncompiled commits.
+2. **Eliminate structural duplication instead of patching strings (`.77`, `.78`):** Single-source dependency/feature metadata and enforce doc-governance invariants mechanically so closed-bead README drift and `capabilities` vs `Cargo.toml` drift become impossible to reintroduce silently.
+3. **Turn proof capsules from self-test stubs into cryptographic release gates (`.76`):** `completeness.populated = true` + `--verify-capsule` bound into `scripts/release_binary_probe.sh` makes partial 56-test closures structurally impossible to stage as release candidates.
+4. **Separate mandatory Part III release/product blockers from external schedules:** `.75`–`.81`, `.83`, and `.85` block `.22` (with `.75`–`.81`, `.85` also gating `.76`/`.7` release staging), while `.82` (`external-upstream`) and `.84` (`external-infra` tracker hygiene) stay non-blocking so external crate/tool schedules cannot deadlock `ee`.
+
+---
+
+### 22.5 Three Ambition Rounds (Phase 4)
+
+- **Ambition Round 1 (Single Source of Truth for Capability, Dependency, and Doc Governance — `.77` & `.78`):**
+  - *Original plan:* Hand-edit `"0.2.3"` → `"0.2.4"` in `src/core/capabilities.rs` and update 7 stale prose passages across `AGENTS.md`/`README.md`/`CHANGELOG.md`/`PUBLISH_CHECKLIST.md`/`docs/feature_flag_registry.md`.
+  - *Upgraded vision:* Eliminate the 4-way duplication structurally by deriving `ToonDependencySource` and `CapabilitiesReport.features` from shared canonical metadata checked against `Cargo.toml`, strengthen BOTH `dependency_contract_matrix.rs` and `contract-drift-radar.sh` to parse pinned versions fail-closed, and ship a fast (<100ms) `scripts/check-doc-governance-invariants.py` gate catching closed-bead open-tracker refs, stale CHANGELOG headers, hosted-CI contradictions, and expired feature reservations on every `verify.sh --static-only` run.
+- **Ambition Round 2 (Cryptographic, Tamper-Verifiable Release-Candidate Proof Gating — `.76` & `.81`):**
+  - *Original plan:* Run the missing `--lib`/`contracts`/`clippy` shards manually and paste counts into a close comment.
+  - *Upgraded vision:* Upgrade `scripts/lib/emit_proof_capsule.py` with `--populate-candidate` (binding `headSha`, `manifestHash`, `cargoLockSha256`, `frankenStackLockSha256`, `candidateBinarySha256`, per-stage `terminatorClass`, log SHA-256s, and shard test-count reconciliation) and `--verify-capsule`, mechanically require `--proof-capsule` inside `scripts/release_binary_probe.sh --verify-release-dir`, and require `./scripts/check-forbidden-deps.sh --strict-fuzz-lock` (`exit 4` on stale `fuzz/Cargo.lock`) before release staging.
+- **Ambition Round 3 (Statistically Rigorous Paired Performance Proof & Honest Legacy Debt Clearance — `.79`, `.83`, `.85`):**
+  - *Original plan:* Run one daemon timing check for `#87` and leave the 84 `.closure-quality-report.json` suspects and 41 orphaned E2Es grandfathered in baselines forever.
+  - *Upgraded vision:* Enforce a paired randomized `N=10,000` release-profile harness with 95% bootstrap CI `>= 2.0x`, mandatory `servingPath != in_process_fallback`, and 100% `packHash` parity (fixing bottlenecks if `< 2.0x`); drive `.closure-quality-report.json` P0/P1 `suspectTotal` to `0` via executed tests (or explicit reopenings) while triaging all 6 unwired doctor fixers, 6 staged modules, and 41 orphaned E2Es under RULE 1; and enforce a dedicated black-box cross-surface twin-sweep suite (`.85`) before `.76` seals the candidate capsule.
+
+---
+
+### 22.6 Five Plan-Space Refinement Passes (Phase 5)
+
+Executed across all 11 newly created beads (`.75`–`.85`) BEFORE writing any implementation code:
+
+- **Refinement Pass 1 (Full `br show` completeness & CLI/target accuracy audit):**
+  - *Real defects caught & fixed:* (a) `scripts/br_retry.sh create --description-file -` dropped stdin through the retry wrapper, leaving `.81`–`.85` with `0`-byte descriptions — repaired by writing full specs to scratch files under `/Volumes/USBNVME16TB/temp_agent_space/` and loading via `br update --description-file <path>`; (b) corrected `.85` from invented `ee hook install --target claude-code` to real `HookCommand` CLI syntax (`ee hook claude-code --install` / `--print` / `--undo` and `ee hook status --json` verified in `src/cli/mod.rs:12428-12473`); (c) verified exact Cargo test targets (`tests/suites/integration_a_d.rs`, `integration_n_r.rs`, `integration_s_z.rs`, plus standalone `harness_hook_install_audit`, `lexical_relevance_contract`, `verification_drift_guard`, `contracts`) across all 11 beads.
+- **Refinement Pass 2 (Dependency DAG tightening & deadlock avoidance):**
+  - *Real defects caught & fixed:* Wired `.79 -> .75` (`.79` needs a compiling `HEAD` binary before benchmarking) and `.76 -> .79` (so the immutable single-SHA candidate proof capsule captures `.79`'s final daemon code and `README.md` updates before `.7` release staging). Verified `.83` blocks `.22` (preventing premature Part III archive) without blocking `.76`/`.7`, and `.82`/`.84` remain non-blocking. Confirmed `0` active cycles via `scripts/br_retry.sh dep cycles --json`.
+- **Refinement Pass 3 (Structured acceptance checklists, pinned RCH commands, & `bd-2phcw` control markers):**
+  - Added explicit `- [ ]` `--acceptance-criteria` checklists, exact `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- ... --locked ...` commands, namespaced control markers (`EE_RC20261120_*_RC=`, `EE_CAPSULE_RC=`, `EE_DAEMON_10K_RC=`, `EE_MAIN_GREEN_RC=`), structured `ee.test_event.v1` JSONL logging, and positive + negative twin arms to all 11 beads.
+- **Refinement Pass 4 (Cross-surface twin sweeps `bd-p1b4e`, DSR-Only, & RULE 1 safety audit):**
+  - Verified cross-surface twin coverage across `ee capabilities`/`ee diag dependencies`/`ee version`/`docs/dependency-contract-matrix.md` (`.77`), `claude-code`/`codex`/`status` hooks (`.80`), `ee doctor`/`ee doctor --fix`/`ee model status` (`.81`), and `EE_FS_BOUNDARY` modules (`.75`); confirmed DSR-Only policy (zero hosted Actions) in `.76`/`.78`/`.85` and explicit RULE 1 no-deletion boundaries in `.78` (`master` branch), `.83` (unwired files/scripts), and `.84` (beads).
+- **Refinement Pass 5 (Automated convergence & hygiene verification):**
+  - Re-read all 11 beads via `br show --json` after `br sync --flush-only` → **11/11 PASS (`0/11` failures)** across description completeness, acceptance checklists, twin arms, structured logging, namespaced markers, and pinned RCH/static verification; `check-fleet-identifier-census.py` clean (`0` private identifiers); `br dep cycles --json` → `0` active cycles; `plan-drift.sh`, `bridge-staleness.sh`, and `bv --robot-triage` verified cleanly.
+
+---
+
+### 22.7 Updated critical path & DAG to Part III convergence (`.22`)
+
+```text
+Parallel Track 1 (Immediate Leaves):
+  .75 (P0: Green main static gates + compile/test 7 Nov-20 commits + un-ignore .11 pins)
+  .77 (P1: Single-source capabilities/dependency-matrix truth, GH #74)
+  .78 (P1: Reconcile 7 doc/governance contradictions + doc-governance gate)
+  .80 (P1: Deduplicate Claude Code legacy unmanaged EE hooks + status check, GH #41)
+  .81 (P1: Strict fuzz/Cargo.lock audit + doctor model staging dir reclamation, GH #75)
+  .83 (P1: Clear 84 compile-only/uncited closures + 6 fixers + 6 staged + 41 orphan E2Es)
+
+Wave 2 (Post-.75 Compile):
+  .79 (P1: ADR 0052 10k-memory >=2x warm-daemon paired proof/fix, GH #87)  [depends on .75]
+  .85 (P1: Companion black-box E2E & cross-surface twin suite)             [depends on .75, .77, .78, .80, .81]
+
+Wave 3 (Single-SHA Cryptographic Proof Capsule):
+  .76 (P0: completeness.populated=true capsule + full HEAD convergence)    [depends on .75, .77, .78, .79, .85]
+
+Wave 4 (Hermetic Release & Human Publish Boundary):
+  .7  (P1: Private DSR release draft + native smoke)                       [depends on .76, .81]
+  .20 (P0: Explicit human publication authorization)                       [depends on .7]
+  .27 (P1: Signed & attested release publication)                          [depends on .20]
+  .21 (P1: Post-public asset/channel/link reconciliation)                  [depends on .27]
+
+Final Archive Gate:
+  .22 (P0: Final Part III evidence-ledger closeout)                        [depends on .75–.81, .83, .85, .21, bd-xayfm, ...]
+
+Non-Blocking Parallel Hygiene (Parented to 1azkt, do NOT block .7 or .22):
+  .82 (P2: Upstream lru RUSTSEC-2026-0253 / fnx 0.3.1+ / weighted PPR)
+  .84 (P2: Quarantine 30 external RCH/br/bv/Agent-Mail infra beads)
+```
 
 Part III remains active under §15.
