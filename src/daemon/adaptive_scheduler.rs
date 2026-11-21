@@ -1233,6 +1233,7 @@ mod tests {
                                 prefetch_top_k: Some(1),
                                 prefetch_budget_ms: Some(5_000),
                                 similarity_threshold: Some(0.0),
+                                ..SwarmAdaptiveConfig::default()
                             }
                         });
                     Ok((tickets, false))

@@ -736,7 +736,9 @@ fn assert_global_sources_with_healthy_workspace() {
                 .report
                 .degraded
                 .iter()
-                .any(|entry| entry.code == "global_live_snapshot_lexical")
+                .any(|entry| entry.code == "global_live_snapshot_lexical"),
+            "phase={phase} degraded={:?}",
+            handoff.report.degraded
         );
         assert!(!handoff.report.degraded.iter().any(|entry| matches!(
             entry.code.as_str(),
@@ -1133,6 +1135,13 @@ fn global_search_uses_captured_corpus_when_publication_has_no_matching_retained_
         &paths.index_dir,
         &workspace,
     );
+    assert!(
+        global
+            .get_workspace_generation(&workspace)
+            .unwrap()
+            .unwrap()
+            > captured_generation
+    );
     let before = index_file_hashes(&paths.root);
     let result = retrieve_captured_global_search(&paths, &options, captured);
     assert_eq!(
@@ -1160,13 +1169,6 @@ fn global_search_uses_captured_corpus_when_publication_has_no_matching_retained_
             .degraded
             .iter()
             .any(|entry| entry.code == "global_index_unavailable")
-    );
-    assert!(
-        global
-            .get_workspace_generation(&workspace)
-            .unwrap()
-            .unwrap()
-            > captured_generation
     );
     assert_eq!(index_file_hashes(&paths.root), before);
 }

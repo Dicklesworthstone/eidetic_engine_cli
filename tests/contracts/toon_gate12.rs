@@ -64,8 +64,19 @@ fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee_in_workspace(workspace: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let isolated_home = workspace.join(".isolated-home");
+    fs::create_dir_all(&isolated_home).map_err(|error| {
+        format!(
+            "failed to create isolated home {}: {error}",
+            isolated_home.display()
+        )
+    })?;
     crate::common_spawn::serialized_real_ee_with(|command| {
-        command.arg("--workspace").arg(workspace).args(args);
+        command
+            .env("HOME", &isolated_home)
+            .arg("--workspace")
+            .arg(workspace)
+            .args(args);
     })
     .map_err(|error| {
         format!(
@@ -475,9 +486,11 @@ fn capabilities_json_reports_toon_readiness_metadata() -> TestResult {
     ensure_contains(&stdout, "\"toon\":", "toon metadata")?;
     ensure_contains(&stdout, "\"available\":true", "toon availability")?;
     ensure_contains(&stdout, "\"package\":\"tru\"", "toon package")?;
+    ensure_contains(&stdout, "\"version\":\"0.2.4\"", "toon dependency version")?;
+    ensure_contains(&stdout, "\"sourceKind\":\"registry\"", "toon source kind")?;
     ensure_contains(
         &stdout,
-        "\"path\":\"/data/projects/toon_rust\"",
+        "\"path\":\"https://crates.io/crates/tru\"",
         "toon source path",
     )?;
     ensure_contains(

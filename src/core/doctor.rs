@@ -4464,6 +4464,32 @@ pub const DEPENDENCY_DRIFT_POLICY: DependencyDriftPolicy = DependencyDriftPolicy
     runtime_diagnostic_owner: "EE-308",
 };
 
+/// Shared by dependency diagnostics and the TOON output capability report.
+pub const TOON_DEPENDENCY_CONTRACT: DependencyContractEntry = DependencyContractEntry {
+    name: "toon_rust",
+    kind: "rust_crate",
+    owning_surface: "ee-output",
+    status: "accepted_default",
+    enabled_by_default: true,
+    source: DependencySource {
+        kind: "registry",
+        version: "0.2.4",
+        path: "https://crates.io/crates/tru",
+    },
+    default_feature_profile: DependencyFeatureProfile {
+        default_features: false,
+        features: &[],
+    },
+    optional_feature_profiles: &[],
+    blocked_features: &[],
+    forbidden_transitive_dependencies: &[],
+    minimum_smoke_test: "TOON renderer round-trip and golden parity tests",
+    degradation_code: "toon_unavailable",
+    status_fields: &["capabilities.output.toon"],
+    diagnostic_command: "ee status --json",
+    release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
+};
+
 pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
     DependencyContractEntry {
         name: "asupersync",
@@ -4658,30 +4684,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         diagnostic_command: "ee import cass --dry-run --json",
         release_pin_decision: "External process contract is accepted; no Rust crate is linked into ee.",
     },
-    DependencyContractEntry {
-        name: "toon_rust",
-        kind: "rust_crate",
-        owning_surface: "ee-output",
-        status: "accepted_default",
-        enabled_by_default: true,
-        source: DependencySource {
-            kind: "registry",
-            version: "0.2.4",
-            path: "https://crates.io/crates/tru",
-        },
-        default_feature_profile: DependencyFeatureProfile {
-            default_features: false,
-            features: &[],
-        },
-        optional_feature_profiles: &[],
-        blocked_features: &[],
-        forbidden_transitive_dependencies: &[],
-        minimum_smoke_test: "TOON renderer round-trip and golden parity tests",
-        degradation_code: "toon_unavailable",
-        status_fields: &["capabilities.output.toon"],
-        diagnostic_command: "ee status --json",
-        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
-    },
+    TOON_DEPENDENCY_CONTRACT,
     DependencyContractEntry {
         name: "franken_mermaid",
         kind: "planned_rust_crate",

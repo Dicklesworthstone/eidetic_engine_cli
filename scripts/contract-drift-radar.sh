@@ -158,7 +158,11 @@ run_self_test() {
       "Cargo.toml",
       "docs/dependency-research-notes.md",
       "docs/dependency-contract-matrix.md",
-      "COMPREHENSIVE_PLAN.md"
+      "COMPREHENSIVE_PLAN.md",
+      "tests/fixtures/golden/dependencies/contract_matrix.json.golden",
+      "src/core/doctor.rs",
+      "src/core/capabilities.rs",
+      "src/core/mod.rs"
     ] and
     .summary.dependencyProfileViolations == $dependency_violations and
     (.summary.shellSchemaIdsChecked // 0) > 0 and
@@ -535,6 +539,164 @@ if [ -f "$COMPREHENSIVE_PLAN_DOC" ]; then
   done < <(grep -nE 'asupersync[^[:cntrl:]]*[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+[^[:cntrl:]]*asupersync' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null \
     | grep -Fv "$accepted_asupersync_version" || true)
 fi
+
+# Check every accepted registry family, and the two runtime inventories that
+# previously duplicated those facts. The negative controls use in-memory
+# copies, so --self-test never edits the checkout it is measuring.
+metadata_check=$(python3 - "$ROOT" "$SELF_TEST" <<'PY'
+import json
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+root = Path(sys.argv[1])
+paths = [
+    "Cargo.toml",
+    "docs/dependency-contract-matrix.md",
+    "tests/fixtures/golden/dependencies/contract_matrix.json.golden",
+    "src/core/doctor.rs",
+    "src/core/capabilities.rs",
+    "src/core/mod.rs",
+]
+aliases = {
+    "asupersync": ["asupersync"],
+    "frankensqlite": ["fsqlite"],
+    "sqlmodel_rust": ["sqlmodel-core", "sqlmodel-frankensqlite"],
+    "frankensearch": ["frankensearch"],
+    "franken_networkx": ["fnx-algorithms", "fnx-classes", "fnx-runtime"],
+    "toon_rust": ["toon"],
+    "franken_agent_detection": ["franken-agent-detection"],
+}
+
+def inspect(sources):
+    issues = []
+
+    def fail(file, code, context, expected):
+        line = next((i for i, text in enumerate(sources.get(file, "").splitlines(), 1)
+                     if context and context in text), 0)
+        issues.append(dict(file=file, line=line, code=code, context=context, expected=expected))
+
+    missing = [path for path in paths if path not in sources]
+    for path in missing:
+        fail(path, "dependency_contract_missing", "", "required dependency contract source")
+    if missing:
+        return issues
+    try:
+        manifest = tomllib.loads(sources[paths[0]])
+        matrix = json.loads(sources[paths[2]])
+        entries = matrix["entries"]
+        if not isinstance(entries, list):
+            raise ValueError("dependency entries must be an array")
+    except (ValueError, KeyError, TypeError) as error:
+        fail(paths[0], "dependency_contract_parse", str(error), "valid Cargo and matrix inputs")
+        return issues
+
+    runtime = {}
+    for match in re.finditer(
+        r'DependencyContractEntry\s*\{\s*name:\s*"([^"]+)".*?\bsource:\s*DependencySource\s*\{([^}]+)\}',
+        sources[paths[3]], re.S,
+    ):
+        name, source = match.groups()
+        runtime[name] = dict(re.findall(r'(kind|version|path):\s*"([^"]+)"', source))
+
+    registry_names = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("source"), dict):
+            fail(paths[2], "dependency_contract_parse", "entries", "typed dependency rows")
+            continue
+        name, source = entry.get("name"), entry["source"]
+        if source.get("kind") != "registry":
+            continue
+        registry_names.add(name)
+        if name not in aliases:
+            fail(paths[2], "dependency_pin_unmapped", str(name), "checked Cargo family mapping")
+            continue
+        for alias in aliases[name]:
+            dependency = manifest.get("dependencies", {}).get(alias)
+            if not isinstance(dependency, dict):
+                fail(paths[0], "dependency_pin_drift", alias, "exact crates.io dependency pin")
+                continue
+            pin = "=" + str(source.get("version"))
+            if dependency.get("version") != pin or any(key in dependency for key in ("path", "git", "registry")):
+                fail(paths[0], "dependency_pin_drift", alias, f"crates.io {pin} ({name})")
+        if runtime.get(name) != source:
+            fail(paths[3], "dependency_runtime_drift", f'name: "{name}"', json.dumps(source, sort_keys=True))
+        prefix = f"| `{name}` |"
+        rows = [line for line in sources[paths[1]].splitlines() if line.startswith(prefix)]
+        profile = rows[0].split("|")[3] if len(rows) == 1 else ""
+        pin = "`=" + str(source.get("version")) + "`"
+        if "registry" not in profile or pin not in profile:
+            fail(paths[1], "dependency_pin_drift", prefix, f"one matrix row with registry {pin}")
+    if registry_names != set(aliases):
+        fail(paths[2], "dependency_registry_inventory_drift", "entries", "all accepted registry families")
+
+    capabilities = sources[paths[4]]
+    for field, expression in {
+        "version": "TOON_DEPENDENCY_CONTRACT.source.version",
+        "source_kind": "TOON_DEPENDENCY_CONTRACT.source.kind",
+        "path": "TOON_DEPENDENCY_CONTRACT.source.path",
+        "default_features": "TOON_DEPENDENCY_CONTRACT.default_feature_profile.default_features",
+    }.items():
+        expression_pattern = r"\s*\.\s*".join(re.escape(part) for part in expression.split("."))
+        if not re.search(r"\b" + field + r":\s*" + expression_pattern + r"\s*,", capabilities):
+            fail(paths[4], "capability_dependency_drift", field, expression)
+    for binding in ("super::build_features()", "let features = FeatureEntry::gather();"):
+        if binding not in capabilities:
+            fail(paths[4], "capability_feature_inventory_drift", "features", binding)
+    for field, value in (("crate_name", "toon"), ("package", "tru")):
+        if not re.search(r"\b" + field + r':\s*"' + value + '"', capabilities):
+            fail(paths[4], "capability_dependency_drift", field, value)
+    toon = manifest.get("dependencies", {}).get("toon", {})
+    toon_entry = next((entry for entry in entries if entry.get("name") == "toon_rust"), {})
+    if toon.get("package") != "tru" or toon.get("default-features", True) != toon_entry.get("default_feature_profile", {}).get("default_features"):
+        fail(paths[0], "capability_dependency_drift", "toon", "TOON alias and default features match the shared contract")
+
+    build_function = re.search(r"pub fn build_features\(\) -> Vec<BuildFeature> \{(.*?)\n\}", sources[paths[5]], re.S)
+    body = build_function.group(1) if build_function else ""
+    features = re.findall(r'BuildFeature::new\(\s*"([^"]+)"\s*,\s*cfg!\(feature\s*=\s*"([^"]+)"\)', body)
+    expected = set(manifest.get("features", {})) - {"default"}
+    if (not expected or len(features) != len(expected) or {name for name, _ in features} != expected
+            or any(name != gate for name, gate in features)):
+        fail(paths[5], "capability_feature_inventory_drift", "pub fn build_features", ", ".join(sorted(expected)))
+    return issues
+
+sources = {path: (root / path).read_text(encoding="utf-8") for path in paths if (root / path).is_file()}
+issues = inspect(sources)
+if sys.argv[2] == "1":
+    if issues:
+        raise SystemExit("dependency self-test positive control failed: " + json.dumps(issues))
+    cases = []
+    stale_doc = dict(sources)
+    sqlite_pin = tomllib.loads(sources[paths[0]])["dependencies"]["fsqlite"]["version"]
+    stale_doc[paths[1]] = stale_doc[paths[1]].replace(f"`{sqlite_pin}`", "`=0.0.0`", 1)
+    cases.append(("stale matrix version", stale_doc, "dependency_pin_drift"))
+    stale_runtime = dict(sources)
+    stale_runtime[paths[4]] = stale_runtime[paths[4]].replace(
+        "version: TOON_DEPENDENCY_CONTRACT.source.version", 'version: "0.0.0"', 1)
+    cases.append(("hardcoded capability version", stale_runtime, "capability_dependency_drift"))
+    phantom_feature = dict(sources)
+    phantom_feature[paths[5]] = phantom_feature[paths[5]].replace('BuildFeature::new("fts5"', 'BuildFeature::new("phantom"', 1)
+    cases.append(("phantom Cargo feature", phantom_feature, "capability_feature_inventory_drift"))
+    stale_matrix = dict(sources)
+    matrix = json.loads(stale_matrix[paths[2]])
+    matrix["entries"][0]["source"]["version"] = "0.0.0"
+    stale_matrix[paths[2]] = json.dumps(matrix)
+    cases.append(("stale runtime matrix", stale_matrix, "dependency_runtime_drift"))
+    for name, mutated, expected_code in cases:
+        if mutated == sources or not any(issue["code"] == expected_code for issue in inspect(mutated)):
+            raise SystemExit(f"dependency self-test negative control failed: {name}")
+    print("dependency self-test PASSED: current metadata plus 4 drift controls", file=sys.stderr)
+print(json.dumps(issues))
+PY
+)
+dependency_violations=$(jq -cn --argjson existing "$dependency_violations" --argjson metadata "$metadata_check" '$existing + $metadata')
+dependency_violation_count=$(printf '%s' "$dependency_violations" | jq 'length')
+for metadata_path in \
+  "tests/fixtures/golden/dependencies/contract_matrix.json.golden" \
+  "src/core/doctor.rs" "src/core/capabilities.rs" "src/core/mod.rs"; do
+  append_dependency_checked_file "$metadata_path"
+done
 
 dependency_status="ok"
 [ "$dependency_violation_count" -gt 0 ] && dependency_status="violations"

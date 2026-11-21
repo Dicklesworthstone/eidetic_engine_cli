@@ -978,21 +978,21 @@ fn cli_loop_workflow_create_storeless_dry_run_persist_and_close() -> TestResult 
     let dry_run_json = stdout_json(&dry_run)?;
     ensure_equal(
         &dry_run_json["schema"],
-        &serde_json::json!("ee.response.v2"),
+        &serde_json::json!("ee.workflow.create.v1"),
         "workflow create dry-run envelope schema",
     )?;
     ensure_equal(
-        &dry_run_json["data"]["workflowId"],
+        &dry_run_json["workflowId"],
         &serde_json::json!("release-prep"),
         "workflow create dry-run workflowId",
     )?;
     ensure_equal(
-        &dry_run_json["data"]["dryRun"],
+        &dry_run_json["dryRun"],
         &serde_json::json!(true),
         "workflow create dryRun flag",
     )?;
     ensure_equal(
-        &dry_run_json["data"]["persisted"],
+        &dry_run_json["persisted"],
         &serde_json::json!(false),
         "workflow create dry-run persisted=false",
     )?;
@@ -1023,21 +1023,21 @@ fn cli_loop_workflow_create_storeless_dry_run_persist_and_close() -> TestResult 
     let created_json = stdout_json(&created)?;
     ensure_equal(
         &created_json["schema"],
-        &serde_json::json!("ee.response.v2"),
+        &serde_json::json!("ee.workflow.create.v1"),
         "workflow create persisted schema",
     )?;
     ensure_equal(
-        &created_json["data"]["workflowId"],
+        &created_json["workflowId"],
         &serde_json::json!("release-prep"),
         "workflow create persisted workflowId",
     )?;
     ensure_equal(
-        &created_json["data"]["persisted"],
+        &created_json["persisted"],
         &serde_json::json!(true),
         "workflow create persisted=true",
     )?;
     ensure(
-        created_json["data"]["auditId"]
+        created_json["auditId"]
             .as_str()
             .is_some_and(|id| !id.is_empty()),
         "workflow create must record a non-empty auditId",
@@ -1122,7 +1122,7 @@ fn cli_loop_diag_contention_default_triage_and_missing_daemon() -> TestResult {
         "diag contention command",
     )?;
     ensure_equal(
-        &default_json["data"]["report"]["schema"],
+        &default_json["data"]["report"]["schemaTag"],
         &serde_json::json!("ee.diag.contention.v1"),
         "diag contention report schema",
     )?;

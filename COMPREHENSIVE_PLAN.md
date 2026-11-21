@@ -4,7 +4,7 @@
 
 > Status: durable vision document, written pre-implementation and kept as the
 > measuring stick. The implementation is far past this text (package version
-> `0.18.0`, `ee.response.v2`, a single crate under `src/`, crates.io registry
+> `0.19.0`, `ee.response.v2`, a single crate under `src/`, crates.io registry
 > pins in `Cargo.toml`/`Cargo.lock`); where a detail here conflicts with `README.md`,
 > `AGENTS.md`, or the code, those win and this file records the original
 > intent. Current gap tracking lives in `CLOSE_THE_GAP_PLAN.md`.
