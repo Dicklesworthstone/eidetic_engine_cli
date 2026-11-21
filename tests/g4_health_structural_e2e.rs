@@ -11,7 +11,8 @@ fn g4_health_structural_script_passes_with_cargo_built_binary() {
         std::process::id()
     ));
 
-    let temp = tempfile::tempdir().expect("isolated tempdir");
+    let temp = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create isolated tempdir: {error}"));
     let output = Command::new("bash")
         .arg(&script)
         .current_dir(repo_root)

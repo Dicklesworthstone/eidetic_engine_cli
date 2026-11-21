@@ -4,7 +4,7 @@
 //! subcommands. CLI unit coverage pins the formatter; this E2E exercises the
 //! compiled binary so argument routing and the JSON envelope stay stable.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 

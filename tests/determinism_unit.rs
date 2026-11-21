@@ -27,7 +27,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use frankensearch::{NativeReranker, RerankDocument, RerankScore, SyncRerank};

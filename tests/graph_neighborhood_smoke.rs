@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::db::{

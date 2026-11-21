@@ -31,8 +31,7 @@ use ee::models::MemoryScope;
 use ee::search::SpeedMode;
 use tempfile::TempDir;
 
-#[path = "support/isolated_ee.rs"]
-mod isolated_ee;
+use crate::isolated_ee;
 
 type TestResult<T = ()> = Result<T, String>;
 

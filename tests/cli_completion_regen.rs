@@ -1,7 +1,5 @@
 #![forbid(unsafe_code)]
 
-use std::process::Command;
-
 type TestResult = Result<(), String>;
 
 fn run_completion(shell: &str) -> Result<String, String> {

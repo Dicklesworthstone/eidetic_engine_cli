@@ -13,15 +13,13 @@
 //! is deterministic. The binary is only invoked to *read* agent-docs JSON, which
 //! is deterministic output.
 
-use std::process::Command;
-
 #[path = "support/command_inventory.rs"]
 mod command_inventory;
 
 fn run_json(args: &[&str]) -> serde_json::Value {
-    let temp = tempfile::tempdir().expect("isolated tempdir");
+    let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("isolated tempdir: {e}"));
     let output = crate::isolated_ee::isolated_ee_command(temp.path())
-        .expect("isolated ee command")
+        .unwrap_or_else(|e| panic!("isolated ee command: {e}"))
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to run ee {args:?}: {e}"));

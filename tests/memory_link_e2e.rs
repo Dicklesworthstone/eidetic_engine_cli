@@ -9,7 +9,7 @@ use serde_json::{Value as JsonValue, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;

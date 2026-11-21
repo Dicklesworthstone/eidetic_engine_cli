@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ee::db::{CreateWorkspaceInput, DatabaseConfig, DbConnection};

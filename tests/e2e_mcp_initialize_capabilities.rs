@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{Value, json};
 

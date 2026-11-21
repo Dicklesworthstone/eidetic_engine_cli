@@ -6,7 +6,7 @@
 use std::fmt::Debug;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
