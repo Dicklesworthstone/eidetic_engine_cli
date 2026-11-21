@@ -47,3 +47,7 @@ e2e_mesh_selective_sync.sh | cargo test --workspace --bins --tests --examples | 
 e2e_mesh_share_preview.sh | cargo test --workspace --bins --tests --examples | none
 e2e_backup_roundtrip.sh | cargo test --workspace --bins --tests --examples | none
 e2e_br_concurrent_race.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_anti_entropy_model.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_audit_forensics.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_cache_retention.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_surrogate_audit.sh | cargo test --workspace --bins --tests --examples | none

@@ -98,12 +98,8 @@
 # True orphan count is 21 of 92 (14 baselined + 7 retired), not 9. The earlier
 # "19 of 92" figure in this file's header was measured with the same blind
 # predicate and should not be treated as a clean prior.
-e2e_mesh_anti_entropy_model.sh
-e2e_mesh_audit_forensics.sh
-e2e_mesh_cache_retention.sh
 e2e_mesh_emergency_disable.sh
 e2e_mesh_remote_evidence.sh
-e2e_mesh_surrogate_audit.sh
 
 # --- scripts/e2e_overhaul/ — bd-1cn5o, recorded 2026-09-17 ---
 #
