@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
-"""Emit an ee.release_candidate_proof.v1 SKELETON from a real graded run.
+"""Emit, populate, and cryptographically verify ee.release_candidate_proof.v1 capsules.
 
-bd-reality-core-convergence-1azkt.5. The bead asks for a capsule that binds, in
-one tamper-detecting record, the identities a release decision depends on.
-Nothing in this repo emitted one. This does, from facts a run actually produced.
+Supports three modes:
+1. Skeleton mode (used by scripts/rch_run.sh for single-command dispatches):
+   emit_proof_capsule.py --log L --base SHA --dirty N --host H --run-exit E
+                         --command C --out PATH
+   Always emits `completeness.populated = false` with structured
+   `completeness.unestablished` objects `{item, reason, blockedBy}`.
 
-IT NEVER SETS completeness.populated = true. That belongs to .19, which emits a
-complete capsule for an immutable clean-main candidate. Everything this cannot
-establish is NAMED in completeness.unestablished rather than defaulted, guessed,
-or left out -- because a capsule whose empty fields are indistinguishable from
-its verified ones is the empty-digest defect with more fields.
+2. Candidate population mode (bd-reality-core-convergence-1azkt.76):
+   emit_proof_capsule.py --populate-candidate --candidate-manifest M [--out PATH]
+   Ingests retained stage results, hashes Cargo.lock, franken-stack.lock,
+   scripts/verify-budget.toml, candidate binaries, evidence files, and stage
+   logs, and sets `completeness.populated = true` ONLY when every mandatory
+   stage passed against one clean single commit SHA with zero failures,
+   zero infra refusals, zero timeouts/signals, reconciled test counts, and
+   matching log/binary SHA-256 digests.
 
-THE IDENTITY / COMPLETENESS SEPARATION IS ENFORCED HERE, not just documented.
-capsuleHash is computed over SOURCE + MANIFEST ONLY. Run completeness, host,
-timing and results are deliberately EXCLUDED from it. If degradation entered the
-hash, every degraded run would mint a different identity and no two runs would be
-comparable -- and ee already learned this in the other direction, where pack's
-degraded[] is hash-bearing precisely because it is kept free of load-dependent
-entries. Here the run facts ARE load-dependent, so they sit outside identity.
+3. Cryptographic verification mode (bd-reality-core-convergence-1azkt.76):
+   emit_proof_capsule.py --verify-capsule PATH --expected-sha SHA
+                         [--expected-binary BIN] [--verify-logs]
+   Recomputes `capsuleHash` over every field except `capsuleHash` and
+   `generatedAt`, validates recursively against the committed schema, and fails
+   closed (`EE_CAPSULE_RC=1`, exit 1) on tamper, SHA mismatch, missing stages,
+   or `completeness.populated != true`.
 
-INVOCATION, stated honestly: this is called by scripts/rch_run.sh, which agents
-may choose to use. It therefore inherits that wrapper's open adoption question
-(bd-pnj3s). It is not yet on a path every verdict takes, and this docstring is
-not going to pretend otherwise.
-
-USAGE
-  emit_proof_capsule.py --log L --base SHA --dirty N --host H --run-exit E
-                        --command C --out PATH
-  emit_proof_capsule.py --self-test
+4. Self-test mode:
+   emit_proof_capsule.py --self-test
 """
 
 from __future__ import annotations
@@ -35,17 +34,28 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import hmac
 import json
 import pathlib
 import platform
+import re
 import subprocess
 import sys
+from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 SCHEMA = REPO / "docs" / "schemas" / "ee.release_candidate_proof.v1.json"
 
+HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+ZERO_SHA40 = "0" * 40
+
 sys.path.insert(0, str(HERE))
+
+
+def _unestablished(item: str, reason: str, blocked_by: str | None = None) -> dict[str, Any]:
+    return {"item": item, "reason": reason, "blockedBy": blocked_by}
 
 
 def _tool_version(binary: str) -> str | None:
@@ -58,6 +68,51 @@ def _tool_version(binary: str) -> str | None:
         return None
 
 
+def _resolve_commit_sha(base: str, repo_root: pathlib.Path) -> tuple[str, bool]:
+    """Return (40-hex commit, resolved_cleanly)."""
+    candidate = base.strip().lower()
+    if HEX40_RE.fullmatch(candidate):
+        return candidate, True
+    rev = "HEAD" if not base.strip() or base.strip() == "unknown" else base.strip()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{rev}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        resolved = out.stdout.strip().lower()
+        if out.returncode == 0 and HEX40_RE.fullmatch(resolved):
+            return resolved, True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ZERO_SHA40, False
+
+
+def _sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def compute_capsule_hash(capsule: dict[str, Any]) -> str:
+    """Content address of every field except capsuleHash and generatedAt."""
+    hash_input = {
+        key: value
+        for key, value in capsule.items()
+        if key not in ("capsuleHash", "generatedAt")
+    }
+    encoded = json.dumps(hash_input, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.blake2b(encoded, digest_size=32).hexdigest()
+
+
 def host_cfg_label() -> str:
     system = platform.system().lower()
     family = "unix" if system in {"darwin", "linux", "freebsd"} else system
@@ -65,16 +120,14 @@ def host_cfg_label() -> str:
 
 
 def classify_terminator(run_exit: int, no_verdict_cause: str | None) -> str:
-    """Classify a dispatched verdict's terminator (bd-reality-core-convergence-1azkt.70).
-
-    Every dispatched verdict must name its terminator class rather than only an
-    exit code, so an infrastructure refusal (exit 3 / 70-79 / NOT_RUN), a
-    timeout (exit 124 / TIMEOUT), or an external signal (exit 130 / 137 / 143 /
-    129-192) cannot be confused with a product verdict.
-    """
+    """Classify a dispatched verdict's terminator (bd-reality-core-convergence-1azkt.70)."""
     if run_exit == 124 or no_verdict_cause == "TIMEOUT":
         return "timeout"
-    if run_exit in (130, 137, 143) or (128 < run_exit <= 192) or no_verdict_cause == "CANCELLED":
+    if (
+        run_exit in (130, 137, 143)
+        or (128 < run_exit <= 192)
+        or no_verdict_cause == "CANCELLED"
+    ):
         return "signal"
     if (
         no_verdict_cause in ("NOT_RUN", "INFRA_ERROR")
@@ -92,13 +145,23 @@ def build_capsule(
     host: str | None,
     run_exit: int,
     command: str,
-) -> dict:
+    repo_root: pathlib.Path = REPO,
+) -> dict[str, Any]:
     from grade_test_log import parse, strip_ansi  # noqa: F401  (same directory)
 
-    unestablished: list[str] = []
-    results: list[dict] = []
+    unestablished: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
-    pairs: list[dict] = []
+    commit_sha, commit_resolved = _resolve_commit_sha(base, repo_root)
+    if not commit_resolved:
+        unestablished.append(
+            _unestablished(
+                "source.commit",
+                f"could not resolve 40-hex commit SHA from base {base!r}",
+            )
+        )
+
+    pairs: list[dict[str, Any]] = []
     problems: list[str] = []
     announced_targets: list[str] = []
     if log is not None and log.is_file():
@@ -106,13 +169,13 @@ def build_capsule(
             log.read_text(errors="replace").splitlines()
         )
     else:
-        unestablished.append("results: no readable log was supplied")
+        unestablished.append(
+            _unestablished("results", "no readable log was supplied")
+        )
 
     for pair in pairs:
         reconciles = pair["announced"] == pair["counted"]
-        if pair["announced"] == 0:
-            status, cause = "INFRA_ERROR", "NOT_RUN"
-        elif not reconciles:
+        if pair["announced"] == 0 or not reconciles:
             status, cause = "INFRA_ERROR", "NOT_RUN"
         elif run_exit == 124:
             status, cause = "TIMEOUT", "TIMEOUT"
@@ -149,124 +212,91 @@ def build_capsule(
             }
         )
 
-    # ATTRIBUTION IS ADVISORY ON A MULTI-TARGET RUN, so the capsule says so
-    # rather than presenting `stage`/`target` as established facts.
-    #
-    # `grade_test_log.parse` assigns each summary to the Nth `Running` line.
-    # That is correct for a sequential run and WRONG under `-j N`, where
-    # several test binaries interleave their announcements: its own comment
-    # records measuring three targets each passing one test and producing
-    # three pairs that ALL RECONCILED with every label wrong. Nothing in the
-    # log ties a summary to a target under interleaving -- the information is
-    # absent, not merely unparsed -- so this cannot be repaired here either.
-    #
-    # What it can do is refuse to launder the uncertainty. A release decision
-    # reading `stage: contracts, status: PASS` out of this capsule would be
-    # taking a label the grader calls advisory as a verified identity, and this
-    # file's whole premise is that a field whose empty state is
-    # indistinguishable from its verified one is the empty-digest defect with
-    # more fields. The announced target list does NOT depend on attribution, so
-    # it is the reliable half and is named here with the caveat.
     if len(announced_targets) > 1:
         unestablished.append(
-            "results[].stage/target: "
-            f"{len(announced_targets)} targets announced in one log "
-            f"({', '.join(announced_targets)}), so each summary's attribution to "
-            "a target is ADVISORY -- cargo interleaves `Running` lines under "
-            "`-j N` and nothing in the log binds a summary to a target. The "
-            "target list is reliable; the pairing of counts to targets is not. "
-            "Dispatch one target per invocation when per-target attribution "
-            "has to be established."
+            _unestablished(
+                "results[].stage/target",
+                f"{len(announced_targets)} targets announced in one log "
+                f"({', '.join(announced_targets)}), so each summary's attribution to "
+                "a target is ADVISORY -- cargo interleaves `Running` lines under "
+                "`-j N` and nothing in the log binds a summary to a target. "
+                "Dispatch one target per invocation when per-target attribution "
+                "has to be established.",
+            )
         )
 
     if host is None:
         unestablished.append(
-            "results[].workerHost: the run log did not name a worker; a verdict "
-            "without a host is reported, not reproducible"
+            _unestablished(
+                "results[].workerHost",
+                "the run log did not name a worker; a verdict without a host is reported, not reproducible",
+            )
         )
 
-    # The cfg set belongs to the machine that RAN the tests, not to the machine
-    # writing the capsule. Emitting the local cfg for a remote run is the exact
-    # defect this field was added to prevent, one level up: it would have said
-    # `target_os=darwin` for a verdict produced on a Linux worker, and it would
-    # have looked right. If the run was remote, this host cannot know it.
     local_host = platform.node().split(".")[0]
     run_was_remote = host is not None and host != local_host
     if run_was_remote:
         evaluated_cfg = None
         unestablished.append(
-            f"toolchain.evaluatedUnderCfg: the tests ran on {host}, not on this "
-            f"machine ({local_host}), so the cfg set they were evaluated under is "
-            "not knowable here. Reporting the emitter's own cfg would be a "
-            "plausible-looking falsehood."
+            _unestablished(
+                "toolchain.evaluatedUnderCfg",
+                f"the tests ran on {host}, not on this machine ({local_host}), so the cfg set they were evaluated under is not knowable here.",
+            )
         )
     else:
         evaluated_cfg = host_cfg_label()
     if dirty:
         unestablished.append(
-            f"source.treeish: the tree carried {dirty} uncommitted file(s), so this "
-            "verdict is bound to a working state rather than to a commit"
+            _unestablished(
+                "source.treeish",
+                f"the tree carried {dirty} uncommitted file(s), so this verdict is bound to a working state rather than to a commit",
+            )
         )
 
-    # These are genuinely not knowable from a single graded run. Named, never
-    # defaulted: an absent field and a verified-empty field must not look alike.
-    for missing in (
-        "effectiveDependencies.siblingPins: not resolved by this emitter",
-        "binaries: no candidate binary was hashed by this run",
-        "testInventory: no cross-shard logical-test inventory was computed",
-        "performance.samples: this emitter records no timing samples",
-        "evidenceHashes: no evidence artifacts were hashed",
-        "runIdentifiers.hostedCi: hosted workflows are disabled (bd-hvlm2), so "
-        "there is no hosted run id to bind -- recorded as null, never invented",
+    for item, reason, blocked_by in (
+        ("effectiveDependencies.siblingPins", "not resolved by this emitter", None),
+        ("binaries", "no candidate binary was hashed by this run", None),
+        ("testInventory", "no cross-shard logical-test inventory was computed", None),
+        ("performance.samples", "this emitter records no timing samples", None),
+        ("evidenceHashes", "no evidence artifacts were hashed", None),
+        (
+            "runIdentifiers.hostedCi",
+            "hosted workflows are disabled (bd-hvlm2), so there is no hosted run id to bind -- recorded as null, never invented",
+            "bd-hvlm2",
+        ),
+        (
+            "manifest.manifestHash",
+            "this run did not execute through scripts/verify.sh, so no manifest governed it.",
+            "bd-pnj3s",
+        ),
     ):
-        unestablished.append(missing)
+        unestablished.append(_unestablished(item, reason, blocked_by))
 
-    # manifestHash is NULL ON PURPOSE for a run that did not execute through
-    # scripts/verify.sh, and that is not a gap this emitter should paper over.
-    #
-    # scripts/verify-budget.toml IS the manifest -- it declares stage names,
-    # requirement policy ("advisory" / "tracked_red" + a mandatory owning bead)
-    # and per-stage budgets, verify.sh reads it at :141 and resolves policy at
-    # :662-671, and tests/verification_drift_guard.rs:530 cross-checks it against
-    # verify.sh's own run_stage labels under a local variable literally named
-    # `manifest`.
-    #
-    # But it governs VERIFY.SH RUNS. A `cargo test` dispatched straight at a
-    # worker never consults it, so binding its hash into such a capsule would
-    # assert a relationship that did not exist -- inventing provenance to fill a
-    # required field, which is the defect this emitter was written to refuse.
-    # So the capsule says WHY it is null instead, on every emission, and in doing
-    # so records bd-pnj3s's gap as data rather than as a bead somebody has to
-    # remember.
-    unestablished.append(
-        "manifest.manifestHash: this run did not execute through scripts/verify.sh, "
-        "so no manifest governed it. verify-budget.toml is the manifest for "
-        "verify.sh runs; a directly dispatched remote command is outside it "
-        "(bd-pnj3s)."
-    )
-    identity = {
-        "source": {"treeish": base, "commit": base, "dirty": bool(dirty)},
-        "manifest": {"stageCount": len(results), "manifestHash": None},
-    }
-    # IDENTITY ONLY. Run facts are excluded on purpose; see the module docstring.
-    capsule_hash = hashlib.blake2b(
-        json.dumps(identity, sort_keys=True).encode(), digest_size=32
-    ).hexdigest()
+    franken_lock = repo_root / "franken-stack.lock"
+    cargo_lock = repo_root / "Cargo.lock"
+    franken_lock_hash = _sha256_file(franken_lock) if franken_lock.is_file() else None
+    cargo_lock_hash = _sha256_file(cargo_lock) if cargo_lock.is_file() else None
+    lock_hash = franken_lock_hash or cargo_lock_hash
+    if lock_hash is None:
+        unestablished.append(
+            _unestablished(
+                "effectiveDependencies.lockfileHash",
+                "neither franken-stack.lock nor Cargo.lock was present to hash",
+            )
+        )
 
-    lock = REPO / "franken-stack.lock"
-    lock_hash = (
-        hashlib.blake2b(lock.read_bytes(), digest_size=32).hexdigest()
-        if lock.is_file()
-        else None
-    )
-
-    return {
+    capsule: dict[str, Any] = {
         "schema": "ee.release_candidate_proof.v1",
-        "capsuleHash": f"blake2b:{capsule_hash}",
+        "capsuleHash": ZERO_SHA40 + "0" * 24,
         "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "completeness": {"populated": False, "unestablished": unestablished},
-        "source": identity["source"],
-        "effectiveDependencies": {"lockfileHash": lock_hash, "siblingPins": []},
+        "source": {"treeish": base, "commit": commit_sha, "dirty": bool(dirty)},
+        "effectiveDependencies": {
+            "lockfileHash": lock_hash,
+            "cargoLockSha256": cargo_lock_hash,
+            "frankenStackLockSha256": franken_lock_hash,
+            "siblingPins": [],
+        },
         "toolchain": {
             "rustc": _tool_version("rustc") or "unknown",
             "cargo": _tool_version("cargo") or "unknown",
@@ -274,7 +304,7 @@ def build_capsule(
             "target": platform.machine(),
             "evaluatedUnderCfg": evaluated_cfg,
         },
-        "manifest": identity["manifest"],
+        "manifest": {"stageCount": len(results), "manifestHash": None},
         "binaries": [],
         "testInventory": {"logicalTests": None, "shards": []},
         "results": results,
@@ -282,35 +312,595 @@ def build_capsule(
         "runIdentifiers": {"rch": command, "hostedCi": None},
         "evidenceHashes": [],
     }
+    capsule["capsuleHash"] = compute_capsule_hash(capsule)
+    return capsule
 
 
-def validate(capsule: dict) -> list[str]:
-    """Structural check against the committed schema, without a jsonschema dep."""
-    problems: list[str] = []
-    schema = json.loads(SCHEMA.read_text())
-    for field in schema["required"]:
-        if field not in capsule:
-            problems.append(f"missing required top-level field: {field}")
-    for key in capsule:
-        if key not in schema["properties"]:
-            problems.append(f"field not permitted by additionalProperties:false: {key}")
-    for obj_name, spec in schema["properties"].items():
-        if spec.get("type") != "object" or obj_name not in capsule:
-            continue
-        for field in spec.get("required", []):
-            if field not in capsule[obj_name]:
-                problems.append(f"missing required {obj_name}.{field}")
-        if spec.get("additionalProperties") is False:
-            for key in capsule[obj_name]:
-                if key not in (spec.get("properties") or {}):
-                    problems.append(f"{obj_name}.{key} not permitted by the schema")
-    allowed = set(
-        (schema["properties"]["results"]["items"].get("properties") or {}).keys()
+def populate_candidate_capsule(
+    candidate_manifest: dict[str, Any],
+    repo_root: pathlib.Path = REPO,
+    base_override: str | None = None,
+    dirty_override: int | None = None,
+) -> dict[str, Any]:
+    """Assemble a candidate proof capsule from verified stage/binary inputs."""
+    unestablished: list[dict[str, Any]] = []
+
+    raw_base = base_override if base_override is not None else str(candidate_manifest.get("base", ""))
+    commit_sha, commit_resolved = _resolve_commit_sha(raw_base, repo_root)
+    if not commit_resolved or commit_sha == ZERO_SHA40:
+        unestablished.append(
+            _unestablished(
+                "source.commit",
+                f"candidate base {raw_base!r} is not a valid 40-hex commit SHA",
+            )
+        )
+
+    dirty_val = (
+        dirty_override
+        if dirty_override is not None
+        else int(candidate_manifest.get("dirty", 0) or 0)
     )
-    for row in capsule.get("results", []):
-        for key in row:
-            if key not in allowed:
-                problems.append(f"results[].{key} not permitted by the schema")
+    dirty = bool(dirty_val)
+    if dirty:
+        unestablished.append(
+            _unestablished(
+                "source.dirty",
+                f"working tree reported dirty={dirty_val}; candidate requires a clean tree",
+            )
+        )
+
+    cargo_lock = repo_root / "Cargo.lock"
+    franken_lock = repo_root / "franken-stack.lock"
+    cargo_lock_hash = _sha256_file(cargo_lock) if cargo_lock.is_file() else None
+    franken_lock_hash = _sha256_file(franken_lock) if franken_lock.is_file() else None
+    lock_hash = franken_lock_hash or cargo_lock_hash
+    if lock_hash is None:
+        unestablished.append(
+            _unestablished(
+                "effectiveDependencies.lockfileHash",
+                "neither franken-stack.lock nor Cargo.lock exists under repo root",
+            )
+        )
+
+    manifest_rel = str(candidate_manifest.get("manifestPath") or "scripts/verify-budget.toml")
+    manifest_file = (
+        pathlib.Path(manifest_rel)
+        if pathlib.Path(manifest_rel).is_absolute()
+        else (repo_root / manifest_rel)
+    )
+    required_stages = [str(s) for s in candidate_manifest.get("requiredStages", [])]
+    if manifest_file.is_file():
+        manifest_payload = {
+            "manifestPath": manifest_rel,
+            "verifyBudgetSha256": _sha256_file(manifest_file),
+            "requiredStages": sorted(required_stages),
+        }
+        manifest_hash = _sha256_bytes(
+            json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+    else:
+        manifest_hash = None
+        unestablished.append(
+            _unestablished(
+                "manifest.manifestHash",
+                f"verification manifest file missing: {manifest_rel}",
+            )
+        )
+
+    binaries: list[dict[str, Any]] = []
+    for idx, entry in enumerate(candidate_manifest.get("binaries", [])):
+        if not isinstance(entry, dict):
+            unestablished.append(
+                _unestablished(f"binaries[{idx}]", "binary entry must be an object")
+            )
+            continue
+        raw_path = str(entry.get("path", ""))
+        bin_path = (
+            pathlib.Path(raw_path)
+            if pathlib.Path(raw_path).is_absolute()
+            else (repo_root / raw_path)
+        )
+        if not raw_path or not bin_path.is_file():
+            unestablished.append(
+                _unestablished(
+                    f"binaries[{idx}]",
+                    f"candidate binary file missing: {raw_path!r}",
+                )
+            )
+            continue
+        computed_sha = _sha256_file(bin_path)
+        declared_sha = entry.get("sha256")
+        if declared_sha is not None and str(declared_sha).lower() != computed_sha:
+            unestablished.append(
+                _unestablished(
+                    f"binaries[{idx}].sha256",
+                    f"binary SHA-256 mismatch for {raw_path}: declared {declared_sha}, actual {computed_sha}",
+                )
+            )
+            continue
+        bin_obj: dict[str, Any] = {
+            "path": raw_path,
+            "sha256": computed_sha,
+            "version": str(entry.get("version") or "unknown"),
+            "target": str(entry.get("target") or platform.machine()),
+        }
+        if isinstance(entry.get("features"), list):
+            bin_obj["features"] = [str(f) for f in entry["features"]]
+        binaries.append(bin_obj)
+    if not binaries:
+        unestablished.append(
+            _unestablished("binaries", "at least one verified candidate binary is required")
+        )
+
+    evidence_hashes: list[dict[str, str]] = []
+    for raw_ev in candidate_manifest.get("evidencePaths", []):
+        rel_str = str(raw_ev)
+        if rel_str.startswith("/"):
+            unestablished.append(
+                _unestablished(
+                    "evidenceHashes",
+                    f"evidence path must be repo-relative, got absolute path {rel_str!r}",
+                )
+            )
+            continue
+        ev_path = repo_root / rel_str
+        if not ev_path.is_file():
+            unestablished.append(
+                _unestablished(
+                    "evidenceHashes",
+                    f"evidence artifact missing on disk: {rel_str}",
+                )
+            )
+            continue
+        evidence_hashes.append({"path": rel_str, "sha256": _sha256_file(ev_path)})
+
+    approved_ignored = {str(s) for s in candidate_manifest.get("approvedIgnoredStages", [])}
+    raw_stages = candidate_manifest.get("stages", [])
+    results: list[dict[str, Any]] = []
+    shards: list[dict[str, Any]] = []
+    logical_tests = 0
+    seen_stages: set[str] = set()
+
+    for idx, st in enumerate(raw_stages):
+        if not isinstance(st, dict):
+            unestablished.append(
+                _unestablished(f"results[{idx}]", "stage entry must be an object")
+            )
+            continue
+        stage_name = str(st.get("stage", "")).strip()
+        if not stage_name:
+            unestablished.append(
+                _unestablished(f"results[{idx}].stage", "stage name is missing")
+            )
+            continue
+        seen_stages.add(stage_name)
+
+        stage_commit = st.get("commit") or st.get("headSha")
+        if stage_commit is not None and str(stage_commit).lower() != commit_sha:
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].commit",
+                    f"stage {stage_name} ran at {stage_commit}, expected single candidate SHA {commit_sha}",
+                )
+            )
+
+        status = str(st.get("status", "")).upper()
+        exit_code = st.get("exitCode")
+        no_verdict_cause = st.get("noVerdictCause")
+        terminator_class = st.get("terminatorClass") or classify_terminator(
+            int(exit_code) if isinstance(exit_code, int) else 1,
+            no_verdict_cause,
+        )
+
+        log_path_str = st.get("logPath")
+        declared_log_sha = st.get("logSha256")
+        computed_log_sha: str | None = None
+        if log_path_str:
+            lp = (
+                pathlib.Path(str(log_path_str))
+                if pathlib.Path(str(log_path_str)).is_absolute()
+                else (repo_root / str(log_path_str))
+            )
+            if not lp.is_file():
+                unestablished.append(
+                    _unestablished(
+                        f"results[{stage_name}].logPath",
+                        f"stage {stage_name} log file missing on disk: {log_path_str}",
+                    )
+                )
+            else:
+                computed_log_sha = _sha256_file(lp)
+                if declared_log_sha and str(declared_log_sha).lower() != computed_log_sha:
+                    unestablished.append(
+                        _unestablished(
+                            f"results[{stage_name}].logSha256",
+                            f"stage {stage_name} log SHA-256 mismatch: declared {declared_log_sha}, actual {computed_log_sha}",
+                        )
+                    )
+        else:
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].logPath",
+                    f"stage {stage_name} omitted logPath so log digest cannot be verified",
+                )
+            )
+
+        announced = st.get("announced")
+        executed = st.get("executed")
+        failed = st.get("failed")
+        ignored = st.get("ignored")
+
+        if status != "PASS":
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].status",
+                    f"stage {stage_name} status is {status!r}, expected 'PASS'",
+                )
+            )
+        if exit_code != 0:
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].exitCode",
+                    f"stage {stage_name} exitCode is {exit_code!r}, expected 0",
+                )
+            )
+        if terminator_class != "product_verdict":
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].terminatorClass",
+                    f"stage {stage_name} terminatorClass is {terminator_class!r}, expected 'product_verdict'",
+                )
+            )
+        if no_verdict_cause is not None:
+            unestablished.append(
+                _unestablished(
+                    f"results[{stage_name}].noVerdictCause",
+                    f"stage {stage_name} carries noVerdictCause={no_verdict_cause!r}",
+                )
+            )
+        if announced is not None or executed is not None:
+            if not isinstance(announced, int) or isinstance(announced, bool) or announced <= 0:
+                unestablished.append(
+                    _unestablished(
+                        f"results[{stage_name}].announced",
+                        f"test stage {stage_name} has invalid/zero announced count: {announced!r}",
+                    )
+                )
+            elif executed != announced:
+                unestablished.append(
+                    _unestablished(
+                        f"results[{stage_name}].executed",
+                        f"test stage {stage_name} executed={executed!r} != announced={announced!r}",
+                    )
+                )
+            else:
+                logical_tests += announced
+                shards.append({"name": stage_name, "tests": announced})
+            if failed is not None and failed != 0:
+                unestablished.append(
+                    _unestablished(
+                        f"results[{stage_name}].failed",
+                        f"test stage {stage_name} reported failed={failed!r}",
+                    )
+                )
+            if ignored is not None and ignored != 0 and stage_name not in approved_ignored:
+                unestablished.append(
+                    _unestablished(
+                        f"results[{stage_name}].ignored",
+                        f"test stage {stage_name} reported unapproved ignored={ignored!r}",
+                    )
+                )
+
+        row: dict[str, Any] = {
+            "stage": stage_name,
+            "status": status or "INFRA_ERROR",
+            "exitCode": exit_code if isinstance(exit_code, int) else None,
+            "durationSeconds": st.get("durationSeconds"),
+            "attempts": st.get("attempts"),
+            "reason": st.get("reason"),
+            "target": st.get("target"),
+            "announced": announced,
+            "executed": executed,
+            "filteredOut": st.get("filteredOut"),
+            "failed": failed,
+            "ignored": ignored,
+            "logPath": str(log_path_str) if log_path_str else None,
+            "logSha256": computed_log_sha or declared_log_sha,
+            "workerHost": st.get("workerHost") or candidate_manifest.get("host"),
+            "noVerdictCause": no_verdict_cause,
+            "terminatorClass": terminator_class,
+        }
+        results.append(row)
+
+    if not results:
+        unestablished.append(
+            _unestablished("results", "at least one executed stage result is required")
+        )
+    for req_stage in required_stages:
+        if req_stage not in seen_stages:
+            unestablished.append(
+                _unestablished(
+                    f"results[{req_stage}]",
+                    f"mandatory stage {req_stage!r} is missing from candidate results",
+                )
+            )
+
+    tc_in = candidate_manifest.get("toolchain") or {}
+    default_host = candidate_manifest.get("host")
+    local_host = platform.node().split(".")[0]
+    evaluated_cfg = tc_in.get("evaluatedUnderCfg")
+    if evaluated_cfg is None and (default_host is None or default_host == local_host):
+        evaluated_cfg = host_cfg_label()
+    toolchain: dict[str, Any] = {
+        "rustc": str(tc_in.get("rustc") or _tool_version("rustc") or "unknown"),
+        "cargo": str(tc_in.get("cargo") or _tool_version("cargo") or "unknown"),
+        "channel": str(tc_in.get("channel") or "nightly"),
+        "target": str(tc_in.get("target") or platform.machine()),
+        "evaluatedUnderCfg": evaluated_cfg,
+    }
+    if isinstance(tc_in.get("features"), list):
+        toolchain["features"] = [str(f) for f in tc_in["features"]]
+
+    sibling_pins: list[dict[str, Any]] = []
+    for pin in candidate_manifest.get("siblingPins", []):
+        if isinstance(pin, dict) and "crate" in pin and "resolved" in pin:
+            sibling_pins.append(
+                {
+                    "crate": str(pin["crate"]),
+                    "resolved": str(pin["resolved"]),
+                    "path": pin.get("path"),
+                }
+            )
+
+    run_ids_in = candidate_manifest.get("runIdentifiers") or {}
+    run_identifiers = {
+        "rch": run_ids_in.get("rch"),
+        "hostedCi": None,
+    }
+    perf_samples = [
+        sample
+        for sample in candidate_manifest.get("performanceSamples", [])
+        if isinstance(sample, dict)
+    ]
+
+    capsule: dict[str, Any] = {
+        "schema": "ee.release_candidate_proof.v1",
+        "capsuleHash": ZERO_SHA40 + "0" * 24,
+        "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "completeness": {
+            "populated": False,
+            "unestablished": unestablished,
+        },
+        "source": {
+            "treeish": str(candidate_manifest.get("treeish") or commit_sha),
+            "commit": commit_sha,
+            "dirty": dirty,
+        },
+        "effectiveDependencies": {
+            "lockfileHash": lock_hash,
+            "cargoLockSha256": cargo_lock_hash,
+            "frankenStackLockSha256": franken_lock_hash,
+            "siblingPins": sibling_pins,
+        },
+        "toolchain": toolchain,
+        "manifest": {
+            "stageCount": len(results),
+            "manifestHash": manifest_hash,
+            "manifestPath": manifest_rel,
+        },
+        "binaries": binaries,
+        "testInventory": {
+            "logicalTests": logical_tests,
+            "shards": shards,
+        },
+        "results": results,
+        "performance": {"samples": perf_samples},
+        "runIdentifiers": run_identifiers,
+        "evidenceHashes": evidence_hashes,
+    }
+
+    schema_problems = validate(capsule)
+    for prob in schema_problems:
+        unestablished.append(_unestablished("schema", prob))
+
+    capsule["completeness"]["populated"] = len(unestablished) == 0
+    capsule["capsuleHash"] = compute_capsule_hash(capsule)
+    return capsule
+
+
+def _matches_json_type(value: Any, expected: str) -> bool:
+    if expected == "null":
+        return value is None
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "object":
+        return isinstance(value, dict)
+    return True
+
+
+def _validate_node(
+    value: Any, spec: dict[str, Any], path: str, problems: list[str]
+) -> None:
+    if "const" in spec and value != spec["const"]:
+        problems.append(f"{path}: expected const {spec['const']!r}, got {value!r}")
+        return
+
+    if "type" in spec:
+        allowed_types = (
+            spec["type"] if isinstance(spec["type"], list) else [spec["type"]]
+        )
+        if not any(_matches_json_type(value, t) for t in allowed_types):
+            problems.append(
+                f"{path}: expected type {allowed_types}, got {type(value).__name__}"
+            )
+            return
+
+    if "enum" in spec and value not in spec["enum"]:
+        problems.append(f"{path}: value {value!r} not in enum {spec['enum']!r}")
+
+    if isinstance(value, str):
+        if "pattern" in spec and not re.fullmatch(spec["pattern"], value):
+            problems.append(
+                f"{path}: value {value!r} does not match pattern {spec['pattern']!r}"
+            )
+        if spec.get("format") == "date-time":
+            try:
+                datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                problems.append(f"{path}: invalid RFC3339/ISO date-time {value!r}")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in spec and value < spec["minimum"]:
+            problems.append(f"{path}: value {value} < minimum {spec['minimum']}")
+
+    if isinstance(value, dict):
+        for req in spec.get("required", []):
+            if req not in value:
+                problems.append(f"{path}: missing required field {req!r}")
+        props = spec.get("properties") or {}
+        if spec.get("additionalProperties") is False:
+            for key in value:
+                if key not in props:
+                    problems.append(
+                        f"{path}.{key}: field not permitted by additionalProperties:false"
+                    )
+        for key, child_spec in props.items():
+            if key in value:
+                _validate_node(value[key], child_spec, f"{path}.{key}", problems)
+
+    if isinstance(value, list) and "items" in spec:
+        item_spec = spec["items"]
+        for idx, item in enumerate(value):
+            _validate_node(item, item_spec, f"{path}[{idx}]", problems)
+
+
+def validate(capsule: dict[str, Any]) -> list[str]:
+    """Full recursive validation against the committed JSON Schema."""
+    if not isinstance(capsule, dict):
+        return ["capsule root must be a JSON object"]
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    problems: list[str] = []
+    _validate_node(capsule, schema, "$", problems)
+    return problems
+
+
+def verify_capsule(
+    capsule: dict[str, Any],
+    expected_sha: str,
+    expected_binary: pathlib.Path | None = None,
+    verify_logs: bool = False,
+    repo_root: pathlib.Path = REPO,
+) -> list[str]:
+    """Fail-closed cryptographic + completeness verification of a proof capsule."""
+    problems = validate(capsule)
+    if problems:
+        return problems
+
+    expected_sha_norm = expected_sha.strip().lower()
+    if not HEX40_RE.fullmatch(expected_sha_norm):
+        return [f"expected_sha {expected_sha!r} is not a 40-hex commit SHA"]
+
+    actual_hash = str(capsule.get("capsuleHash", ""))
+    recomputed_hash = compute_capsule_hash(capsule)
+    if not hmac.compare_digest(actual_hash, recomputed_hash):
+        problems.append(
+            f"capsuleHash mismatch: recorded {actual_hash}, recomputed {recomputed_hash}"
+        )
+
+    completeness = capsule["completeness"]
+    if completeness.get("populated") is not True:
+        problems.append("completeness.populated is not true (unpopulated skeleton refused)")
+    if completeness.get("unestablished"):
+        problems.append(
+            f"completeness.unestablished is non-empty ({len(completeness['unestablished'])} item(s))"
+        )
+
+    source = capsule["source"]
+    if source.get("dirty") is not False:
+        problems.append("source.dirty must be false")
+    commit = str(source.get("commit", "")).lower()
+    if commit == ZERO_SHA40:
+        problems.append("source.commit cannot be the zero placeholder SHA")
+    elif commit != expected_sha_norm:
+        problems.append(
+            f"source.commit {commit} does not match expected SHA {expected_sha_norm}"
+        )
+
+    if not capsule["effectiveDependencies"].get("lockfileHash"):
+        problems.append("effectiveDependencies.lockfileHash must be non-null when populated")
+    if not capsule["manifest"].get("manifestHash"):
+        problems.append("manifest.manifestHash must be non-null when populated")
+    if capsule["testInventory"].get("logicalTests") is None:
+        problems.append("testInventory.logicalTests must be non-null when populated")
+
+    results = capsule["results"]
+    if not results:
+        problems.append("results[] must be non-empty")
+    for idx, row in enumerate(results):
+        stage = row.get("stage", f"#{idx}")
+        if row.get("status") != "PASS":
+            problems.append(f"results[{stage}].status is {row.get('status')!r}, want 'PASS'")
+        if row.get("exitCode") != 0:
+            problems.append(f"results[{stage}].exitCode is {row.get('exitCode')!r}, want 0")
+        if row.get("terminatorClass") != "product_verdict":
+            problems.append(
+                f"results[{stage}].terminatorClass is {row.get('terminatorClass')!r}, want 'product_verdict'"
+            )
+        if row.get("noVerdictCause") is not None:
+            problems.append(
+                f"results[{stage}].noVerdictCause must be null, got {row.get('noVerdictCause')!r}"
+            )
+        if row.get("failed") not in (None, 0):
+            problems.append(f"results[{stage}].failed is {row.get('failed')!r}, want 0")
+        announced = row.get("announced")
+        executed = row.get("executed")
+        if announced is not None or executed is not None:
+            if not isinstance(announced, int) or announced <= 0:
+                problems.append(f"results[{stage}].announced must be > 0, got {announced!r}")
+            elif executed != announced:
+                problems.append(
+                    f"results[{stage}].executed ({executed!r}) != announced ({announced!r})"
+                )
+        log_sha = row.get("logSha256")
+        log_path = row.get("logPath")
+        if log_path is not None:
+            lp = (
+                pathlib.Path(str(log_path))
+                if pathlib.Path(str(log_path)).is_absolute()
+                else (repo_root / str(log_path))
+            )
+            if lp.is_file():
+                actual_log_sha = _sha256_file(lp)
+                if not log_sha or not hmac.compare_digest(str(log_sha), actual_log_sha):
+                    problems.append(
+                        f"results[{stage}].logSha256 mismatch for {log_path}: recorded {log_sha!r}, actual {actual_log_sha}"
+                    )
+            elif verify_logs:
+                problems.append(f"results[{stage}].logPath missing on disk: {log_path}")
+
+    binaries = capsule["binaries"]
+    if not binaries:
+        problems.append("binaries[] must be non-empty")
+    if expected_binary is not None:
+        if not expected_binary.is_file():
+            problems.append(f"expected binary does not exist: {expected_binary}")
+        else:
+            want_sha = _sha256_file(expected_binary)
+            if not any(
+                hmac.compare_digest(str(b.get("sha256", "")), want_sha) for b in binaries
+            ):
+                problems.append(
+                    f"expected binary {expected_binary} SHA-256 {want_sha} not present in capsule binaries[]"
+                )
+
     return problems
 
 
@@ -322,11 +912,6 @@ ZERO_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out
 """
-# Two `Running` lines BEFORE any announcement: the buffered multi-target shape
-# cargo emits when one invocation names several targets, which is the case
-# grade_test_log measured misattributing every label while every pair
-# reconciled. Both pairs here are green, so nothing in the numbers hints that
-# the labels are advisory -- that is the point of the arm it drives.
 MULTI_TARGET_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
      Running tests/contracts.rs (target/debug/deps/contracts-bbb)
 running 1 test
@@ -337,6 +922,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 
 def self_test() -> int:
+    import copy
     import tempfile
 
     failures = 0
@@ -349,135 +935,192 @@ def self_test() -> int:
             print(f"  [self-test] FAIL {name}")
             failures += 1
 
-    with tempfile.TemporaryDirectory() as directory:
-        green = pathlib.Path(directory) / "green.log"
-        green.write_text(GREEN_LOG)
-        zero = pathlib.Path(directory) / "zero.log"
-        zero.write_text(ZERO_LOG)
+    sha_a = "a" * 40
+    sha_b = "b" * 40
 
-        capsule = build_capsule(green, "abc123", 0, "worker-a", 0, "rch exec ...")
-        check("a green run validates against the committed schema", not validate(capsule))
-        check("populated is never true", capsule["completeness"]["populated"] is False)
-        check("unestablished is non-empty", bool(capsule["completeness"]["unestablished"]))
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        green = root / "green.log"
+        green.write_text(GREEN_LOG, encoding="utf-8")
+        zero = root / "zero.log"
+        zero.write_text(ZERO_LOG, encoding="utf-8")
+
+        capsule = build_capsule(green, sha_a, 0, "worker-a", 0, "rch exec ...")
+        check("skeleton green run validates recursively against schema", not validate(capsule))
+        check("skeleton capsuleHash is 64 lowercase hex chars", bool(HEX64_RE.fullmatch(capsule["capsuleHash"])))
+        check("skeleton populated is false", capsule["completeness"]["populated"] is False)
+        check("skeleton unestablished contains schema objects", all(isinstance(u, dict) and "item" in u and "reason" in u for u in capsule["completeness"]["unestablished"]))
         check("host is recorded", capsule["results"][0]["workerHost"] == "worker-a")
         check("announced is recorded", capsule["results"][0]["announced"] == 4)
-        # capsule above was built with host="worker-a", i.e. a REMOTE run.
+        check("remote run does not claim local cfg", capsule["toolchain"]["evaluatedUnderCfg"] is None)
         check(
-            "a REMOTE run does NOT claim this machine's cfg",
-            capsule["toolchain"]["evaluatedUnderCfg"] is None,
+            "unestablished names evaluatedUnderCfg",
+            any(u["item"] == "toolchain.evaluatedUnderCfg" for u in capsule["completeness"]["unestablished"]),
         )
-        check(
-            "and says why the cfg is unknown",
-            any("evaluatedUnderCfg" in u for u in capsule["completeness"]["unestablished"]),
-        )
-        local = build_capsule(green, "abc123", 0, platform.node().split(".")[0], 0, "x")
-        check(
-            "a LOCAL run DOES record the cfg",
-            bool(local["toolchain"]["evaluatedUnderCfg"]),
-        )
-        check("hostedCi is null, not invented", capsule["runIdentifiers"]["hostedCi"] is None)
-        check("a green run reports PASS", capsule["results"][0]["status"] == "PASS")
+        local = build_capsule(green, sha_a, 0, platform.node().split(".")[0], 0, "x")
+        check("local run records cfg", bool(local["toolchain"]["evaluatedUnderCfg"]))
+        check("hostedCi is null", capsule["runIdentifiers"]["hostedCi"] is None)
+        check("green run reports PASS", capsule["results"][0]["status"] == "PASS")
 
-        # bd-uaonk-adjacent regression pin: `parse` returns THREE values since
-        # 21a273248 and this caller unpacked two, so every call raised
-        # ValueError and this whole self-test exited 1 for two days. Nothing
-        # saw it, because the stage that runs it lives in verify.sh, which
-        # cannot execute on this host and whose hosted lane is switched off.
-        # The arms below all call build_capsule, so any of them would catch a
-        # recurrence -- this one just names the cause.
-        check(
-            "build_capsule survives grade_test_log.parse's return arity",
-            isinstance(capsule.get("results"), list),
-        )
-        # BOTH POLARITIES of the attribution caveat. A single-target log must
-        # NOT carry it, or the caveat becomes noise that readers learn to skip.
         single_caveat = [
-            u for u in capsule["completeness"]["unestablished"] if "ADVISORY" in u
+            u for u in capsule["completeness"]["unestablished"] if u["item"] == "results[].stage/target"
         ]
-        check(
-            "a SINGLE-target log does not claim attribution is advisory",
-            single_caveat == [],
-        )
-        multi = pathlib.Path(directory) / "multi.log"
-        multi.write_text(MULTI_TARGET_LOG)
-        multi_capsule = build_capsule(multi, "abc123", 0, "worker-a", 0, "rch exec ...")
-        multi_caveat = [
-            u for u in multi_capsule["completeness"]["unestablished"] if "ADVISORY" in u
-        ]
-        # The caveat must NAME the targets, because "attribution is advisory"
-        # without the list leaves a reader unable to tell which results to
-        # distrust. `parse` records the BINARY path from each `Running` line
-        # (its `bin` group), not the source name, so these are the strings it
-        # actually produced -- this arm failed first against `tests/contracts.rs`
-        # and `unittests`, which is what the log says and not what the parser
-        # keeps.
-        check(
-            "a MULTI-target log names per-target attribution as advisory",
-            len(multi_caveat) == 1
-            and "2 targets announced" in multi_caveat[0]
-            and "target/debug/deps/ee-aaa" in multi_caveat[0]
-            and "target/debug/deps/contracts-bbb" in multi_caveat[0],
-        )
-        check(
-            "the multi-target caveat does not suppress the results themselves",
-            len(multi_capsule["results"]) == 2
-            and all(r["status"] == "PASS" for r in multi_capsule["results"]),
-        )
-        check(
-            "a multi-target capsule still validates against the schema",
-            not validate(multi_capsule),
-        )
+        check("single-target log does not emit multi-target advisory", single_caveat == [])
 
-        vacuous = build_capsule(zero, "abc123", 0, "worker-a", 0, "rch exec ...")
+        multi = root / "multi.log"
+        multi.write_text(MULTI_TARGET_LOG, encoding="utf-8")
+        multi_capsule = build_capsule(multi, sha_a, 0, "worker-a", 0, "rch exec ...")
+        multi_caveat = [
+            u for u in multi_capsule["completeness"]["unestablished"] if u["item"] == "results[].stage/target"
+        ]
         check(
-            "a ZERO-test run is NOT recorded as PASS",
-            vacuous["results"][0]["status"] != "PASS",
+            "multi-target log names targets in advisory object",
+            len(multi_caveat) == 1
+            and "2 targets announced" in multi_caveat[0]["reason"]
+            and "target/debug/deps/ee-aaa" in multi_caveat[0]["reason"]
+            and "target/debug/deps/contracts-bbb" in multi_caveat[0]["reason"],
         )
-        check(
-            "a ZERO-test run carries a no-verdict cause",
-            vacuous["results"][0]["noVerdictCause"] == "NOT_RUN",
-        )
-        check(
-            "a green run classifies terminator as product_verdict",
-            capsule["results"][0]["terminatorClass"] == "product_verdict",
-        )
-        check(
-            "a ZERO-test run classifies terminator as infra_refusal",
-            vacuous["results"][0]["terminatorClass"] == "infra_refusal",
-        )
-        timed_out = build_capsule(green, "abc123", 0, "worker-a", 124, "rch exec ...")
+        check("multi-target capsule validates against schema", not validate(multi_capsule))
+
+        vacuous = build_capsule(zero, sha_a, 0, "worker-a", 0, "rch exec ...")
+        check("zero-test run is not PASS", vacuous["results"][0]["status"] != "PASS")
+        check("zero-test run carries noVerdictCause=NOT_RUN", vacuous["results"][0]["noVerdictCause"] == "NOT_RUN")
+        check("green run terminatorClass is product_verdict", capsule["results"][0]["terminatorClass"] == "product_verdict")
+        check("zero-test run terminatorClass is infra_refusal", vacuous["results"][0]["terminatorClass"] == "infra_refusal")
+        timed_out = build_capsule(green, sha_a, 0, "worker-a", 124, "rch exec ...")
         check(
             "exit 124 classifies terminator as timeout",
             timed_out["results"][0]["terminatorClass"] == "timeout"
             and timed_out["results"][0]["status"] == "TIMEOUT",
         )
-        killed = build_capsule(green, "abc123", 0, "worker-a", 137, "rch exec ...")
+        killed = build_capsule(green, sha_a, 0, "worker-a", 137, "rch exec ...")
         check(
             "exit 137 classifies terminator as signal",
             killed["results"][0]["terminatorClass"] == "signal"
             and killed["results"][0]["status"] == "INFRA_ERROR",
         )
 
-        # Identity must not move when only run facts move. This is the design
-        # constraint the whole capsule rests on, so it is asserted, not assumed.
-        other_host = build_capsule(green, "abc123", 0, "hz9", 0, "rch exec ...")
+        # capsuleHash covers every field except capsuleHash & generatedAt.
+        same_again = copy.deepcopy(capsule)
+        same_again["generatedAt"] = "2026-01-01T00:00:00+00:00"
         check(
-            "capsuleHash is identity-only: a different host does not change it",
-            capsule["capsuleHash"] == other_host["capsuleHash"],
+            "capsuleHash ignores generatedAt",
+            compute_capsule_hash(same_again) == capsule["capsuleHash"],
         )
-        moved = build_capsule(green, "def456", 0, "worker-a", 0, "rch exec ...")
+        moved = build_capsule(green, sha_b, 0, "worker-a", 0, "rch exec ...")
+        check("capsuleHash changes when commit changes", capsule["capsuleHash"] != moved["capsuleHash"])
+        dirty = build_capsule(green, sha_a, 3, "worker-a", 0, "rch exec ...")
         check(
-            "capsuleHash DOES change when the source changes",
-            capsule["capsuleHash"] != moved["capsuleHash"],
+            "dirty tree is named in unestablished",
+            any(u["item"] == "source.treeish" for u in dirty["completeness"]["unestablished"]),
         )
-        dirty = build_capsule(green, "abc123", 3, "worker-a", 0, "rch exec ...")
+        check("capsuleHash changes when dirty changes", capsule["capsuleHash"] != dirty["capsuleHash"])
+
+        # Negative validation checks: short commit SHA and legacy string unestablished must fail.
+        bad_sha = copy.deepcopy(capsule)
+        bad_sha["source"]["commit"] = "abc123"
+        check("validate() rejects non-40-hex source.commit", bool(validate(bad_sha)))
+
+        # Candidate population + cryptographic verification (.76).
+        cand_repo = root / "repo"
+        (cand_repo / "scripts").mkdir(parents=True)
+        (cand_repo / "Cargo.lock").write_text("cargo-lock-content\n", encoding="utf-8")
+        (cand_repo / "franken-stack.lock").write_text("franken-lock-content\n", encoding="utf-8")
+        (cand_repo / "scripts" / "verify-budget.toml").write_text("total_expected_seconds = 608\n", encoding="utf-8")
+        bin_path = root / "ee-candidate"
+        bin_path.write_bytes(b"fake-ee-binary-bytes")
+        ev_rel = "scripts/verify-budget.toml"
+        log_path = root / "stage-lib.log"
+        log_path.write_text(GREEN_LOG, encoding="utf-8")
+
+        manifest = {
+            "base": sha_a,
+            "treeish": "main",
+            "dirty": 0,
+            "host": "worker-01",
+            "toolchain": {
+                "rustc": "rustc 1.90.0-nightly",
+                "cargo": "cargo 1.90.0-nightly",
+                "channel": "nightly",
+                "target": "x86_64-unknown-linux-gnu",
+                "features": ["fts5", "json", "embed-fast", "lexical-bm25", "graph"],
+                "evaluatedUnderCfg": "target_family=unix, target_os=linux",
+            },
+            "manifestPath": "scripts/verify-budget.toml",
+            "requiredStages": ["lib"],
+            "binaries": [
+                {
+                    "path": str(bin_path),
+                    "version": "0.19.0",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "features": ["fts5", "json"],
+                }
+            ],
+            "siblingPins": [{"crate": "fsqlite", "resolved": "=0.4.10", "path": None}],
+            "stages": [
+                {
+                    "stage": "lib",
+                    "status": "PASS",
+                    "exitCode": 0,
+                    "terminatorClass": "product_verdict",
+                    "target": "src/lib.rs",
+                    "announced": 4,
+                    "executed": 4,
+                    "failed": 0,
+                    "ignored": 0,
+                    "workerHost": "worker-01",
+                    "logPath": str(log_path),
+                    "logSha256": _sha256_file(log_path),
+                    "commit": sha_a,
+                    "durationSeconds": 1.25,
+                    "attempts": 1,
+                }
+            ],
+            "evidencePaths": [ev_rel],
+            "runIdentifiers": {"rch": "rch-run-1"},
+        }
+        populated = populate_candidate_capsule(manifest, repo_root=cand_repo)
+        check("populated candidate validates recursively", not validate(populated))
+        check("populated candidate sets populated=true", populated["completeness"]["populated"] is True)
         check(
-            "a dirty tree is named in unestablished",
-            any("uncommitted" in u for u in dirty["completeness"]["unestablished"]),
+            "verify_capsule passes valid populated candidate",
+            not verify_capsule(populated, sha_a, expected_binary=bin_path, verify_logs=True, repo_root=cand_repo),
+        )
+
+        # Negative verification controls:
+        check(
+            "verify_capsule refuses unpopulated skeleton",
+            bool(verify_capsule(capsule, sha_a, repo_root=cand_repo)),
         )
         check(
-            "a dirty tree changes identity (it is a different source)",
-            capsule["capsuleHash"] != dirty["capsuleHash"],
+            "verify_capsule refuses wrong expected SHA",
+            bool(verify_capsule(populated, sha_b, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+        tampered = copy.deepcopy(populated)
+        tampered["results"][0]["workerHost"] = "worker-99"
+        check(
+            "verify_capsule detects capsule tampering via capsuleHash",
+            bool(verify_capsule(tampered, sha_a, expected_binary=bin_path, repo_root=cand_repo)),
+        )
+        other_bin = root / "other-ee"
+        other_bin.write_bytes(b"different-binary")
+        check(
+            "verify_capsule rejects mismatched expected binary",
+            bool(verify_capsule(populated, sha_a, expected_binary=other_bin, repo_root=cand_repo)),
+        )
+        dirty_manifest = copy.deepcopy(manifest)
+        dirty_manifest["dirty"] = 1
+        dirty_cand = populate_candidate_capsule(dirty_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate forces populated=false on dirty tree",
+            dirty_cand["completeness"]["populated"] is False,
+        )
+        missing_stage_manifest = copy.deepcopy(manifest)
+        missing_stage_manifest["requiredStages"] = ["lib", "contracts"]
+        missing_stage_cand = populate_candidate_capsule(missing_stage_manifest, repo_root=cand_repo)
+        check(
+            "populate_candidate forces populated=false when mandatory stage missing",
+            missing_stage_cand["completeness"]["populated"] is False,
         )
 
     if failures:
@@ -490,6 +1133,13 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--populate-candidate", action="store_true")
+    parser.add_argument("--candidate-manifest")
+    parser.add_argument("--verify-capsule")
+    parser.add_argument("--expected-sha")
+    parser.add_argument("--expected-binary")
+    parser.add_argument("--verify-logs", action="store_true")
+    parser.add_argument("--repo-root")
     parser.add_argument("--log")
     parser.add_argument("--base", default="unknown")
     parser.add_argument("--dirty", type=int, default=0)
@@ -499,17 +1149,81 @@ def main() -> int:
     parser.add_argument("--out")
     args = parser.parse_args()
 
+    repo_root = pathlib.Path(args.repo_root).resolve() if args.repo_root else REPO
+
     if args.self_test:
         return self_test()
 
-    capsule = build_capsule(
-        pathlib.Path(args.log) if args.log else None,
-        args.base,
-        args.dirty,
-        args.host,
-        args.run_exit,
-        args.command,
-    )
+    if args.verify_capsule:
+        if not args.expected_sha:
+            print("[emit-proof-capsule] --verify-capsule requires --expected-sha", file=sys.stderr)
+            print("EE_CAPSULE_RC=1")
+            return 1
+        cap_path = pathlib.Path(args.verify_capsule)
+        if not cap_path.is_file():
+            print(f"[emit-proof-capsule] capsule not found: {cap_path}", file=sys.stderr)
+            print("EE_CAPSULE_RC=1")
+            return 1
+        try:
+            capsule = json.loads(cap_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[emit-proof-capsule] invalid capsule JSON: {exc}", file=sys.stderr)
+            print("EE_CAPSULE_RC=1")
+            return 1
+        exp_bin = pathlib.Path(args.expected_binary) if args.expected_binary else None
+        problems = verify_capsule(
+            capsule,
+            args.expected_sha,
+            expected_binary=exp_bin,
+            verify_logs=args.verify_logs,
+            repo_root=repo_root,
+        )
+        if problems:
+            for prob in problems:
+                print(f"[emit-proof-capsule] VERIFY FAILED: {prob}", file=sys.stderr)
+            print("EE_CAPSULE_RC=1")
+            return 1
+        print(
+            f"[emit-proof-capsule] verified {cap_path} sha={capsule['source']['commit']} "
+            f"stages={len(capsule['results'])} hash={capsule['capsuleHash']}"
+        )
+        print("EE_CAPSULE_RC=0")
+        return 0
+
+    if args.populate_candidate:
+        if not args.candidate_manifest:
+            print(
+                "[emit-proof-capsule] --populate-candidate requires --candidate-manifest",
+                file=sys.stderr,
+            )
+            return 1
+        manifest_path = pathlib.Path(args.candidate_manifest)
+        if not manifest_path.is_file():
+            print(
+                f"[emit-proof-capsule] candidate manifest not found: {manifest_path}",
+                file=sys.stderr,
+            )
+            return 1
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        base_override = args.base if args.base != "unknown" else None
+        dirty_override = args.dirty if args.dirty != 0 else None
+        capsule = populate_candidate_capsule(
+            manifest_data,
+            repo_root=repo_root,
+            base_override=base_override,
+            dirty_override=dirty_override,
+        )
+    else:
+        capsule = build_capsule(
+            pathlib.Path(args.log) if args.log else None,
+            args.base,
+            args.dirty,
+            args.host,
+            args.run_exit,
+            args.command,
+            repo_root=repo_root,
+        )
+
     problems = validate(capsule)
     if problems:
         for problem in problems:
@@ -517,7 +1231,7 @@ def main() -> int:
         return 1
     text = json.dumps(capsule, indent=2) + "\n"
     if args.out:
-        pathlib.Path(args.out).write_text(text)
+        pathlib.Path(args.out).write_text(text, encoding="utf-8")
         print(f"[emit-proof-capsule] wrote {args.out}")
     else:
         print(text)

@@ -82,7 +82,9 @@
       "required": ["lockfileHash", "siblingPins"],
       "description": "What was actually linked, not what the manifest requested. Franken-stack siblings are path dependencies whose resolved revision is not visible in Cargo.lock alone, which is why each is pinned explicitly.",
       "properties": {
-        "lockfileHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "lockfileHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "cargoLockSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "frankenStackLockSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "siblingPins": {
           "type": "array",
           "items": {
@@ -121,7 +123,7 @@
       "description": "Identity of the verification manifest this run executed. The stage registry is already pinned bijectively to verify.sh's run_stage calls by `verify_budget_manifest_declares_every_verify_stage`, so a capsule naming a different stage count than the registry is detectable.",
       "properties": {
         "stageCount": { "type": "integer", "minimum": 0 },
-        "manifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "manifestHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "manifestPath": { "type": ["string", "null"] }
       }
     },
@@ -147,7 +149,7 @@
       "required": ["logicalTests", "shards"],
       "description": "Exact inventory, so an omitted or duplicated logical test is visible. A logical test appearing in two shards is a defect, not redundancy.",
       "properties": {
-        "logicalTests": { "type": "integer", "minimum": 0 },
+        "logicalTests": { "type": ["integer", "null"], "minimum": 0 },
         "shards": {
           "type": "array",
           "items": {
@@ -213,6 +215,10 @@
             "minimum": 0,
             "description": "Tests the filter excluded. Load-bearing for feature-gated targets: `--features mcp --lib` selecting 59 of 10112 is what proves the feature was applied rather than the filter matching nothing."
           },
+          "failed": { "type": ["integer", "null"], "minimum": 0 },
+          "ignored": { "type": ["integer", "null"], "minimum": 0 },
+          "logPath": { "type": ["string", "null"] },
+          "logSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
           "workerHost": {
             "type": ["string", "null"],
             "description": "The machine that produced this result. A verdict without a host is not reproducible, only reported -- and this field was omitted by hand from three certifications on 2026-09-18 before anything recorded it mechanically."

@@ -34,7 +34,7 @@
 #   scripts/release_binary_probe.sh --replay <capture-dir>
 #       [--expected-target <triple>] [--output <file>] [--json]
 #   scripts/release_binary_probe.sh --verify-release-dir <dir>
-#       [--allow-compile-only <triple>]...
+#       [--allow-compile-only <triple>]... [--proof-capsule <file>]
 #   scripts/release_binary_probe.sh --self-test
 #
 # Output (--json): one `ee.release_probe.v1` object on stdout, keyed by the
@@ -51,6 +51,8 @@
 set -uo pipefail
 
 SCHEMA="ee.release_probe.v1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Captured before HOME is redirected into the isolated tree.
 OPERATOR_HOME="${HOME:-}"
 
@@ -1028,6 +1030,123 @@ self_test() {
         failures=$((failures + 1))
     fi
 
+    # --verify-release-dir --proof-capsule positive and negative controls (.76).
+    local sha_good="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    local sha_other="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    local cap_repo="$root/cap_repo"
+    mkdir -p "$cap_repo/scripts"
+    printf 'cargo-lock\n' >"$cap_repo/Cargo.lock"
+    printf 'franken-lock\n' >"$cap_repo/franken-stack.lock"
+    printf 'total_expected_seconds = 608\n' >"$cap_repo/scripts/verify-budget.toml"
+    local cap_bin="$root/ee-cap-bin"
+    printf 'fake-ee-binary\n' >"$cap_bin"
+    local cap_log="$root/cap-lib.log"
+    cat >"$cap_log" <<'EOF'
+     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 4 tests
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+EOF
+    local cap_log_sha
+    cap_log_sha="$(sha256_of "$cap_log")"
+    jq -n \
+        --arg base "$sha_good" \
+        --arg bin "$cap_bin" \
+        --arg log "$cap_log" \
+        --arg log_sha "$cap_log_sha" \
+        '{
+            base: $base,
+            treeish: "main",
+            dirty: 0,
+            host: "worker-01",
+            toolchain: {
+                rustc: "rustc 1.90.0-nightly",
+                cargo: "cargo 1.90.0-nightly",
+                channel: "nightly",
+                target: "aarch64-apple-darwin",
+                features: ["fts5", "json", "embed-fast", "lexical-bm25", "graph"],
+                evaluatedUnderCfg: "target_family=unix, target_os=darwin"
+            },
+            manifestPath: "scripts/verify-budget.toml",
+            requiredStages: ["lib"],
+            binaries: [{path: $bin, version: "0.19.0", target: "aarch64-apple-darwin", features: ["fts5"]}],
+            siblingPins: [{crate: "fsqlite", resolved: "=0.4.10", path: null}],
+            stages: [{
+                stage: "lib",
+                status: "PASS",
+                exitCode: 0,
+                terminatorClass: "product_verdict",
+                target: "src/lib.rs",
+                announced: 4,
+                executed: 4,
+                failed: 0,
+                ignored: 0,
+                workerHost: "worker-01",
+                logPath: $log,
+                logSha256: $log_sha,
+                commit: $base
+            }],
+            evidencePaths: ["scripts/verify-budget.toml"],
+            runIdentifiers: {rch: "self-test-run"}
+        }' >"$root/cap_manifest.json"
+    local cap_good="$root/good.capsule.json"
+    python3 "$ROOT/scripts/lib/emit_proof_capsule.py" \
+        --populate-candidate \
+        --candidate-manifest "$root/cap_manifest.json" \
+        --repo-root "$cap_repo" \
+        --out "$cap_good" >/dev/null
+    local rdir_cap="$root/rel-capsule"
+    mkdir -p "$rdir_cap"
+    cp "$rdir/ee-aarch64-apple-darwin.tar.xz" "$rdir_cap/"
+    jq --arg sha "$sha_good" '.binary.gitCommit = $sha' "$rdir/release-probe-aarch64-apple-darwin.json" \
+        >"$rdir_cap/release-probe-aarch64-apple-darwin.json"
+
+    ( "$0" --verify-release-dir "$rdir_cap" --proof-capsule "$cap_good" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 0 ]; then
+        printf '  ok    %-40s -> exit 0\n' "verify-release-dir bound proof capsule" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 0\n' "verify-release-dir bound proof capsule" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
+    local rdir_cap_bad_sha="$root/rel-capsule-bad-sha"
+    mkdir -p "$rdir_cap_bad_sha"
+    cp "$rdir_cap/ee-aarch64-apple-darwin.tar.xz" "$rdir_cap_bad_sha/"
+    jq --arg sha "$sha_other" '.binary.gitCommit = $sha' "$rdir_cap/release-probe-aarch64-apple-darwin.json" \
+        >"$rdir_cap_bad_sha/release-probe-aarch64-apple-darwin.json"
+    ( "$0" --verify-release-dir "$rdir_cap_bad_sha" --proof-capsule "$cap_good" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir mismatched gitCommit" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir mismatched gitCommit" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
+    local cap_tampered="$root/tampered.capsule.json"
+    jq '.results[0].workerHost = "worker-tampered"' "$cap_good" >"$cap_tampered"
+    ( "$0" --verify-release-dir "$rdir_cap" --proof-capsule "$cap_tampered" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir tampered capsule" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir tampered capsule" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
+    local cap_skeleton="$root/skeleton.capsule.json"
+    python3 "$ROOT/scripts/lib/emit_proof_capsule.py" \
+        --log "$cap_log" --base "$sha_good" --dirty 0 --host "worker-01" \
+        --run-exit 0 --command "self-test" --out "$cap_skeleton" >/dev/null
+    ( "$0" --verify-release-dir "$rdir_cap" --proof-capsule "$cap_skeleton" ) 2>/dev/null
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ]; then
+        printf '  ok    %-40s -> exit 1\n' "verify-release-dir unpopulated skeleton" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want 1\n' "verify-release-dir unpopulated skeleton" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
+
     # Checksum refusal: a mismatched digest must stop before anything executes.
     local blob="$root/archive.tar.xz" rc
     printf 'not an archive' >"$blob"
@@ -1089,7 +1208,11 @@ verify_release_dir() {
     shift
     local allow_compile_only=" $* "
     [ -d "$dir" ] || die_env "--verify-release-dir directory not found: $dir"
-    local found=0 failures=0 archive target probe_file sha got_sha got_verdict got_target got_schema got_checks
+    if [ -n "${PROOF_CAPSULE:-}" ] && [ ! -f "$PROOF_CAPSULE" ]; then
+        printf 'release_binary_probe: proof capsule not found: %s\n' "$PROOF_CAPSULE" >&2
+        exit 1
+    fi
+    local found=0 failures=0 capsule_verified=0 archive target probe_file sha got_sha got_verdict got_target got_schema got_checks got_commit
     for archive in "$dir"/ee-*.tar.xz; do
         [ -f "$archive" ] || continue
         found=$((found + 1))
@@ -1105,6 +1228,7 @@ verify_release_dir() {
         got_sha="$(jq -r '.archive.sha256 // empty' "$probe_file" 2>/dev/null)"
         got_verdict="$(jq -r '.verdict // empty' "$probe_file" 2>/dev/null)"
         got_target="$(jq -r '.binary.targetTriple // empty' "$probe_file" 2>/dev/null)"
+        got_commit="$(jq -r '.binary.gitCommit // empty' "$probe_file" 2>/dev/null)"
         got_checks="$(jq -r '(.checks // []) | length' "$probe_file" 2>/dev/null || echo 0)"
         if [ "$got_schema" != "$SCHEMA" ]; then
             printf 'release_binary_probe: %s has schema %s (want %s)\n' "$probe_file" "${got_schema:-<absent>}" "$SCHEMA" >&2
@@ -1124,11 +1248,30 @@ verify_release_dir() {
                     printf 'release_binary_probe: %s verdict is %s (want pass or compile_only)\n' "$probe_file" "${got_verdict:-<absent>}" >&2
                     failures=$((failures + 1))
                 fi
+                if [ -n "${PROOF_CAPSULE:-}" ] && [ -n "$got_commit" ]; then
+                    if ! python3 "$ROOT/scripts/lib/emit_proof_capsule.py" --verify-capsule "$PROOF_CAPSULE" --expected-sha "$got_commit" >&2; then
+                        printf 'release_binary_probe: %s binary.gitCommit %s failed proof capsule verification (%s)\n' "$probe_file" "$got_commit" "$PROOF_CAPSULE" >&2
+                        failures=$((failures + 1))
+                    else
+                        capsule_verified=$((capsule_verified + 1))
+                    fi
+                fi
                 ;;
             *)
                 if [ "$got_verdict" != "pass" ] || [ "${got_checks:-0}" -lt 12 ] 2>/dev/null; then
                     printf 'release_binary_probe: %s verdict=%s checks=%s (want pass with >=12 checks)\n' "$probe_file" "${got_verdict:-<absent>}" "${got_checks:-0}" >&2
                     failures=$((failures + 1))
+                fi
+                if [ -n "${PROOF_CAPSULE:-}" ]; then
+                    if ! printf '%s' "$got_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+                        printf 'release_binary_probe: %s binary.gitCommit %s is not a 40-hex commit SHA required for --proof-capsule\n' "$probe_file" "${got_commit:-<absent>}" >&2
+                        failures=$((failures + 1))
+                    elif ! python3 "$ROOT/scripts/lib/emit_proof_capsule.py" --verify-capsule "$PROOF_CAPSULE" --expected-sha "$got_commit" >&2; then
+                        printf 'release_binary_probe: %s binary.gitCommit %s failed proof capsule verification (%s)\n' "$probe_file" "$got_commit" "$PROOF_CAPSULE" >&2
+                        failures=$((failures + 1))
+                    else
+                        capsule_verified=$((capsule_verified + 1))
+                    fi
                 fi
                 ;;
         esac
@@ -1136,6 +1279,10 @@ verify_release_dir() {
     if [ "$found" -eq 0 ]; then
         printf 'release_binary_probe: no ee-*.tar.xz archives found in %s\n' "$dir" >&2
         exit 1
+    fi
+    if [ -n "${PROOF_CAPSULE:-}" ] && [ "$capsule_verified" -eq 0 ] && [ "$failures" -eq 0 ]; then
+        printf 'release_binary_probe: --proof-capsule was supplied but no archive commit was verified against %s\n' "$PROOF_CAPSULE" >&2
+        failures=$((failures + 1))
     fi
     if [ "$failures" -gt 0 ]; then
         printf 'release_binary_probe: %s release-probe capture check(s) failed in %s\n' "$failures" "$dir" >&2
@@ -1148,7 +1295,7 @@ verify_release_dir() {
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
-ARCHIVE="" SHA="" EXPECTED_TARGET="" OUTPUT_FILE="" VERIFY_RELEASE_DIR=""
+ARCHIVE="" SHA="" EXPECTED_TARGET="" OUTPUT_FILE="" VERIFY_RELEASE_DIR="" PROOF_CAPSULE=""
 ALLOW_COMPILE_ONLY=() MODEL_CACHE="" WORKDIR="" REPLAY="" JSON=0 SELF_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1157,6 +1304,7 @@ while [ $# -gt 0 ]; do
         --expected-target) EXPECTED_TARGET="${2:-}"; shift 2 ;;
         --output) OUTPUT_FILE="${2:-}"; shift 2 ;;
         --verify-release-dir) VERIFY_RELEASE_DIR="${2:-}"; shift 2 ;;
+        --proof-capsule) PROOF_CAPSULE="${2:-}"; shift 2 ;;
         --allow-compile-only) ALLOW_COMPILE_ONLY+=("${2:-}"); shift 2 ;;
         --model-cache) MODEL_CACHE="${2:-}"; shift 2 ;;
         --workdir) WORKDIR="${2:-}"; shift 2 ;;
