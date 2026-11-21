@@ -319,6 +319,14 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 parent.display()
             )
         })?;
+        // This fixture seeds the database directly instead of calling init;
+        // preserve init's private state-directory contract explicitly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("secure fixture state directory: {error}"))?;
+        }
     }
 
     let canonical_workspace = canonical_fixture_path(workspace, "workspace")?;
@@ -668,6 +676,31 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) -> Resu
     // every single run.
     normalize_pack_slo_measurements(value)
         .map_err(|error| format!("pack SLO measurements are not self-consistent: {error}"))?;
+    // These two probes explicitly report that Unix modes cannot be inspected
+    // on non-Unix hosts. Canonicalize only that exact platform message; keep
+    // severity, tier and error fields visible to the contract comparison.
+    #[cfg(not(unix))]
+    if let Some(checks) = value
+        .pointer_mut("/data/checks")
+        .and_then(Value::as_array_mut)
+    {
+        for check in checks {
+            if check.get("message").and_then(Value::as_str)
+                != Some("Unix state permissions are not inspected on this platform.")
+            {
+                continue;
+            }
+            let path = match check.get("name").and_then(Value::as_str) {
+                Some("state_directory_permissions") => fixture.canonical_workspace.join(".ee"),
+                Some("state_file_permissions") => fixture.canonical_database.clone(),
+                _ => continue,
+            };
+            check["message"] = Value::String(format!(
+                "Private state at {} grants no group or other permissions.",
+                path.display()
+            ));
+        }
+    }
     scrub_json_contract_recursive(value, fixture);
     Ok(())
 }

@@ -3240,6 +3240,11 @@ fn classify_harness_hook(
     if hook.get("type").and_then(serde_json::Value::as_str) != Some("command") {
         return HarnessHookOwnership::UserCustom;
     }
+    // Explicit ownership takes precedence over copied command text or an old
+    // group marker. A user may keep an EE command under their own lifecycle.
+    if group_custom_marker || has_custom_harness_hook_marker(hook) {
+        return HarnessHookOwnership::UserCustom;
+    }
     if has_harness_hook_marker(hook)
         || hook.get("command").and_then(serde_json::Value::as_str) == Some(snippet.command.as_str())
         // Older installs mark the group, not its single command. A mixed
@@ -3248,12 +3253,10 @@ fn classify_harness_hook(
     {
         return HarnessHookOwnership::Managed;
     }
-    if !group_custom_marker
-        && !has_custom_harness_hook_marker(hook)
-        && hook
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|command| is_legacy_unmanaged_ee_hook_command(command, snippet))
+    if hook
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| is_legacy_unmanaged_ee_hook_command(command, snippet))
     {
         return HarnessHookOwnership::LegacyUnmanagedEe;
     }

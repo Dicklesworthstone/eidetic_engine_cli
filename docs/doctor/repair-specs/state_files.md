@@ -78,15 +78,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-permissions-too-permissive
 
-- **Label:** NOT-DETECTED (pinned gap; NOT coverage)
+- **Label:** REPAIR (implementation and executable oracle; RCH runtime verification pending)
 - **Severity:** P1. Scored P1 as `pop-state_files-permission_permissive`.
-- **Detector:** None. No doctor check reads file modes, and the chmod fixer `fix_state_file_permission_drift` is never dispatched by `--fix`.
+- **Detector:** On Unix, `state_directory_permissions` and `state_file_permissions` inspect canonical `.ee` and `.ee/ee.db` metadata. Group or other permission bits emit EE-E208 and affect core health. Symlinks, unexpected entry types and inspection failures emit EE-E209 without an automatic permission repair. Missing artifacts remain the responsibility of the workspace and database checks.
 - **Real trigger:** A healthy store whose private modes (`ee init` sets `.ee` 0700 and `ee.db` 0600) are opened to `.ee` 0755 and `ee.db` 0644, so any local user can read the memory store. `corrupt.sh` fails unless the baseline was private and the store is group/other readable afterwards.
-- **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
-- **Undo:** Not applicable. The modes are still open after `--fix`.
-- **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/ee.db`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the database bytes are unchanged. The witness is the mode string from `ls -ld` (portable across GNU and BSD): `ee.db` is group- and other-readable, and `.ee` is group- and other-readable and enterable, before and after `--fix`. (A first version used `find -perm`, whose flag text trips the contract's forbidden-token scan; bd-2oh15 c10006.)
-- **Negative control:** `corrupt.sh` requires the healthy store's baseline modes to be private before opening them up; `doctor_fixture_healthy_store` asserts the store is healthy first.
-- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker (corrupt 0, assert 0: "pinned gap confirmed").
+- **Repair:** Opt-in `--fix` dispatches `fix_state_directory_permission_drift` and `fix_state_file_permission_drift` to fixed canonical paths. `TightenPermissions` caps the directory at 0700 and database at 0600 through a no-follow descriptor, adding no permission bits, and journals the existing `chmod` action. Unreadable-store findings remain unresolved independently. WAL/SHM sidecars are outside this detector's scope.
+- **Undo:** Restore each recorded original mode exactly through the existing chmod inverse, preserving database bytes. Runtime validation refuses redirected paths and changed postconditions.
+- **Oracle:** `assert.sh` requires both EE-E208 findings with unchanged bytes/modes during read-only diagnosis, two applied permission fixers with `chmod` operations, actual 0700/0600 modes and healthy diagnosis after repair, no permission dispatch on a second fix, then exact 0755/0644 modes and the full original content digest after undo. The independent mode witness uses `ls -ld`, portable across GNU and BSD.
+- **Negative control:** `corrupt.sh` requires a healthy private store before opening it up. Unit tests cover private and more restrictive owner modes, missing paths, symlink and wrong-type refusal, and unresolved database failure alongside permission repair. Runtime tests exercise restrictive modes and no-follow refusal.
+- **Pinned sha:** Pending RCH verification of the implementation. Historical 02524267e measured the former gap only; it is not evidence that this repair roundtrip has run.
 
 ## fm-state_files-workspace-ambiguous-multiple-candidates
 

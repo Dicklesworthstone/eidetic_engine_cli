@@ -4,10 +4,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/doctor_fixtures/lib.sh
 . "$SCRIPT_DIR/../lib.sh"
 
-# NOT-DETECTED, PINNED GAP (bd-2oh15 survey c9983): `ee init` creates .ee as
+# Permission repair trigger (bd-2oh15 survey c9983): `ee init` creates .ee as
 # 0700 and ee.db as 0600. Here a healthy store is opened up to group and other
-# (.ee 0755, ee.db 0644), so any local user can read the memory store. No
-# doctor check reads file modes, and the chmod fixer is never dispatched.
+# (.ee 0755, ee.db 0644), so any local user can read the memory store.
+# Diagnosis must detect the exposure and opt-in repair must tighten it.
 FM="fm-state_files-permissions-too-permissive"
 target="$(doctor_fixture_target)"
 ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"

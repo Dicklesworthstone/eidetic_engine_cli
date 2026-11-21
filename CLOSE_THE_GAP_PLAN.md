@@ -4051,3 +4051,36 @@ Non-Blocking Parallel Hygiene (Parented to 1azkt, do NOT block .7 or .22):
 ```
 
 Part III remains active under §15.
+
+### 22.8 Core safety implementation follow-through — 2026-11-21
+
+The current source already contained much of `.80` and `.81`; this pass checked
+those implementations against their acceptance criteria and repaired concrete
+remaining defects instead of repeating the original implementation work.
+
+- **`.80` / `.75` — hook ownership (`f894e274`).** Explicit custom group and
+  child ownership now takes precedence over an exact EE command match or an old
+  managed singleton marker. Claude Code and Codex share the classifier. Added
+  regression coverage for status, mixed groups, repeat installation, and exact
+  undo, and corrected two existing test arguments from `&str` to `&Path`.
+- **`.81` — recoverable model staging (`cd85d3ea`).** Both automatic sweeping
+  and doctor inspection preserve live or unknown owners, including old empty
+  directories. Doctor moves confirmed abandoned trees into audited quarantine;
+  each move has a content fingerprint and an inverse. Undo refuses changed or
+  missing recovery artifacts, occupied destinations, and legacy deletion-only
+  receipts. Quarantine preserves bytes rather than freeing their disk space;
+  cross-filesystem moves refuse without deleting the source.
+- **`.83` — private state permissions.** Doctor now inspects the canonical
+  `.ee` directory and `.ee/ee.db` file, reports external-access drift, and routes
+  explicit repair through the existing action ledger. The new tightening
+  primitive removes permissions without granting owner permissions. Unsafe
+  paths receive a separate finding and no automatic repair. The previously
+  test-only file-permission fixer is now reachable, with detection, repair,
+  repeat-run, and exact permission/content undo regression coverage.
+
+Targeted nightly formatting, diff checks, and independent source review were
+completed. Rust compilation and behavioral execution are **not** claimed: the
+working environment has no RCH client, and the repository forbids local Cargo
+verification as a fallback. The `.80`, `.81`, and `.83` Beads therefore remain
+open pending their required executable evidence; the native Mac staging
+inventory/cleanup criterion and the broader `.83` debt are also still open.

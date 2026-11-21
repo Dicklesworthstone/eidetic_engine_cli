@@ -384,6 +384,10 @@ pub enum Op {
     /// Change file permissions (mode bits).
     Chmod { mode: u32 },
 
+    /// Remove permissions without granting any that are currently absent.
+    /// Uses the same `chmod` journal and exact-mode inverse as `Chmod`.
+    TightenPermissions { mode: u32 },
+
     /// AGENTS.md RULE 1: doctor never deletes. To remove a file from a
     /// canonical location, rename it under
     /// `.doctor/runs/<run-id>/quarantine/<rel-path>`.
@@ -440,8 +444,9 @@ pub enum Op {
     /// steps; the backup writer actor lands in a follow-up slice.
     SnapshotBackup { label: String, steps: Vec<String> },
 
-    /// Reclaim abandoned model download staging directories (`empty >= 1h`
-    /// or `non-empty dead-PID >= 24h`) under the resolved model store root.
+    /// Quarantine abandoned model download staging directories (`empty >= 1h`
+    /// or `non-empty >= 24h`, with a confirmed dead PID). Each move is an
+    /// ordinary journaled quarantine action, so undo restores the exact tree.
     ReclaimModelStagingDirs { steps: Vec<String> },
 }
 
@@ -453,6 +458,7 @@ impl Op {
             self,
             Self::WriteFile { .. }
                 | Self::Chmod { .. }
+                | Self::TightenPermissions { .. }
                 | Self::QuarantineByRename { .. }
                 | Self::CreateDirAll { .. }
                 | Self::RunIndexRebuild { .. }
@@ -482,7 +488,7 @@ impl Op {
         match self {
             Self::WriteFile { .. } => "write_file",
             Self::CreateDirAll { .. } => "create_dir_all",
-            Self::Chmod { .. } => "chmod",
+            Self::Chmod { .. } | Self::TightenPermissions { .. } => "chmod",
             Self::QuarantineByRename { .. } => "quarantine_by_rename",
             Self::Manual { .. } => "manual",
             Self::EmitDiagnostic { .. } => "emit_diagnostic",
@@ -514,6 +520,8 @@ pub struct ActionLine {
     pub kind: String,
     /// blake3 hex of bytes BEFORE the action (None when the file did not
     /// exist).
+    /// Directory quarantine entries use a tagged `tree-v1:<blake3>` digest
+    /// of relative names, entry types, link targets, and file bytes.
     pub before_hash: Option<String>,
     /// blake3 hex of bytes AFTER the action (None for QuarantineByRename of
     /// existing files — the after state is "not present").
@@ -950,11 +958,51 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         });
     }
 
-    let before_hash = if path.exists() && path.is_file() {
+    if matches!(&op, Op::ReclaimModelStagingDirs { .. }) && !ctx.dry_run {
+        validate_doctor_lifecycle_paths([path])?;
+        let mut receipt = None;
+        super::index_download_backoff::reclaim_abandoned_staging_dirs(path, false, |entry| {
+            validate_doctor_lifecycle_paths([entry.path.as_path()])?;
+            let destination = PathBuf::from("model-staging")
+                .join(format!("{:06}", ctx.state.action_count + 1))
+                .join(sanitize_path_for_run_dir(&entry.path));
+            // Rename preserves every byte and uses the existing no-replace
+            // primitive and undo ledger. Across filesystems it fails with
+            // EXDEV, leaving the source intact; never fall back to deletion.
+            receipt = Some(mutate(
+                ctx,
+                &entry.path,
+                Op::QuarantineByRename {
+                    dest_under_quarantine: destination,
+                },
+            )?);
+            Ok::<(), DoctorRuntimeError>(())
+        })?;
+        return receipt.ok_or(DoctorRuntimeError::NoOpIdempotent);
+    }
+
+    #[cfg(unix)]
+    let permission_target = if matches!(&op, Op::Chmod { .. } | Op::TightenPermissions { .. }) {
+        Some(open_doctor_permission_target(path)?)
+    } else {
+        None
+    };
+
+    let before_hash = if matches!(&op, Op::QuarantineByRename { .. }) && path.exists() {
+        Some(hash_quarantine_path(path)?)
+    } else if path.exists() && path.is_file() {
         Some(hash_file(path)?)
     } else {
         None
     };
+    #[cfg(unix)]
+    let before_mode = if let Some(target) = permission_target.as_ref() {
+        use std::os::unix::fs::PermissionsExt as _;
+        Some(target.metadata()?.permissions().mode())
+    } else {
+        read_mode(path)
+    };
+    #[cfg(not(unix))]
     let before_mode = read_mode(path);
 
     // Round-3 self-review (Bug #1): pre-check idempotence BEFORE staging a
@@ -975,7 +1023,7 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
                 }
             }
         }
-        Op::Chmod { mode } => {
+        Op::Chmod { mode } | Op::TightenPermissions { mode } => {
             #[cfg(unix)]
             {
                 // Bug #2: `read_mode` returns the full `st_mode` (with
@@ -986,7 +1034,11 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
                 // permission-bit window (0o7777 covers sticky/setuid/setgid
                 // plus user/group/other rwx).
                 let cur = before_mode.map(|m| m & 0o7777);
-                let want = *mode & 0o7777;
+                let want = if matches!(&op, Op::TightenPermissions { .. }) {
+                    cur.map_or(*mode & 0o7777, |current| current & *mode & 0o7777)
+                } else {
+                    *mode & 0o7777
+                };
                 if cur == Some(want) {
                     return Err(DoctorRuntimeError::NoOpIdempotent);
                 }
@@ -1084,17 +1136,33 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
                 after_hash = Some(hash_bytes(bytes));
             }
         }
-        Op::Chmod { mode } => {
+        Op::Chmod { mode } | Op::TightenPermissions { mode } => {
             #[cfg(unix)]
             {
-                if !ctx.dry_run {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    let perms = fs::Permissions::from_mode(*mode);
-                    fs::set_permissions(path, perms).map_err(|source| DoctorRuntimeError::Io {
-                        context: format!("Chmod({})", path.display()),
-                        source,
+                use std::os::unix::fs::PermissionsExt as _;
+                let target = permission_target
+                    .as_ref()
+                    .ok_or_else(|| DoctorRuntimeError::Io {
+                        context: "open permission repair target".to_owned(),
+                        source: io::Error::other("permission target descriptor is missing"),
                     })?;
+                let current = target.metadata()?.permissions().mode() & 0o7777;
+                let desired = if matches!(&op, Op::TightenPermissions { .. }) {
+                    current & *mode & 0o7777
+                } else {
+                    *mode & 0o7777
+                };
+                if !ctx.dry_run {
+                    validate_doctor_lifecycle_paths([path])?;
+                    let perms = fs::Permissions::from_mode(desired);
+                    target
+                        .set_permissions(perms)
+                        .map_err(|source| DoctorRuntimeError::Io {
+                            context: format!("Chmod({})", path.display()),
+                            source,
+                        })?;
                 }
+                after_mode = Some(desired);
             }
             #[cfg(not(unix))]
             {
@@ -1105,7 +1173,10 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
             // Mask to permission bits — the OS only honors 0o7777 for chmod,
             // and storing the user's input verbatim could mislead operators
             // reading actions.jsonl into thinking we wrote file-type bits too.
-            after_mode = Some(*mode & 0o7777);
+            #[cfg(not(unix))]
+            {
+                after_mode = Some(*mode & 0o7777);
+            }
             after_hash = before_hash.clone();
         }
         Op::CreateDirAll { mode: _ } => {
@@ -1236,7 +1307,9 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         }
         Op::ReclaimModelStagingDirs { .. } => {
             let summary =
-                super::index_download_backoff::reclaim_abandoned_staging_dirs(path, ctx.dry_run);
+                super::index_download_backoff::reclaim_abandoned_staging_dirs(path, true, |_| {
+                    Ok::<(), DoctorRuntimeError>(())
+                })?;
             if summary.reclaimed_count == 0 {
                 if summary.failed_count > 0 {
                     return Err(DoctorRuntimeError::Io {
@@ -1252,7 +1325,7 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
                 return Err(DoctorRuntimeError::NoOpIdempotent);
             }
             notes = Some(format!(
-                "reclaim_model_staging_dirs inspected={} reclaimed_dirs={} reclaimed_bytes={} kept={} failed={}",
+                "reclaim_model_staging_dirs inspected={} planned_quarantine_dirs={} bytes_preserved={} kept={} failed={}",
                 summary.inspected_count,
                 summary.reclaimed_count,
                 summary.reclaimed_bytes,
@@ -1794,6 +1867,14 @@ fn validate_undo_log(
             });
         }
         if completed.is_some() {
+            if action.kind == "reclaim_model_staging_dirs" {
+                return Err(DoctorRuntimeError::RunArtifactInvalid {
+                    path: undo_log_path.clone(),
+                    reason: format!(
+                        "line {line_number} claims undo for legacy staging deletion without a recovery artifact; restoration cannot be verified"
+                    ),
+                });
+            }
             successful.insert(sequence);
         }
     }
@@ -1869,7 +1950,9 @@ fn action_pre_state_matches(
         "chmod" => {
             #[cfg(unix)]
             {
-                Ok(read_mode(&action.path).map(|mode| mode & 0o7777)
+                use std::os::unix::fs::PermissionsExt as _;
+                let target = open_doctor_permission_target(&action.path)?;
+                Ok(Some(target.metadata()?.permissions().mode() & 0o7777)
                     == action.before_mode.map(|mode| mode & 0o7777))
             }
             #[cfg(not(unix))]
@@ -1890,13 +1973,25 @@ fn action_pre_state_matches(
             if let Some(source) = source.as_deref() {
                 validate_doctor_lifecycle_paths([source])?;
             }
-            let source_exists = source.as_deref().is_some_and(Path::exists);
-            let target_matches = match action.before_hash.as_deref() {
-                Some(expected) if action.path.is_file() => hash_file(&action.path)? == expected,
-                Some(_) => false,
-                None => action.path.exists(),
+            let source_exists = match source.as_deref().map(fs::symlink_metadata) {
+                Some(Ok(_)) => true,
+                Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => false,
+                Some(Err(error)) => return Err(error.into()),
+                None => false,
             };
-            Ok(target_matches && !source_exists)
+            if source_exists {
+                return Ok(false);
+            }
+            let Some(expected) = action.before_hash.as_deref() else {
+                // Old directory actions did not record content identity.
+                // Mere occupancy cannot prove their inverse completed.
+                return Ok(false);
+            };
+            match fs::symlink_metadata(&action.path) {
+                Ok(_) => Ok(hash_quarantine_path(&action.path)? == expected),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            }
         }
         "manual"
         | "emit_diagnostic"
@@ -1906,8 +2001,11 @@ fn action_pre_state_matches(
         | "run_migration"
         | "rewrite_jsonl"
         | "atomic_rewrite_toml"
-        | "snapshot_backup"
-        | "reclaim_model_staging_dirs" => Ok(true),
+        | "snapshot_backup" => Ok(true),
+        // Historical reclamation records deleted data without a recovery
+        // artifact. New runs emit quarantine actions instead; never report
+        // an old destructive action as successfully undone.
+        "reclaim_model_staging_dirs" => Ok(false),
         other => Err(DoctorRuntimeError::ActionsLogCorrupt {
             line_number: action.sequence as usize,
             reason: format!("unknown action kind: {other}"),
@@ -2047,7 +2145,8 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
-                let current_mode = read_mode(&action.path).map(|mode| mode & 0o7777);
+                let target = open_doctor_permission_target(&action.path)?;
+                let current_mode = Some(target.metadata()?.permissions().mode() & 0o7777);
                 let expected_after = action.after_mode.map(|mode| mode & 0o7777);
                 if current_mode != expected_after {
                     return Err(DoctorRuntimeError::UndoStateDrifted {
@@ -2062,7 +2161,7 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 }
                 if let Some(mode) = action.before_mode.map(|mode| mode & 0o7777) {
                     let perms = fs::Permissions::from_mode(mode);
-                    fs::set_permissions(&action.path, perms)?;
+                    target.set_permissions(perms)?;
                 }
             }
             #[cfg(not(unix))]
@@ -2146,31 +2245,79 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             // path between quarantine and undo, refuse rather than overwrite.
             // `UndoStateDrifted` is the right signal — the user can inspect
             // both the new occupant and the quarantine and decide.
-            if action.path.exists() {
-                let live_hash = if action.path.is_file() {
-                    hash_file(&action.path)?
-                } else {
-                    "<directory>".to_string()
-                };
-                return Err(DoctorRuntimeError::UndoStateDrifted {
-                    path: action.path.clone(),
-                    expected_hash: "<not present (quarantined)>".into(),
-                    observed_hash: live_hash,
-                });
+            match fs::symlink_metadata(&action.path) {
+                Ok(metadata) => {
+                    let live_hash = if metadata.file_type().is_symlink() {
+                        "<symlink>".to_owned()
+                    } else if metadata.is_file() {
+                        hash_file(&action.path)?
+                    } else {
+                        "<directory or special file>".to_owned()
+                    };
+                    return Err(DoctorRuntimeError::UndoStateDrifted {
+                        path: action.path.clone(),
+                        expected_hash: "<not present (quarantined)>".into(),
+                        observed_hash: live_hash,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            let quarantine_dest = action
+            let source = action
                 .quarantine_dest_rel
                 .as_ref()
-                .map(|rel| run_dir.join("quarantine").join(rel));
-            if let Some(source) = quarantine_dest {
-                validate_doctor_lifecycle_paths([source.as_path()])?;
-                if source.exists() {
-                    if let Some(parent) = action.path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::rename(&source, &action.path)?;
-                }
+                .map(|rel| run_dir.join("quarantine").join(rel))
+                .ok_or_else(|| DoctorRuntimeError::ActionsLogCorrupt {
+                    line_number: action.sequence as usize,
+                    reason: "quarantine action has no recovery path".to_owned(),
+                })?;
+            validate_doctor_lifecycle_paths([source.as_path(), action.path.as_path()])?;
+            // A missing recovery tree is an error, not a successful no-op.
+            fs::symlink_metadata(&source)?;
+            let expected = action.before_hash.as_deref().ok_or_else(|| DoctorRuntimeError::Io {
+                context: "verify legacy quarantined directory before undo".to_owned(),
+                source: io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this legacy directory action has no content fingerprint; inspect and restore its quarantine manually",
+                ),
+            })?;
+            let observed = hash_quarantine_path(&source)?;
+            if observed != expected {
+                return Err(DoctorRuntimeError::UndoBackupCorrupt {
+                    backup_path: source,
+                    expected_hash: expected.to_owned(),
+                    observed_hash: Some(observed),
+                });
             }
+            if let Some(parent) = action.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+            rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                &source,
+                rustix::fs::CWD,
+                &action.path,
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+            .map_err(|error| DoctorRuntimeError::Io {
+                context: format!(
+                    "restore quarantined {} without replacement",
+                    action.path.display()
+                ),
+                source: error.into(),
+            })?;
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+            fs::rename(&source, &action.path)?;
+        }
+        "reclaim_model_staging_dirs" => {
+            return Err(DoctorRuntimeError::Io {
+                context: "undo legacy model staging reclamation".to_owned(),
+                source: io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this legacy action has no recovery artifact; its deleted staging directories cannot be restored",
+                ),
+            });
         }
         "manual"
         | "emit_diagnostic"
@@ -2180,8 +2327,7 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
         | "run_migration"
         | "rewrite_jsonl"
         | "atomic_rewrite_toml"
-        | "snapshot_backup"
-        | "reclaim_model_staging_dirs" => {
+        | "snapshot_backup" => {
             // No-op for undo. These op kinds are advisory: `mutate()`
             // records planned-mutation evidence in `actions.jsonl` but does
             // not touch the doctor's blast-radius files itself. The actual
@@ -3740,12 +3886,33 @@ fn derive_run_id(target_sha: &str) -> String {
     )
 }
 
+#[cfg(unix)]
+fn open_doctor_permission_target(path: &Path) -> Result<fs::File, DoctorRuntimeError> {
+    validate_doctor_lifecycle_paths([path])?;
+    let target = open_doctor_inspect_file_for_read(path)?;
+    let metadata = target.metadata()?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: path.to_path_buf(),
+            reason: "permission repair target must be a regular file or directory".to_owned(),
+        });
+    }
+    Ok(target)
+}
+
 fn hash_file(path: &Path) -> Result<String, DoctorRuntimeError> {
     let mut hasher = blake3::Hasher::new();
-    let mut file = fs::File::open(path).map_err(|source| DoctorRuntimeError::Io {
-        context: format!("open for hashing: {}", path.display()),
-        source,
-    })?;
+    let mut file =
+        open_doctor_inspect_file_for_read(path).map_err(|source| DoctorRuntimeError::Io {
+            context: format!("open for hashing: {}", path.display()),
+            source,
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: path.to_path_buf(),
+            reason: "hash target is not a regular file".to_owned(),
+        });
+    }
     let mut buf = [0u8; 8192];
     loop {
         let n = file
@@ -3760,6 +3927,73 @@ fn hash_file(path: &Path) -> Result<String, DoctorRuntimeError> {
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// File hashes retain their existing wire form. Directory hashes bind entry
+/// names, types, symlink targets, and file bytes; the tag prevents a file from
+/// masquerading as an already-restored directory without a schema change.
+fn hash_quarantine_path(path: &Path) -> Result<String, DoctorRuntimeError> {
+    validate_doctor_lifecycle_paths([path])?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() {
+        return hash_file(path);
+    }
+    if !metadata.is_dir() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: path.to_path_buf(),
+            reason: "quarantine root must be a regular file or directory".to_owned(),
+        });
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.doctor.quarantine.tree.v1\0");
+    hash_quarantine_tree(path, Path::new(""), &mut hasher, 0)?;
+    Ok(format!("tree-v1:{}", hasher.finalize().to_hex()))
+}
+
+fn hash_quarantine_tree(
+    root: &Path,
+    relative: &Path,
+    hasher: &mut blake3::Hasher,
+    depth: usize,
+) -> Result<(), DoctorRuntimeError> {
+    let path = root.join(relative);
+    if depth > 64 {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path,
+            reason: "quarantine tree exceeds the fingerprint depth limit".to_owned(),
+        });
+    }
+    let name = relative.as_os_str().as_encoded_bytes();
+    hasher.update(&(name.len() as u64).to_le_bytes());
+    hasher.update(name);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() {
+        // A link inside the tree is data. Never read through it.
+        hasher.update(b"L");
+        let target = fs::read_link(&path)?;
+        let target = target.as_os_str().as_encoded_bytes();
+        hasher.update(&(target.len() as u64).to_le_bytes());
+        hasher.update(target);
+    } else if metadata.is_file() {
+        validate_doctor_lifecycle_paths([path.as_path()])?;
+        hasher.update(b"F");
+        hasher.update(hash_file(&path)?.as_bytes());
+    } else if metadata.is_dir() {
+        validate_doctor_lifecycle_paths([path.as_path()])?;
+        hasher.update(b"D");
+        let mut children = fs::read_dir(&path)?.collect::<io::Result<Vec<_>>>()?;
+        children.sort_by_key(fs::DirEntry::file_name);
+        hasher.update(&(children.len() as u64).to_le_bytes());
+        for child in children {
+            hash_quarantine_tree(root, &relative.join(child.file_name()), hasher, depth + 1)?;
+        }
+    } else {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path,
+            reason: "quarantine tree contains a special file".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -4262,6 +4496,15 @@ fn open_doctor_inspect_file_for_read(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     configure_doctor_inspect_open_no_follow(&mut options);
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Inspect the opened descriptor's type before reading or chmodding.
+        // A replaced FIFO must not block that inspection waiting for a writer.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
     options.open(path)
 }
 
@@ -5551,6 +5794,475 @@ mod tests {
         assert!(!target.exists());
         assert!(ctx.run_dir().join("quarantine").join("trash.tmp").exists());
         assert_eq!(line.kind, "quarantine_by_rename");
+    }
+
+    #[cfg(unix)]
+    fn dead_staging_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[cfg(unix)]
+    fn old_model_staging(root: &Path, pid: u32, suffix: &str, payload: Option<&[u8]>) -> PathBuf {
+        let directory = root.join(format!(".potion-test-download-{pid}-{suffix}"));
+        fs::create_dir_all(&directory).unwrap();
+        if let Some(payload) = payload {
+            fs::write(directory.join("model.safetensors.part"), payload).unwrap();
+        }
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        fs::File::open(&directory)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    fn model_staging_op() -> Op {
+        Op::ReclaimModelStagingDirs { steps: Vec::new() }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_staging_repair_quarantines_each_directory_and_undo_restores_bytes() {
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let models = workspace.join("models");
+        let dead_pid = dead_staging_pid();
+        let empty = old_model_staging(&models, dead_pid, "0001", None);
+        let partial = old_model_staging(&models, dead_pid, "0002", Some(b"partial model bytes"));
+        fs::create_dir(partial.join("nested")).unwrap();
+        fs::write(
+            partial.join("nested/tokenizer.json.part"),
+            b"tokenizer bytes",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("model.safetensors.part", partial.join("partial-link")).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        fs::File::open(&partial)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let live = old_model_staging(&models, std::process::id(), "live", None);
+        let unknown = old_model_staging(&models, u32::MAX, "unknown", None);
+        let installed = models.join("potion-test");
+        fs::create_dir(&installed).unwrap();
+        fs::write(installed.join("model.safetensors"), b"installed model").unwrap();
+        let linked = models.join(format!(".potion-test-download-{dead_pid}-linked"));
+        std::os::unix::fs::symlink(&installed, &linked).unwrap();
+
+        let mut ctx = start_run(&workspace);
+        let run_dir = ctx.run_dir().to_path_buf();
+        let receipt = mutate(&mut ctx, &models, model_staging_op()).unwrap();
+        assert_eq!(receipt.kind, "quarantine_by_rename");
+        assert_eq!(ctx.state.action_count, 2);
+        assert!(!empty.exists());
+        assert!(!partial.exists());
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        assert!(
+            fs::symlink_metadata(&linked)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(installed.join("model.safetensors")).unwrap(),
+            b"installed model"
+        );
+        let actions = fs::read_to_string(run_dir.join("actions.jsonl")).unwrap();
+        let actions: Vec<ActionLine> = actions
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(actions.len(), 2);
+        for action in &actions {
+            assert_eq!(action.kind, "quarantine_by_rename");
+            let quarantined = run_dir
+                .join("quarantine")
+                .join(action.quarantine_dest_rel.as_ref().unwrap());
+            assert!(quarantined.is_dir());
+            if action.path == partial {
+                assert_eq!(
+                    fs::read(quarantined.join("model.safetensors.part")).unwrap(),
+                    b"partial model bytes"
+                );
+            }
+        }
+        assert!(matches!(
+            mutate(&mut ctx, &models, model_staging_op()),
+            Err(DoctorRuntimeError::NoOpIdempotent)
+        ));
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let summary = replay_test_undo(&run_dir).unwrap();
+        assert!(matches!(summary.status, RunStatus::Undone));
+        assert!(empty.is_dir());
+        assert_eq!(
+            fs::read(partial.join("model.safetensors.part")).unwrap(),
+            b"partial model bytes"
+        );
+        assert_eq!(
+            fs::read(partial.join("nested/tokenizer.json.part")).unwrap(),
+            b"tokenizer bytes"
+        );
+        assert_eq!(
+            fs::read_link(partial.join("partial-link")).unwrap(),
+            PathBuf::from("model.safetensors.part")
+        );
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        assert!(matches!(
+            replay_test_undo(&run_dir).unwrap().status,
+            RunStatus::Undone
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_staging_dry_run_preserves_all_candidates() {
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let models = workspace.join("models");
+        let staging = old_model_staging(&models, dead_staging_pid(), "0001", Some(b"keep"));
+        let mut ctx =
+            RunContext::start(&workspace, "dry-staging", vec![workspace.clone()], true).unwrap();
+        let receipt = mutate(&mut ctx, &models, model_staging_op()).unwrap();
+        assert_eq!(receipt.kind, "reclaim_model_staging_dirs");
+        assert!(
+            receipt
+                .notes
+                .as_deref()
+                .unwrap()
+                .contains("planned_quarantine_dirs=1")
+        );
+        assert_eq!(
+            fs::read(staging.join("model.safetensors.part")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            fs::read_dir(ctx.run_dir().join("quarantine"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_staging_partial_repair_keeps_an_undo_ledger_when_later_destination_is_unsafe() {
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let models = workspace.join("models");
+        let dead_pid = dead_staging_pid();
+        let first = old_model_staging(&models, dead_pid, "0001", Some(b"first"));
+        let second = old_model_staging(&models, dead_pid, "0002", Some(b"second"));
+        let external = workspace.join("external");
+        fs::create_dir(&external).unwrap();
+        let mut ctx = start_run(&workspace);
+        let run_dir = ctx.run_dir().to_path_buf();
+        let destinations = run_dir.join("quarantine/model-staging");
+        fs::create_dir(&destinations).unwrap();
+        std::os::unix::fs::symlink(&external, destinations.join("000002")).unwrap();
+        assert!(mutate(&mut ctx, &models, model_staging_op()).is_err());
+        assert_eq!(ctx.state.action_count, 1);
+        assert!(!first.exists());
+        assert_eq!(
+            fs::read(second.join("model.safetensors.part")).unwrap(),
+            b"second"
+        );
+        assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
+        ctx.finish(RunStatus::CompletedPartial).unwrap();
+        assert!(matches!(
+            replay_test_undo(&run_dir).unwrap().status,
+            RunStatus::Undone
+        ));
+        assert_eq!(
+            fs::read(first.join("model.safetensors.part")).unwrap(),
+            b"first"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_staging_undo_preserves_new_occupants_and_dangling_symlinks() {
+        for dangling_symlink in [false, true] {
+            let ws = fresh_workspace();
+            let workspace = ws.path().canonicalize().unwrap();
+            let models = workspace.join("models");
+            let staging = old_model_staging(&models, dead_staging_pid(), "0001", Some(b"original"));
+            let mut ctx = start_run(&workspace);
+            let run_dir = ctx.run_dir().to_path_buf();
+            let receipt = mutate(&mut ctx, &models, model_staging_op()).unwrap();
+            let saved = run_dir
+                .join("quarantine")
+                .join(receipt.quarantine_dest_rel.unwrap());
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+            if dangling_symlink {
+                std::os::unix::fs::symlink(models.join("missing-target"), &staging).unwrap();
+            } else {
+                fs::create_dir(&staging).unwrap();
+                fs::write(staging.join("unrelated"), b"new owner").unwrap();
+            }
+            let result = replay_test_undo(&run_dir);
+            assert!(matches!(
+                result,
+                Err(_)
+                    | Ok(UndoSummary {
+                        status: RunStatus::UndonePartial,
+                        ..
+                    })
+            ));
+            assert_eq!(
+                fs::read(saved.join("model.safetensors.part")).unwrap(),
+                b"original"
+            );
+            if dangling_symlink {
+                assert!(
+                    fs::symlink_metadata(&staging)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                assert!(!models.join("missing-target").exists());
+            } else {
+                assert_eq!(fs::read(staging.join("unrelated")).unwrap(), b"new owner");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_staging_reclamation_cannot_claim_successful_undo() {
+        let ws = fresh_workspace();
+        let mut ctx = start_run(ws.path());
+        let mut action = mutate(
+            &mut ctx,
+            &ws.path().join("models"),
+            Op::Manual { steps: Vec::new() },
+        )
+        .unwrap();
+        action.kind = "reclaim_model_staging_dirs".to_owned();
+        assert!(
+            matches!(undo_one(ctx.run_dir(), &action), Err(DoctorRuntimeError::Io { source, .. }) if source.kind() == io::ErrorKind::Unsupported)
+        );
+        let forged_receipt = serde_json::json!({
+            "schema": "ee.doctor.undo_entry.v1",
+            "sequence": action.sequence,
+            "path": action.path.display().to_string(),
+            "kind": action.kind,
+            "undone_at": "2026-11-21T00:00:00Z"
+        })
+        .to_string();
+        assert!(matches!(
+            validate_undo_log(ctx.run_dir(), &forged_receipt, &[action]),
+            Err(DoctorRuntimeError::RunArtifactInvalid { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_staging_quarantine_cannot_be_replaced_by_unrelated_path_or_symlink() {
+        for replacement in ["missing", "directory", "file", "symlink"] {
+            let ws = fresh_workspace();
+            let workspace = ws.path().canonicalize().unwrap();
+            let models = workspace.join("models");
+            let staging = old_model_staging(&models, dead_staging_pid(), "0001", Some(b"original"));
+            let mut ctx = start_run(&workspace);
+            let run_dir = ctx.run_dir().to_path_buf();
+            let receipt = mutate(&mut ctx, &models, model_staging_op()).unwrap();
+            assert!(
+                receipt
+                    .before_hash
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("tree-v1:")
+            );
+            let saved = run_dir
+                .join("quarantine")
+                .join(receipt.quarantine_dest_rel.unwrap());
+            let retained = workspace.join("retained-original");
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+            fs::rename(&saved, &retained).unwrap();
+            match replacement {
+                "directory" => {
+                    fs::create_dir(&staging).unwrap();
+                    fs::write(staging.join("model.safetensors.part"), b"different").unwrap();
+                }
+                "file" => fs::write(&staging, b"replacement file").unwrap(),
+                "symlink" => std::os::unix::fs::symlink(&retained, &staging).unwrap(),
+                _ => {}
+            }
+            assert!(matches!(
+                replay_test_undo(&run_dir),
+                Err(_)
+                    | Ok(UndoSummary {
+                        status: RunStatus::UndonePartial,
+                        ..
+                    })
+            ));
+            assert_eq!(
+                fs::read(retained.join("model.safetensors.part")).unwrap(),
+                b"original"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn altered_staging_quarantine_is_refused_before_restoration() {
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let models = workspace.join("models");
+        let staging = old_model_staging(&models, dead_staging_pid(), "0001", Some(b"original"));
+        let mut ctx = start_run(&workspace);
+        let run_dir = ctx.run_dir().to_path_buf();
+        let receipt = mutate(&mut ctx, &models, model_staging_op()).unwrap();
+        let saved = run_dir
+            .join("quarantine")
+            .join(receipt.quarantine_dest_rel.unwrap());
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+        fs::write(saved.join("model.safetensors.part"), b"changed quarantine").unwrap();
+        let summary = replay_test_undo(&run_dir).unwrap();
+        assert!(matches!(summary.status, RunStatus::UndonePartial));
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read(saved.join("model.safetensors.part")).unwrap(),
+            b"changed quarantine"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_tightening_preserves_owner_restrictions_and_undo_restores_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let file = workspace.join("private.db");
+        fs::write(&file, b"private").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        let directory = workspace.join("private-state");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+        let mut ctx = start_run(&workspace);
+        let run_dir = ctx.run_dir().to_path_buf();
+        let file_action = mutate(&mut ctx, &file, Op::TightenPermissions { mode: 0o600 }).unwrap();
+        let directory_action =
+            mutate(&mut ctx, &directory, Op::TightenPermissions { mode: 0o700 }).unwrap();
+        assert_eq!(file_action.kind, "chmod");
+        assert_eq!(file_action.after_mode, Some(0o400));
+        assert_eq!(directory_action.after_mode, Some(0o500));
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o400
+        );
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+            0o500
+        );
+        assert!(matches!(
+            mutate(&mut ctx, &file, Op::TightenPermissions { mode: 0o600 }),
+            Err(DoctorRuntimeError::NoOpIdempotent)
+        ));
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+        assert!(matches!(
+            replay_test_undo(&run_dir).unwrap().status,
+            RunStatus::Undone
+        ));
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o444
+        );
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_chmod_still_grants_explicit_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let file = workspace.join("explicit-mode");
+        fs::write(&file, b"keep").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+        let mut ctx = start_run(&workspace);
+        let action = mutate(&mut ctx, &file, Op::Chmod { mode: 0o600 }).unwrap();
+        assert_eq!(action.after_mode, Some(0o600));
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_tightening_refuses_symlink_targets_and_ancestors() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let real = workspace.join("real");
+        fs::create_dir(&real).unwrap();
+        let file = real.join("private.db");
+        fs::write(&file, b"unchanged").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let linked_file = workspace.join("linked-file");
+        std::os::unix::fs::symlink(&file, &linked_file).unwrap();
+        let linked_directory = workspace.join("linked-dir");
+        std::os::unix::fs::symlink(&real, &linked_directory).unwrap();
+        let mut ctx = start_run(&workspace);
+        for target in [linked_file, linked_directory.join("private.db")] {
+            assert!(matches!(
+                mutate(&mut ctx, &target, Op::TightenPermissions { mode: 0o600 }),
+                Err(DoctorRuntimeError::SymlinkedRunRoot { .. })
+            ));
+        }
+        assert_eq!(ctx.state.action_count, 0);
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_undo_cannot_accept_or_chmod_a_replacement_symlink() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let ws = fresh_workspace();
+        let workspace = ws.path().canonicalize().unwrap();
+        let file = workspace.join("private.db");
+        let unrelated = workspace.join("unrelated.db");
+        for target in [&file, &unrelated] {
+            fs::write(target, b"keep").unwrap();
+            fs::set_permissions(target, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut ctx = start_run(&workspace);
+        let run_dir = ctx.run_dir().to_path_buf();
+        mutate(&mut ctx, &file, Op::TightenPermissions { mode: 0o600 }).unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+        fs::rename(&file, workspace.join("retained.db")).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &file).unwrap();
+        assert!(matches!(
+            replay_test_undo(&run_dir),
+            Err(_)
+                | Ok(UndoSummary {
+                    status: RunStatus::UndonePartial,
+                    ..
+                })
+        ));
+        assert!(
+            fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::metadata(&unrelated).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
     }
 
     #[test]

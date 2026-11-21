@@ -435,6 +435,8 @@ impl DoctorReport {
             check_cass(workspace_path).advisory(),
             check_wal_pressure(workspace_path).advisory(),
             check_model_staging_dirs().advisory(),
+            check_state_directory_permissions(workspace_path),
+            check_state_file_permissions(workspace_path),
         ];
 
         let overall_healthy = checks.iter().all(CheckResult::is_topline_healthy);
@@ -2934,6 +2936,115 @@ fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
     )
 }
 
+fn check_state_directory_permissions(workspace_path: Option<&Path>) -> CheckResult {
+    check_private_state_permissions(workspace_path, "state_directory_permissions", None)
+}
+
+fn check_state_file_permissions(workspace_path: Option<&Path>) -> CheckResult {
+    check_private_state_permissions(workspace_path, "state_file_permissions", Some("ee.db"))
+}
+
+/// Inspect only the canonical state directory and database. Metadata probes
+/// reject symlinks at either component, and never open the database.
+/// Missing state is diagnosed by the workspace/database checks; it is not a
+/// permission finding and must not manufacture a chmod target.
+#[cfg(unix)]
+fn check_private_state_permissions(
+    workspace_path: Option<&Path>,
+    check_name: &'static str,
+    file_name: Option<&str>,
+) -> CheckResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::ok(
+            check_name,
+            "No workspace selected; permission inspection skipped.",
+        );
+    };
+    let state_directory = workspace_path.join(".ee");
+    let unavailable = |path: &Path, reason: &str| {
+        CheckResult::warning(
+            check_name,
+            format!(
+                "Cannot safely inspect private state permissions at {}: {reason}. No automatic permission repair is offered.",
+                path.display()
+            ),
+            error_codes::STATE_PERMISSIONS_UNAVAILABLE,
+        )
+    };
+    let absent = |path: &Path| {
+        CheckResult::ok(
+            check_name,
+            format!(
+                "{} is absent; permission inspection skipped.",
+                path.display()
+            ),
+        )
+    };
+    let directory_metadata = match std::fs::symlink_metadata(&state_directory) {
+        Ok(metadata) if metadata.is_dir() => metadata,
+        Ok(_) => {
+            return unavailable(
+                &state_directory,
+                "expected a directory, not a symlink or other entry",
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return absent(&state_directory);
+        }
+        Err(error) => return unavailable(&state_directory, &error.to_string()),
+    };
+    let (path, metadata) = match file_name {
+        Some(file_name) => {
+            let path = state_directory.join(file_name);
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => {
+                    return unavailable(
+                        &path,
+                        "expected a regular file, not a symlink or other entry",
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return absent(&path),
+                Err(error) => return unavailable(&path, &error.to_string()),
+            };
+            (path, metadata)
+        }
+        None => (state_directory, directory_metadata),
+    };
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return CheckResult::warning(
+            check_name,
+            format!(
+                "Private state at {} has mode {mode:04o}, granting group or other users access. Opt-in repair removes those permissions without adding owner permissions.",
+                path.display()
+            ),
+            error_codes::STATE_PERMISSIONS_TOO_PERMISSIVE,
+        );
+    }
+    CheckResult::ok(
+        check_name,
+        format!(
+            "Private state at {} grants no group or other permissions.",
+            path.display()
+        ),
+    )
+}
+
+#[cfg(not(unix))]
+fn check_private_state_permissions(
+    _workspace_path: Option<&Path>,
+    check_name: &'static str,
+    _file_name: Option<&str>,
+) -> CheckResult {
+    CheckResult::ok(
+        check_name,
+        "Unix state permissions are not inspected on this platform.",
+    )
+}
+
 #[path = "doctor_database_failure.rs"]
 mod database_failure;
 
@@ -3952,7 +4063,7 @@ fn model_staging_dirs_check_from_inventory(
     CheckResult::warning(
         "model_staging_dirs",
         format!(
-            "{} abandoned model download staging director{} ({} empty, {} dead-pid non-empty, {} reclaimable bytes) can be reclaimed safely.",
+            "{} abandoned model download staging director{} with confirmed dead PIDs ({} empty, {} non-empty, {} bytes) can be quarantined reversibly.",
             inventory.reclaimable_count,
             if inventory.reclaimable_count == 1 {
                 "y"
@@ -4831,6 +4942,172 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_state_permission_checks_detect_drift_without_opening_the_store() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let state = temp.path().join(".ee");
+        let database = state.join("ee.db");
+        std::fs::create_dir(&state).map_err(|error| error.to_string())?;
+        let original = b"not a database: permission inspection must not open or recover it";
+        std::fs::write(&database, original).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        for check in [
+            check_state_directory_permissions(Some(temp.path())),
+            check_state_file_permissions(Some(temp.path())),
+        ] {
+            ensure(
+                check.severity,
+                CheckSeverity::Warning,
+                "exposure is reported",
+            )?;
+            ensure(
+                check.error_code.map(|code| code.id),
+                Some("EE-E208"),
+                "permission finding",
+            )?;
+            ensure(
+                check.tier,
+                CheckTier::Core,
+                "privacy affects workspace health",
+            )?;
+        }
+        ensure(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            original.to_vec(),
+            "inspection preserves database bytes",
+        )?;
+        ensure(
+            std::fs::metadata(&state)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "inspection preserves directory mode",
+        )?;
+        ensure(
+            std::fs::metadata(&database)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "inspection preserves file mode",
+        )?;
+
+        for (directory_mode, file_mode) in [(0o700, 0o600), (0o500, 0o400)] {
+            std::fs::set_permissions(&database, std::fs::Permissions::from_mode(file_mode))
+                .map_err(|error| error.to_string())?;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(directory_mode))
+                .map_err(|error| error.to_string())?;
+            let directory_check = check_state_directory_permissions(Some(temp.path()));
+            let file_check = check_state_file_permissions(Some(temp.path()));
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+            ensure(
+                directory_check.severity,
+                CheckSeverity::Ok,
+                "private directory remains healthy",
+            )?;
+            ensure(
+                file_check.severity,
+                CheckSeverity::Ok,
+                "private file remains healthy",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_state_permission_checks_refuse_symlinks_and_unexpected_types() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let external = temp.path().join("external");
+        std::fs::create_dir(&external).map_err(|error| error.to_string())?;
+        let external_database = external.join("ee.db");
+        std::fs::write(&external_database, b"external private state")
+            .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&external_database, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let directory_link_workspace = temp.path().join("directory-link");
+        std::fs::create_dir(&directory_link_workspace).map_err(|error| error.to_string())?;
+        symlink(&external, directory_link_workspace.join(".ee"))
+            .map_err(|error| error.to_string())?;
+        let file_link_workspace = temp.path().join("file-link");
+        std::fs::create_dir_all(file_link_workspace.join(".ee"))
+            .map_err(|error| error.to_string())?;
+        symlink(&external_database, file_link_workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        let wrong_type_workspace = temp.path().join("wrong-type");
+        std::fs::create_dir_all(wrong_type_workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+
+        for check in [
+            check_state_directory_permissions(Some(&directory_link_workspace)),
+            check_state_file_permissions(Some(&directory_link_workspace)),
+            check_state_file_permissions(Some(&file_link_workspace)),
+            check_state_file_permissions(Some(&wrong_type_workspace)),
+        ] {
+            ensure(
+                check.error_code.map(|code| code.id),
+                Some("EE-E209"),
+                "unsafe inspection remains explicit",
+            )?;
+            ensure(
+                super::super::doctor_fixers::fix_finding_for_check(
+                    check.error_code.map(|code| code.id),
+                    check.name,
+                    false,
+                ),
+                None,
+                "unsafe path has no automatic repair",
+            )?;
+        }
+        ensure(
+            std::fs::metadata(&external_database)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "external target is unchanged",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_private_state_does_not_manufacture_permission_repairs() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        for workspace in [None, Some(temp.path())] {
+            for check in [
+                check_state_directory_permissions(workspace),
+                check_state_file_permissions(workspace),
+            ] {
+                ensure(
+                    check.severity,
+                    CheckSeverity::Ok,
+                    "missing state belongs to existing workspace/database checks",
+                )?;
+                ensure(
+                    check.error_code,
+                    None,
+                    "no permission repair for missing state",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// bd-2vq2z.15: the semantic-weight lint must fire on a hash tier and stay
@@ -7704,11 +7981,17 @@ mod tests {
 
     #[test]
     fn gathered_checks_only_core_loop_drives_topline() {
-        // ADR 0081 / bd-1et0v.12: only the store/retrieve memory loop is CORE.
-        // Every other gathered check must be ADVISORY so optional subsystems
-        // never flip the top-line. Partition test — robust to which advisory
-        // checks happen to be present in this environment.
-        const CORE: &[&str] = &["runtime", "workspace", "database", "search_index"];
+        // The store/retrieve memory loop and private state permissions are
+        // CORE. Optional subsystems stay ADVISORY and cannot flip the
+        // top-line. Partition test — robust to optional checks in this host.
+        const CORE: &[&str] = &[
+            "runtime",
+            "workspace",
+            "database",
+            "search_index",
+            "state_directory_permissions",
+            "state_file_permissions",
+        ];
         let report = DoctorReport::gather_with_workspace(None);
         for check in &report.checks {
             let expected = if CORE.contains(&check.name) {
@@ -8109,7 +8392,7 @@ mod remote_embedding_endpoint_tests {
             warn_check.message
         );
         assert!(
-            warn_check.message.contains("4096 reclaimable bytes"),
+            warn_check.message.contains("4096 bytes"),
             "{}",
             warn_check.message
         );

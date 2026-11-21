@@ -527,7 +527,14 @@ fn normalize_doctor_platform_variants_for_target(
             let Some(name) = check
                 .get("name")
                 .and_then(Value::as_str)
-                .filter(|name| is_platform_specific_doctor_check(name))
+                .filter(|name| {
+                    is_platform_specific_doctor_check(name)
+                        || (windows_paths
+                            && matches!(
+                                *name,
+                                "state_directory_permissions" | "state_file_permissions"
+                            ))
+                })
                 .map(str::to_owned)
             else {
                 continue;
