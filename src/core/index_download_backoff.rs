@@ -255,11 +255,12 @@ pub(crate) fn staging_reclaim_root() -> PathBuf {
 #[must_use]
 pub(crate) fn staging_search_roots_under(root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![root.to_path_buf()];
-    if configured_embed_model_dir().is_none() {
-        let model2vec = root.join("model2vec");
-        if model2vec.is_dir() && model2vec != root {
-            roots.push(model2vec);
-        }
+    let model2vec = root.join("model2vec");
+    if model2vec != root
+        && std::fs::symlink_metadata(&model2vec)
+            .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+    {
+        roots.push(model2vec);
     }
     roots
 }
@@ -276,7 +277,7 @@ fn parse_staging_dir_name(name: &str) -> Option<(String, u32)> {
         return None;
     }
     let (pid_str, seq) = tail.split_once('-')?;
-    if seq.is_empty() {
+    if seq.is_empty() || pid_str.is_empty() || !pid_str.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let pid = pid_str.parse::<u32>().ok()?;
@@ -431,7 +432,10 @@ fn reclaim_abandoned_staging_dirs_in_roots_at(
                 if dry_run {
                     summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
                     ("dry_run_reclaim_empty", 0u64)
-                } else if std::fs::remove_dir(&entry.path).is_ok() {
+                } else if std::fs::symlink_metadata(&entry.path)
+                    .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+                    && std::fs::remove_dir(&entry.path).is_ok()
+                {
                     summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
                     summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
                     ("reclaim_empty", entry.bytes)
@@ -445,7 +449,10 @@ fn reclaim_abandoned_staging_dirs_in_roots_at(
                     summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
                     summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
                     ("dry_run_reclaim_dead_pid", entry.bytes)
-                } else if std::fs::remove_dir_all(&entry.path).is_ok() {
+                } else if std::fs::symlink_metadata(&entry.path)
+                    .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+                    && std::fs::remove_dir_all(&entry.path).is_ok()
+                {
                     summary.reclaimed_count = summary.reclaimed_count.saturating_add(1);
                     summary.reclaimed_bytes = summary.reclaimed_bytes.saturating_add(entry.bytes);
                     ("reclaim_dead_pid", entry.bytes)
@@ -663,6 +670,25 @@ mod tests {
             parse_staging_dir_name(".potion-multilingual-128M-download-123-"),
             None
         );
+        assert_eq!(
+            parse_staging_dir_name(".potion-multilingual-128M-download-+123-1"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_search_roots_under_skips_symlinked_model2vec() -> TestResult {
+        let root = temp_root("ee-staging-symlink-m2v-")?;
+        let external = root.path().join("external");
+        std::fs::create_dir_all(&external).map_err(|error| error.to_string())?;
+        let model_root = root.path().join("models");
+        std::fs::create_dir_all(&model_root).map_err(|error| error.to_string())?;
+        let link = model_root.join("model2vec");
+        std::os::unix::fs::symlink(&external, &link).map_err(|error| error.to_string())?;
+
+        assert_eq!(staging_search_roots_under(&model_root), vec![model_root]);
+        Ok(())
     }
 
     #[test]

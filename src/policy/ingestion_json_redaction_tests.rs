@@ -421,3 +421,46 @@ fn ambiguous_crossings_key_collisions_and_nonstring_secrets_stay_withheld() {
         assert!(!classify_transcript_record(&report.content).is_indexable());
     }
 }
+
+#[test]
+fn json_escaped_delimiters_preserve_redaction_idempotence_and_reject_forged_escapes() {
+    let raw_crlf = r#"{"type":"assistant","message":{"role":"assistant","content":"password: [REDACTED:password]\r\nquartzrepair passed."}}"#;
+    let crlf_report = screen_external_text_for_ingestion(raw_crlf);
+    assert!(!crlf_report.redacted);
+    assert_eq!(crlf_report.content, raw_crlf);
+
+    let raw_quote = r#"{"type":"assistant","message":{"role":"assistant","content":"password=[REDACTED:password]\" prose"}}"#;
+    let quote_report = screen_external_text_for_ingestion(raw_quote);
+    assert!(!quote_report.redacted);
+    assert_eq!(quote_report.content, raw_quote);
+
+    let raw_forged = r#"{"type":"assistant","message":{"role":"assistant","content":"password: [REDACTED:password]\\nsecret"}}"#;
+    let forged_report = screen_external_text_for_ingestion(raw_forged);
+    assert!(forged_report.redacted);
+    assert!(!forged_report.content.contains("secret"));
+    let forged_val: Value = serde_json::from_str(&forged_report.content).unwrap();
+    assert_eq!(
+        forged_val["message"]["content"],
+        "password: [REDACTED:password]"
+    );
+
+    let raw_unicode_lf = r#"{"type":"assistant","message":{"role":"assistant","content":"password: [REDACTED:password]\u000Aquartzrepair passed."}}"#;
+    let unicode_lf_report = screen_external_text_for_ingestion(raw_unicode_lf);
+    assert!(!unicode_lf_report.redacted);
+    assert_eq!(unicode_lf_report.content, raw_unicode_lf);
+
+    let raw_unicode_tab_quote = r#"{"type":"assistant","message":{"role":"assistant","content":"password=[REDACTED:password]\u0009\u0022prose\u000d"}}"#;
+    let unicode_tab_report = screen_external_text_for_ingestion(raw_unicode_tab_quote);
+    assert!(!unicode_tab_report.redacted);
+    assert_eq!(unicode_tab_report.content, raw_unicode_tab_quote);
+
+    let raw_unicode_forged = r#"{"type":"assistant","message":{"role":"assistant","content":"password: [REDACTED:password]\\u000asecret"}}"#;
+    let unicode_forged_report = screen_external_text_for_ingestion(raw_unicode_forged);
+    assert!(unicode_forged_report.redacted);
+    assert!(!unicode_forged_report.content.contains("secret"));
+    let unicode_forged_val: Value = serde_json::from_str(&unicode_forged_report.content).unwrap();
+    assert_eq!(
+        unicode_forged_val["message"]["content"],
+        "password: [REDACTED:password]"
+    );
+}

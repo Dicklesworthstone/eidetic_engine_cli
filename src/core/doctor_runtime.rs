@@ -2358,14 +2358,23 @@ impl CapabilitiesReport {
     }
 }
 
-/// Default blast radius for an ee workspace: the four canonical roots
-/// doctor is allowed to write to.
+/// Default blast radius for an ee workspace: the canonical workspace roots,
+/// the user's local data root, and (when configured outside those roots) the
+/// resolved model staging reclaim root.
 #[must_use]
 pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
     let mut roots = vec![workspace.join(".ee"), workspace.join(".doctor")];
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         roots.push(home.join(".local").join("share").join("ee"));
+    }
+    let staging_root = super::index_download_backoff::staging_reclaim_root();
+    if staging_root.is_absolute()
+        && !roots
+            .iter()
+            .any(|existing| staging_root.starts_with(existing))
+    {
+        roots.push(staging_root);
     }
     roots
 }

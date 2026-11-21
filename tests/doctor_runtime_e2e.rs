@@ -906,3 +906,96 @@ fn undo_create_dir_all_reports_partial_when_created_dir_gains_content() {
         "undo must leave peer-created directory contents in place"
     );
 }
+
+#[test]
+fn doctor_fix_reclaims_abandoned_staging_dir_under_ee_embed_model_dir() {
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+
+    let root = fresh_workspace();
+    let ws = root.path().join("workspace");
+    let home = root.path().join("home");
+    let model_dir = root.path().join("custom-models");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&model_dir).unwrap();
+
+    let staging = model_dir.join(".potion-multilingual-128M-download-999999-0000000000000001");
+    fs::create_dir_all(&staging).unwrap();
+    let aged = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    fs::File::open(&staging)
+        .unwrap()
+        .set_modified(aged)
+        .unwrap();
+
+    let init_out = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["init", "--workspace"])
+        .arg(&ws)
+        .arg("--json")
+        .env("HOME", &home)
+        .env("EE_EMBED_MODEL_DIR", &model_dir)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("EE_DOCTOR_BLAST_RADIUS")
+        .output()
+        .expect("run ee init");
+    assert!(
+        init_out.status.success(),
+        "ee init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&init_out.stdout),
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    // Narrowing EE_DOCTOR_BLAST_RADIUS to workspace/.ee alone must still refuse
+    // external EE_EMBED_MODEL_DIR reclamation with BlastRadiusExceeded (exit 7).
+    let denied_out = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["doctor", "--fix", "--workspace"])
+        .arg(&ws)
+        .arg("--json")
+        .env("HOME", &home)
+        .env("EE_EMBED_MODEL_DIR", &model_dir)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_DOCTOR_BLAST_RADIUS", ws.join(".ee"))
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("run narrowed ee doctor --fix");
+    assert_eq!(
+        denied_out.status.code(),
+        Some(7),
+        "narrowed blast radius must deny external model reclaim: stdout={}",
+        String::from_utf8_lossy(&denied_out.stdout)
+    );
+    assert!(
+        staging.exists(),
+        "denied doctor --fix must leave staging dir untouched"
+    );
+
+    // With default blast radius roots, EE_EMBED_MODEL_DIR is included automatically.
+    let fix_out = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["doctor", "--fix", "--workspace"])
+        .arg(&ws)
+        .arg("--json")
+        .env("HOME", &home)
+        .env("EE_EMBED_MODEL_DIR", &model_dir)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("EE_DOCTOR_BLAST_RADIUS")
+        .output()
+        .expect("run ee doctor --fix");
+    let stdout = String::from_utf8(fix_out.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("parse doctor --fix json");
+    let fixer_results = parsed["data"]["fixerResults"]
+        .as_array()
+        .expect("fixerResults array");
+    let reclaim_result = fixer_results
+        .iter()
+        .find(|entry| entry["findingCode"] == "model_staging_dirs_abandoned")
+        .unwrap_or_else(|| {
+            panic!("expected model_staging_dirs_abandoned fixer result in {stdout}")
+        });
+    assert_eq!(reclaim_result["outcome"], "applied");
+    assert!(
+        !staging.exists(),
+        "doctor --fix must reclaim abandoned staging dir under EE_EMBED_MODEL_DIR"
+    );
+}

@@ -955,18 +955,18 @@ fn primer_seal_admission(
     connection: &DbConnection,
     workspace_id: &str,
 ) -> crate::db::Result<(BTreeSet<String>, String)> {
-    let closed = connection
-        .list_memory_seals_for_recovery(workspace_id)
-        .map_err(|_| crate::db::DbError::MalformedRow {
-            operation: crate::db::DbOperation::Query,
-            message:
-                "Could not verify primer seal authority; cached and fresh content were withheld"
-                    .to_owned(),
-        })?
-        .into_iter()
-        .filter(|seal| seal.is_sealed())
-        .map(|seal| seal.memory_id)
-        .collect::<BTreeSet<_>>();
+    let closed =
+        crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)
+            .map_err(|_| crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Query,
+                message:
+                    "Could not verify primer seal authority; cached and fresh content were withheld"
+                        .to_owned(),
+            })?
+            .into_iter()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id)
+            .collect::<BTreeSet<_>>();
     let mut hash = blake3::Hasher::new();
     hash.update(b"ee.primer.seal_admission.v1\0");
     for id in &closed {

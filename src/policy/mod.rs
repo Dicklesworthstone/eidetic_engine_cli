@@ -3001,39 +3001,69 @@ fn secret_value_range(
         plain_multiline_secret_value_end(input, cursor)
     } else {
         let mut redaction_depth = 0_usize;
-        input[cursor..]
-            .char_indices()
-            .find_map(|(offset, ch)| {
-                // A marker's closing bracket is part of the value. Stopping
-                // before it both misidentifies exact markers and leaves an
-                // attached secret suffix untouched. Keep nested/malformed
-                // marker shapes in the same value; ordinary quoting and
-                // punctuation still delimit the surrounding source.
-                if ch == '['
-                    && (redaction_depth != 0
-                        || input[cursor + offset..]
-                            .get(.."[REDACTED:".len())
-                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[REDACTED:")))
-                {
-                    redaction_depth += 1;
+        let mut pos = cursor;
+        let bytes = input.as_bytes();
+        let mut found_end = None;
+        while pos < input.len() {
+            let ch = input[pos..].chars().next().unwrap_or('\0');
+            // A marker's closing bracket is part of the value. Stopping
+            // before it both misidentifies exact markers and leaves an
+            // attached secret suffix untouched. Keep nested/malformed
+            // marker shapes in the same value; ordinary quoting, JSON-escaped
+            // line/tab/quote boundaries, and punctuation still delimit the
+            // surrounding source while `\\` pairs stay literal backslashes.
+            if ch == '['
+                && (redaction_depth != 0
+                    || input[pos..]
+                        .get(.."[REDACTED:".len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[REDACTED:")))
+            {
+                redaction_depth += 1;
+                pos += 1;
+                continue;
+            }
+            if ch == ']' && redaction_depth != 0 {
+                redaction_depth -= 1;
+                pos += 1;
+                continue;
+            }
+            if ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ',' | ';' | '&' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}'
+                )
+                || (stop_at_uri_fragment && ch == '#')
+            {
+                found_end = Some(pos);
+                break;
+            }
+            if ch == '\\' {
+                match bytes.get(pos + 1).copied() {
+                    Some(b'\\') => {
+                        pos += 2;
+                        continue;
+                    }
+                    Some(b'r' | b'n' | b't' | b'"') => {
+                        found_end = Some(pos);
+                        break;
+                    }
+                    Some(b'u')
+                        if bytes.get(pos + 2..pos + 6).is_some_and(|hex| {
+                            hex.eq_ignore_ascii_case(b"000a")
+                                || hex.eq_ignore_ascii_case(b"000d")
+                                || hex.eq_ignore_ascii_case(b"0009")
+                                || hex.eq_ignore_ascii_case(b"0022")
+                        }) =>
+                    {
+                        found_end = Some(pos);
+                        break;
+                    }
+                    _ => {}
                 }
-                if ch == ']' && redaction_depth != 0 {
-                    redaction_depth -= 1;
-                    return None;
-                }
-                if ch.is_whitespace()
-                    || matches!(
-                        ch,
-                        ',' | ';' | '&' | '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}'
-                    )
-                    || (stop_at_uri_fragment && ch == '#')
-                {
-                    Some(cursor + offset)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(input.len())
+            }
+            pos += ch.len_utf8();
+        }
+        found_end.unwrap_or(input.len())
     };
     Some((cursor, value_end))
 }

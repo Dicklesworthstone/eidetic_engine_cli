@@ -3343,6 +3343,10 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
                 || (script.contains("\"PreToolUse\"")
                     && script.contains("cmd = [ee, \"recall\"]")
                     && script.contains("\"--budget-tokens\""))
+                || (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
+                    && script.contains("SURFACE = \"pre_risky_preflight\"")
+                    && script.contains("\"preflight\"")
+                    && script.contains("\"check\""))
         }
         "ee-journal-bash-failure" => {
             script.contains("body = \"Harness observed a non-zero Bash exit code.\"")
@@ -4946,6 +4950,64 @@ mod tests {
         assert!(session_capture.contains("No memories were stored"));
         assert!(session_capture.contains("already_seen(text)"));
         assert!(session_capture.contains("provenance=ee:{SCHEMA}"));
+    }
+
+    #[test]
+    fn merge_harness_hooks_deduplicates_retired_v013_unmanaged_preflight_hook() -> TestResult {
+        let legacy_preflight = python_hook_command(
+            r#"import json, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "pre_risky_preflight"
+cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
+"#,
+            "/old/ee",
+        );
+        let custom_hook = serde_json::json!({
+            "type": "command",
+            "command": "echo user-custom-pretool"
+        });
+        let mut document = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": legacy_preflight, "timeout": 10 }
+                        ]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [ custom_hook ]
+                    }
+                ]
+            }
+        });
+        let snippets = harness_hook_snippets(HarnessHookTarget::ClaudeCode, "ee");
+        merge_harness_hooks(HarnessHookTarget::ClaudeCode, &mut document, &snippets)
+            .map_err(|error| error.to_string())?;
+
+        let pre_tool_use = document["hooks"]["PreToolUse"]
+            .as_array()
+            .ok_or("PreToolUse array")?;
+        assert_eq!(
+            pre_tool_use.len(),
+            2,
+            "only custom group + fresh managed group remain"
+        );
+        assert!(
+            !pre_tool_use
+                .iter()
+                .any(|group| group.to_string().contains("pre_risky_preflight")),
+            "retired v0.13.0 unmanaged pre_risky_preflight hook must be removed on install"
+        );
+        assert!(
+            pre_tool_use
+                .iter()
+                .any(|group| group.to_string().contains("user-custom-pretool")),
+            "user custom PreToolUse hook must remain untouched"
+        );
+        Ok(())
     }
 
     /// Run a Python hook snippet under `python3 -c` with the given stdin JSON,

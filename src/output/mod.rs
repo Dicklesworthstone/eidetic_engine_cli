@@ -1530,24 +1530,23 @@ pub fn apply_field_selector_to_json(
     };
 
     // The response carries the command name in `data.command` for most surfaces,
-    // but newer schema-first responses (e.g. swarm brief/next-action/work-packet)
-    // emit only `data.schema = "ee.swarm.brief.v1"` without a duplicate `command`
-    // field. Fall back to deriving the command from the schema so the preset
-    // dispatch finds the right per-command field list. Without this fallback,
-    // preset_fields_for_command would hit the default arm whose summary preset
-    // is `["command", "version", "status", "summary", "count", "schema"]` —
-    // none of which exist at the top level of a swarm brief response.
+    // while schema-first or subcommand-specific responses (e.g. swarm surfaces,
+    // `ee.evidence.withdraw_session.v1`) carry distinct preset schemas. Check
+    // `command_name_from_schema(data.schema)` first when mapped, and fall back
+    // to `data.command`.
+    let schema_command = data
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .map(command_name_from_schema)
+        .filter(|name| !name.is_empty());
     let command_owned;
-    let command = match data.get("command").and_then(serde_json::Value::as_str) {
-        Some(name) => name,
-        None => {
-            command_owned = data
-                .get("schema")
-                .and_then(serde_json::Value::as_str)
-                .map(command_name_from_schema)
-                .unwrap_or_default();
-            command_owned.as_str()
-        }
+    let command = if let Some(mapped) = schema_command {
+        command_owned = mapped;
+        command_owned.as_str()
+    } else {
+        data.get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
     };
     let requested_fields = requested_fields_for_selector(command, selector);
     if requested_fields.is_empty() {
@@ -1670,6 +1669,7 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.decide.list.v1" => "decide list".to_string(),
         "ee.decide.revisit.v1" => "decide revisit".to_string(),
         "ee.evidence.withdraw.v1" => "evidence withdraw".to_string(),
+        "ee.evidence.withdraw_session.v1" => "evidence withdraw-session".to_string(),
         "ee.evidence.security_rescreen.v1" => "evidence rescreen".to_string(),
         "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
         "ee.ask.v1" => "ask".to_string(),
@@ -1929,6 +1929,59 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "previousPackEligibility",
                 "searchEligibility",
                 "packEligibility",
+                "auditId",
+                "indexJobId",
+                "indexStatus",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "evidence withdraw-session" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "sessionId",
+                "status",
+                "dryRun",
+                "persisted",
+                "wouldWithdrawCount",
+                "withdrawnCount",
+                "indexStatus",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "sessionId",
+                "scope",
+                "futureImports",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "cassEvidenceCount",
+                "excludedProducerCount",
+                "alreadyWithdrawnCount",
+                "wouldWithdrawCount",
+                "withdrawnCount",
+                "indexStatus",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "version",
+                "workspaceId",
+                "sessionId",
+                "scope",
+                "futureImports",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "retainedEvidenceCount",
+                "cassEvidenceCount",
+                "excludedProducerCount",
+                "alreadyWithdrawnCount",
+                "wouldWithdrawCount",
+                "withdrawnCount",
                 "auditId",
                 "indexJobId",
                 "indexStatus",

@@ -77,6 +77,8 @@ fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> Result<Output
         .args(args)
         .env("HOME", &workspace.home)
         .env("EE_NO_COLOR", "1")
+        .env_remove("EE_EMBED_MODEL_DIR")
+        .env_remove("XDG_DATA_HOME")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     workspace.log(
