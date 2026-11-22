@@ -249,7 +249,18 @@ fn configured_embed_model_dir() -> Option<PathBuf> {
 
 #[must_use]
 pub(crate) fn staging_reclaim_root() -> PathBuf {
-    configured_embed_model_dir().unwrap_or_else(default_model_cache_root)
+    absolute_staging_reclaim_root(
+        configured_embed_model_dir().unwrap_or_else(default_model_cache_root),
+    )
+}
+
+fn absolute_staging_reclaim_root(root: PathBuf) -> PathBuf {
+    // Model loading accepts relative overrides, but audited repair requires an
+    // absolute path so undo cannot target a different cwd. Do not canonicalize:
+    // the lifecycle guard must still see and reject a symlinked model root.
+    // If cwd cannot be resolved, retain the relative path so repair fails closed
+    // at its existing absolute-path check instead of guessing another store.
+    std::path::absolute(&root).unwrap_or(root)
 }
 
 #[must_use]
@@ -713,6 +724,51 @@ mod tests {
             parse_staging_dir_name(".potion-multilingual-128M-download-+123-1"),
             None
         );
+    }
+
+    #[test]
+    fn relative_staging_reclaim_root_uses_process_working_directory() -> TestResult {
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let relative = PathBuf::from("ee-relative-model-cache").join("models");
+
+        let resolved = absolute_staging_reclaim_root(relative.clone());
+
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, cwd.join(relative));
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_staging_reclaim_root_preserves_missing_directory() -> TestResult {
+        let root = temp_root("ee-staging-root-")?;
+        let missing = root.path().join("not-created").join("models");
+        assert!(!missing.exists());
+
+        assert_eq!(absolute_staging_reclaim_root(missing.clone()), missing);
+        assert!(!missing.exists(), "root resolution must not create directories");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_staging_reclaim_root_does_not_follow_symlinks() -> TestResult {
+        let root = temp_root("ee-staging-root-symlink-")?;
+        let target = root.path().join("actual-models");
+        let link = root.path().join("configured-models");
+        std::fs::create_dir(&target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&target, &link).map_err(|error| error.to_string())?;
+
+        let resolved = absolute_staging_reclaim_root(link.clone());
+
+        assert_eq!(resolved, link);
+        assert!(
+            std::fs::symlink_metadata(&resolved)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "the audited repair guard must retain visibility of the symlink"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
