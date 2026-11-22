@@ -923,18 +923,18 @@ fn model_status_json_includes_staging_dirs_and_repair_when_reclaimable() -> Test
     };
     let dirty_json = report.data_json();
     ensure_equal(
-        dirty_json.pointer("/stagingDirs/reclaimableCount"),
-        Some(&serde_json::json!(3)),
+        &dirty_json.pointer("/stagingDirs/reclaimableCount"),
+        &Some(&serde_json::json!(3)),
         "reclaimableCount",
     )?;
     ensure_equal(
-        dirty_json.pointer("/stagingDirs/reclaimableBytes"),
-        Some(&serde_json::json!(2048)),
+        &dirty_json.pointer("/stagingDirs/reclaimableBytes"),
+        &Some(&serde_json::json!(2048)),
         "reclaimableBytes",
     )?;
     ensure_equal(
-        dirty_json.pointer("/stagingDirs/repair"),
-        Some(&serde_json::json!("ee doctor --fix --workspace . --json")),
+        &dirty_json.pointer("/stagingDirs/repair"),
+        &Some(&serde_json::json!("ee doctor --fix --workspace . --json")),
         "stagingDirs.repair",
     )?;
     let human = report.human_summary();

@@ -3381,7 +3381,7 @@ mod pack_benchmark_contracts {
         let parsed = parse_proc_status_rss_bytes(sample).expect("parse /proc status RSS");
         assert_eq!(parsed.rss_bytes, 262_144 * 1024);
         assert_eq!(parsed.peak_rss_bytes, Some(300_000 * 1024));
-        assert!(300_000 * 1024 <= DAEMON_MAX_RSS_BYTES);
+        assert!(parsed.peak_rss_bytes.expect("peak RSS") <= DAEMON_MAX_RSS_BYTES);
     }
 }
 
