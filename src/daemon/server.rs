@@ -76,7 +76,9 @@ use crate::core::search::{
     run_search_unaudited_with_runtime,
 };
 use crate::db::DatabaseConfig;
-use crate::db::read_pool::{ProcessReadPoolResidency, retain_process_read_pools};
+use crate::db::read_pool::{
+    PoolConfig, ProcessReadPoolResidency, registered_process_read_pool, retain_process_read_pools,
+};
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
@@ -4661,8 +4663,7 @@ fn dispatch_search_with_runtime(
             );
         }
     };
-    let advisory_workspace_id =
-        crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
+    let advisory_workspace_id = daemon_search_advisory_workspace_id(&options);
     let performance = explain_performance.then(|| {
         search_run.report.performance_explain_json_with_trace(
             options.speed,
@@ -4723,6 +4724,28 @@ fn dispatch_search_with_runtime(
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
+}
+
+fn daemon_search_advisory_workspace_id(options: &SearchOptions) -> String {
+    let database_path = options.resolve_database_path();
+    // The dispatch retains this store's pools. Reuse the same nonblocking
+    // configuration as cached-model admission, without keeping a source snapshot
+    // or caching a workspace identity across database replacement/rebinding.
+    let pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.clone()),
+        PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+    );
+    let Ok(connection) = pool.acquire() else {
+        // Request decoding already canonicalized the authorized workspace path.
+        // Advisory bookkeeping is best-effort; it must not reopen storage after
+        // a failed checkout or turn a successful search into an error.
+        return crate::core::workspace::stable_workspace_id(&options.workspace_path);
+    };
+    crate::core::search::bound_search_workspace_id(
+        &options.workspace_path,
+        Some(&database_path),
+        Some(&connection),
+    )
 }
 
 fn daemon_response_fits(response: &DaemonResponse, max_bytes: usize) -> bool {
@@ -11163,6 +11186,133 @@ mod tests {
             "least-recently-used store is released"
         );
         restarted.close();
+    }
+
+    #[test]
+    fn daemon_search_advisories_reuse_readers_and_follow_addressed_binding() {
+        use crate::db::{CreateWorkspaceInput, DbConnection};
+        use sqlmodel_core::Value;
+
+        const DEFAULT_ID: &str = "wsp_51000000000000000000000087";
+        const ADDRESSED_ID: &str = "wsp_52000000000000000000000087";
+        const REBOUND_ID: &str = "wsp_53000000000000000000000087";
+
+        let workspace = private_tempdir();
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        fs::create_dir_all(workspace_path.join(".ee")).expect("default store directory");
+        let default_database = workspace_path.join(".ee/ee.db");
+        let addressed_database = workspace_path.join("addressed.db");
+        for (path, workspace_id) in [
+            (&default_database, DEFAULT_ID),
+            (&addressed_database, ADDRESSED_ID),
+        ] {
+            let connection = DbConnection::open_file(path).expect("open fixture store");
+            connection.migrate().expect("fixture schema");
+            connection
+                .insert_workspace(
+                    workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace_path.display().to_string(),
+                        name: None,
+                    },
+                )
+                .expect("bind fixture workspace");
+        }
+        let params = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": workspace_path,
+            "databasePath": addressed_database,
+            "sourceMode": "lexical_only",
+        }))
+        .expect("valid search request");
+        let (mut options, _, _, _) = params
+            .into_search_parts(&workspace_path.display().to_string())
+            .expect("authorized addressed store");
+        let owner = DaemonReadPools::default();
+        owner.retain(&addressed_database);
+        let pool = registered_process_read_pool(
+            DatabaseConfig::file(addressed_database.clone()),
+            PoolConfig::default_single().with_acquire_timeout(Duration::ZERO),
+        );
+        let connection = pool.acquire().expect("warm addressed reader");
+        let slot = connection.slot_id();
+        drop(connection);
+        let samples_before = pool.stats().acquire_wait.samples;
+        let addressed_id = daemon_search_advisory_workspace_id(&options);
+        assert_eq!(addressed_id, ADDRESSED_ID);
+        assert_eq!(
+            pool.stats().acquire_wait.samples,
+            samples_before + 1,
+            "advisory lookup must check out the resident reader"
+        );
+        assert_eq!(pool.stats().active_pins, 0);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().idle, 1);
+        let connection = pool.acquire().expect("reader remains reusable");
+        assert_eq!(connection.slot_id(), slot);
+        drop(connection);
+
+        let policy = DaemonDispatchPolicy::for_workspace(workspace_path.display().to_string());
+        let report = stale_index_advisory_report(108, 1);
+        let deliver = |workspace_id: &str, expected_warning: bool| {
+            let (mut response, result) =
+                advisory_delivery_candidate(&report, &policy, workspace_id);
+            let has_warning = result
+                .pointer("/response/degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.get("code").and_then(serde_json::Value::as_str)
+                            == Some("search_index_large_gap")
+                    })
+                });
+            assert_eq!(has_warning, expected_warning, "workspace {workspace_id}");
+            assert_eq!(
+                result.pointer("/response/data/indexFreshness/largeGap"),
+                Some(&serde_json::json!(true)),
+                "suppression must preserve structured freshness"
+            );
+            settle_daemon_response_delivery(&policy, &mut response, true);
+        };
+        deliver(&addressed_id, true);
+        deliver(&daemon_search_advisory_workspace_id(&options), false);
+
+        options.database_path = Some(default_database.clone());
+        owner.retain(&default_database);
+        let default_id = daemon_search_advisory_workspace_id(&options);
+        assert_eq!(default_id, DEFAULT_ID);
+        deliver(&default_id, true);
+
+        let writer = DbConnection::open_file(&addressed_database).expect("binding writer");
+        assert_eq!(
+            writer
+                .execute(
+                    "UPDATE workspaces SET path = ?1 WHERE id = ?2",
+                    &[
+                        Value::Text(workspace_path.join("previous-binding").display().to_string()),
+                        Value::Text(ADDRESSED_ID.to_owned()),
+                    ],
+                )
+                .expect("move the previous workspace binding"),
+            1
+        );
+        writer
+            .insert_workspace(
+                REBOUND_ID,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: None,
+                },
+            )
+            .expect("commit changed workspace binding");
+        drop(writer);
+        options.database_path = Some(addressed_database);
+        let rebound_id = daemon_search_advisory_workspace_id(&options);
+        assert_eq!(rebound_id, REBOUND_ID, "resident reads observe a new binding");
+        deliver(&rebound_id, true);
+        deliver(&daemon_search_advisory_workspace_id(&options), false);
+        assert_eq!(pool.stats().active_pins, 0);
     }
 
     #[test]

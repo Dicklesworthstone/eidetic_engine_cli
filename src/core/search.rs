@@ -1166,7 +1166,7 @@ fn default_workspace_database_path(workspace_path: &Path) -> PathBuf {
         .join("ee.db")
 }
 
-fn bound_search_workspace_id(
+pub(crate) fn bound_search_workspace_id(
     workspace_path: &Path,
     database_path: Option<&Path>,
     connection: Option<&DbConnection>,

@@ -52274,8 +52274,6 @@ where
     let mut command_timings = Vec::new();
     let workspace_start = Instant::now();
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
-    let advisory_workspace_id =
-        crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     command_timings.push(cli_performance_timing_json(
         "command::workspaceResolve",
         workspace_start.elapsed(),
@@ -52521,6 +52519,15 @@ where
             // of the 240-character body elision on every renderer, so the flag
             // cannot silently apply to JSON but not to human or TOON output.
             let preview = search_content_preview_mode(args.full);
+            // A daemon success already carries its rendered advisories. Resolve
+            // the addressed store only when a local structured renderer needs it.
+            let advisory_workspace_id = || {
+                crate::core::search::bound_search_workspace_id(
+                    &options.workspace_path,
+                    options.database_path.as_deref(),
+                    None,
+                )
+            };
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary_with_preview(preview))
@@ -52531,7 +52538,7 @@ where
                         &report,
                         args.mesh_mode,
                         &mut process.search_advisory_session,
-                        &advisory_workspace_id,
+                        &advisory_workspace_id(),
                         preview,
                         Some(&serving),
                     ) + "\n"),
@@ -52547,7 +52554,7 @@ where
                         recalibration.as_ref(),
                         args.explain.then_some("data.results"),
                         &mut process.search_advisory_session,
-                        &advisory_workspace_id,
+                        &advisory_workspace_id(),
                         preview,
                         Some(&serving),
                     ) + "\n"),
