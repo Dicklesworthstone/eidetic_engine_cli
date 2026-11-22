@@ -234,7 +234,7 @@ pub(super) fn find_twin(
     let source_start = source.valid_from.as_deref().map(timestamp).transpose()?;
     let source_end = source.valid_to.as_deref().map(timestamp).transpose()?;
     let rows = db.query(
-        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, s.memory_id, s.revealed_at, m.typed_fields_json FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
+        "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified, m.id, m.valid_from, m.valid_to, m.superseded_at, m.typed_fields_json FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
         &[
             Value::Text(workspace.to_owned()),
             Value::Text(source.content.clone()),
@@ -248,31 +248,39 @@ pub(super) fn find_twin(
         ],
     )?;
     for row in rows {
-        let Some(Value::Text(id)) = row.get(0) else {
+        let Some(Value::Text(id)) = row.get(5) else {
             return Err(invalid_authority());
         };
         if id.parse::<crate::models::MemoryId>().is_err() {
             return Err(invalid_authority());
         }
-        let from = optional_text(row.get(1))?;
-        let to = optional_text(row.get(2))?;
-        let superseded = optional_text(row.get(3))?;
-        let seal_id = optional_text(row.get(4))?;
-        let revealed = optional_text(row.get(5))?;
-        if seal_id.is_some_and(|seal_id| seal_id != id.as_str())
-            || (seal_id.is_none() && revealed.is_some())
-        {
-            return Err(invalid_authority());
-        }
-        // Match MemorySeal::is_sealed, additionally validating persisted times.
-        let revealed = revealed.map(timestamp).transpose()?;
+        let from = optional_text(row.get(6))?;
+        let to = optional_text(row.get(7))?;
+        let superseded = optional_text(row.get(8))?;
+        // An absent left join is unsealed only when the whole sidecar is
+        // absent. A present reveal needs the same validated commitment,
+        // timestamps and verification state as every other live reader.
+        let sealed = match row.get(0) {
+            Some(Value::Null) => {
+                if (1..5).any(|index| !matches!(row.get(index), Some(Value::Null))) {
+                    return Err(invalid_authority());
+                }
+                false
+            }
+            Some(Value::Text(seal_id)) if seal_id == id => {
+                crate::core::memory_lifecycle::decode_admission_seal(&row)
+                    .map_err(|_| invalid_authority())?
+                    .is_sealed()
+            }
+            _ => return Err(invalid_authority()),
+        };
         let lifecycle = lifecycle_refusal(from, to, superseded, reference)?;
-        if lifecycle.is_some() || (seal_id.is_some() && revealed.is_none()) {
+        if lifecycle.is_some() || sealed {
             continue;
         }
         let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)? {
+        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(9))?)? {
             continue;
         }
         if start != source_start {
@@ -582,6 +590,139 @@ mod duplicate_compatibility_tests {
         assert_eq!(f.matched(&f.memory), Some(id.clone()));
         f.update(&id, "superseded_at = '2098-01-01T00:00:00Z'");
         assert_eq!(f.matched(&f.memory), None);
+    }
+
+    #[test]
+    fn invalid_twin_reveal_refuses_preview_and_publication_without_mutation() {
+        let f = Fixture::new();
+        let id = f.publish();
+        let commitment = crate::models::memory_seal_commitment(f.memory.content.as_bytes());
+        let invalid_commitment = format!("blake3:{}", "Q".repeat(64));
+        f.db.insert_memory_seal(&id, &commitment, FROM).unwrap();
+        assert_eq!(f.matched(&f.memory), None);
+        assert!(f.db.mark_memory_seal_revealed(&id, FROM).unwrap());
+        let preview = super::super::promote_global(&f.options(true)).unwrap();
+        assert!(preview.plan.allowed() && preview.already_promoted);
+        assert_eq!(preview.global_memory_id.as_deref(), Some(id.as_str()));
+
+        let source = DbConnection::open_file_read_only(&f.source_path).unwrap();
+        let source_before = source.get_memory(SOURCE).unwrap();
+        let target_before = f.db.get_memory(&id).unwrap();
+        let counts = |db: &DbConnection| {
+            [
+                "memories",
+                "audit_log",
+                "search_index_jobs",
+                "curation_candidates",
+            ]
+            .map(|table| db.count_table_rows(table).unwrap())
+        };
+        let source_counts = counts(&source);
+        let global_counts = counts(&f.db);
+        for (stored_commitment, sealed_at, revealed_at, verified) in [
+            (commitment.as_str(), FROM, "PRIVATE-TWIN-REVEAL", 1),
+            (commitment.as_str(), "PRIVATE-TWIN-SEAL", FROM, 1),
+            (commitment.as_str(), FROM, "2019-12-31T23:59:59.999999999Z", 1),
+            (commitment.as_str(), FROM, FROM, 0),
+            (invalid_commitment.as_str(), FROM, FROM, 1),
+        ] {
+            f.db.execute_raw(&format!(
+                "UPDATE memory_seals SET content_commitment = '{stored_commitment}', sealed_at = '{sealed_at}', revealed_at = '{revealed_at}', reveal_verified = {verified} WHERE memory_id = '{id}'"
+            ))
+            .unwrap();
+            let generation = f.db.get_workspace_generation(&f.workspace).unwrap();
+            for dry_run in [true, false] {
+                let error = super::super::promote_global(&f.options(dry_run)).unwrap_err();
+                assert_eq!(
+                    error,
+                    if dry_run {
+                        "Could not verify global duplicate lifecycle"
+                    } else {
+                        "Global promotion transaction failed; inspect the destination before retrying"
+                    }
+                );
+                assert!(!error.contains("PRIVATE"));
+                assert!(!error.contains(&id));
+                assert!(!error.contains(&f.memory.content));
+                assert_eq!(source.get_memory(SOURCE).unwrap(), source_before);
+                assert_eq!(f.db.get_memory(&id).unwrap(), target_before);
+                assert_eq!(counts(&source), source_counts);
+                assert_eq!(counts(&f.db), global_counts);
+                assert_eq!(
+                    f.db.get_workspace_generation(&f.workspace).unwrap(),
+                    generation
+                );
+                assert!(!f.paths.index_dir.exists());
+            }
+        }
+
+        // Equal instants with different offsets are valid reveal authority.
+        // Restoring that authority reuses the existing twin, without rewriting
+        // its body or scheduling another index job.
+        f.db.execute_raw(&format!(
+            "UPDATE memory_seals SET content_commitment = '{commitment}', sealed_at = '{FROM}', revealed_at = '2019-12-31T19:00:00-05:00', reveal_verified = 1 WHERE memory_id = '{id}'"
+        ))
+        .unwrap();
+        assert_eq!(f.matched(&f.memory), Some(id.clone()));
+        let preview = super::super::promote_global(&f.options(true)).unwrap();
+        assert!(!preview.executed && preview.plan.allowed() && preview.already_promoted);
+        assert_eq!(preview.global_memory_id.as_deref(), Some(id.as_str()));
+        assert_eq!(f.publish(), id);
+        assert_eq!(f.db.get_memory(&id).unwrap(), target_before);
+        assert_eq!(source.get_memory(SOURCE).unwrap(), source_before);
+        assert_eq!(counts(&source), source_counts);
+        assert_eq!(f.db.count_table_rows("memories").unwrap(), global_counts[0]);
+        assert_eq!(
+            f.db.count_table_rows("search_index_jobs").unwrap(),
+            global_counts[2]
+        );
+    }
+
+    #[test]
+    fn twin_reveal_validation_preserves_the_callers_read_snapshot() {
+        for initially_valid in [false, true] {
+            let f = Fixture::new();
+            let id = f.publish();
+            let commitment = crate::models::memory_seal_commitment(f.memory.content.as_bytes());
+            f.db.insert_memory_seal(&id, &commitment, FROM).unwrap();
+            f.db.execute_raw(&format!(
+                "UPDATE memory_seals SET revealed_at = '{FROM}', reveal_verified = {} WHERE memory_id = '{id}'",
+                u8::from(initially_valid)
+            ))
+            .unwrap();
+            let reader = DbConnection::open_file_read_only(&f.paths.database_path).unwrap();
+            reader.begin_read_snapshot().unwrap();
+            let admitted = || match find_twin(
+                &reader,
+                &f.workspace,
+                &f.memory,
+                &PromotionPayload::default(),
+                timestamp("2030-01-01T00:00:00Z").unwrap(),
+            ) {
+                Ok(TwinAdmission::Admitted(found)) => {
+                    assert_eq!(found, id);
+                    true
+                }
+                Err(DbError::MalformedRow { message, .. }) => {
+                    assert_eq!(
+                        message,
+                        "Could not verify global-promotion lifecycle metadata"
+                    );
+                    false
+                }
+                _ => panic!("expected an admitted twin or invalid seal authority"),
+            };
+            assert_eq!(admitted(), initially_valid);
+            f.db.execute_raw(&format!(
+                "UPDATE memory_seals SET reveal_verified = {} WHERE memory_id = '{id}'",
+                u8::from(!initially_valid)
+            ))
+            .unwrap();
+            assert_eq!(admitted(), initially_valid);
+            assert!(reader.begin_read_snapshot().is_err());
+            reader.rollback_read_snapshot().unwrap();
+            assert_eq!(admitted(), !initially_valid);
+        }
     }
 
     #[test]
