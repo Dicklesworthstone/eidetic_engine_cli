@@ -169,6 +169,7 @@ fn posture_code(posture: &str) -> &'static str {
     match posture {
         "sealed" => "derived_source_memory_sealed",
         "held" => "derived_source_memory_review_pending",
+        "unavailable" => "derived_source_memory_authority_unavailable",
         _ => panic!("unknown source posture"),
     }
 }
@@ -510,5 +511,458 @@ fn derivation_source_authority_fails_closed_without_releasing_owned_transaction(
             .map_err(|error| error.to_string())?
             .contains(&"snapshot-owner".to_owned())
     );
+    Ok(())
+}
+
+struct ProceduralFixture {
+    directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+    connection: DbConnection,
+    workspace_id: String,
+    memory_id: String,
+    candidate_id: String,
+    as_recipe: bool,
+}
+
+impl ProceduralFixture {
+    fn new(kind: &str, as_recipe: bool) -> Result<Self, String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir(directory.path().join(".ee")).map_err(|error| error.to_string())?;
+        let database = directory.path().join("ee.db");
+        let workspace_id = test_workspace_id(directory.path());
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x73_600)).to_string();
+        let candidate_id = curate_id(0x73_601);
+        let connection = seed_candidate_database(
+            &database,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            kind,
+            Some("approved"),
+            Some("Verify the signed release artifact before deployment."),
+        )?;
+        Ok(Self {
+            directory,
+            database,
+            connection,
+            workspace_id,
+            memory_id,
+            candidate_id,
+            as_recipe,
+        })
+    }
+
+    fn apply(&self, dry_run: bool) -> Result<curate_core::CurateApplyReport, DomainError> {
+        let options = curate_core::CurateApplyOptions {
+            workspace_path: self.directory.path(),
+            database_path: Some(&self.database),
+            candidate_id: &self.candidate_id,
+            actor: Some("procedural-source-authority-test"),
+            dry_run,
+            allow_tombstone_load_bearing: false,
+        };
+        if self.as_recipe {
+            curate_core::apply_curation_candidate_as_recipe(
+                &options,
+                "Verified release",
+                "Before deploying a release",
+            )
+        } else {
+            curate_core::apply_curation_candidate(&options)
+        }
+    }
+
+    fn withdraw(&self, id: &str, posture: &str) -> TestResult {
+        match posture {
+            "sealed" => self.connection.insert_memory_seal(
+                id,
+                &crate::models::memory_seal_commitment(b"retained procedural evidence"),
+                "2026-05-24T00:05:00Z",
+            ),
+            "held" => self.connection.insert_feedback_quarantine(
+                &format!("fq_{:026}", 92),
+                &crate::db::CreateFeedbackQuarantineInput {
+                    workspace_id: self.workspace_id.clone(),
+                    source_id: "procedural-source-authority-test".to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: id.to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "automated_check".to_owned(),
+                    proposed_event_id: None,
+                    recorded_at: "2026-05-24T00:05:00Z".to_owned(),
+                    reason: "PRIVATE_REVIEW_REASON_NOT_FOR_SOURCE_ERRORS".to_owned(),
+                    event_reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    raw_event_hash: format!("blake3:{}", "b".repeat(64)),
+                },
+            ),
+            "unavailable" => self
+                .connection
+                .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_procedural_seals"),
+            _ => return Err(format!("unknown source posture {posture}")),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn counts(&self) -> Result<Vec<i64>, String> {
+        [
+            "memories",
+            "curation_candidates",
+            "procedural_rules",
+            "procedures",
+            "procedure_events",
+            "plan_recipes",
+            "search_index_jobs",
+            "audit_log",
+        ]
+        .into_iter()
+        .map(|table| {
+            self.connection
+                .count_table_rows(table)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+    }
+}
+
+#[test]
+fn procedural_apply_rechecks_withdrawn_sources_without_creating_outputs() -> TestResult {
+    for (kind, as_recipe) in [
+        ("rule", false),
+        ("anti_pattern_proposal", false),
+        ("procedure", false),
+        ("rule", true),
+        ("procedure", true),
+    ] {
+        for posture in ["sealed", "held", "unavailable"] {
+            let fixture = ProceduralFixture::new(kind, as_recipe)?;
+            let preview = fixture.apply(true).map_err(|error| error.message())?;
+            assert_eq!(preview.application.status, "would_apply");
+            let stored = fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, &fixture.candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("missing procedural candidate")?;
+            let target = fixture
+                .connection
+                .get_memory(&fixture.memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("missing procedural source")?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut planned = curate_core::evaluate_candidate_for_apply(
+                &stored,
+                Some(&target),
+                &curate_core::ConsolidateAbsorbResolution::LegacyUpdate,
+                &now,
+            );
+            assert!(planned.should_persist, "{:?}", planned.application.errors);
+            let recipe = as_recipe.then(|| {
+                planned.rule_create = None;
+                planned.procedure_create = None;
+                planned.target_after = planned.target_before.clone();
+                crate::db::StoredPlanRecipe {
+                    id: curate_core::candidate_recipe_id(&stored),
+                    workspace_id: fixture.workspace_id.clone(),
+                    name: "Verified release".to_owned(),
+                    when_to_use: "Before deploying a release".to_owned(),
+                    steps_json: serde_json::json!([stored.proposed_content]).to_string(),
+                    evidence_uris_json: serde_json::json!([
+                        format!("ee://curation-candidate/{}", stored.id),
+                        format!("ee://memory/{}", fixture.memory_id),
+                    ])
+                    .to_string(),
+                    maturity: "draft".to_owned(),
+                    confidence: 0.0,
+                    helpful_count: 0,
+                    harmful_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_recommended_at: None,
+                }
+            });
+            fixture.withdraw(&fixture.memory_id, posture)?;
+            // Seal/review sidecars change; the prepared target row does not.
+            assert_eq!(
+                fixture
+                    .connection
+                    .get_memory(&fixture.memory_id)
+                    .map_err(|error| error.to_string())?,
+                Some(target.clone()),
+            );
+            let counts = fixture.counts()?;
+            for dry_run in [true, false] {
+                let error = fixture
+                    .apply(dry_run)
+                    .expect_err("source withdrawal must block public procedural apply");
+                assert_private_refusal(&error.message(), &target.content, posture_code(posture));
+                assert!(
+                    !error
+                        .message()
+                        .contains(stored.proposed_content.as_deref().ok_or("proposal")?)
+                );
+            }
+            let error = curate_core::persist_candidate_application(
+                &fixture.connection,
+                &fixture.workspace_id,
+                &stored,
+                &planned,
+                recipe.as_ref(),
+                &now,
+                "procedural-source-authority-test",
+            )
+            .expect_err("source withdrawal after planning must block the writer");
+            assert_private_refusal(&error.message(), &target.content, posture_code(posture));
+            assert_eq!(fixture.counts()?, counts, "{kind}, recipe={as_recipe}, {posture}");
+            assert_eq!(
+                fixture
+                    .connection
+                    .get_memory(&fixture.memory_id)
+                    .map_err(|error| error.to_string())?,
+                Some(target),
+            );
+            assert_eq!(
+                fixture
+                    .connection
+                    .get_curation_candidate(&fixture.workspace_id, &fixture.candidate_id)
+                    .map_err(|error| error.to_string())?,
+                Some(stored),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn procedural_apply_checks_cluster_sources_beyond_the_target() -> TestResult {
+    for posture in ["sealed", "held"] {
+        let fixture = ProceduralFixture::new("rule", false)?;
+        let second_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x73_602)).to_string();
+        fixture
+            .connection
+            .insert_memory(
+                &second_id,
+                &CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "Corroborating release evidence kept out of source errors.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.7,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        bind_procedural_source_audit(&fixture, &second_id)?;
+        assert_eq!(
+            fixture.apply(true).map_err(|error| error.message())?.application.status,
+            "would_apply"
+        );
+        fixture.withdraw(&second_id, posture)?;
+        let counts = fixture.counts()?;
+        let error = fixture.apply(false).expect_err("a cluster source was withdrawn");
+        assert_private_refusal(
+            &error.message(),
+            "Corroborating release evidence kept out of source errors.",
+            posture_code(posture),
+        );
+        assert_eq!(fixture.counts()?, counts);
+    }
+    Ok(())
+}
+
+#[test]
+fn applied_procedural_outputs_remain_independent_of_later_source_withdrawal() -> TestResult {
+    for (kind, as_recipe) in [
+        ("rule", false),
+        ("anti_pattern_proposal", false),
+        ("procedure", false),
+        ("rule", true),
+        ("procedure", true),
+    ] {
+        let fixture = ProceduralFixture::new(kind, as_recipe)?;
+        let accepted = fixture.apply(false).map_err(|error| error.message())?;
+        assert_eq!(accepted.application.status, "applied");
+        assert!(accepted.durable_mutation);
+        let before = fixture.counts()?;
+        fixture.withdraw(&fixture.memory_id, "sealed")?;
+        fixture.withdraw(&fixture.memory_id, "held")?;
+        let replay = fixture.apply(false).map_err(|error| error.message())?;
+        assert_eq!(replay.application.status, "already_applied");
+        assert!(!replay.durable_mutation);
+        // Source revocation does not delete or remint an independent rule,
+        // procedure or recipe. Derived index recovery remains the normal lane.
+        assert_eq!(&fixture.counts()?[..6], &before[..6]);
+        assert_eq!(
+            fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, &fixture.candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("missing applied candidate")?
+                .status,
+            "applied"
+        );
+    }
+    Ok(())
+}
+
+fn bind_procedural_source_audit(fixture: &ProceduralFixture, source_id: &str) -> TestResult {
+    let stored = fixture
+        .connection
+        .get_curation_candidate(&fixture.workspace_id, &fixture.candidate_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing procedural candidate")?;
+    fixture
+        .connection
+        .insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(fixture.workspace_id.clone()),
+                actor: Some("learn.experiment.propose".to_owned()),
+                action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                target_type: Some("curation_candidate".to_owned()),
+                target_id: Some(stored.id.clone()),
+                details: Some(
+                    serde_json::json!({
+                        "schema": "ee.audit.curation_candidate_create.v1",
+                        "proposalSource": "learn.experiment.propose",
+                        "workspaceId": fixture.workspace_id,
+                        "candidateId": stored.id,
+                        "candidateType": stored.candidate_type,
+                        "sourceType": stored.source_type,
+                        "sourceId": stored.source_id,
+                        "targetMemoryId": stored.target_memory_id,
+                        "proposedContentHash": blake3::hash(
+                            stored.proposed_content.as_deref().unwrap_or_default().as_bytes()
+                        ).to_hex().to_string(),
+                        "sourceRefs": [{
+                            "kind": "memory",
+                            "id": source_id,
+                            "contentHash": format!("blake3:{}", blake3::hash(
+                                b"Corroborating release evidence kept out of source errors."
+                            ).to_hex()),
+                        }],
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn procedural_source_admission_keeps_unavailable_audit_claims_visible() -> TestResult {
+    for (posture, code) in [
+        ("missing", "derived_source_memory_missing"),
+        ("foreign", "derived_source_workspace_mismatch"),
+        ("tombstoned", "derived_source_memory_tombstoned"),
+    ] {
+        let fixture = ProceduralFixture::new("rule", false)?;
+        let source_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x73_603)).to_string();
+        if posture != "missing" {
+            let source_workspace = if posture == "foreign" {
+                let foreign_id =
+                    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x73_604))
+                        .to_string();
+                fixture
+                    .connection
+                    .insert_workspace(
+                        &foreign_id,
+                        &CreateWorkspaceInput {
+                            path: "/procedural-source-other-workspace".to_owned(),
+                            name: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                foreign_id
+            } else {
+                fixture.workspace_id.clone()
+            };
+            fixture
+                .connection
+                .insert_memory(
+                    &source_id,
+                    &CreateMemoryInput {
+                        workspace_id: source_workspace,
+                        level: "semantic".to_owned(),
+                        kind: "note".to_owned(),
+                        content: "Corroborating release evidence kept out of source errors."
+                            .to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            if posture == "tombstoned" {
+                assert!(
+                    fixture
+                        .connection
+                        .tombstone_memory(&source_id)
+                        .map_err(|error| error.to_string())?
+                );
+            }
+        }
+        // The claimed ID remains in authenticated creation provenance even
+        // when the normal publication helper would omit a missing/foreign row.
+        bind_procedural_source_audit(&fixture, &source_id)?;
+        let counts = fixture.counts()?;
+        for dry_run in [true, false] {
+            let error = fixture
+                .apply(dry_run)
+                .expect_err("all claimed source memories need authority");
+            assert_private_refusal(
+                &error.message(),
+                "Corroborating release evidence kept out of source errors.",
+                code,
+            );
+        }
+        assert_eq!(fixture.counts()?, counts);
+    }
+    Ok(())
+}
+
+#[test]
+fn procedural_source_admission_accepts_history_and_non_memory_review_targets() -> TestResult {
+    let fixture = ProceduralFixture::new("rule", false)?;
+    fixture
+        .connection
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_from = '2000-01-01T00:00:00Z', valid_to = '2001-01-01T00:00:00Z', superseded_at = '2001-01-01T00:00:00Z' WHERE id = '{}'",
+            fixture.memory_id,
+        ))
+        .map_err(|error| error.to_string())?;
+    fixture.withdraw(&fixture.memory_id, "sealed")?;
+    assert!(
+        fixture
+            .connection
+            .mark_memory_seal_revealed(&fixture.memory_id, "2026-05-24T00:06:00Z")
+            .map_err(|error| error.to_string())?
+    );
+    fixture.withdraw(&fixture.memory_id, "held")?;
+    fixture
+        .connection
+        .execute_raw("UPDATE feedback_quarantine SET target_type = 'rule'")
+        .map_err(|error| error.to_string())?;
+    // ADR 0043 permits historical, hash-locked evidence. A rule-target review
+    // whose raw ID happens to match is not a pending review of this memory.
+    let preview = fixture.apply(true).map_err(|error| error.message())?;
+    assert_eq!(preview.application.status, "would_apply");
+    assert!(!preview.durable_mutation);
     Ok(())
 }

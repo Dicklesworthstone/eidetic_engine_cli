@@ -104,3 +104,69 @@ pub(super) fn require_memory_authority(
         }
     })
 }
+
+/// A reviewed proposal authorizes one new procedural object, not continued
+/// access to source memories that were subsequently sealed or held for review.
+/// Check all memory provenance, including learning-cluster audit references,
+/// in one snapshot. Already-applied candidates are independent durable objects:
+/// replaying their receipt/publication must not retroactively revoke them.
+pub(super) fn require_procedural_candidate_sources(
+    connection: &DbConnection,
+    stored: &crate::db::StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    if stored.status != crate::curate::CandidateStatus::Approved.as_str()
+        || !matches!(
+            stored.candidate_type.as_str(),
+            "rule" | "anti_pattern_proposal" | "procedure"
+        )
+    {
+        return Ok(());
+    }
+    with_snapshot(connection, || {
+        let mut ids =
+            super::source_memory_ids_for_rule_candidate_with_audits(connection, stored, true)?;
+        if let Some(target) = &stored.target_memory_id {
+            ids.push(target.clone());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let memory = connection
+                .get_memory(&id)
+                .map_err(|_| DomainError::Storage {
+                    message: "Could not inspect procedural candidate source authority.".to_owned(),
+                    repair: Some("Repair storage and retry curation apply.".to_owned()),
+                })?
+                .ok_or_else(|| DomainError::Usage {
+                    message: format!(
+                        "derived_source_memory_missing: Memory source {id} is missing."
+                    ),
+                    repair: Some(
+                        "Re-propose the candidate from existing source memories.".to_owned(),
+                    ),
+                })?;
+            if memory.workspace_id != stored.workspace_id {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "derived_source_workspace_mismatch: Memory source {id} is outside this workspace."
+                    ),
+                    repair: Some(
+                        "Re-propose the candidate from sources in the same workspace.".to_owned(),
+                    ),
+                });
+            }
+            if memory.tombstoned_at.is_some() {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "derived_source_memory_tombstoned: Memory source {id} is tombstoned."
+                    ),
+                    repair: Some(
+                        "Re-propose the candidate from non-tombstoned source memories.".to_owned(),
+                    ),
+                });
+            }
+            require_memory_authority(connection, &memory)?;
+        }
+        Ok(())
+    })
+}

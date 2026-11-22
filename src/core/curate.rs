@@ -6438,6 +6438,10 @@ fn apply_curation_candidate_with_recipe(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
+    // Approval does not authorize a new rule, procedure or recipe after its
+    // source has been sealed or held for review. Run before constructing any
+    // response containing the retained target or proposed procedural text.
+    source_admission::require_procedural_candidate_sources(&connection, &stored)?;
     let global_merge_index_paths = crate::core::global_promotion::merge_index_paths(
         &connection,
         &stored,
@@ -14693,6 +14697,17 @@ pub(crate) fn audited_source_memory_ids_for_rule_candidate(
     connection: &DbConnection,
     stored: &StoredCurationCandidate,
 ) -> Result<Vec<String>, DomainError> {
+    source_memory_ids_for_rule_candidate_with_audits(connection, stored, false)
+}
+
+/// Publication retains its established treatment of unavailable historical
+/// audit references. New-object admission requests every claimed source so a
+/// missing or foreign row cannot disappear before its authority is checked.
+fn source_memory_ids_for_rule_candidate_with_audits(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    include_unavailable_sources: bool,
+) -> Result<Vec<String>, DomainError> {
     let invalid = |reason: &str| DomainError::Storage {
         message: format!(
             "Learning candidate {} has invalid creation provenance: {reason}",
@@ -14757,11 +14772,15 @@ pub(crate) fn audited_source_memory_ids_for_rule_candidate(
                 id,
                 reference["contentHash"].as_str().unwrap_or_default(),
             ));
-            let memory = connection
-                .get_memory(id)
-                .map_err(|error| invalid(&error.to_string()))?;
-            if memory.is_some_and(|memory| memory.workspace_id == stored.workspace_id) {
+            if include_unavailable_sources {
                 ids.insert(id.to_owned());
+            } else {
+                let memory = connection
+                    .get_memory(id)
+                    .map_err(|error| invalid(&error.to_string()))?;
+                if memory.is_some_and(|memory| memory.workspace_id == stored.workspace_id) {
+                    ids.insert(id.to_owned());
+                }
             }
         }
         canonical_derivation_source_refs_json(&sources)
@@ -15534,6 +15553,9 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    // The memory row can be unchanged while a concurrent writer changes its
+    // seal or review sidecar. Recheck under the writer fence before any writes.
+    source_admission::require_procedural_candidate_sources(connection, stored)?;
     crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
         |message| DomainError::UsageCodeWithDetails {
             code: "global_merge_snapshot_changed",
