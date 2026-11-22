@@ -559,8 +559,8 @@ pub fn export_procedure_from_records(
     let export_id = format!("exp_{}", generate_id());
 
     let snapshot = procedure_export_snapshot(&options.procedure_id, &exported_at, records)?;
-    let (public_snapshot, redacted_evidence_refs) = public_procedure_export_snapshot(&snapshot);
-    let redaction_status = procedure_export_redaction_status(redacted_evidence_refs);
+    let (public_snapshot, redacted) = public_procedure_export_snapshot(&snapshot);
+    let redaction_status = procedure_export_redaction_status(redacted);
     let content = render_export_content(
         &public_snapshot,
         format,
@@ -584,7 +584,7 @@ pub fn export_procedure_from_records(
     Ok(ProcedureExportReport {
         schema: PROCEDURE_EXPORT_REPORT_SCHEMA_V1.to_owned(),
         export_id,
-        procedure_id: options.procedure_id.clone(),
+        procedure_id: public_snapshot.procedure.procedure_id,
         format: format.as_str().to_owned(),
         artifact_kind: artifact_kind(format).to_owned(),
         output_path,
@@ -861,11 +861,41 @@ fn public_procedure_export_snapshot(
 ) -> (ProcedureExportSnapshot, bool) {
     let mut public = snapshot.clone();
     let mut redacted = false;
+    // Persisted and explicitly supplied procedures are not guaranteed to have
+    // passed ingestion redaction. Sanitize the shared projection before any
+    // renderer, hash, or output file observes it, retaining nonsecret guidance.
+    // Identifiers and timestamps are strings on the explicit-record API, so
+    // they need the same scan; valid native values remain byte-identical.
+    redact_procedure_export_text(&mut public.procedure.procedure_id, &mut redacted);
+    redact_procedure_export_text(&mut public.procedure.title, &mut redacted);
+    redact_procedure_export_text(&mut public.procedure.summary, &mut redacted);
+    redact_procedure_export_text(&mut public.procedure.status, &mut redacted);
+    redact_procedure_export_text(&mut public.procedure.created_at, &mut redacted);
+    redact_procedure_export_text(&mut public.procedure.updated_at, &mut redacted);
+    if let Some(verified_at) = &mut public.procedure.verified_at {
+        redact_procedure_export_text(verified_at, &mut redacted);
+    }
+    for step in &mut public.steps {
+        redact_procedure_export_text(&mut step.step_id, &mut redacted);
+        redact_procedure_export_text(&mut step.title, &mut redacted);
+        redact_procedure_export_text(&mut step.instruction, &mut redacted);
+        if let Some(command) = &mut step.command_hint {
+            redact_procedure_export_text(command, &mut redacted);
+        }
+    }
     public.procedure.source_run_ids =
         redact_procedure_public_source_refs(&public.procedure.source_run_ids, &mut redacted);
     public.procedure.evidence_ids =
         redact_procedure_public_source_refs(&public.procedure.evidence_ids, &mut redacted);
     (public, redacted)
+}
+
+fn redact_procedure_export_text(value: &mut String, redacted: &mut bool) {
+    let report = crate::policy::redact_git_capture_text(value);
+    if report.redacted {
+        *redacted = true;
+        *value = report.content;
+    }
 }
 
 fn redact_procedure_public_source_refs(values: &[String], redacted: &mut bool) -> Vec<String> {
@@ -882,7 +912,7 @@ fn redact_procedure_public_source_refs(values: &[String], redacted: &mut bool) -
 }
 
 fn redact_procedure_public_source_ref(value: &str) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    let secret_redacted = crate::policy::redact_git_capture_text(value).content;
     redact_procedure_public_path_like_segments(&secret_redacted)
 }
 
@@ -5339,6 +5369,201 @@ mod tests {
 
         assert_eq!(record.procedure.source_run_ids, vec![source_ref.to_owned()]);
         assert_eq!(record.procedure.evidence_ids, vec![evidence_ref.to_owned()]);
+        Ok(())
+    }
+
+    #[test]
+    fn export_scans_each_public_text_field_across_all_formats() -> TestResult {
+        let secret = format!("ghp_{}", "e1a9C2d8".repeat(6));
+        for field in [
+            "procedure_id",
+            "title",
+            "summary",
+            "status",
+            "created_at",
+            "updated_at",
+            "verified_at",
+            "source_run_id",
+            "evidence_id",
+            "step_id",
+            "step_title",
+            "instruction",
+            "command_hint",
+        ] {
+            let mut record = procedure_record("candidate");
+            let target = match field {
+                "procedure_id" => &mut record.procedure.procedure_id,
+                "title" => &mut record.procedure.title,
+                "summary" => &mut record.procedure.summary,
+                "status" => &mut record.procedure.status,
+                "created_at" => &mut record.procedure.created_at,
+                "updated_at" => &mut record.procedure.updated_at,
+                "verified_at" => record.procedure.verified_at.get_or_insert_with(String::new),
+                "source_run_id" => &mut record.procedure.source_run_ids[0],
+                "evidence_id" => &mut record.procedure.evidence_ids[0],
+                "step_id" => &mut record.steps[0].step_id,
+                "step_title" => &mut record.steps[0].title,
+                "instruction" => &mut record.steps[0].instruction,
+                "command_hint" => record.steps[0].command_hint.get_or_insert_with(String::new),
+                _ => unreachable!("fixed public-field inventory"),
+            };
+            // Fused labels exercise the shared scanner's identifier boundary,
+            // not just standalone tokens after whitespace or `api_key=`.
+            *target = format!("{field}-{secret}");
+            let before = serde_json::to_value(&record).map_err(|error| error.to_string())?;
+            let (projected, redacted) =
+                public_procedure_export_snapshot(&ProcedureExportSnapshot {
+                    procedure: record.procedure.clone(),
+                    steps: record.steps.clone(),
+                });
+            assert!(
+                redacted,
+                "{field} must mark the public projection as redacted"
+            );
+            let projected = json!({ "procedure": projected.procedure, "steps": projected.steps });
+            assert!(
+                !projected.to_string().contains(&secret),
+                "{field} must be redacted from the shared public projection"
+            );
+            for format in ["markdown", "playbook", "json", "skill-capsule"] {
+                let report = export_procedure_from_records(
+                    &ProcedureExportOptions {
+                        procedure_id: record.procedure.procedure_id.clone(),
+                        format: format.to_owned(),
+                        ..Default::default()
+                    },
+                    std::slice::from_ref(&record),
+                )
+                .map_err(|error| error.message())?;
+                let serialized =
+                    serde_json::to_string(&report).map_err(|error| error.to_string())?;
+                assert!(
+                    !serialized.contains(&secret),
+                    "{field} leaked through the {format} artifact or report"
+                );
+                // Export replaces updated_at with the fresh export timestamp
+                // before projection, so that input value is never emitted.
+                let expected_redaction = if field == "updated_at" {
+                    "not_required"
+                } else {
+                    "standard"
+                };
+                assert_eq!(
+                    report.redaction_status, expected_redaction,
+                    "{field}: {format}"
+                );
+                assert_eq!(report.content_length, report.content.len());
+                assert_eq!(
+                    report.content_hash,
+                    format!(
+                        "blake3:{}",
+                        blake3::hash(report.content.as_bytes()).to_hex()
+                    )
+                );
+            }
+            assert!(
+                serde_json::to_value(&record).map_err(|error| error.to_string())? == before,
+                "export must not mutate its source record"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn export_preserves_nonsecret_procedure_guidance_across_all_formats() -> TestResult {
+        let mut record = procedure_record("validated");
+        let command = "/usr/local/bin/ee procedure verify proc_test --json";
+        record.procedure.summary = format!("Run {command} and review the retained evidence.");
+        record.steps[0].instruction = record.procedure.summary.clone();
+        record.steps[0].command_hint = Some(command.to_owned());
+        record.procedure.verified_at = Some("2026-05-01T11:00:00Z".to_owned());
+        let snapshot = ProcedureExportSnapshot {
+            procedure: record.procedure.clone(),
+            steps: record.steps.clone(),
+        };
+        let (projected, redacted) = public_procedure_export_snapshot(&snapshot);
+        assert!(!redacted);
+        assert_eq!(
+            serde_json::to_value(&projected.procedure).map_err(|error| error.to_string())?,
+            serde_json::to_value(&snapshot.procedure).map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            serde_json::to_value(&projected.steps).map_err(|error| error.to_string())?,
+            serde_json::to_value(&snapshot.steps).map_err(|error| error.to_string())?
+        );
+        for format in ["markdown", "playbook", "json", "skill-capsule"] {
+            let report = export_procedure_from_records(
+                &ProcedureExportOptions {
+                    procedure_id: record.procedure.procedure_id.clone(),
+                    format: format.to_owned(),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&record),
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(report.redaction_status, "not_required", "{format}");
+            assert_eq!(report.procedure_id, "proc_test");
+            assert!(report.content.contains(command), "{format}");
+            assert!(!report.content.contains("[REDACTED"), "{format}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn export_redacts_legacy_persisted_procedure_before_writing_artifacts() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let secret = format!("ghp_{}", "f2b8D3e9".repeat(6));
+        let stored = connection
+            .insert_procedure(
+                "proc_legacy_export",
+                &CreateProcedureInput {
+                    workspace_id: workspace_id.clone(),
+                    name: format!("Release credential {secret}"),
+                    body: format!("1. Authenticate with bearer {secret}\n2. Run ee status --json"),
+                    level: "procedural".to_owned(),
+                    maturity: "provisional".to_owned(),
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.6,
+                    evidence_uris: vec!["evidence://release-check".to_owned()],
+                    created_at: Some("2026-05-01T10:00:00Z".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for format in ["markdown", "playbook", "json", "skill-capsule"] {
+            let path = workspace.join(format!("public-procedure-{format}.txt"));
+            let report = export_procedure(&ProcedureExportOptions {
+                workspace: workspace.clone(),
+                procedure_id: stored.id.clone(),
+                format: format.to_owned(),
+                output_path: Some(path.clone()),
+            })
+            .map_err(|error| error.message())?;
+            let written = fs::read_to_string(path).map_err(|error| error.to_string())?;
+            assert!(
+                !written.contains(&secret),
+                "{format} file leaked a credential"
+            );
+            assert!(
+                written == report.content,
+                "{format} file differs from report"
+            );
+            assert_eq!(report.redaction_status, "standard", "{format}");
+            assert!(written.contains("ee status --json"), "{format}");
+            assert_eq!(report.content_length, written.len());
+            assert_eq!(
+                report.content_hash,
+                format!("blake3:{}", blake3::hash(written.as_bytes()).to_hex())
+            );
+        }
+        let after = connection
+            .get_procedure(&workspace_id, &stored.id)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            after.as_ref() == Some(&stored),
+            "export changed the stored procedure"
+        );
         Ok(())
     }
 

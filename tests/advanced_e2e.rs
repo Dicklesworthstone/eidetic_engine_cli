@@ -612,6 +612,142 @@ fn procedure_export_reports_not_found_for_missing_record() -> TestResult {
     assert_procedure_not_found(&output, procedure_id)
 }
 
+fn ensure_procedure_export_success(output: &Output, context: &str) -> TestResult {
+    let stdout =
+        ee::policy::redact_git_capture_text(&String::from_utf8_lossy(&output.stdout)).content;
+    let stderr =
+        ee::policy::redact_git_capture_text(&String::from_utf8_lossy(&output.stderr)).content;
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: status {} (code {:?}); stdout: {stdout}; stderr: {stderr}",
+            output.status,
+            output.status.code()
+        ),
+    )
+}
+
+#[test]
+fn procedure_export_redacts_persisted_content_in_every_public_format() -> TestResult {
+    let (_tempdir, workspace) = initialized_workspace()?;
+    let secret = format!("ghp_{}", "c4a7D8e2".repeat(6));
+    let command = "/usr/local/bin/ee status --json";
+    for (case, title, summary, redaction_status) in [
+        (
+            "sensitive",
+            format!("Release-{secret}"),
+            format!("1. Authenticate using bearer {secret}\n2. Run {command}"),
+            "standard",
+        ),
+        (
+            "clean",
+            "Release validation".to_owned(),
+            format!("1. Run {command}\n2. Review the retained evidence"),
+            "not_required",
+        ),
+    ] {
+        let proposed = run_ee(&[
+            "--workspace",
+            &workspace,
+            "procedure",
+            "propose",
+            "--title",
+            &title,
+            "--summary",
+            &summary,
+            "--json",
+        ])
+        .map_err(|error| ee::policy::redact_git_capture_text(&error).content)?;
+        ensure_procedure_export_success(&proposed, "procedure proposal")?;
+        let proposed_json = stdout_json(&proposed)?;
+        let procedure_id = proposed_json["procedureId"]
+            .as_str()
+            .ok_or_else(|| "procedure proposal missing procedureId".to_owned())?;
+
+        for format in ["markdown", "playbook", "json", "skill-capsule"] {
+            let path = Path::new(&workspace).join(format!("{case}-{format}.txt"));
+            let path_arg = path.to_string_lossy().into_owned();
+            let exported = run_ee(&[
+                "--workspace",
+                &workspace,
+                "procedure",
+                "export",
+                procedure_id,
+                "--export-format",
+                format,
+                "--output",
+                &path_arg,
+                "--json",
+            ])?;
+            ensure_procedure_export_success(&exported, "procedure export")?;
+            ensure(
+                exported.stderr.is_empty(),
+                "export JSON stderr must be empty",
+            )?;
+            ensure(
+                !String::from_utf8_lossy(&exported.stdout).contains(&secret),
+                format!("{case} {format} stdout leaked a credential"),
+            )?;
+            let exported_json = stdout_json(&exported)?;
+            ensure_equal(
+                &exported_json["schema"],
+                &serde_json::json!("ee.response.v2"),
+                "export envelope schema",
+            )?;
+            let data = &exported_json["data"];
+            ensure_equal(
+                &data["procedureId"],
+                &serde_json::json!(procedure_id),
+                "export keeps native procedure identity",
+            )?;
+            ensure_equal(
+                &data["redactionStatus"],
+                &serde_json::json!(redaction_status),
+                "export redaction status",
+            )?;
+            let content = data["content"]
+                .as_str()
+                .ok_or_else(|| "export report missing content".to_owned())?;
+            let written = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            ensure(
+                written == content && !written.contains(&secret),
+                format!("{case} {format} file must match the safe response artifact"),
+            )?;
+            ensure(
+                content.contains(command),
+                format!("{case} {format} must preserve nonsecret executable guidance"),
+            )?;
+            ensure(
+                content.contains("[REDACTED") == (case == "sensitive"),
+                format!("{case} {format} redaction must match the procedure contents"),
+            )?;
+            ensure_equal(
+                &data["contentLength"],
+                &serde_json::json!(written.len()),
+                "export length describes the written artifact",
+            )?;
+            ensure_equal(
+                &data["contentHash"],
+                &serde_json::json!(format!(
+                    "blake3:{}",
+                    blake3::hash(written.as_bytes()).to_hex()
+                )),
+                "export hash describes the written artifact",
+            )?;
+            if format == "json" {
+                let artifact: serde_json::Value =
+                    serde_json::from_str(content).map_err(|error| error.to_string())?;
+                ensure_equal(
+                    &artifact["redactionStatus"],
+                    &data["redactionStatus"],
+                    "JSON artifact and report agree on redaction status",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn procedure_promote_dry_run_reports_not_found_for_missing_record() -> TestResult {
     let (_tempdir, workspace) = empty_workspace()?;
