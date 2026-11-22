@@ -347,6 +347,35 @@ fn bounded_batches_preserve_candidate_order_and_defer_unknown_store_identities()
 }
 
 #[test]
+fn local_memory_admission_rejects_missing_rows_and_keeps_the_callers_snapshot() -> TestResult {
+    let (_temp, options, db) = fixture()?;
+    let missing = MemoryId::from_uuid(Uuid::from_u128(9_999)).to_string();
+    let requested = BTreeSet::from([PRIOR, HEAD, missing.as_str()]);
+    let reference = options.as_of.ok_or("fixture reference time")?;
+    db.begin_read_snapshot().map_err(|error| error.to_string())?;
+    let mut degraded = Vec::new();
+    let (admitted, queries) = crate::db::capture_query_sql_for_test(|| {
+        admit_local_memory_ids(&db, &requested, reference, &mut degraded)
+    });
+    assert_eq!(admitted, BTreeSet::from([HEAD.to_owned()]));
+    assert_eq!(
+        queries.len(),
+        3,
+        "one bounded authority page, not one read per candidate",
+    );
+    assert!(degraded.iter().any(|entry| entry.code == FILTERED));
+    assert!(degraded.iter().any(|entry| entry.code == UNAVAILABLE));
+    assert!(!degraded.iter().any(|entry| entry.message.contains(&missing)));
+    db.commit_read_snapshot().map_err(|error| error.to_string())?;
+    let (empty, queries) = crate::db::capture_query_sql_for_test(|| {
+        admit_local_memory_ids(&db, &BTreeSet::new(), Utc::now(), &mut Vec::new())
+    });
+    assert!(empty.is_empty());
+    assert!(queries.is_empty());
+    Ok(())
+}
+
+#[test]
 fn non_memory_candidates_do_not_read_revision_authority() -> TestResult {
     let (_temp, options, db) = fixture()?;
     let (actual, queries) = crate::db::capture_query_sql_for_test(|| {

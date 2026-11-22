@@ -13995,6 +13995,355 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn pack_source_authority_id(ordinal: u128) -> String {
+        MemoryId::from_uuid(uuid::Uuid::from_u128(0xad_0000 + ordinal)).to_string()
+    }
+
+    fn pack_source_authority_fixture()
+    -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(ee_dir.join("config.toml"), "[memory]\ninclude_global = false\n")
+            .map_err(|error| error.to_string())?;
+        let database = ee_dir.join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for ordinal in 1..=4 {
+            let id = pack_source_authority_id(ordinal);
+            connection
+                .insert_memory_with_timestamps(
+                    &id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "note".to_owned(),
+                        content: "authorityfallback release procedure".to_owned(),
+                        workflow_id: None,
+                        confidence: 1.0,
+                        utility: 1.0,
+                        importance: 0.7,
+                        provenance_uri: Some("manual://pack-source-authority".to_owned()),
+                        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                    &id,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        assert!(
+            connection
+                .restore_imported_memory_supersession(
+                    &pack_source_authority_id(1),
+                    "2026-06-01T00:00:00Z",
+                )
+                .map_err(|error| error.to_string())?
+        );
+        // The body deliberately is not the seal placeholder: the sidecar is
+        // authority even if an imported or retained body is still readable.
+        connection
+            .insert_memory_seal(
+                &pack_source_authority_id(2),
+                &format!("blake3:{}", "a".repeat(64)),
+                "2026-05-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_feedback_quarantine_for_recovery(&crate::db::StoredFeedbackQuarantine {
+                id: "fq_00000000000000000000000001".to_owned(),
+                workspace_id,
+                source_id: "private-pack-quarantine-source".to_owned(),
+                target_type: "memory".to_owned(),
+                target_id: pack_source_authority_id(3),
+                signal: "harmful".to_owned(),
+                weight: 0.5,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-05-01T00:00:00Z".to_owned(),
+                reason: "private-pack-quarantine-reason".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "b".repeat(64)),
+                status: "pending".to_owned(),
+                reviewed_at: None,
+                reviewed_by: None,
+                released_feedback_event_id: None,
+            })
+            .map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            index_dir: None,
+            query: "authorityfallback".to_owned(),
+            limit: 1,
+            speed: crate::search::SpeedMode::Default,
+            explain: false,
+            as_of: Some(query_time("2026-07-01T00:00:00Z")),
+            include_tombstoned: true,
+            include_expired: true,
+            include_future: true,
+            include_stale: true,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        };
+        Ok((temp, options, connection))
+    }
+
+    #[test]
+    fn direct_pack_candidates_obey_source_authority_and_historical_boundaries() -> TestResult {
+        let (_temp, mut options, connection) = pack_source_authority_fixture()?;
+        let workspace_id = super::stable_context_workspace_id(&options.workspace_path);
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|memory| (memory.id.clone(), memory))
+            .collect::<BTreeMap<_, _>>();
+        let originals = (1..=4)
+            .map(|ordinal| pagination_candidate(0xad_0000 + ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Graph and passive focus both enter through this shared adapter.
+        // Neither cached content nor include-all flags can revive a hold.
+        for (reference, prior_visible) in [
+            ("2026-05-31T23:59:59.999999999Z", true),
+            ("2026-06-01T00:00:00Z", false),
+            ("2026-07-01T00:00:00Z", false),
+        ] {
+            options.as_of = Some(query_time(reference));
+            let mut candidates = originals.clone();
+            let mut degraded = Vec::new();
+            super::quality_score_direct_memory_candidates(
+                &connection,
+                &options,
+                None,
+                &memories,
+                &mut candidates,
+                "Graph-hint",
+                &mut degraded,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut expected = BTreeSet::from([pack_source_authority_id(4)]);
+            if prior_visible {
+                expected.insert(pack_source_authority_id(1));
+            }
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_id.to_string())
+                    .collect::<BTreeSet<_>>(),
+                expected,
+                "{reference}",
+            );
+            assert!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "sealed_memory_filtered")
+            );
+            assert!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "quarantined_memory_filtered")
+            );
+            assert_eq!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "superseded_revision_filtered"),
+                !prior_visible,
+            );
+            let diagnostics =
+                serde_json::to_string(&degraded).map_err(|error| error.to_string())?;
+            assert!(!diagnostics.contains("private-pack-quarantine"));
+            assert!(!diagnostics.contains("authorityfallback release procedure"));
+        }
+        assert!(
+            connection
+                .mark_memory_seal_revealed(
+                    &pack_source_authority_id(2),
+                    "2026-07-01T00:00:00Z",
+                )
+                .map_err(|error| error.to_string())?
+        );
+        connection
+            .execute_raw("UPDATE feedback_quarantine SET status = 'rejected', reviewed_at = '2026-07-01T00:00:00Z', reviewed_by = 'test-reviewer'")
+            .map_err(|error| error.to_string())?;
+        let mut candidates = originals;
+        super::quality_score_direct_memory_candidates(
+            &connection,
+            &options,
+            None,
+            &memories,
+            &mut candidates,
+            "Passive-focus",
+            &mut Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.memory_id.to_string())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                pack_source_authority_id(2),
+                pack_source_authority_id(3),
+                pack_source_authority_id(4),
+            ]),
+            "reviewed and revealed content returns without reviving a superseded revision",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_pack_fallback_admits_before_limit_and_preserves_global_ownership() -> TestResult {
+        let (_temp, options, connection) = pack_source_authority_fixture()?;
+        let run = |reference: DateTime<Utc>,
+                   global_memories: Vec<StoredMemory>,
+                   degraded: &mut Vec<ContextResponseDegradation>| {
+            super::lexical_memory_fallback_hits(
+                &connection,
+                &options.workspace_path,
+                &options.query,
+                1,
+                true,
+                Some(reference),
+                true,
+                true,
+                true,
+                global_memories,
+                degraded,
+            )
+        };
+        let reference = query_time("2026-07-01T00:00:00Z");
+        let mut degraded = Vec::new();
+        let hits = run(reference, Vec::new(), &mut degraded);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, pack_source_authority_id(4));
+        for code in [
+            "superseded_revision_filtered",
+            "sealed_memory_filtered",
+            "quarantined_memory_filtered",
+        ] {
+            assert!(degraded.iter().any(|entry| entry.code == code), "{code}");
+        }
+        let historical = run(
+            query_time("2026-05-31T23:59:59.999999999Z"),
+            Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].doc_id, pack_source_authority_id(1));
+
+        let local = connection
+            .get_memory(&pack_source_authority_id(4))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing live fixture memory".to_owned())?;
+        let mut global = local.clone();
+        global.id = pack_source_authority_id(5);
+        global.workspace_id = "wsp_00000000000000000000000099".to_owned();
+        // These rows represent the independently admitted global-store lane.
+        // No local row exists for that identity, even with healthy authority.
+        let all_global = super::lexical_memory_fallback_hits(
+            &connection,
+            &options.workspace_path,
+            &options.query,
+            10,
+            true,
+            Some(reference),
+            true,
+            true,
+            true,
+            vec![global.clone()],
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            all_global
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([local.id.clone(), global.id.clone()]),
+        );
+
+        connection
+            .execute_raw(
+                "ALTER TABLE feedback_quarantine RENAME TO private_unavailable_pack_quarantine",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut degraded = Vec::new();
+        let hits = run(reference, vec![global.clone()], &mut degraded);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, global.id);
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("storeLane"))
+                .and_then(serde_json::Value::as_str),
+            Some("global"),
+        );
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "revision_visibility_unavailable")
+        );
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry.message.contains("private_unavailable"))
+        );
+
+        let mut candidates = vec![pagination_candidate(0xad_0004)?];
+        let mut direct_degraded = Vec::new();
+        super::quality_score_direct_memory_candidates(
+            &connection,
+            &options,
+            None,
+            &BTreeMap::from([(local.id.clone(), local)]),
+            &mut candidates,
+            "Passive-focus",
+            &mut direct_degraded,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(candidates.is_empty());
+        assert!(
+            direct_degraded
+                .iter()
+                .any(|entry| entry.code == "revision_visibility_unavailable")
+        );
+
+        connection
+            .execute_raw(
+                "ALTER TABLE private_unavailable_pack_quarantine RENAME TO feedback_quarantine",
+            )
+            .map_err(|error| error.to_string())?;
+        let recovered = run(reference, Vec::new(), &mut Vec::new());
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].doc_id, pack_source_authority_id(4));
+        Ok(())
+    }
+
     #[test]
     fn pack_quality_fallback_ranks_before_limit_and_tracks_feedback_snapshot() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;

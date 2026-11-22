@@ -13984,6 +13984,7 @@ mod unpublished_tests;
 #[path = "search_rule_admission.rs"]
 mod rule_admission;
 pub(crate) use rule_admission::load_pack_rule_projections;
+pub(crate) use rule_admission::memory_revisions::admit_local_memory_ids;
 
 struct DiagSearchSyncResult {
     // Kept private: raw arm JSON intentionally contains only IDs, ranks and scores.

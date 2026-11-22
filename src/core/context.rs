@@ -5652,8 +5652,25 @@ fn lexical_memory_fallback_hits(
         global_memories,
         degraded,
     );
+    // Only local rows belong to this snapshot. Global rows were admitted by
+    // their owning store before hydration and must not be checked against the
+    // local connection.
+    let local_ids = memories
+        .keys()
+        .filter(|id| !global_ids.contains(*id))
+        .map(String::as_str)
+        .collect();
+    let mut search_degraded = Vec::new();
+    let admitted = crate::core::search::admit_local_memory_ids(
+        connection,
+        &local_ids,
+        reference_time,
+        &mut search_degraded,
+    );
+    push_search_degradations(degraded, &search_degraded);
     let mut scored: Vec<(StoredMemory, f32)> = memories
         .into_values()
+        .filter(|memory| global_ids.contains(&memory.id) || admitted.contains(&memory.id))
         .filter_map(|memory| {
             lexical_memory_score(&memory, &query_terms).map(|score| (memory, score))
         })
@@ -14009,8 +14026,8 @@ fn apply_graph_hints(
 }
 
 /// Graph topology and passive focus are retrieval priors, not exemptions from
-/// memory quality. Score direct-source candidates with the same policy as
-/// indexed search before admitting them into the shared context pack.
+/// memory authority or quality. Admit and score direct-source candidates with
+/// the same policy as indexed search before adding them to the context pack.
 fn quality_score_direct_memory_candidates(
     connection: &DbConnection,
     options: &SearchOptions,
@@ -14027,6 +14044,23 @@ fn quality_score_direct_memory_candidates(
     let config = crate::core::search::resolved_search_scoring_config(&options.workspace_path)
         .map_err(ContextPackError::Search)?;
     let reference_time = reference_time.or(options.as_of).unwrap_or_else(Utc::now);
+    let candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let local_ids = candidate_ids.iter().map(String::as_str).collect();
+    let mut search_degraded = Vec::new();
+    let admitted = crate::core::search::admit_local_memory_ids(
+        connection,
+        &local_ids,
+        reference_time,
+        &mut search_degraded,
+    );
+    push_search_degradations(degraded, &search_degraded);
+    candidates.retain(|candidate| admitted.contains(&candidate.memory_id.to_string()));
+    if candidates.is_empty() {
+        return Ok(());
+    }
     let mut hits: Vec<SearchHit> = candidates
         .iter()
         .filter_map(|candidate| {

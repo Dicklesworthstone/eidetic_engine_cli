@@ -215,14 +215,55 @@ pub(in crate::core::search) fn admit_hits(
             return hits.into_iter().filter(|hit| !is_memory(hit)).collect();
         }
     };
-    let reference = options.as_of.unwrap_or_else(Utc::now);
+    let admitted = admitted_ids(
+        hits.iter().map(|hit| hit.doc_id.as_str()),
+        &states,
+        options.as_of.unwrap_or_else(Utc::now),
+        true,
+        degraded,
+    );
+    hits.into_iter()
+        .filter(|hit| admitted.contains(&hit.doc_id))
+        .collect()
+}
+
+/// Admit local memory identities from the caller's pinned source snapshot.
+/// Direct-source pack lanes must pass this gate before ranking or limiting:
+/// preloaded bodies and author-validity checks do not establish revision,
+/// seal or quarantine authority. Missing local rows fail closed. Independently
+/// admitted global-store identities must not be passed to this local gate.
+pub(crate) fn admit_local_memory_ids(
+    connection: &DbConnection,
+    ids: &BTreeSet<&str>,
+    reference: DateTime<Utc>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> BTreeSet<String> {
+    if ids.is_empty() {
+        return BTreeSet::new();
+    }
+    let states = match states(connection, ids) {
+        Ok(states) => states,
+        Err(_) => {
+            degraded.push(unavailable());
+            return BTreeSet::new();
+        }
+    };
+    admitted_ids(ids.iter().copied(), &states, reference, false, degraded)
+}
+
+fn admitted_ids<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    states: &BTreeMap<String, RevisionState>,
+    reference: DateTime<Utc>,
+    allow_missing: bool,
+    degraded: &mut Vec<SearchDegradation>,
+) -> BTreeSet<String> {
     let mut superseded = 0usize;
     let mut sealed = 0usize;
     let mut quarantined = 0usize;
     let mut malformed = 0usize;
-    let hits = hits
-        .into_iter()
-        .filter(|hit| match states.get(&hit.doc_id).copied() {
+    let admitted = ids
+        .filter(|id| match states.get(*id).copied() {
             Some(RevisionState::Malformed) => {
                 malformed += 1;
                 false
@@ -239,8 +280,13 @@ pub(in crate::core::search) fn admit_hits(
                 superseded += 1;
                 false
             }
+            None if !allow_missing => {
+                malformed += 1;
+                false
+            }
             _ => true,
         })
+        .map(str::to_owned)
         .collect();
     if superseded > 0 {
         degraded.push(SearchDegradation {
@@ -269,7 +315,7 @@ pub(in crate::core::search) fn admit_hits(
             repair: Some("Review pending feedback with ee outcome quarantine list in the addressed workspace.".to_owned()),
         });
     }
-    hits
+    admitted
 }
 
 /// Source truth for a similarity seed: missing, closed or quarantined evidence
