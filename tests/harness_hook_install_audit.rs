@@ -562,7 +562,7 @@ fn undo_refuses_later_user_edits_and_tampered_recovery_data() -> TestResult {
             };
             fs::write(changed_path, "{\"laterUserChange\":true}\n")
                 .map_err(|error| error.to_string())?;
-            let before = [&path, &backup, &receipt].map(|path| fs::read(path));
+            let before = [&path, &backup, &receipt].map(fs::read);
             let error = generate_harness_hook_install(&options(target, &path, false, true))
                 .expect_err("undo must reject changed data");
             assert!(
