@@ -3017,7 +3017,14 @@ fn harness_sibling_path(path: &Path, suffix: &str) -> PathBuf {
 
 fn harness_settings_hash(bytes: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn harness_settings_io_error(path: &Path, error: impl std::fmt::Display) -> DomainError {
@@ -3693,8 +3700,6 @@ fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
 }
 
 fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnippet) -> bool {
-    use sha2::{Digest as _, Sha256};
-
     let Some(script) = extract_python_inline_script_from_ee_hook(command) else {
         return false;
     };
@@ -3736,7 +3741,7 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
         ],
         _ => return false,
     };
-    let fingerprint = format!("{:x}", Sha256::digest(script.as_bytes()));
+    let fingerprint = harness_settings_hash(script.as_bytes());
     known.contains(&fingerprint.as_str())
 }
 
@@ -6110,8 +6115,12 @@ mod tests {
                         .map_err(|error| error.to_string())?;
                 }
                 "directory" => fs::create_dir(&receipt).map_err(|error| error.to_string())?,
-                _ => rustix::fs::mkfifo(&receipt, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
-                    .map_err(|error| error.to_string())?,
+                _ => rustix::fs::mkfifoat(
+                    rustix::fs::CWD,
+                    &receipt,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                )
+                .map_err(|error| error.to_string())?,
             }
             assert!(
                 generate_harness_hook_install(&harness_options(
