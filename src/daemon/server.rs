@@ -91,7 +91,7 @@ use super::protocol::{
     METHOD_RECALL, read_request, write_response,
 };
 pub use super::protocol::{
-    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
     DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, METHOD_PACK_SEARCH,
     METHOD_SEARCH,
 };
@@ -4532,7 +4532,7 @@ fn dispatch_pack_search_with_runtime(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
-                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, "handoff": handoff }),
+                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, "handoff": handoff }),
             );
             if daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
                 response
@@ -7164,7 +7164,7 @@ fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Valu
             },
             "ee.daemon.pack_search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
+                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4
             }
         },
         // GH #37: lets a client tell "this daemon is still loading its model"
@@ -9542,7 +9542,7 @@ mod tests {
             let response = dispatch_pack_search(&request, &AtomicBool::new(false), &pools);
             assert!(response.error.is_none(), "{response:?}");
             let result = response.result.expect("feedback retrieval");
-            assert_eq!(result["schema"], DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3);
+            assert_eq!(result["schema"], DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4);
             let handoff =
                 crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
                     .expect("versioned handoff");

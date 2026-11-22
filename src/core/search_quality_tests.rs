@@ -7,6 +7,9 @@ use crate::db::{
 use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[path = "search_global_handoff_tests.rs"]
+mod global_handoff_tests;
+
 const BODY: &str = "qualityquasar release guidance preserves the authoritative source.";
 const ANCHOR_MATCH_BODY: &str = "qualityquasar release guidance for `src/engine/cache/queue.rs` beside src/queue/cache/engine.rs.";
 const ANCHOR_OTHER_BODY: &str = "qualityquasar release guidance for src/engine/cache/queue.rs beside `src/queue/cache/engine.rs`.";
@@ -410,7 +413,7 @@ fn instant_hybrid_search_and_diagnostics_never_use_the_semantic_producer() {
     // A response produced under the default speed cannot bypass Instant's
     // lexical contract through a cached/provider handoff.
     handoff.report = hybrid;
-    assert!(handoff.matches_request(&options));
+    assert!(!handoff.matches_request(&options));
     assert!(!handoff.matches_request(&instant_options));
 }
 
@@ -2245,8 +2248,17 @@ fn global_feedback_changes_search_quality_and_preserves_local_collisions() {
         }
         // Retrieval-only handoffs never reconcile the absent index, so both
         // the live source and published global retrieval paths are covered.
-        let handoff = run_pack_search(&fixture.options()).unwrap();
-        assert!(!handoff.snapshot_matches(&fixture.options(), &fixture.db));
+        let options = fixture.options();
+        let mut handoff = run_pack_search(&options).unwrap();
+        assert!(handoff.can_reuse_for_pack());
+        let before = serde_json::to_value(&handoff.report.results).unwrap();
+        let validated = handoff.validate_snapshot(&options, &fixture.db).unwrap();
+        let memories = handoff.revalidate_with_feedback(&options, &fixture.db, Some(&validated));
+        assert_eq!(serde_json::to_value(&handoff.report.results).unwrap(), before);
+        assert_eq!(memories[&local_clean].workspace_id, fixture.workspace);
+        assert_eq!(memories[&local_harmful].workspace_id, fixture.workspace);
+        assert_eq!(memories[&harmful].workspace_id, global.workspace);
+        drop(validated);
         let report = &handoff.report;
         assert_eq!(report.status, SearchStatus::Success);
         assert_eq!(report.results.len(), 6);

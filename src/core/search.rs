@@ -77,6 +77,9 @@ use crate::search::HashEmbedder;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalRead;
 
+#[path = "search_global_handoff.rs"]
+mod global_handoff;
+
 #[cfg(unix)]
 #[path = "search_index_cache.rs"]
 mod index_cache;
@@ -1890,6 +1893,7 @@ pub struct SearchPerformanceRun {
     pub(crate) audit_facts: Option<SearchAuditFacts>,
     pack_snapshot: Option<PackSearchSnapshot>,
     pack_calibration_identity: Option<String>,
+    pack_global_snapshot: Option<global_handoff::GlobalPackSearchWitness>,
     scoring_reference_time: DateTime<Utc>,
 }
 
@@ -1920,6 +1924,8 @@ struct PackSearchSnapshot {
     // before floor filtering and candidate truncation.
     calibration_input_identity: Option<String>,
     scoring_reference_time: DateTime<Utc>,
+    global_snapshot: Option<global_handoff::GlobalPackSearchWitness>,
+    request_identity: Option<String>,
 }
 
 impl PackSearchHandoff {
@@ -1948,19 +1954,6 @@ impl PackSearchHandoff {
         options: &SearchOptions,
         connection: &'a DbConnection,
     ) -> Option<ValidatedPackSearchSnapshot<'a>> {
-        if global_store_participates_in_scope(options.memory_scope) {
-            let policy = crate::config::workspace_memory_policy(&options.workspace_path).ok()?;
-            if policy.participate.unwrap_or(true) && policy.include_global.unwrap_or(true) {
-                let paths = super::global_store::default_global_store_paths_from_env().ok()?;
-                if paths.database_path.try_exists().ok()? {
-                    // This wire witness covers only the local source and its
-                    // feedback ledger. Global outcomes may change independently,
-                    // even when no global candidate survived the old limit.
-                    // Canonical retrieval must admit and score that store again.
-                    return None;
-                }
-            }
-        }
         if !self.matches_request(options)
             || self.snapshot.workspace_id
                 != bound_search_workspace_id(
@@ -1984,10 +1977,18 @@ impl PackSearchHandoff {
         if calibration.input_identity().as_ref() != Some(identity) {
             return None;
         }
+        let global = global_handoff::validate(
+            self.snapshot.global_snapshot.as_ref()?,
+            options,
+            self.snapshot.scoring_reference_time,
+            connection,
+            &self.report.results,
+        )?;
         Some(ValidatedPackSearchSnapshot {
             calibration_input_identity: identity.clone(),
             calibration,
             feedback: feedback?,
+            global,
         })
     }
 
@@ -2006,7 +2007,9 @@ impl PackSearchHandoff {
         connection: &DbConnection,
         validated: Option<&ValidatedPackSearchSnapshot<'_>>,
     ) -> BTreeMap<String, StoredMemory> {
-        let mut memories = BTreeMap::new();
+        let mut memories = validated
+            .map(|snapshot| snapshot.global.local_memories.clone())
+            .unwrap_or_default();
         let mut native_calibration_ids = BTreeSet::new();
         let mut native_scope_ids = BTreeSet::new();
         for hit in &self.report.results {
@@ -2026,7 +2029,24 @@ impl PackSearchHandoff {
                 }
             }
         }
-        let hits = std::mem::take(&mut self.report.results);
+        let mut hits = std::mem::take(&mut self.report.results);
+        // Classify source authority before the local preload shortcut. A
+        // global preload must never be mistaken for a locally owned row.
+        let global_hits = validated
+            .map(|snapshot| {
+                snapshot
+                    .global
+                    .take_global_hits(options, &mut hits, &mut memories)
+            })
+            .unwrap_or_default();
+        let admitted_global_ids = global_hits
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<BTreeSet<_>>();
+        let global_memories = admitted_global_ids
+            .iter()
+            .filter_map(|id| memories.remove(id).map(|memory| (id.clone(), memory)))
+            .collect::<BTreeMap<_, _>>();
         let mut hits = apply_tombstone_visibility_with_connection(
             options,
             hits,
@@ -2035,6 +2055,8 @@ impl PackSearchHandoff {
             Some(&mut memories),
         );
         hits.retain(|hit| !hit.doc_id.starts_with("mem_") || memories.contains_key(&hit.doc_id));
+        memories.extend(global_memories);
+        hits.extend(global_hits);
         let hits = apply_live_evidence_visibility(
             options,
             hits,
@@ -2086,9 +2108,9 @@ impl PackSearchHandoff {
                     self.snapshot.scoring_reference_time,
                     Some(connection),
                     Some(&memories),
-                    None,
+                    Some(&admitted_global_ids),
                     validated.map(|snapshot| &snapshot.feedback),
-                    None,
+                    validated.and_then(|snapshot| snapshot.global.feedback()),
                     &mut self.report.degraded,
                 );
             }
@@ -2135,7 +2157,9 @@ impl PackSearchHandoff {
     /// assembly. Bodies are always reloaded from the caller's own store.
     pub(crate) fn matches_request(&self, options: &SearchOptions) -> bool {
         let report = &self.report;
-        report.query == options.query
+        self.snapshot.request_identity.as_ref().is_some_and(|identity| {
+            global_handoff::request_identity(options).as_ref() == Some(identity)
+        }) && report.query == options.query
             && self.quality_reference_time == options.as_of
             && options
                 .as_of
@@ -2182,7 +2206,7 @@ impl PackSearchHandoff {
                 .degraded
                 .iter()
                 .any(|entry| entry.code == "search_live_snapshot_lexical");
-        matches!(
+        self.snapshot.global_snapshot.is_some() && matches!(
             self.report.status,
             SearchStatus::Success | SearchStatus::NoResults
         ) && (complete_live_snapshot
@@ -5124,6 +5148,7 @@ pub(crate) struct ValidatedPackSearchSnapshot<'a> {
     pub(crate) calibration_input_identity: String,
     calibration: SearchScoreCalibration,
     feedback: SearchFeedbackSnapshot<'a>,
+    global: global_handoff::ValidatedGlobalPackSnapshot,
 }
 
 impl SearchFeedbackSnapshot<'_> {
@@ -9104,6 +9129,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                     run.pack_snapshot = Some(PackSearchSnapshot {
                         calibration_input_identity: run.pack_calibration_identity.take(),
                         scoring_reference_time: run.scoring_reference_time,
+                        global_snapshot: run.pack_global_snapshot.take(),
+                        request_identity: global_handoff::request_identity(options),
                         workspace_id,
                         generation,
                     });
@@ -11588,6 +11615,7 @@ async fn run_search_inner_with_performance(
             audit_facts: None,
             pack_snapshot: None,
             pack_calibration_identity: None,
+            pack_global_snapshot: None,
             scoring_reference_time,
             report: SearchReport {
                 index_freshness,
@@ -11726,6 +11754,7 @@ async fn run_search_inner_with_performance(
             // actual global-store read may carry this request-local authority.
             let mut global_source_memories = BTreeMap::new();
             let mut global_feedback_snapshot = None;
+            let mut pack_global_snapshot = None;
             let global_hits = global_store_frankensearch_hits(
                 cx,
                 options,
@@ -11740,6 +11769,7 @@ async fn run_search_inner_with_performance(
                 &mut trace,
                 !retrieval_only,
                 unpublished_source,
+                retrieval_only.then_some(&mut pack_global_snapshot),
             )
             .await;
             search_checkpoint(cx)?;
@@ -12039,6 +12069,7 @@ async fn run_search_inner_with_performance(
                 audit_facts,
                 pack_snapshot: None,
                 pack_calibration_identity,
+                pack_global_snapshot,
                 scoring_reference_time,
                 report: SearchReport {
                     status,
@@ -12095,6 +12126,7 @@ async fn run_search_inner_with_performance(
                 audit_facts: None,
                 pack_snapshot: None,
                 pack_calibration_identity: None,
+                pack_global_snapshot: None,
                 scoring_reference_time,
                 report: SearchReport {
                     status: SearchStatus::IndexError,
@@ -15315,20 +15347,31 @@ async fn global_store_frankensearch_hits(
     trace: &mut SearchPerformanceTrace,
     reconcile: bool,
     source_only: bool,
+    pack_witness: Option<&mut Option<global_handoff::GlobalPackSearchWitness>>,
 ) -> Vec<SearchHit> {
-    if !global_store_participates_in_scope(options.memory_scope) {
+    if !global_store_participates_in_scope(options.memory_scope)
+        || options.query.trim().is_empty()
+    {
+        if let Some(pack_witness) = pack_witness {
+            *pack_witness = global_handoff::capture(options, memory_config, None);
+        }
         return Vec::new();
     }
-    if options.query.trim().is_empty() {
-        return Vec::new();
-    }
-    let Some((paths, mut snapshot)) = admitted_global_store_memories(
+    let admitted = admitted_global_store_memories(
         options,
         memory_config,
         memory_filters,
         reference_time,
         degraded,
-    ) else {
+    );
+    if let Some(pack_witness) = pack_witness.filter(|_| memory_filters.is_empty()) {
+        *pack_witness = global_handoff::capture(
+            options,
+            memory_config,
+            admitted.as_ref().map(|(paths, snapshot)| (paths, snapshot)),
+        );
+    }
+    let Some((paths, mut snapshot)) = admitted else {
         return Vec::new();
     };
     if !memory_filters.is_empty() && !snapshot.memories.is_empty() {
@@ -25157,6 +25200,8 @@ mod tests {
                 generation: 0,
                 calibration_input_identity: None,
                 scoring_reference_time: options.as_of.unwrap_or_else(Utc::now),
+                global_snapshot: None,
+                request_identity: global_handoff::request_identity(&options),
             },
         };
         assert!(handoff.revalidate(&options, &connection).is_empty());
@@ -25279,6 +25324,8 @@ mod tests {
                 generation: 0,
                 calibration_input_identity: None,
                 scoring_reference_time: scoped_options.as_of.unwrap_or_else(Utc::now),
+                global_snapshot: None,
+                request_identity: global_handoff::request_identity(&scoped_options),
             },
         };
         assert!(handoff.revalidate(&scoped_options, &connection).is_empty());

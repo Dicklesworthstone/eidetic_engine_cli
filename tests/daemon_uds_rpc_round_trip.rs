@@ -1308,7 +1308,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             && result
                 .pointer("/method_schemas/ee.daemon.pack_search/response")
                 .and_then(serde_json::Value::as_str)
-                == Some("ee.daemon.pack_search.response.v3"),
+                == Some("ee.daemon.pack_search.response.v4"),
         format!(
             "pack search capability must retain its workspace authorization and typed schemas: {result}"
         ),
@@ -2615,7 +2615,7 @@ fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes(
     )?;
     ensure(
         empty.get("schema").and_then(serde_json::Value::as_str)
-            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3)
+            == Some(ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4)
             && empty
                 .pointer("/handoff/report/results")
                 .and_then(serde_json::Value::as_array)
@@ -2688,8 +2688,8 @@ fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes(
                 "feedback handoff",
             )?;
             ensure(
-                result["schema"] == ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
-                "feedback and retrieval configuration witnesses require the v3 handoff",
+                result["schema"] == ee::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
+                "feedback, request and global-source witnesses require the v4 handoff",
             )?;
             let hits: Vec<SearchHit> =
                 serde_json::from_value(result["handoff"]["report"]["results"].clone())

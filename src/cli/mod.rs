@@ -51338,7 +51338,7 @@ fn search_daemon_response_before(
     use crate::daemon::protocol::DaemonRequest;
     use crate::daemon::server::{
         ClientError, DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE,
-        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
+        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
         DAEMON_SEARCH_PARAMS_INVALID_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
         DAEMON_UNKNOWN_METHOD_CODE, DAEMON_WARMING_CODE, DaemonSearchParams, METHOD_CAPABILITIES,
         METHOD_PACK_SEARCH, METHOD_SEARCH, client_round_trip_before,
@@ -51433,7 +51433,7 @@ fn search_daemon_response_before(
                 capabilities,
                 METHOD_PACK_SEARCH,
                 DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
             )?;
         } else {
             validate_daemon_search_capabilities(capabilities)?;
@@ -51567,7 +51567,7 @@ fn pack_search_via_daemon(
         )
         .and_then(|value| {
             if value.get("schema").and_then(serde_json::Value::as_str)
-                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3)
+                != Some(crate::daemon::protocol::DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4)
                 || value.as_object().is_none_or(|object| object.len() != 2)
             {
                 return Err(DaemonSearchFallbackReason::SearchResponseDrift);
@@ -51589,20 +51589,8 @@ fn pack_search_via_daemon(
                     "daemon index needs canonical in-process freshness checks",
                 ));
             }
-            // Global hits are hydrated from a separate source-of-truth
-            // store by the in-process search path. Do not substitute
-            // daemon-supplied bodies for that canonical admission step.
-            if handoff.report.results.iter().any(|hit| {
-                hit.metadata
-                    .as_ref()
-                    .and_then(|meta| meta.get("storeLane"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(crate::core::global_store::GLOBAL_PROVENANCE_LANE)
-            }) {
-                return Err(DaemonSearchFallbackReason::UnsupportedCliOption(
-                    "global-store hit hydration remains in-process",
-                ));
-            }
+            // Core validates both source witnesses and reloads all bodies
+            // from its own pinned stores before admitting this retrieval.
             Ok(handoff)
         });
         let _ = sender.send(result);
@@ -98506,27 +98494,28 @@ mod tests {
     fn daemon_pack_capability_requires_retrieval_witness_version_and_workspace_authority() {
         use crate::daemon::protocol::{
             DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
-            DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_PACK_SEARCH,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_PACK_SEARCH,
         };
         let mut capabilities = daemon_search_capabilities_fixture();
         capabilities["methods"] = serde_json::json!([METHOD_PACK_SEARCH]);
         capabilities["authorization"][METHOD_PACK_SEARCH] = serde_json::json!("same_uid_workspace");
         capabilities["method_schemas"][METHOD_PACK_SEARCH] = serde_json::json!({
             "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+            "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
         });
         let validate = |value: &serde_json::Value| {
             super::validate_daemon_method_capabilities(
                 value,
                 METHOD_PACK_SEARCH,
                 DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
+                DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
             )
         };
         assert_eq!(validate(&capabilities), Ok(()));
         for incompatible in [
             "ee.daemon.pack_search.response.v1",
             DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
             "ee.daemon.pack_search.response.v99",
         ] {
             let mut legacy = capabilities.clone();
@@ -98737,7 +98726,7 @@ mod tests {
     fn daemon_warming_only_blocks_requests_that_need_embeddings() -> TestResult {
         use crate::daemon::protocol::{DaemonResponse, read_request, write_response};
         use crate::daemon::server::{
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_SEARCH_PARAMS_INVALID_CODE,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_SEARCH_PARAMS_INVALID_CODE,
             DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_WARMING_CODE,
             METHOD_CAPABILITIES, METHOD_PACK_SEARCH, METHOD_SEARCH,
         };
@@ -98915,7 +98904,7 @@ mod tests {
                     METHOD_SEARCH
                 };
                 let response_schema = if pack_retrieval {
-                    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3
+                    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4
                 } else {
                     DAEMON_SEARCH_RESPONSE_SCHEMA_V4
                 };
