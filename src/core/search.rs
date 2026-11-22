@@ -17343,23 +17343,13 @@ fn apply_tombstone_visibility_with_connection(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let batch_memories = if let Some(preloaded) = preloaded_memories
-        .as_deref()
-        .filter(|preloaded| hit_doc_ids.iter().all(|id| preloaded.contains_key(*id)))
-    {
-        Some(
-            hit_doc_ids
-                .iter()
-                .filter_map(|id| {
-                    preloaded
-                        .get(*id)
-                        .map(|memory| ((*id).to_owned(), memory.clone()))
-                })
-                .collect(),
-        )
-    } else {
-        connection.get_memories_by_id_seeks(&hit_doc_ids).ok()
-    };
+    // This is the source-admission boundary, before scope and quality may
+    // reuse its positively read rows. The preload can contain independently
+    // admitted global memories, including IDs also present in the local DB.
+    // Complete cache coverage proves neither local ownership nor readable
+    // local authority. Always perform the bounded source seeks here: local
+    // rows win collisions, and failed reads cannot become cached success.
+    let batch_memories = connection.get_memories_by_id_seeks(&hit_doc_ids).ok();
     // Seal authority is hydrated beside source bodies in the caller's pinned
     // snapshot, not once per hit. A failed batch retains the point getter's
     // fail-closed semantics while isolating any single malformed sidecar.
@@ -24881,6 +24871,101 @@ mod tests {
                     .as_ref(),
                 Some(&fixture.local_memory),
                 "preload hydration must not mutate the authoritative row"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_global_preload_keeps_global_only_source_identity() -> TestResult {
+        let fixture = MemoryPreloadCollisionFixture::new()?;
+        let id = MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID;
+        let mut preloaded = fixture.global_memories.clone();
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility_collecting(
+            &fixture.options,
+            vec![fixture.global_hit(id)],
+            &mut degraded,
+            Some(&fixture.connection),
+            Some(&mut preloaded),
+        );
+
+        assert_eq!(visible.len(), 1);
+        let metadata = visible[0]
+            .metadata
+            .as_ref()
+            .ok_or("global metadata missing")?;
+        assert_eq!(
+            metadata["storeLane"],
+            crate::core::global_store::GLOBAL_PROVENANCE_LANE
+        );
+        assert_eq!(metadata["memory_scope"], "global");
+        assert_eq!(metadata["tags"], serde_json::json!(["global"]));
+        assert_eq!(
+            metadata["workspaceId"],
+            fixture.global_memories[id].workspace_id
+        );
+        assert_eq!(preloaded.get(id), fixture.global_memories.get(id));
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn global_preloads_cannot_bypass_local_tombstones_or_closed_seals() -> TestResult {
+        for sealed in [false, true] {
+            let fixture = MemoryPreloadCollisionFixture::new()?;
+            let local_id = MemoryPreloadCollisionFixture::LOCAL_ID;
+            let global_id = MemoryPreloadCollisionFixture::GLOBAL_ONLY_ID;
+            if sealed {
+                fixture
+                    .connection
+                    .insert_memory_seal(
+                        local_id,
+                        &format!("blake3:{}", "a".repeat(64)),
+                        "2026-01-01T00:00:00Z",
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else {
+                fixture
+                    .connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET tombstoned_at = '2026-02-01T00:00:00Z' WHERE id = '{local_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            let local = fixture
+                .connection
+                .get_memory(local_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("local collision row missing")?;
+            let mut preloaded = fixture.global_memories.clone();
+            let mut degraded = Vec::new();
+            let visible = apply_tombstone_visibility_collecting(
+                &fixture.options,
+                vec![fixture.global_hit(local_id), fixture.global_hit(global_id)],
+                &mut degraded,
+                Some(&fixture.connection),
+                Some(&mut preloaded),
+            );
+
+            assert_eq!(visible.len(), 1, "local lifecycle authority must win");
+            assert_eq!(visible[0].doc_id, global_id);
+            assert_eq!(
+                visible[0]
+                    .metadata
+                    .as_ref()
+                    .ok_or("global metadata missing")?["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            assert_eq!(preloaded.get(local_id), Some(&local));
+            assert_eq!(
+                preloaded.get(global_id),
+                fixture.global_memories.get(global_id)
+            );
+            assert!(
+                !serde_json::json!(visible)
+                    .to_string()
+                    .contains("different global body for the same ID")
             );
         }
         Ok(())
