@@ -33185,10 +33185,12 @@ impl DbConnection {
         memory_id: &str,
         input: &ApplyMemoryScoreUpdateInput,
     ) -> Result<Option<String>> {
-        self.with_transaction(|| self.apply_memory_score_update_audited_inner(memory_id, input))
+        self.with_transaction(|| self.apply_memory_score_update_audited_in_txn(memory_id, input))
     }
 
-    fn apply_memory_score_update_audited_inner(
+    /// Apply the score, feedback markers, audit and publication job in the
+    /// caller's transaction, allowing a decay lifecycle action to share it.
+    pub(crate) fn apply_memory_score_update_audited_in_txn(
         &self,
         memory_id: &str,
         input: &ApplyMemoryScoreUpdateInput,
@@ -33203,6 +33205,23 @@ impl DbConnection {
         }
         if !score_fields_changed(&existing, input.confidence, input.utility, input.importance) {
             return Ok(None);
+        }
+        let mut feedback_ids = BTreeSet::new();
+        for event_id in &input.feedback_event_ids {
+            let event = self.get_feedback_event(event_id)?;
+            if !feedback_ids.insert(event_id)
+                || !event.is_some_and(|event| {
+                    event.workspace_id == input.workspace_id
+                        && event.target_type == "memory"
+                        && event.target_id == memory_id
+                        && event.applied_at.is_none()
+                })
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Score decay feedback is missing, already applied, duplicated, or belongs to another target".to_owned(),
+                });
+            }
         }
 
         let mut updated = existing.clone();
@@ -33231,7 +33250,12 @@ impl DbConnection {
         }
 
         for event_id in &input.feedback_event_ids {
-            self.apply_feedback_event_at(event_id, &input.updated_at)?;
+            if !self.apply_feedback_event_at(event_id, &input.updated_at)? {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Score decay lost its unapplied feedback event".to_owned(),
+                });
+            }
         }
 
         let audit_id = generate_audit_id();
@@ -33261,10 +33285,11 @@ impl DbConnection {
         memory_id: &str,
         input: &ApplyMemoryDecayDemotionInput,
     ) -> Result<Option<String>> {
-        self.with_transaction(|| self.apply_memory_decay_demotion_audited_inner(memory_id, input))
+        self.with_transaction(|| self.apply_memory_decay_demotion_audited_in_txn(memory_id, input))
     }
 
-    fn apply_memory_decay_demotion_audited_inner(
+    /// Apply a planned demotion under the caller's writer transaction.
+    pub(crate) fn apply_memory_decay_demotion_audited_in_txn(
         &self,
         memory_id: &str,
         input: &ApplyMemoryDecayDemotionInput,
@@ -33349,52 +33374,60 @@ impl DbConnection {
         details: &str,
     ) -> Result<Option<String>> {
         self.with_transaction(|| {
-            let Some(existing) = self.get_memory(memory_id)? else {
-                return Ok(None);
-            };
-            if !text_matches(&existing.workspace_id, workspace_id)
-                || existing.tombstoned_at.is_some()
-            {
-                return Ok(None);
-            }
-            let tombstoned = self.tombstone_memory(memory_id)?;
-            if !tombstoned {
-                return Ok(None);
-            }
-
-            let audit_id = generate_audit_id();
-            self.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_string()),
-                    actor: actor.map(str::to_string),
-                    action: audit_actions::MEMORY_DECAY_TOMBSTONE.to_string(),
-                    target_type: Some("memory".to_string()),
-                    target_id: Some(memory_id.to_string()),
-                    details: Some(details.to_string()),
-                },
-            )?;
-
-            let _ =
-                self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
-                    workspace_id: workspace_id.to_string(),
-                    actor: actor.map(str::to_string),
-                    memory_id: memory_id.to_string(),
-                    previous_level: existing.level,
-                    new_level: "tombstoned".to_string(),
-                    reason: "auto_forgetting".to_string(),
-                    automatic: true,
-                    event: "decay.l3".to_string(),
-                    evidence_refs: vec!["decay_evaluation".to_string()],
-                    source_action: Some(audit_actions::MEMORY_DECAY_TOMBSTONE.to_string()),
-                    previous_trust_class: None,
-                    new_trust_class: None,
-                })?;
-            // Drop the tombstoned document from the persisted index.
-            self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
-
-            Ok(Some(audit_id))
+            self.tombstone_memory_decay_audited_in_txn(memory_id, workspace_id, actor, details)
         })
+    }
+
+    /// Apply a planned tombstone under the caller's writer transaction.
+    pub(crate) fn tombstone_memory_decay_audited_in_txn(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        actor: Option<&str>,
+        details: &str,
+    ) -> Result<Option<String>> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(None);
+        };
+        if !text_matches(&existing.workspace_id, workspace_id) || existing.tombstoned_at.is_some() {
+            return Ok(None);
+        }
+        let tombstoned = self.tombstone_memory(memory_id)?;
+        if !tombstoned {
+            return Ok(None);
+        }
+
+        let audit_id = generate_audit_id();
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(str::to_string),
+                action: audit_actions::MEMORY_DECAY_TOMBSTONE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(details.to_string()),
+            },
+        )?;
+
+        let _ = self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+            workspace_id: workspace_id.to_string(),
+            actor: actor.map(str::to_string),
+            memory_id: memory_id.to_string(),
+            previous_level: existing.level,
+            new_level: "tombstoned".to_string(),
+            reason: "auto_forgetting".to_string(),
+            automatic: true,
+            event: "decay.l3".to_string(),
+            evidence_refs: vec!["decay_evaluation".to_string()],
+            source_action: Some(audit_actions::MEMORY_DECAY_TOMBSTONE.to_string()),
+            previous_trust_class: None,
+            new_trust_class: None,
+        })?;
+        // Drop the tombstoned document from the persisted index.
+        self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
+
+        Ok(Some(audit_id))
     }
 
     /// Complete the live, admitted working set in one writer transaction.
@@ -34596,6 +34629,30 @@ impl DbConnection {
             ],
         )?;
         rows.iter().map(stored_audit_from_row).collect()
+    }
+
+    /// Read only the access clocks needed to revalidate one decay decision.
+    /// Do not materialize the workspace's audit bodies while holding a writer.
+    pub(crate) fn memory_access_audit_timestamps(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT timestamp FROM audit_log WHERE workspace_id = ?1 AND target_type = 'memory' AND target_id = ?2 AND action IN (?3, ?4, ?5, ?6)",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(memory_id.to_owned()),
+                Value::Text(audit_actions::SEARCH_RETURNED_MEM.to_owned()),
+                Value::Text(audit_actions::PACK_INCLUDED_MEM.to_owned()),
+                Value::Text(audit_actions::MEMORY_SHOW.to_owned()),
+                Value::Text(audit_actions::WHY_INSPECTED.to_owned()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "timestamp").map(str::to_owned))
+            .collect()
     }
 
     /// List a bounded target audit slice scoped to one non-null workspace.

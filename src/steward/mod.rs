@@ -2307,6 +2307,10 @@ pub fn run_score_decay_job(
     let as_of_timestamp = parse_score_decay_timestamp(&as_of, "as_of")?;
     score_decay_check_cancelled(options)?;
 
+    // Capture before the planning reads. A topology change during the scan
+    // must invalidate structural decisions just like one made after it.
+    let mut structural_generation = score_decay_structural_generation(conn, options)
+        .map_err(|error| format!("Failed to read score decay source generation: {error}"))?;
     let mut memories = conn
         .list_memories(&options.workspace_id, None, false)
         .map_err(|error| format!("Failed to list memories for score decay: {error}"))?;
@@ -2347,10 +2351,14 @@ pub fn run_score_decay_job(
     let mut scanned_count = 0usize;
     let mut changes = Vec::new();
     let empty_feedback = Vec::new();
+    let mut structural_plan_invalidated = false;
 
     for memory in memories {
         score_decay_check_cancelled(options)?;
         scanned_count = scanned_count.saturating_add(1);
+        if structural_plan_invalidated {
+            continue;
+        }
         let feedback_events = feedback_by_memory
             .get(&memory.id)
             .unwrap_or(&empty_feedback);
@@ -2369,34 +2377,25 @@ pub fn run_score_decay_job(
         };
 
         if !options.dry_run {
-            score_decay_check_cancelled(options)?;
-            if change.confidence_changed(options.min_delta) {
-                let details = score_decay_audit_details(&change, &as_of);
-                change.audit_id = conn
-                    .apply_memory_score_update_audited(
-                        &memory.id,
-                        &ApplyMemoryScoreUpdateInput {
-                            workspace_id: options.workspace_id.clone(),
-                            confidence: change.new_confidence,
-                            utility: memory.utility,
-                            importance: memory.importance,
-                            updated_at: as_of.clone(),
-                            actor: options.actor.clone(),
-                            details,
-                            feedback_event_ids: change.feedback_event_ids.clone(),
-                        },
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "Failed to apply score decay for memory {}: {error}",
-                            memory.id
-                        )
-                    })?;
-            }
-            if options.include_decay_actions {
-                apply_decay_lifecycle_action(conn, &memory, &mut change, options, &as_of)?;
-            }
-            change.applied = change.audit_id.is_some() || change.lifecycle_audit_id.is_some();
+            let snapshot = ScoreDecayMemorySnapshot {
+                memory: &memory,
+                feedback_events,
+                last_accessed_at: access_times.get(&memory.id).copied(),
+                structural_generation,
+            };
+            let Some((applied_change, generation)) =
+                apply_score_decay_change(conn, &snapshot, change, options, &as_of)?
+            else {
+                continue;
+            };
+            change = applied_change;
+            // A tombstone removes a live vertex and can delete derived links.
+            // Recompute the remaining structural proposals in the next sweep;
+            // carrying the new generation alone cannot validate the old graph.
+            structural_plan_invalidated = generation.is_some()
+                && change.decay_action == MemoryDecayAction::Tombstone
+                && change.lifecycle_audit_id.is_some();
+            structural_generation = generation;
         }
 
         changes.push(change);
@@ -2435,6 +2434,141 @@ pub fn run_score_decay_job(
         decay_thresholds: options.decay_thresholds,
         decay_half_lives: options.decay_half_lives,
         changes,
+    })
+}
+
+struct ScoreDecayMemorySnapshot<'a> {
+    memory: &'a StoredMemory,
+    feedback_events: &'a [StoredFeedbackEvent],
+    last_accessed_at: Option<DateTime<Utc>>,
+    structural_generation: Option<u64>,
+}
+
+fn score_decay_structural_generation(
+    conn: &DbConnection,
+    options: &ScoreDecayJobOptions,
+) -> crate::db::Result<Option<u64>> {
+    if !options.include_decay_actions || !options.structural_decay || options.dry_run {
+        return Ok(None);
+    }
+    conn.get_workspace_generation(&options.workspace_id)?
+        .map(Some)
+        .ok_or_else(|| crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "Structural score decay requires a workspace source generation".to_owned(),
+        })
+}
+
+/// Revalidate one proposal and commit all of its effects together. Planning is
+/// deliberately outside the writer fence; a changed input defers this memory
+/// to the next sweep instead of overwriting newer learning or recent use.
+fn apply_score_decay_change(
+    conn: &DbConnection,
+    snapshot: &ScoreDecayMemorySnapshot<'_>,
+    mut change: ScoreDecayMemoryChange,
+    options: &ScoreDecayJobOptions,
+    as_of: &str,
+) -> Result<Option<(ScoreDecayMemoryChange, Option<u64>)>, String> {
+    score_decay_check_cancelled(options)?;
+    let applied = conn.with_transaction(|| {
+        score_decay_write_checkpoint(options)?;
+        let memory = snapshot.memory;
+        if conn.get_memory(&memory.id)?.as_ref() != Some(memory)
+            || conn.get_memory_superseded_at(&memory.id)?.is_some()
+            || score_decay_structural_generation(conn, options)? != snapshot.structural_generation
+        {
+            return Ok(None);
+        }
+        let current_feedback: Vec<_> = conn
+            .list_feedback_events_for_target("memory", &memory.id)?
+            .into_iter()
+            .filter(|event| {
+                event.workspace_id == options.workspace_id && event.applied_at.is_none()
+            })
+            .collect();
+        if current_feedback != snapshot.feedback_events {
+            return Ok(None);
+        }
+        if options.include_decay_actions {
+            let last_accessed_at = conn
+                .memory_access_audit_timestamps(&options.workspace_id, &memory.id)?
+                .iter()
+                .filter_map(|timestamp| {
+                    parse_score_decay_timestamp(timestamp, "audit.timestamp").ok()
+                })
+                .max();
+            if last_accessed_at != snapshot.last_accessed_at {
+                return Ok(None);
+            }
+        }
+        score_decay_write_checkpoint(options)?;
+        if change.confidence_changed(options.min_delta) {
+            change.audit_id = conn.apply_memory_score_update_audited_in_txn(
+                &memory.id,
+                &ApplyMemoryScoreUpdateInput {
+                    workspace_id: options.workspace_id.clone(),
+                    confidence: change.new_confidence,
+                    utility: memory.utility,
+                    importance: memory.importance,
+                    updated_at: as_of.to_owned(),
+                    actor: options.actor.clone(),
+                    details: score_decay_audit_details(&change, as_of),
+                    feedback_event_ids: change.feedback_event_ids.clone(),
+                },
+            )?;
+        }
+        score_decay_write_checkpoint(options)?;
+        if options.include_decay_actions {
+            apply_decay_lifecycle_action(conn, memory, &mut change, options, as_of)?;
+        }
+        score_decay_write_checkpoint(options)?;
+        change.applied = change.audit_id.is_some() || change.lifecycle_audit_id.is_some();
+        // Read inside the transaction: reading after COMMIT could absorb a
+        // competing write and reauthorize plans made against older topology.
+        let generation = score_decay_structural_generation(conn, options)?;
+        score_decay_write_checkpoint(options)?;
+        Ok(Some((change, generation)))
+    });
+    let applied = applied.map_err(|error| {
+        if matches!(
+            &error,
+            crate::db::DbError::SqlModel { source, .. }
+                if matches!(source.as_ref(), sqlmodel_core::Error::Cancelled)
+        ) {
+            SCORE_DECAY_CANCELLED_MESSAGE.to_owned()
+        } else {
+            format!(
+                "Failed to apply score decay for memory {}: {error}",
+                snapshot.memory.id
+            )
+        }
+    })?;
+    if let Some((change, _)) = &applied {
+        if change.lifecycle_audit_id.is_some() {
+            tracing::info!(
+                target: "ee::learn::decay",
+                memory_id = %change.memory_id,
+                freshness = change.freshness,
+                confidence = change.new_confidence,
+                utility = snapshot.memory.utility,
+                action = change.decay_action.as_str(),
+                "memory lifecycle decay committed"
+            );
+        }
+    } else {
+        tracing::debug!(
+            target: "ee::learn::decay",
+            memory_id = %snapshot.memory.id,
+            "skipped score decay because its source snapshot changed"
+        );
+    }
+    Ok(applied)
+}
+
+fn score_decay_write_checkpoint(options: &ScoreDecayJobOptions) -> crate::db::Result<()> {
+    score_decay_check_cancelled(options).map_err(|_| crate::db::DbError::SqlModel {
+        operation: crate::db::DbOperation::Execute,
+        source: Box::new(sqlmodel_core::Error::Cancelled),
     })
 }
 
@@ -2718,67 +2852,31 @@ fn apply_decay_lifecycle_action(
     change: &mut ScoreDecayMemoryChange,
     options: &ScoreDecayJobOptions,
     as_of: &str,
-) -> Result<(), String> {
+) -> crate::db::Result<()> {
     let details = decay_lifecycle_audit_details(change, as_of);
     match change.decay_action {
         MemoryDecayAction::Preserve => Ok(()),
         MemoryDecayAction::Demote => {
-            change.lifecycle_audit_id = conn
-                .apply_memory_decay_demotion_audited(
-                    &memory.id,
-                    &ApplyMemoryDecayDemotionInput {
-                        workspace_id: options.workspace_id.clone(),
-                        level: change.new_level.clone(),
-                        importance: change.new_importance,
-                        updated_at: as_of.to_owned(),
-                        actor: options.actor.clone(),
-                        details,
-                    },
-                )
-                .map_err(|error| {
-                    format!(
-                        "Failed to apply decay demotion for memory {}: {error}",
-                        memory.id
-                    )
-                })?;
-            if change.lifecycle_audit_id.is_some() {
-                tracing::info!(
-                    target: "ee::learn::decay",
-                    memory_id = %memory.id,
-                    freshness = change.freshness,
-                    confidence = change.new_confidence,
-                    utility = memory.utility,
-                    action = change.decay_action.as_str(),
-                    "memory demoted by decay"
-                );
-            }
+            change.lifecycle_audit_id = conn.apply_memory_decay_demotion_audited_in_txn(
+                &memory.id,
+                &ApplyMemoryDecayDemotionInput {
+                    workspace_id: options.workspace_id.clone(),
+                    level: change.new_level.clone(),
+                    importance: change.new_importance,
+                    updated_at: as_of.to_owned(),
+                    actor: options.actor.clone(),
+                    details,
+                },
+            )?;
             Ok(())
         }
         MemoryDecayAction::Tombstone => {
-            change.lifecycle_audit_id = conn
-                .tombstone_memory_decay_audited(
-                    &memory.id,
-                    &options.workspace_id,
-                    options.actor.as_deref(),
-                    &details,
-                )
-                .map_err(|error| {
-                    format!(
-                        "Failed to apply decay tombstone for memory {}: {error}",
-                        memory.id
-                    )
-                })?;
-            if change.lifecycle_audit_id.is_some() {
-                tracing::info!(
-                    target: "ee::learn::decay",
-                    memory_id = %memory.id,
-                    freshness = change.freshness,
-                    confidence = change.new_confidence,
-                    utility = memory.utility,
-                    action = change.decay_action.as_str(),
-                    "memory tombstoned by decay"
-                );
-            }
+            change.lifecycle_audit_id = conn.tombstone_memory_decay_audited_in_txn(
+                &memory.id,
+                &options.workspace_id,
+                options.actor.as_deref(),
+                &details,
+            )?;
             Ok(())
         }
     }
@@ -12149,6 +12247,535 @@ mod tests {
     // ========================================================================
     // EE-206: Score Decay Job Tests
     // ========================================================================
+
+    #[derive(Clone)]
+    struct PreparedScoreDecayTest {
+        memory: StoredMemory,
+        feedback: Vec<StoredFeedbackEvent>,
+        last_accessed_at: Option<DateTime<Utc>>,
+        structural_generation: Option<u64>,
+        change: ScoreDecayMemoryChange,
+    }
+
+    impl PreparedScoreDecayTest {
+        fn new(connection: &DbConnection, options: &ScoreDecayJobOptions) -> Result<Self, String> {
+            let structural_generation = score_decay_structural_generation(connection, options)
+                .map_err(|error| error.to_string())?;
+            let memory = connection
+                .get_memory(SCORE_MEMORY_A)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "missing decay target".to_owned())?;
+            let feedback = connection
+                .list_feedback_events_for_target("memory", SCORE_MEMORY_A)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|event| event.applied_at.is_none())
+                .collect();
+            let last_accessed_at = latest_memory_access_timestamps(connection, SCORE_WORKSPACE_ID)?
+                .get(SCORE_MEMORY_A)
+                .copied();
+            let mut preview = options.clone();
+            preview.dry_run = true;
+            let change = run_score_decay_job(connection, &preview)?
+                .changes
+                .into_iter()
+                .find(|change| change.memory_id == SCORE_MEMORY_A)
+                .ok_or_else(|| "fixture must produce a decay proposal".to_owned())?;
+            Ok(Self {
+                memory,
+                feedback,
+                last_accessed_at,
+                structural_generation,
+                change,
+            })
+        }
+
+        fn apply(
+            self,
+            connection: &DbConnection,
+            options: &ScoreDecayJobOptions,
+        ) -> Result<Option<(ScoreDecayMemoryChange, Option<u64>)>, String> {
+            apply_score_decay_change(
+                connection,
+                &ScoreDecayMemorySnapshot {
+                    memory: &self.memory,
+                    feedback_events: &self.feedback,
+                    last_accessed_at: self.last_accessed_at,
+                    structural_generation: self.structural_generation,
+                },
+                self.change,
+                options,
+                options.as_of.as_deref().ok_or("fixture needs as_of")?,
+            )
+        }
+    }
+
+    fn score_decay_durable_state(
+        connection: &DbConnection,
+    ) -> Result<BTreeMap<String, BTreeMap<i64, String>>, String> {
+        [
+            "memories",
+            "feedback_events",
+            "audit_log",
+            "search_index_jobs",
+            "workspace_generations",
+            "memory_links",
+        ]
+        .into_iter()
+        .map(|table| {
+            connection
+                .table_row_digests_by_rowid(table)
+                .map(|digest| (table.to_owned(), digest))
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+    }
+
+    #[test]
+    fn score_decay_skips_new_learning_promotions_and_changed_feedback() -> TestResult {
+        const EVENT: &str = "fb_00000000000000000000009910";
+        for interleave in [
+            "posterior",
+            "promotion",
+            "superseded",
+            "feedback_applied",
+            "feedback_added",
+            "feedback_reweighted",
+        ] {
+            let connection = open_score_decay_db()?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            if interleave == "promotion" {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET level = 'semantic' WHERE id = '{SCORE_MEMORY_A}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+            insert_score_feedback(&connection, EVENT, SCORE_MEMORY_A, "harmful", 1.0)?;
+            let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+            options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+            options.include_decay_actions = true;
+            // Exercise the row/feedback fences independently of the topology
+            // generation, including applied_at-only feedback changes.
+            options.structural_decay = false;
+            let plan = PreparedScoreDecayTest::new(&connection, &options)?;
+            assert_eq!(plan.change.decay_action, MemoryDecayAction::Tombstone);
+            match interleave {
+                "posterior" => {
+                    assert!(
+                        connection
+                            .with_transaction(|| connection.update_memory_learning_posterior(
+                                SCORE_MEMORY_A,
+                                7.0,
+                                1.0,
+                            ))
+                            .map_err(|error| error.to_string())?
+                    );
+                }
+                "promotion" => {
+                    assert!(
+                        connection
+                            .apply_memory_level_transition_audited(
+                                SCORE_MEMORY_A,
+                                &crate::db::ApplyMemoryLevelTransitionInput {
+                                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                                    expected_level: Some("semantic".to_owned()),
+                                    level: "procedural".to_owned(),
+                                    updated_at: "2099-01-01T00:00:00Z".to_owned(),
+                                    actor: Some("decay-race-test".to_owned()),
+                                    reason: "new evidence promotes this memory".to_owned(),
+                                    automatic: false,
+                                    event: "memory.promoted".to_owned(),
+                                    evidence_refs: Vec::new(),
+                                    source_action: None,
+                                },
+                            )
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                    );
+                }
+                "feedback_applied" => {
+                    let generation = connection
+                        .get_workspace_generation(SCORE_WORKSPACE_ID)
+                        .map_err(|error| error.to_string())?;
+                    assert!(
+                        connection
+                            .apply_feedback_event(EVENT)
+                            .map_err(|error| error.to_string())?
+                    );
+                    assert_eq!(
+                        connection
+                            .get_workspace_generation(SCORE_WORKSPACE_ID)
+                            .map_err(|error| error.to_string())?,
+                        generation,
+                        "feedback markers are not covered by the memory generation"
+                    );
+                }
+                "superseded" => {
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE memories SET superseded_at = '2099-01-01T00:00:00Z' WHERE id = '{SCORE_MEMORY_A}'"
+                        ))
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(
+                        connection
+                            .get_memory(SCORE_MEMORY_A)
+                            .map_err(|error| error.to_string())?
+                            .as_ref(),
+                        Some(&plan.memory),
+                        "supersession is outside StoredMemory's projection"
+                    );
+                }
+                "feedback_added" => insert_score_feedback(
+                    &connection,
+                    "fb_00000000000000000000009911",
+                    SCORE_MEMORY_A,
+                    "helpful",
+                    1.0,
+                )?,
+                "feedback_reweighted" => connection
+                    .execute_raw(&format!(
+                        "UPDATE feedback_events SET weight = 0.0 WHERE id = '{EVENT}'"
+                    ))
+                    .map_err(|error| error.to_string())?,
+                _ => unreachable!(),
+            }
+            let before = score_decay_durable_state(&connection)?;
+            assert!(plan.apply(&connection, &options)?.is_none(), "{interleave}");
+            assert_eq!(
+                score_decay_durable_state(&connection)?,
+                before,
+                "{interleave}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_skips_recent_access_and_changed_graph_topology() -> TestResult {
+        for action in [
+            audit_actions::SEARCH_RETURNED_MEM,
+            audit_actions::PACK_INCLUDED_MEM,
+            audit_actions::MEMORY_SHOW,
+            audit_actions::WHY_INSPECTED,
+            "topology",
+        ] {
+            let connection = open_score_decay_db()?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            insert_score_memory(&connection, SCORE_MEMORY_B, 0.8)?;
+            set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+            let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+            options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+            options.include_decay_actions = true;
+            let plan = PreparedScoreDecayTest::new(&connection, &options)?;
+            if action == "topology" {
+                insert_score_memory_link(
+                    &connection,
+                    "link_00000000000000000000009921",
+                    SCORE_MEMORY_A,
+                    SCORE_MEMORY_B,
+                )?;
+                assert_ne!(
+                    score_decay_structural_generation(&connection, &options)
+                        .map_err(|error| error.to_string())?,
+                    plan.structural_generation
+                );
+            } else {
+                connection
+                    .insert_audit(
+                        "audit_00000000000000000000009922",
+                        &CreateAuditInput {
+                            workspace_id: Some(SCORE_WORKSPACE_ID.to_owned()),
+                            actor: Some("decay-access-test".to_owned()),
+                            action: action.to_owned(),
+                            target_type: Some("memory".to_owned()),
+                            target_id: Some(SCORE_MEMORY_A.to_owned()),
+                            details: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            assert_eq!(
+                connection
+                    .get_memory(SCORE_MEMORY_A)
+                    .map_err(|error| error.to_string())?
+                    .as_ref(),
+                Some(&plan.memory),
+                "{action} must exercise evidence outside the memory row"
+            );
+            let before = score_decay_durable_state(&connection)?;
+            assert!(plan.apply(&connection, &options)?.is_none(), "{action}");
+            assert_eq!(score_decay_durable_state(&connection)?, before, "{action}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_rolls_back_score_feedback_and_jobs_when_lifecycle_fails() -> TestResult {
+        for (as_of, expected_action, rejected_audit) in [
+            (
+                "2030-01-01T00:00:00Z",
+                MemoryDecayAction::Demote,
+                audit_actions::MEMORY_DECAY_DEMOTE,
+            ),
+            (
+                "2099-01-01T00:00:00Z",
+                MemoryDecayAction::Tombstone,
+                audit_actions::MEMORY_DECAY_TOMBSTONE,
+            ),
+        ] {
+            let connection = open_score_decay_db()?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+            insert_score_feedback(
+                &connection,
+                "fb_00000000000000000000009930",
+                SCORE_MEMORY_A,
+                "harmful",
+                1.0,
+            )?;
+            let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+            options.as_of = Some(as_of.to_owned());
+            options.include_decay_actions = true;
+            options.structural_decay = false;
+            let mut preview = options.clone();
+            preview.dry_run = true;
+            let planned = run_score_decay_job(&connection, &preview)?;
+            assert!(planned.changes[0].confidence_changed(options.min_delta));
+            assert_eq!(planned.changes[0].decay_action, expected_action);
+            connection
+                .execute_raw(&format!(
+                    "CREATE TRIGGER reject_decay_lifecycle BEFORE INSERT ON audit_log \
+                 WHEN NEW.action = '{rejected_audit}' BEGIN \
+                 SELECT RAISE(ABORT, 'injected decay lifecycle audit failure'); END"
+                ))
+                .map_err(|error| error.to_string())?;
+            let before = score_decay_durable_state(&connection)?;
+            let error =
+                run_score_decay_job(&connection, &options).expect_err("lifecycle audit must fail");
+            assert!(
+                error.contains("injected decay lifecycle audit failure"),
+                "{error}"
+            );
+            assert_eq!(
+                score_decay_durable_state(&connection)?,
+                before,
+                "{expected_action:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_commits_coherent_structural_plans_and_rejects_replay() -> TestResult {
+        let connection = open_score_decay_db()?;
+        for id in [SCORE_MEMORY_A, SCORE_MEMORY_B] {
+            insert_score_memory(&connection, id, 0.8)?;
+            set_score_memory_timestamp(&connection, id, "2026-01-01T00:00:00Z")?;
+        }
+        insert_score_feedback(
+            &connection,
+            "fb_00000000000000000000009940",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2030-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        let old_plan = PreparedScoreDecayTest::new(&connection, &options)?;
+        let applied = run_score_decay_job(&connection, &options)?;
+        assert_eq!(
+            applied.applied_count, 2,
+            "the sweep must not invalidate its own later plans"
+        );
+        assert_eq!(applied.demoted_count, 2);
+        assert!(
+            applied
+                .changes
+                .iter()
+                .all(|change| change.audit_id.is_some() && change.lifecycle_audit_id.is_some())
+        );
+        let before_replay = score_decay_durable_state(&connection)?;
+        assert!(old_plan.apply(&connection, &options)?.is_none());
+        assert_eq!(score_decay_durable_state(&connection)?, before_replay);
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_defers_remaining_structural_plans_after_own_tombstone() -> TestResult {
+        const MEMORY_C: &str = "mem_00000000000000000000009903";
+        const AUTO_LINK: &str = "link_00000000000000000000009961";
+        let connection = open_score_decay_db()?;
+        for id in [SCORE_MEMORY_A, SCORE_MEMORY_B, MEMORY_C] {
+            insert_score_memory(&connection, id, 0.8)?;
+            set_score_memory_timestamp(&connection, id, "2026-01-01T00:00:00Z")?;
+        }
+        insert_score_memory_link(&connection, AUTO_LINK, SCORE_MEMORY_A, SCORE_MEMORY_B)?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memory_links SET source = 'auto' WHERE id = '{AUTO_LINK}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        insert_score_memory_link(
+            &connection,
+            "link_00000000000000000000009962",
+            SCORE_MEMORY_B,
+            MEMORY_C,
+        )?;
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2030-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        let mut preview = options.clone();
+        preview.dry_run = true;
+        let initial_plan = run_score_decay_job(&connection, &preview)?;
+        assert_eq!(initial_plan.changes[0].memory_id, SCORE_MEMORY_A);
+        assert_eq!(
+            initial_plan.changes[0].decay_action,
+            MemoryDecayAction::Tombstone
+        );
+        let bridge = initial_plan
+            .changes
+            .iter()
+            .find(|change| change.memory_id == SCORE_MEMORY_B)
+            .ok_or_else(|| "bridge proposal missing".to_owned())?;
+        assert_eq!(bridge.decay_action, MemoryDecayAction::Preserve);
+        assert!(
+            bridge
+                .structural_adjustment
+                .as_ref()
+                .is_some_and(|adjustment| adjustment.is_articulation_point)
+        );
+        let before_b = connection
+            .get_memory(SCORE_MEMORY_B)
+            .map_err(|error| error.to_string())?;
+        let before_c = connection
+            .get_memory(MEMORY_C)
+            .map_err(|error| error.to_string())?;
+
+        let first = run_score_decay_job(&connection, &options)?;
+        assert_eq!(first.scanned_count, 3);
+        assert_eq!(first.applied_count, 1);
+        assert_eq!(first.tombstoned_count, 1);
+        assert_eq!(first.skipped_count, 2);
+        assert_eq!(first.changes[0].memory_id, SCORE_MEMORY_A);
+        assert_eq!(
+            connection
+                .get_memory(SCORE_MEMORY_B)
+                .map_err(|error| error.to_string())?,
+            before_b
+        );
+        assert_eq!(
+            connection
+                .get_memory(MEMORY_C)
+                .map_err(|error| error.to_string())?,
+            before_c
+        );
+        assert!(
+            connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .all(|link| link.id != AUTO_LINK),
+            "the committed tombstone must remove its derived graph edge"
+        );
+
+        let second = run_score_decay_job(&connection, &options)?;
+        assert_eq!(second.scanned_count, 2);
+        assert_eq!(second.applied_count, 2);
+        assert_eq!(second.demoted_count, 2);
+        assert_eq!(second.skipped_count, 0);
+        let reevaluated = second
+            .changes
+            .iter()
+            .find(|change| change.memory_id == SCORE_MEMORY_B)
+            .ok_or_else(|| "reevaluated bridge missing".to_owned())?;
+        assert_eq!(reevaluated.decay_action, MemoryDecayAction::Demote);
+        assert!(
+            reevaluated
+                .structural_adjustment
+                .as_ref()
+                .is_some_and(|adjustment| !adjustment.is_articulation_point)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_cancellation_after_planning_keeps_every_durable_row() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID)
+            .with_cancellation_flag(Arc::clone(&cancelled));
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        let plan = PreparedScoreDecayTest::new(&connection, &options)?;
+        let before = score_decay_durable_state(&connection)?;
+        cancelled.store(true, Ordering::SeqCst);
+        let error = plan
+            .apply(&connection, &options)
+            .expect_err("cancelled decay must stop");
+        assert!(score_decay_was_cancelled(&error), "{error}");
+        assert_eq!(score_decay_durable_state(&connection)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_score_helper_rejects_invalid_feedback_and_preserves_noops() -> TestResult {
+        const EVENT: &str = "fb_00000000000000000000009950";
+        for invalid in ["missing", "already_applied", "other_target", "duplicate"] {
+            let connection = open_score_decay_db()?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            insert_score_memory(&connection, SCORE_MEMORY_B, 0.8)?;
+            if invalid != "missing" {
+                let target = if invalid == "other_target" {
+                    SCORE_MEMORY_B
+                } else {
+                    SCORE_MEMORY_A
+                };
+                insert_score_feedback(&connection, EVENT, target, "harmful", 1.0)?;
+            }
+            if invalid == "already_applied" {
+                assert!(
+                    connection
+                        .apply_feedback_event(EVENT)
+                        .map_err(|error| error.to_string())?
+                );
+            }
+            let mut input = ApplyMemoryScoreUpdateInput {
+                workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                updated_at: "2099-01-01T00:00:00Z".to_owned(),
+                actor: Some("decay-feedback-test".to_owned()),
+                details: "{}".to_owned(),
+                feedback_event_ids: vec![EVENT.to_owned()],
+            };
+            if invalid == "duplicate" {
+                input.feedback_event_ids.push(EVENT.to_owned());
+            }
+            let before = score_decay_durable_state(&connection)?;
+            assert!(
+                connection
+                    .apply_memory_score_update_audited(SCORE_MEMORY_A, &input)
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+                "unchanged scores must not consume {invalid} feedback"
+            );
+            assert_eq!(score_decay_durable_state(&connection)?, before, "{invalid}");
+            input.confidence = 0.4;
+            let error = connection
+                .apply_memory_score_update_audited(SCORE_MEMORY_A, &input)
+                .expect_err("invalid feedback must reject the entire score update");
+            assert!(
+                error.to_string().contains("Score decay feedback"),
+                "{error}"
+            );
+            assert_eq!(score_decay_durable_state(&connection)?, before, "{invalid}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn score_decay_job_dry_run_does_not_mutate_memory_or_feedback() -> TestResult {
