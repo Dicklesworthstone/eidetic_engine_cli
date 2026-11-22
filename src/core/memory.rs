@@ -9195,7 +9195,7 @@ pub struct RememberBatchReport {
     pub already_recorded_count: usize,
     pub failed_count: usize,
     /// Derived-index posture after the batch: `indexed`, `queued`,
-    /// `failed`, or `not_applicable` for dry/no-op batches.
+    /// `failed`, or `not_applicable` for dry-run/entirely rejected batches.
     pub index_status: String,
     pub results: Vec<RememberBatchLineResult>,
 }
@@ -9849,9 +9849,16 @@ where
 
     // bd-2efx1: one coalesced index rebuild for the whole batch. Every
     // stored line enqueued its job transactionally; draining here replaces
-    // the per-line full rebuild that made batch ingest O(n²).
+    // the per-line full rebuild that made batch ingest O(n²). Replayed keys
+    // also own committed source identities: a prior invocation may have
+    // stopped after committing every line but before reaching this drain.
+    // Recover those existing jobs without repeating the source writes. The
+    // reconciler returns before model preparation/publication when no work
+    // remains, so a healthy replay only inspects the durable index posture.
     let mut index_status = "not_applicable".to_owned();
-    if !options.dry_run && (stored_count > 0 || reinforced_count > 0) {
+    if !options.dry_run
+        && (stored_count > 0 || reinforced_count > 0 || already_recorded_count > 0)
+    {
         let workspace_path = if options.database_path.is_some() {
             resolve_workspace_path(options.workspace_path, false)?
         } else {
@@ -22940,6 +22947,289 @@ mod tests {
             expected_ids,
             "every batch response memory is searchable without a manual rebuild",
         )
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn remember_batch_idempotent_retry_publishes_interrupted_source_commits() -> TestResult {
+        for with_invalid_line in [false, true] {
+            let temp = upgrade_test_workspace()?;
+            let canonical = temp
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let workspace_id = stable_workspace_id(&canonical);
+            let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+            let mut input = concat!(
+                "{\"content\":\"Orchid retry lesson for release verification.\",",
+                "\"idempotencyKey\":\"retry-release\"}\n",
+                "{\"content\":\"Orchid retry lesson for database recovery.\",",
+                "\"idempotencyKey\":\"retry-recovery\"}\n",
+            )
+            .to_owned();
+            if with_invalid_line {
+                input.push_str("not a JSON object\n");
+            }
+            let options = upgrade_batch_options(&canonical, false);
+
+            let interrupted = remember_memory_batch_stdin_with_reconcile_hook(
+                &options,
+                &input,
+                |_, _| {
+                    Err(DomainError::Storage {
+                        message: "interrupted before batch publication".to_owned(),
+                        repair: None,
+                    })
+                },
+            )
+            .expect_err("stop after source commits and before the final drain");
+            assert_eq!(interrupted.message(), "interrupted before batch publication");
+
+            let connection = open_upgrade_test_db(&canonical)?;
+            let memories_before = connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            let creates_before = connection
+                .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+                .map_err(|error| error.to_string())?;
+            let jobs_before = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            let expected_ids = memories_before
+                .iter()
+                .map(|memory| memory.id.clone())
+                .collect::<BTreeSet<_>>();
+            let expected_jobs = jobs_before
+                .iter()
+                .map(|job| job.id.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(expected_ids.len(), 2);
+            assert_eq!(creates_before.len(), 2);
+            assert_eq!(expected_jobs.len(), 2);
+            assert!(
+                jobs_before
+                    .iter()
+                    .all(|job| job.status_enum() == Some(SearchIndexJobStatus::Pending))
+            );
+            let audit_path = canonical.join(".ee/audit.jsonl");
+            let audit_before = fs::read(&audit_path).map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+
+            let retried =
+                remember_memory_batch_stdin(&options, &input).map_err(|error| error.message())?;
+            assert_eq!(retried.stored_count, 0);
+            assert_eq!(retried.reinforced_count, 0);
+            assert_eq!(retried.already_recorded_count, 2);
+            assert_eq!(retried.failed_count, usize::from(with_invalid_line));
+            assert_eq!(retried.index_status, "indexed");
+            assert_eq!(
+                retried
+                    .results
+                    .iter()
+                    .filter_map(|row| row.memory_id.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_ids,
+                "recovery returns the original committed source identities",
+            );
+            assert!(
+                retried
+                    .results
+                    .iter()
+                    .filter(|row| row.memory_id.is_some())
+                    .all(|row| row.status == "already_recorded")
+            );
+
+            let connection = open_upgrade_test_db(&canonical)?;
+            let completed_jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                completed_jobs
+                    .iter()
+                    .map(|job| job.id.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_jobs,
+                "the retry completes the original jobs without synthesizing replacements",
+            );
+            assert!(
+                completed_jobs
+                    .iter()
+                    .all(|job| job.status_enum() == Some(SearchIndexJobStatus::Completed))
+            );
+            let status_options = IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+            };
+            let published = get_index_status_with_connection(&status_options, Some(&connection))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(published.health, IndexHealth::Ready);
+            assert_eq!(published.db_generation, published.index_generation);
+            assert!(published.index_generation.is_some());
+            let metadata_path = canonical.join(".ee/index/meta.json");
+            let metadata_before = fs::read(&metadata_path).map_err(|error| error.to_string())?;
+            let modified_before = fs::metadata(&metadata_path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+
+            // A healthy retry reports readiness without republishing the index.
+            let healthy =
+                remember_memory_batch_stdin(&options, &input).map_err(|error| error.message())?;
+            assert_eq!(healthy.already_recorded_count, 2);
+            assert_eq!(healthy.index_status, "indexed");
+            assert_eq!(
+                fs::read(&metadata_path).map_err(|error| error.to_string())?,
+                metadata_before
+            );
+            assert_eq!(
+                fs::metadata(&metadata_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| error.to_string())?,
+                modified_before,
+                "completed replay does not rewrite the published generation",
+            );
+
+            let search = crate::core::search::run_pack_search(&SearchOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+                query: "Orchid retry lesson".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            })
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                search
+                    .report
+                    .results
+                    .into_iter()
+                    .map(|hit| hit.doc_id)
+                    .collect::<BTreeSet<_>>(),
+                expected_ids,
+                "read-only pack retrieval sees every recovered lesson",
+            );
+            let connection = open_upgrade_test_db(&canonical)?;
+            assert_eq!(
+                connection
+                    .list_memories(&workspace_id, None, true)
+                    .map_err(|error| error.to_string())?,
+                memories_before,
+                "retries preserve the complete source rows",
+            );
+            assert_eq!(
+                connection
+                    .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+                    .map_err(|error| error.to_string())?,
+                creates_before,
+                "retries do not duplicate creation audits",
+            );
+            assert_eq!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                completed_jobs,
+                "healthy replay and read-only retrieval leave completed jobs untouched",
+            );
+            assert_eq!(
+                connection
+                    .count_table_rows("remember_idempotency_keys")
+                    .map_err(|error| error.to_string())?,
+                2,
+            );
+            assert_eq!(
+                fs::read(&audit_path).map_err(|error| error.to_string())?,
+                audit_before
+            );
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_batch_dry_run_and_conflicting_replays_leave_publication_pending() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let content = "Deferred retry lesson remains pending during inspection.";
+        let seed = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(&canonical, content, 0.8, None, false),
+                &RememberWriteControls {
+                    idempotency_key: Some("preview-retry"),
+                    defer_index_processing: true,
+                    ..RememberWriteControls::default()
+                },
+            )
+            .map_err(|error| error.message())?,
+            "deferred keyed seed",
+        )?;
+        assert_eq!(seed.index_status, "queued");
+        let connection = open_upgrade_test_db(&canonical)?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        for dry_run in [true, false] {
+            let replay_content = if dry_run {
+                content
+            } else {
+                "Changed content conflicts with the recorded key."
+            };
+            let input = serde_json::json!({
+                "content": replay_content,
+                "level": "semantic",
+                "idempotencyKey": "preview-retry",
+            })
+            .to_string();
+            let report = remember_memory_batch_stdin_with_reconcile_hook(
+                &upgrade_batch_options(&canonical, dry_run),
+                &input,
+                |_, _| {
+                    Err(DomainError::Storage {
+                        message: "dry-run or failed replay must not drain the index".to_owned(),
+                        repair: None,
+                    })
+                },
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(report.stored_count, 0);
+            assert_eq!(report.already_recorded_count, usize::from(dry_run));
+            assert_eq!(report.failed_count, usize::from(!dry_run));
+            assert_eq!(report.index_status, "not_applicable");
+            let connection = open_upgrade_test_db(&canonical)?;
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "preview and rejected retries leave source and publication state unchanged",
+            );
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].status_enum(), Some(SearchIndexJobStatus::Pending));
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     #[test]
