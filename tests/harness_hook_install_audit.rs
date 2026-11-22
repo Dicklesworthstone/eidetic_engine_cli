@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use ee::hooks::{HarnessHookInstallOptions, HarnessHookTarget, generate_harness_hook_install};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
@@ -464,6 +464,192 @@ fn audit_status(target: HarnessHookTarget, settings_path: &Path) -> Result<Strin
     let report = generate_harness_hook_install(&options(target, settings_path, false, false))
         .map_err(|error| error.message())?;
     Ok(report.install_audit.status)
+}
+
+fn settings_sidecar(settings_path: &Path, suffix: &str) -> PathBuf {
+    let mut name = settings_path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+#[test]
+fn reinstall_undo_restores_latest_user_settings_and_preserves_older_backups() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let path = temp.path().join("settings.json");
+        let original = b"{\"theme\":\"dark\",\"hooks\":{}}\n";
+        fs::write(&path, original).map_err(|error| error.to_string())?;
+        generate_harness_hook_install(&options(target, &path, true, false))
+            .map_err(|error| error.message())?;
+
+        let mut edited: Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        edited["theme"] = json!("light");
+        edited["userSettingAddedLater"] = json!({"enabled": true});
+        edited["hooks"]["UserPromptSubmit"] = json!([{
+            "hooks": [{"type": "command", "command": "echo keep-my-hook"}]
+        }]);
+        let before_upgrade =
+            serde_json::to_string_pretty(&edited).map_err(|error| error.to_string())? + "\n";
+        fs::write(&path, &before_upgrade).map_err(|error| error.to_string())?;
+        let mut upgrade = options(target, &path, true, false);
+        upgrade.ee_binary_path = Some(PathBuf::from("/opt/updated/ee"));
+        let changed = generate_harness_hook_install(&upgrade).map_err(|error| error.message())?;
+        assert_eq!(changed.written_paths.len(), 1);
+        let backup = settings_sidecar(&path, ".ee-backup");
+        let receipt = settings_sidecar(&path, ".ee-backup.receipt.json");
+        let backup_bytes = fs::read(&backup).map_err(|error| error.to_string())?;
+        let receipt_bytes = fs::read(&receipt).map_err(|error| error.to_string())?;
+        assert_eq!(backup_bytes, before_upgrade.as_bytes());
+        for bytes in [original.as_slice(), before_upgrade.as_bytes()] {
+            let archive =
+                settings_sidecar(&path, &format!(".ee-backup.sha256-{}", sha256_hex(bytes)));
+            assert_eq!(fs::read(archive).map_err(|error| error.to_string())?, bytes);
+        }
+
+        let repeated = generate_harness_hook_install(&upgrade).map_err(|error| error.message())?;
+        assert!(repeated.written_paths.is_empty());
+        assert_eq!(
+            fs::read(&backup).map_err(|error| error.to_string())?,
+            backup_bytes
+        );
+        assert_eq!(
+            fs::read(&receipt).map_err(|error| error.to_string())?,
+            receipt_bytes
+        );
+        let undo = options(target, &path, false, true);
+        assert_eq!(
+            generate_harness_hook_install(&undo)
+                .map_err(|error| error.message())?
+                .written_paths
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs::read(&path).map_err(|error| error.to_string())?,
+            before_upgrade.as_bytes()
+        );
+        assert!(
+            generate_harness_hook_install(&undo)
+                .map_err(|error| error.message())?
+                .written_paths
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(&receipt).map_err(|error| error.to_string())?,
+            receipt_bytes
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn undo_refuses_later_user_edits_and_tampered_recovery_data() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        for changed_file in ["settings", "backup", "receipt"] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let path = temp.path().join("settings.json");
+            fs::write(&path, "{\"original\":true}\n").map_err(|error| error.to_string())?;
+            generate_harness_hook_install(&options(target, &path, true, false))
+                .map_err(|error| error.message())?;
+            let backup = settings_sidecar(&path, ".ee-backup");
+            let receipt = settings_sidecar(&path, ".ee-backup.receipt.json");
+            let changed_path = match changed_file {
+                "settings" => &path,
+                "backup" => &backup,
+                _ => &receipt,
+            };
+            fs::write(changed_path, "{\"laterUserChange\":true}\n")
+                .map_err(|error| error.to_string())?;
+            let before = [&path, &backup, &receipt].map(|path| fs::read(path));
+            let error = generate_harness_hook_install(&options(target, &path, false, true))
+                .expect_err("undo must reject changed data");
+            assert!(
+                error.message().contains(if changed_file == "settings" {
+                    "changed since installation"
+                } else {
+                    "undo receipt"
+                }),
+                "{}",
+                error.message()
+            );
+            for (path, expected) in [&path, &backup, &receipt].into_iter().zip(before) {
+                assert_eq!(
+                    fs::read(path).map_err(|error| error.to_string())?,
+                    expected.map_err(|error| error.to_string())?
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn undo_of_initial_install_leaves_empty_json_and_repeats_without_writes() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let path = temp.path().join("new-directory/settings.json");
+        generate_harness_hook_install(&options(target, &path, true, false))
+            .map_err(|error| error.message())?;
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(settings_sidecar(&path, ".ee-backup.receipt.json"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(receipt["original_file_existed"], false);
+        let undo = options(target, &path, false, true);
+        assert_eq!(
+            generate_harness_hook_install(&undo)
+                .map_err(|error| error.message())?
+                .written_paths
+                .len(),
+            1
+        );
+        assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, b"{}\n");
+        assert!(
+            generate_harness_hook_install(&undo)
+                .map_err(|error| error.message())?
+                .written_paths
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_backup_requires_manual_merge_and_survives_a_verified_upgrade() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let path = temp.path().join("settings.json");
+        let backup = settings_sidecar(&path, ".ee-backup");
+        let current = b"{\"newerUserSetting\":true}\n";
+        let historical = b"{\"firstBackup\":true}\n";
+        fs::write(&path, current).map_err(|error| error.to_string())?;
+        fs::write(&backup, historical).map_err(|error| error.to_string())?;
+        let error = generate_harness_hook_install(&options(target, &path, false, true))
+            .expect_err("receipt-free legacy undo cannot authorize overwriting later settings");
+        assert!(error.message().contains("no undo receipt"));
+        assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, current);
+        assert_eq!(
+            fs::read(&backup).map_err(|error| error.to_string())?,
+            historical
+        );
+        generate_harness_hook_install(&options(target, &path, true, false))
+            .map_err(|error| error.message())?;
+        let archive = settings_sidecar(
+            &path,
+            &format!(".ee-backup.sha256-{}", sha256_hex(historical)),
+        );
+        assert_eq!(
+            fs::read(archive).map_err(|error| error.to_string())?,
+            historical
+        );
+        generate_harness_hook_install(&options(target, &path, false, true))
+            .map_err(|error| error.message())?;
+        assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, current);
+    }
+    Ok(())
 }
 
 #[test]
@@ -955,47 +1141,200 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn released_hook_wrappers() -> Value {
+    serde_json::from_str(include_str!("fixtures/released_ee_hook_wrappers.json"))
+        .expect("released hook fixture must be valid JSON")
+}
+
+fn released_hook_command(script: &str, ee_binary: &str) -> String {
+    let script = script.replace('\'', "'\\''");
+    let ee_binary = ee_binary.replace('\'', "'\\''");
+    format!("python3 -c '{script}' '{ee_binary}'")
+}
+
 fn legacy_pre_015_hook_command(event: &str, legacy_ee_bin: &str) -> String {
-    let script = match event {
-        "PreToolUse" => {
-            r#"import hashlib, json, os, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "pre_edit_recall"
-cmd = [ee, "recall", "--path", "src/lib.rs", "--budget-tokens", "400", "--format", "markdown"]
-subprocess.run(cmd, text=True, capture_output=True, timeout=10)
-"#
-        }
-        "PostToolUse" => {
-            r#"import json, subprocess, sys
-ee = sys.argv[1]
-body = "Harness observed a non-zero Bash exit code."
-cmd = [ee, "journal", "append", body, "--source", "hook", "--kind", "command_failure", "--exit-code", "1", "--json"]
-subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-"#
-        }
-        "SessionStart" => {
-            r#"import hashlib, json, os, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "session_start_orient"
-cmd = [ee, "--max-output-tokens", "1200", "orient", "session start", "--workspace", ".", "--include-primer", "--fast", "--json"]
-subprocess.run(cmd, text=True, capture_output=True, timeout=10)
-"#
-        }
-        "Stop" | "SessionEnd" => {
-            r#"import hashlib, json, os, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "session_end_capture_suggest"
-cmd = [ee, "capture", "suggest", "--from-recent", "--max", "2", "--json"]
-subprocess.run(cmd, text=True, capture_output=True, timeout=10)
-"#
-        }
+    let source_function = match event {
+        "PreToolUse" => "pre_edit_python",
+        "PostToolUse" => "post_bash_failure_python",
+        "SessionStart" => "session_start_python",
+        "Stop" | "SessionEnd" => "session_end_capture_python",
         other => panic!("unexpected legacy hook event {other}"),
     };
-    let escaped = script.replace('\'', "'\\''");
-    format!("python3 -c '{escaped}' '{legacy_ee_bin}'")
+    let fixture = released_hook_wrappers();
+    let wrapper = fixture["wrappers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wrapper| {
+            wrapper["sourceFunction"] == source_function
+                && wrapper["sourceRefs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|reference| reference == "v0.14.4")
+        })
+        .expect("fixture must contain the complete v0.14.4 wrapper");
+    released_hook_command(wrapper["script"].as_str().unwrap(), legacy_ee_bin)
+}
+
+#[test]
+fn install_reclaims_released_wrappers_without_claiming_user_python() -> TestResult {
+    let fixture = released_hook_wrappers();
+    let wrappers = fixture["wrappers"].as_array().unwrap();
+    assert_eq!(wrappers.len(), 11, "exercise every unique released body");
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        for (index, wrapper) in wrappers.iter().enumerate() {
+            let settings_path = temp.path().join(format!("release-{index}.json"));
+            let opts = options(target, &settings_path, true, false);
+            let preview =
+                generate_harness_hook_install(&options(target, &settings_path, false, false))
+                    .map_err(|error| error.message())?;
+            let snippet = preview
+                .snippets
+                .iter()
+                .find(|snippet| wrapper["snippetId"] == snippet.id)
+                .ok_or("released wrapper must map to a current hook")?;
+            let script = wrapper["script"].as_str().unwrap();
+            let legacy = released_hook_command(script, "/opt/EE's old install/ee");
+            let custom_commands = [
+                // Marker substrings remain, but user code inside the Python
+                // body must never be retired as a known released hook.
+                released_hook_command(
+                    &format!("{script}\nsubprocess.run([\"/opt/user-audit\"])\n"),
+                    "/opt/ee/bin/ee",
+                ),
+                released_hook_command(
+                    &script.replacen(
+                        "ee = sys.argv[1]",
+                        "ee = sys.argv[1]\nee = \"/opt/custom-memory\"",
+                        1,
+                    ),
+                    "/opt/ee/bin/ee",
+                ),
+                released_hook_command(
+                    &format!("historical_example = '''{script}'''\nprint(\"user hook\")\n"),
+                    "/opt/ee/bin/ee",
+                ),
+                released_hook_command(script, "/opt/user-hook-runner"),
+                format!("{legacy} --custom-option"),
+                format!("{legacy}; printf user-hook"),
+            ];
+            let mut user_hooks: Vec<Value> = custom_commands
+                .iter()
+                .map(|command| {
+                    serde_json::json!({"type": "command", "command": command, "timeout": 77})
+                })
+                .collect();
+            user_hooks.push(serde_json::json!({
+                "type": "command", "command": legacy,
+                "eeManaged": "user-owned", "timeout": 91
+            }));
+            let expected_user_group = serde_json::json!({
+                "matcher": snippet.matcher,
+                "userSetting": "retain me",
+                "hooks": user_hooks
+            });
+            let mut mixed_group = expected_user_group.clone();
+            for _ in 0..2 {
+                mixed_group["hooks"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "type": "command", "command": legacy, "timeout": 10
+                    }));
+            }
+            let event = snippet.event.as_str();
+            let original = serde_json::to_vec_pretty(&serde_json::json!({
+                "hooks": {event: [mixed_group]}
+            }))
+            .map_err(|error| error.to_string())?;
+            fs::write(&settings_path, &original).map_err(|error| error.to_string())?;
+
+            let audit =
+                generate_harness_hook_install(&options(target, &settings_path, false, false))
+                    .map_err(|error| error.message())?;
+            let finding = audit
+                .install_audit
+                .findings
+                .iter()
+                .find(|finding| finding.event.as_deref() == Some(snippet.event.as_str()))
+                .ok_or("released hook audit finding")?;
+            assert_eq!(finding.code, "duplicate_hook");
+            assert!(finding.message.starts_with("2 ee-managed"), "{finding:?}");
+            assert_eq!(fs::read(&settings_path).unwrap(), original);
+
+            let installed =
+                generate_harness_hook_install(&opts).map_err(|error| error.message())?;
+            assert_eq!(installed.install_audit.status, "fresh");
+            let installed_bytes = fs::read(&settings_path).map_err(|error| error.to_string())?;
+            let installed_doc: Value =
+                serde_json::from_slice(&installed_bytes).map_err(|error| error.to_string())?;
+            let groups = installed_doc["hooks"][&snippet.event].as_array().unwrap();
+            assert_eq!(groups.len(), 2, "{target:?} {}", wrapper["sourceRefs"]);
+            assert_eq!(groups[0], expected_user_group, "custom Python must survive");
+            assert_eq!(groups[1]["hooks"][0]["command"], snippet.command);
+            let repeated = generate_harness_hook_install(&opts).map_err(|error| error.message())?;
+            assert!(repeated.written_paths.is_empty());
+            assert_eq!(fs::read(&settings_path).unwrap(), installed_bytes);
+
+            generate_harness_hook_install(&options(target, &settings_path, false, true))
+                .map_err(|error| error.message())?;
+            assert_eq!(fs::read(&settings_path).unwrap(), original);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn install_recognizes_current_bodies_at_old_paths_but_preserves_edits() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let preview = generate_harness_hook_install(&options(target, &settings_path, false, false))
+            .map_err(|error| error.message())?;
+        let mut events = serde_json::Map::new();
+        let mut custom_commands = Vec::new();
+        for snippet in &preview.snippets {
+            let legacy = snippet
+                .command
+                .replace("'/usr/local/bin/ee'", "'/opt/older/ee'");
+            assert_ne!(legacy, snippet.command);
+            let custom = legacy.replacen(
+                "ee = sys.argv[1]",
+                "ee = sys.argv[1]\nsubprocess.run([\"/opt/user-audit\"])",
+                1,
+            );
+            assert_ne!(custom, legacy);
+            events.insert(
+                snippet.event.clone(),
+                serde_json::json!([{
+                    "hooks": [
+                        {"type": "command", "command": legacy},
+                        {"type": "command", "command": custom}
+                    ]
+                }]),
+            );
+            custom_commands.push((snippet.event.clone(), custom));
+        }
+        fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({"hooks": events})).unwrap(),
+        )
+        .map_err(|error| error.to_string())?;
+        let installed =
+            generate_harness_hook_install(&options(target, &settings_path, true, false))
+                .map_err(|error| error.message())?;
+        assert_eq!(installed.install_audit.status, "fresh");
+        let document: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        for (event, custom) in custom_commands {
+            let groups = document["hooks"][&event].as_array().unwrap();
+            assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+            assert_eq!(groups[0]["hooks"][0]["command"], custom);
+        }
+    }
+    Ok(())
 }
 
 #[test]

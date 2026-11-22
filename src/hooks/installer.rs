@@ -48,6 +48,7 @@ pub const HARNESS_CONFORMANCE_SCHEMA_V1: &str = "ee.harness_conformance.v1";
 const HOOK_INSTALLER_SURFACE: &str = "hook_installer";
 const HARNESS_HOOK_MARKER: &str = "ee-managed-harness-hook:bd-u875s.4";
 const HARNESS_BACKUP_SUFFIX: &str = ".ee-backup";
+const HARNESS_SETTINGS_MAX_BYTES: usize = 4 * 1024 * 1024;
 const HARNESS_CONFORMANCE_REDACTION_STATUS: &str = "redacted_bounded_no_secrets";
 const HARNESS_CONFORMANCE_MAX_TRANSCRIPT_BYTES: usize = 8 * 1024;
 const HARNESS_CONFORMANCE_MAX_TRANSCRIPT_LINES: usize = 64;
@@ -332,7 +333,7 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
 }
 
@@ -1681,15 +1682,26 @@ pub fn generate_harness_hook_install(
         let backup_path = backup_path
             .as_deref()
             .expect("backup path exists when settings path exists");
-        if backup_path.is_file() {
-            restore_harness_settings_backup(settings_path, backup_path)?;
-            written_paths.push(settings_path.display().to_string());
+        if fs::symlink_metadata(backup_path).is_ok() {
+            let restored = restore_harness_settings_backup(settings_path, backup_path)?;
+            if restored {
+                written_paths.push(settings_path.display().to_string());
+            }
             plan.push(HarnessHookPlanItem {
-                action: "restore_backup".to_owned(),
+                action: if restored {
+                    "restore_backup"
+                } else {
+                    "no_change"
+                }
+                .to_owned(),
                 event: None,
                 matcher: None,
                 target_path: Some(settings_path.display().to_string()),
-                reason: format!("Restored {}", backup_path.display()),
+                reason: if restored {
+                    format!("Restored {}", backup_path.display())
+                } else {
+                    "Harness settings already match the verified undo preimage.".to_owned()
+                },
             });
         } else {
             capability_gaps.push(HarnessHookCapabilityGap {
@@ -2983,28 +2995,311 @@ except Exception:
 "#
 }
 
+#[derive(Debug)]
+struct HarnessSettingsSnapshot {
+    bytes: Vec<u8>,
+    metadata: fs::Metadata,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HarnessUndoReceipt {
+    version: u8,
+    before_sha256: String,
+    installed_sha256: String,
+    original_file_existed: bool,
+}
+
+fn harness_sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn harness_settings_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn harness_settings_io_error(path: &Path, error: impl std::fmt::Display) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to publish harness settings data '{}': {error}", path.display()),
+        repair: Some(
+            "Check permissions and available disk space, then retry. Backups and unfinished temporary files are retained.".to_owned(),
+        ),
+    }
+}
+
+fn harness_settings_changed(path: &Path) -> DomainError {
+    DomainError::Storage {
+        message: format!("Harness settings data '{}' changed during the operation; refusing to overwrite it.", path.display()),
+        repair: Some("Review the current settings and retry after other editors or installers have finished.".to_owned()),
+    }
+}
+
+fn harness_same_file_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    if left.len() != right.len()
+        || left.modified().ok() != right.modified().ok()
+        || left.permissions().readonly() != right.permissions().readonly()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if left.dev() != right.dev() || left.ino() != right.ino() || left.mode() != right.mode() {
+            return false;
+        }
+    }
+    true
+}
+
+fn read_harness_settings_snapshot(
+    path: &Path,
+) -> Result<Option<HarnessSettingsSnapshot>, DomainError> {
+    ensure_harness_path_is_not_symlink(path, "settings data path")?;
+    let before = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(harness_settings_io_error(path, error)),
+    };
+    if !before.is_file() || before.len() > HARNESS_SETTINGS_MAX_BYTES as u64 {
+        return Err(harness_settings_io_error(
+            path,
+            "expected a regular file no larger than 4 MiB",
+        ));
+    }
+    // NONBLOCK prevents a raced-in FIFO from hanging before metadata validation.
+    let file = open_no_follow(path).map_err(|error| harness_settings_io_error(path, error))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| harness_settings_io_error(path, error))?;
+    if !opened.is_file() || !harness_same_file_metadata(&before, &opened) {
+        return Err(harness_settings_changed(path));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(HARNESS_SETTINGS_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| harness_settings_io_error(path, error))?;
+    let after = file
+        .metadata()
+        .map_err(|error| harness_settings_io_error(path, error))?;
+    ensure_harness_path_is_not_symlink(path, "settings data path")?;
+    let current =
+        fs::symlink_metadata(path).map_err(|error| harness_settings_io_error(path, error))?;
+    if bytes.len() > HARNESS_SETTINGS_MAX_BYTES
+        || bytes.len() as u64 != after.len()
+        || !harness_same_file_metadata(&opened, &after)
+        || !harness_same_file_metadata(&after, &current)
+    {
+        return Err(harness_settings_changed(path));
+    }
+    Ok(Some(HarnessSettingsSnapshot {
+        bytes,
+        metadata: after,
+    }))
+}
+
+fn require_harness_settings_snapshot(
+    path: &Path,
+    expected: Option<&HarnessSettingsSnapshot>,
+) -> Result<(), DomainError> {
+    let current = read_harness_settings_snapshot(path)?;
+    let unchanged = match (expected, current.as_ref()) {
+        (None, None) => true,
+        (Some(expected), Some(current)) => {
+            expected.bytes == current.bytes
+                && harness_same_file_metadata(&expected.metadata, &current.metadata)
+        }
+        _ => false,
+    };
+    if unchanged {
+        Ok(())
+    } else {
+        Err(harness_settings_changed(path))
+    }
+}
+
+struct HarnessSettingsLock {
+    _file: fs::File,
+    path: PathBuf,
+    metadata: fs::Metadata,
+}
+
+impl HarnessSettingsLock {
+    fn acquire(backup_path: &Path) -> Result<Self, DomainError> {
+        let path = harness_sibling_path(backup_path, ".lock");
+        preflight_harness_write_target(&path, "settings lock")?;
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| harness_settings_io_error(parent, error))?;
+        preflight_harness_write_target(&path, "settings lock")?;
+        let mut open = fs::OpenOptions::new();
+        open.read(true).write(true).create(true).truncate(false);
+        #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600).custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            );
+        }
+        let file = open
+            .open(&path)
+            .map_err(|error| harness_settings_io_error(&path, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| harness_settings_io_error(&path, error))?;
+        if !metadata.is_file() {
+            return Err(harness_settings_changed(&path));
+        }
+        file.try_lock().map_err(|error| DomainError::Storage {
+            message: format!("Cannot lock harness settings '{}': {error}", path.display()),
+            repair: Some(
+                "Wait for the other harness installation or undo to finish, then retry.".to_owned(),
+            ),
+        })?;
+        let lock = Self {
+            _file: file,
+            path,
+            metadata,
+        };
+        lock.validate()?;
+        Ok(lock)
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        preflight_harness_write_target(&self.path, "settings lock")?;
+        let current = fs::symlink_metadata(&self.path)
+            .map_err(|error| harness_settings_io_error(&self.path, error))?;
+        if harness_same_file_metadata(&self.metadata, &current) {
+            Ok(())
+        } else {
+            Err(harness_settings_changed(&self.path))
+        }
+    }
+}
+
+/// Sync a sibling temporary file before renaming it over the destination, then
+/// sync the parent directory on Unix. Failed temporary files deliberately remain
+/// available for diagnosis and recovery.
+fn publish_harness_settings_file(
+    path: &Path,
+    expected: Option<&HarnessSettingsSnapshot>,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+    before_publish: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<HarnessSettingsSnapshot, DomainError> {
+    if bytes.len() > HARNESS_SETTINGS_MAX_BYTES {
+        return Err(harness_settings_io_error(
+            path,
+            "settings data exceeds 4 MiB",
+        ));
+    }
+    preflight_harness_write_target(path, "settings data path")?;
+    let temporary = harness_sibling_path(path, &format!(".{}.tmp", crate::models::MemoryId::now()));
+    let mut open = fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open
+        .open(&temporary)
+        .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)
+            .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    }
+    file.write_all(bytes)
+        .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    file.sync_all()
+        .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    let prepared = file
+        .metadata()
+        .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    before_publish()?;
+    require_harness_settings_snapshot(path, expected)?;
+    preflight_harness_write_target(path, "settings data path")?;
+    let staged = read_harness_settings_snapshot(&temporary)?
+        .ok_or_else(|| harness_settings_changed(&temporary))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| harness_settings_io_error(&temporary, error))?;
+    if staged.bytes != bytes
+        || !harness_same_file_metadata(&prepared, &opened)
+        || !harness_same_file_metadata(&prepared, &staged.metadata)
+    {
+        return Err(harness_settings_changed(&temporary));
+    }
+    fs::rename(&temporary, path).map_err(|error| harness_settings_io_error(path, error))?;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| harness_settings_io_error(parent, error))?;
+    }
+    Ok(HarnessSettingsSnapshot {
+        bytes: bytes.to_vec(),
+        metadata: prepared,
+    })
+}
+
+fn retain_harness_settings_snapshot(
+    backup_path: &Path,
+    bytes: &[u8],
+    lock: &HarnessSettingsLock,
+) -> Result<(), DomainError> {
+    let archive = harness_sibling_path(
+        backup_path,
+        &format!(".sha256-{}", harness_settings_hash(bytes)),
+    );
+    match read_harness_settings_snapshot(&archive)? {
+        Some(existing) if existing.bytes == bytes => Ok(()),
+        Some(_) => Err(harness_settings_changed(&archive)),
+        None => publish_harness_settings_file(&archive, None, bytes, None, || lock.validate())
+            .map(|_| ()),
+    }
+}
+
 fn install_harness_settings_document(
     target: HarnessHookTarget,
     settings_path: &Path,
     backup_path: &Path,
     snippets: &[HarnessHookSnippet],
 ) -> Result<bool, DomainError> {
+    install_harness_settings_document_before_publish(
+        target,
+        settings_path,
+        backup_path,
+        snippets,
+        || Ok(()),
+    )
+}
+
+fn install_harness_settings_document_before_publish(
+    target: HarnessHookTarget,
+    settings_path: &Path,
+    backup_path: &Path,
+    snippets: &[HarnessHookSnippet],
+    before_publish: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<bool, DomainError> {
     preflight_harness_write_target(settings_path, "settings path")?;
-    let existing_text = match fs::read_to_string(settings_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
-        Err(error) => {
-            return Err(DomainError::Storage {
-                message: format!(
-                    "Failed to read harness settings '{}': {error}",
-                    settings_path.display()
-                ),
-                repair: Some("Check harness settings permissions and retry.".to_owned()),
-            });
-        }
-    };
+    let lock = HarnessSettingsLock::acquire(backup_path)?;
+    let existing = read_harness_settings_snapshot(settings_path)?;
+    // Restoring a newly created configuration leaves an empty JSON document;
+    // undo never deletes a settings file or its recoverable history.
+    let existing_bytes = existing
+        .as_ref()
+        .map_or(b"{}\n".as_slice(), |snapshot| snapshot.bytes.as_slice());
     let mut document: serde_json::Value =
-        serde_json::from_str(&existing_text).map_err(|error| DomainError::Configuration {
+        serde_json::from_slice(existing_bytes).map_err(|error| DomainError::Configuration {
             message: format!(
                 "Harness settings '{}' are not valid JSON: {error}",
                 settings_path.display()
@@ -3027,84 +3322,162 @@ fn install_harness_settings_document(
             message: format!("Failed to serialize harness settings: {error}"),
             repair: Some("Retry after reducing unsupported JSON values.".to_owned()),
         })? + "\n";
-    if existing_text == new_text {
+    if existing_bytes == new_text.as_bytes() {
         return Ok(false);
     }
 
     preflight_harness_backup_target(backup_path)?;
-    if settings_path.exists() {
-        preflight_harness_write_target(settings_path, "settings path")?;
-        if !backup_path.exists() {
-            if let Some(parent) = backup_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-                    message: format!(
-                        "Failed to create harness backup directory '{}': {error}",
-                        parent.display()
-                    ),
-                    repair: Some(
-                        "Check harness config directory permissions and retry.".to_owned(),
-                    ),
-                })?;
-            }
-            preflight_harness_backup_target(backup_path)?;
-            if !backup_path.exists() {
-                fs::copy(settings_path, backup_path).map_err(|error| DomainError::Storage {
-                    message: format!(
-                        "Failed to write harness settings backup '{}': {error}",
-                        backup_path.display()
-                    ),
-                    repair: Some(
-                        "Check harness config directory permissions and retry.".to_owned(),
-                    ),
-                })?;
-            }
-        }
+    preflight_harness_write_target(backup_path, "backup path")?;
+    let receipt_path = harness_sibling_path(backup_path, ".receipt.json");
+    preflight_harness_write_target(&receipt_path, "undo receipt")?;
+    let old_backup = read_harness_settings_snapshot(backup_path)?;
+    let old_receipt = read_harness_settings_snapshot(&receipt_path)?;
+    if let Some(previous) = &old_backup {
+        retain_harness_settings_snapshot(backup_path, &previous.bytes, &lock)?;
     }
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to create harness settings directory '{}': {error}",
-                parent.display()
-            ),
-            repair: Some("Check harness config directory permissions and retry.".to_owned()),
-        })?;
-    }
-    preflight_harness_write_target(settings_path, "settings path")?;
-    fs::write(settings_path, new_text).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Failed to write harness settings '{}': {error}",
-            settings_path.display()
-        ),
-        repair: Some("Check harness settings permissions and retry.".to_owned()),
-    })?;
+    retain_harness_settings_snapshot(backup_path, existing_bytes, &lock)?;
+    let backup = publish_harness_settings_file(
+        backup_path,
+        old_backup.as_ref(),
+        existing_bytes,
+        None,
+        || {
+            lock.validate()?;
+            require_harness_settings_snapshot(settings_path, existing.as_ref())
+        },
+    )?;
+    let receipt = HarnessUndoReceipt {
+        version: 1,
+        before_sha256: harness_settings_hash(existing_bytes),
+        installed_sha256: harness_settings_hash(new_text.as_bytes()),
+        original_file_existed: existing.is_some(),
+    };
+    let receipt_bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| harness_settings_io_error(&receipt_path, error))?;
+    // Publish undo metadata before the live settings. An interrupted install
+    // then either has its previous bytes, or a receipt for the new bytes.
+    let published_receipt = publish_harness_settings_file(
+        &receipt_path,
+        old_receipt.as_ref(),
+        &receipt_bytes,
+        None,
+        || {
+            lock.validate()?;
+            require_harness_settings_snapshot(settings_path, existing.as_ref())?;
+            require_harness_settings_snapshot(backup_path, Some(&backup))
+        },
+    )?;
+    publish_harness_settings_file(
+        settings_path,
+        existing.as_ref(),
+        new_text.as_bytes(),
+        existing
+            .as_ref()
+            .map(|snapshot| snapshot.metadata.permissions()),
+        || {
+            before_publish()?;
+            lock.validate()?;
+            require_harness_settings_snapshot(backup_path, Some(&backup))?;
+            require_harness_settings_snapshot(&receipt_path, Some(&published_receipt))
+        },
+    )?;
     Ok(true)
 }
 
 fn restore_harness_settings_backup(
     settings_path: &Path,
     backup_path: &Path,
-) -> Result<(), DomainError> {
+) -> Result<bool, DomainError> {
+    restore_harness_settings_backup_before_publish(settings_path, backup_path, || Ok(()))
+}
+
+fn restore_harness_settings_backup_before_publish(
+    settings_path: &Path,
+    backup_path: &Path,
+    before_publish: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<bool, DomainError> {
     preflight_harness_backup_source(backup_path)?;
     preflight_harness_write_target(settings_path, "settings path")?;
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to create harness settings directory '{}': {error}",
-                parent.display()
-            ),
-            repair: Some("Check harness config directory permissions and retry.".to_owned()),
-        })?;
-    }
-    preflight_harness_backup_source(backup_path)?;
-    preflight_harness_write_target(settings_path, "settings path")?;
-    fs::copy(backup_path, settings_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Failed to restore harness settings backup '{}': {error}",
+    let lock = HarnessSettingsLock::acquire(backup_path)?;
+    let existing = read_harness_settings_snapshot(settings_path)?;
+    let backup = read_harness_settings_snapshot(backup_path)?
+        .ok_or_else(|| harness_settings_changed(backup_path))?;
+    let receipt_path = harness_sibling_path(backup_path, ".receipt.json");
+    let receipt = read_harness_settings_snapshot(&receipt_path)?;
+    let recovery = || {
+        format!(
+            "Compare '{}' with '{}' and merge your changes manually. Older preimages remain beside the backup as '.sha256-<digest>' files; unfinished '.tmp' files are also retained.",
+            settings_path.display(),
             backup_path.display()
-        ),
-        repair: Some("Restore the backup manually after checking permissions.".to_owned()),
-    })?;
-    Ok(())
+        )
+    };
+    let Some(receipt_snapshot) = &receipt else {
+        if existing
+            .as_ref()
+            .is_some_and(|current| current.bytes == backup.bytes)
+        {
+            return Ok(false);
+        }
+        return Err(DomainError::Storage {
+            message: format!(
+                "Cannot safely undo this legacy harness installation: '{}' has no undo receipt.",
+                backup_path.display()
+            ),
+            repair: Some(recovery()),
+        });
+    };
+    let receipt_data: HarnessUndoReceipt = serde_json::from_slice(&receipt_snapshot.bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Cannot verify harness undo receipt '{}': {error}",
+                receipt_path.display()
+            ),
+            repair: Some(recovery()),
+        })?;
+    if receipt_data.version != 1
+        || receipt_data.before_sha256 != harness_settings_hash(&backup.bytes)
+        || receipt_data.before_sha256 == receipt_data.installed_sha256
+    {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Harness backup '{}' does not match a valid undo receipt; refusing to restore it.",
+                backup_path.display()
+            ),
+            repair: Some(recovery()),
+        });
+    }
+    if existing
+        .as_ref()
+        .is_some_and(|current| current.bytes == backup.bytes)
+    {
+        return Ok(false);
+    }
+    let Some(current) = existing
+        .as_ref()
+        .filter(|current| harness_settings_hash(&current.bytes) == receipt_data.installed_sha256)
+    else {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Harness settings '{}' changed since installation; refusing to overwrite later user changes.",
+                settings_path.display()
+            ),
+            repair: Some(recovery()),
+        });
+    };
+    retain_harness_settings_snapshot(backup_path, &current.bytes, &lock)?;
+    publish_harness_settings_file(
+        settings_path,
+        Some(current),
+        &backup.bytes,
+        Some(current.metadata.permissions()),
+        || {
+            before_publish()?;
+            lock.validate()?;
+            require_harness_settings_snapshot(backup_path, Some(&backup))?;
+            require_harness_settings_snapshot(&receipt_path, receipt.as_ref())
+        },
+    )?;
+    Ok(true)
 }
 
 // expect() calls assert JSON-shape invariants validated earlier in this fn.
@@ -3263,47 +3636,29 @@ fn classify_harness_hook(
     HarnessHookOwnership::UserCustom
 }
 
-fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
-    let mut rest = command.strip_prefix("python3 -c '")?;
-    let mut script = String::new();
-    let mut closed = false;
+fn parse_single_quoted_hook_argument(argument: &str) -> Option<(String, &str)> {
+    let mut rest = argument.strip_prefix('\'')?;
+    let mut value = String::new();
     while !rest.is_empty() {
         if let Some(after_escape) = rest.strip_prefix("'\\''") {
-            script.push('\'');
+            value.push('\'');
             rest = after_escape;
         } else if let Some(after_quote) = rest.strip_prefix('\'') {
-            rest = after_quote;
-            closed = true;
-            break;
+            return Some((value, after_quote));
         } else if let Some(ch) = rest.chars().next() {
-            script.push(ch);
+            value.push(ch);
             rest = &rest[ch.len_utf8()..];
         }
     }
-    if !closed {
-        return None;
-    }
+    None
+}
+
+fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
+    let rest = command.strip_prefix("python3 -c ")?;
+    let (script, rest) = parse_single_quoted_hook_argument(rest)?;
     let after_script = rest.strip_prefix(' ')?;
-    let after_bin = if let Some(mut bin_rest) = after_script.strip_prefix('\'') {
-        let mut bin_closed = false;
-        let mut bin_non_empty = false;
-        while !bin_rest.is_empty() {
-            if let Some(after_escape) = bin_rest.strip_prefix("'\\''") {
-                bin_non_empty = true;
-                bin_rest = after_escape;
-            } else if let Some(after_quote) = bin_rest.strip_prefix('\'') {
-                bin_rest = after_quote;
-                bin_closed = true;
-                break;
-            } else if let Some(ch) = bin_rest.chars().next() {
-                bin_non_empty = true;
-                bin_rest = &bin_rest[ch.len_utf8()..];
-            }
-        }
-        if !bin_closed || !bin_non_empty {
-            return None;
-        }
-        bin_rest
+    let (executable, after_bin) = if after_script.starts_with('\'') {
+        parse_single_quoted_hook_argument(after_script)?
     } else {
         let bin_len = after_script
             .bytes()
@@ -3313,14 +3668,23 @@ fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
             return None;
         }
         let bin = &after_script[..bin_len];
-        if !bin.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':' | '\\')
-        }) {
+        if !bin
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':'))
+        {
             return None;
         }
-        &after_script[bin_len..]
+        (bin.to_owned(), &after_script[bin_len..])
     };
 
+    // A copied wrapper invoking another program belongs to the user. Quoted
+    // paths may contain spaces or apostrophes; never evaluate shell syntax to
+    // discover the executable, and reject unquoted backslash escapes.
+    if executable.chars().any(char::is_control)
+        || !matches!(executable.rsplit(['/', '\\']).next(), Some("ee" | "ee.exe"))
+    {
+        return None;
+    }
     if after_bin.is_empty() || after_bin == " 2>/dev/null || :" {
         Some(script)
     } else {
@@ -3329,48 +3693,51 @@ fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
 }
 
 fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnippet) -> bool {
+    use sha2::{Digest as _, Sha256};
+
     let Some(script) = extract_python_inline_script_from_ee_hook(command) else {
         return false;
     };
-    if !script.contains("ee = sys.argv[1]")
-        || !script.contains("import ")
-        || !script.contains("subprocess")
+    // The current body with an older EE installation path is also ours. Any
+    // edited body must remain user-owned, even if it retains our schema,
+    // surface marker, imports, and EE subcommand strings.
+    if extract_python_inline_script_from_ee_hook(&snippet.command)
+        .is_some_and(|current| script == current)
     {
-        return false;
+        return true;
     }
-    match snippet.id.as_str() {
-        "ee-ambient-pre-edit-recall" => {
-            (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"pre_edit_recall\"")
-                && script.contains("\"recall\""))
-                || (script.contains("\"PreToolUse\"")
-                    && script.contains("cmd = [ee, \"recall\"]")
-                    && script.contains("\"--budget-tokens\""))
-                || (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                    && script.contains("SURFACE = \"pre_risky_preflight\"")
-                    && script.contains("\"preflight\"")
-                    && script.contains("\"check\""))
-        }
-        "ee-journal-bash-failure" => {
-            script.contains("body = \"Harness observed a non-zero Bash exit code.\"")
-                && script.contains("\"journal\"")
-                && script.contains("\"append\"")
-                && script.contains("\"--source\"")
-                && script.contains("\"hook\"")
-        }
-        "ee-ambient-session-orient" => {
-            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"session_start_orient\"")
-                && script.contains("\"orient\"")
-        }
-        "ee-ambient-session-capture-suggest" => {
-            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"session_end_capture_suggest\"")
-                && script.contains("\"capture\"")
-                && script.contains("\"suggest\"")
-        }
-        _ => false,
-    }
+
+    // SHA-256 of complete decoded bodies from released installer.rs templates.
+    // The fixture retains each exact body, source function, and release tags:
+    // tests/fixtures/released_ee_hook_wrappers.json. Do not expand this allowlist
+    // from marker matches or abbreviated test scripts: this grants ownership
+    // to remove a user's installed command on upgrade.
+    let known: &[&str] = match snippet.id.as_str() {
+        "ee-ambient-pre-edit-recall" => &[
+            // v0.10.0–v0.12.0, v0.13.0–v0.14.5, retired v0.13.0 preflight,
+            // and v0.15.0–v0.18.0, respectively.
+            "490859f62c4b20737581fad39e76ce8b93f98e51453669a910331e4e2e0afe22",
+            "e0c72f8ba026dd9d110081b30d573c5f2144a30cd4d8fcd40e86f3d8426a61dd",
+            "2aba702127ebac432e433dfc5a42a06c3cf7c066a3d40e7142777ddff2e1b3cb",
+            "4219e17718541be71bec15cb0c4cb74c0216661853e7d1e507b8075fea3f0014",
+        ],
+        "ee-journal-bash-failure" => &[
+            "7c0e4b9c603619c8e92bf113db805b914ce0b16d15458db822443ec2acab3fd1",
+            "406b9063abb9c6da10afe09224423196ce5be73f42fb8e9d019e164ce84e583c",
+            "7d8eb84181d312dd03ecc7cafd893558d7deb6595389ecbc51dfa2e3a1adc0fe",
+        ],
+        "ee-ambient-session-orient" => &[
+            "95fc71cc3d89ce5b87015fc83ab36d9a80a2c391f177f20a3fcb2e2d349c337c",
+            "4eaf6174f5ac01be0236932cedb45d4d8c47f2889c7678160584c4fa25444e80",
+        ],
+        "ee-ambient-session-capture-suggest" => &[
+            "5ca5423d0b8aefa6ded06fdb263f55ba69287b8eaa41a3f03eb72e02382dccd6",
+            "68013e18e5ddd40694c1a3700a5c280449944b4b00157ec1336c9e7e09db20bb",
+        ],
+        _ => return false,
+    };
+    let fingerprint = format!("{:x}", Sha256::digest(script.as_bytes()));
+    known.contains(&fingerprint.as_str())
 }
 
 fn validate_harness_conformance_case(case: &HarnessConformanceCase) -> Result<(), DomainError> {
@@ -4956,15 +5323,66 @@ mod tests {
     }
 
     #[test]
+    fn legacy_hook_parser_decodes_arguments_without_evaluating_shell_syntax() {
+        let script = "print('quoted é text')\n";
+        for executable in [
+            "ee",
+            "/opt/EE's older install/ee",
+            r"C:\Program Files\EE\ee.exe",
+        ] {
+            let command = format!(
+                "python3 -c {} {}",
+                shell_quote_str(script),
+                shell_quote_str(executable)
+            );
+            for suffix in ["", " 2>/dev/null || :"] {
+                assert_eq!(
+                    extract_python_inline_script_from_ee_hook(&format!("{command}{suffix}")),
+                    Some(script.to_owned())
+                );
+            }
+        }
+        let prefix = format!("python3 -c {} ", shell_quote_str(script));
+        assert_eq!(
+            extract_python_inline_script_from_ee_hook(&format!("{prefix}/opt/bin/ee")),
+            Some(script.to_owned())
+        );
+        for suffix in [
+            "''",
+            "'/opt/custom-runner'",
+            "'ee' --custom-option",
+            "'ee'; printf custom",
+            "'ee'$(printf custom)",
+            "ee;printf-custom",
+            "$(command -v ee)",
+            r"/opt/custom\ ee",
+            "'/opt/ee",
+            "'/opt/ee\n'",
+        ] {
+            assert!(
+                extract_python_inline_script_from_ee_hook(&format!("{prefix}{suffix}")).is_none(),
+                "custom or incomplete shell shape must be preserved: {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
     fn merge_harness_hooks_deduplicates_retired_v013_unmanaged_preflight_hook() -> TestResult {
-        let legacy_preflight = python_hook_command(
-            r#"import json, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "pre_risky_preflight"
-cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
-"#,
-            Path::new("/old/ee"),
+        let released: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/released_ee_hook_wrappers.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        let script = released["wrappers"]
+            .as_array()
+            .ok_or("released wrappers array")?
+            .iter()
+            .find(|wrapper| wrapper["sourceFunction"] == "pre_bash_preflight_python")
+            .and_then(|wrapper| wrapper["script"].as_str())
+            .ok_or("released v0.13.0 preflight body")?;
+        let legacy_preflight = format!(
+            "python3 -c {} {}",
+            shell_quote_str(script),
+            shell_quote(Path::new("/old/ee"))
         );
         let custom_hook = serde_json::json!({
             "type": "command",
@@ -5365,6 +5783,359 @@ cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
         let restored = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
         assert_eq!(undo_report.written_paths.len(), 1);
         assert_eq!(restored, original);
+        Ok(())
+    }
+
+    #[test]
+    fn harness_install_rejects_a_late_edit_and_retains_recovery_files() -> TestResult {
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings = temp.path().join("settings.json");
+            let backup = harness_backup_path(&settings);
+            let original = b"{\"original\":true}\n";
+            let edited = b"{\"editorSavedDuringInstall\":true}\n";
+            fs::write(&settings, original).map_err(|error| error.to_string())?;
+            let snippets = harness_hook_snippets(target, &fixed_ee_binary());
+            let error = install_harness_settings_document_before_publish(
+                target,
+                &settings,
+                &backup,
+                &snippets,
+                || {
+                    fs::write(&settings, edited)
+                        .map_err(|error| harness_settings_io_error(&settings, error))
+                },
+            )
+            .expect_err("a late edit must survive installation");
+            assert!(error.message().contains("changed during the operation"));
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                edited
+            );
+            assert_eq!(
+                fs::read(&backup).map_err(|error| error.to_string())?,
+                original
+            );
+            let archive = harness_sibling_path(
+                &backup,
+                &format!(".sha256-{}", harness_settings_hash(original)),
+            );
+            assert_eq!(
+                fs::read(archive).map_err(|error| error.to_string())?,
+                original
+            );
+            assert!(
+                fs::read_dir(temp.path())
+                    .map_err(|error| error.to_string())?
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
+                "an unpublished settings file must remain recoverable"
+            );
+            assert!(restore_harness_settings_backup(&settings, &backup).is_err());
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                edited
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn harness_install_failure_after_backup_is_recoverable_and_retryable() -> TestResult {
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings = temp.path().join("settings.json");
+            let backup = harness_backup_path(&settings);
+            let original = b"{\"original\":true}\n";
+            fs::write(&settings, original).map_err(|error| error.to_string())?;
+            let snippets = harness_hook_snippets(target, &fixed_ee_binary());
+            let error = install_harness_settings_document_before_publish(
+                target,
+                &settings,
+                &backup,
+                &snippets,
+                || {
+                    Err(harness_settings_io_error(
+                        &settings,
+                        "injected publication failure",
+                    ))
+                },
+            )
+            .expect_err("injected failure must interrupt publication");
+            assert!(error.message().contains("injected publication failure"));
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                original
+            );
+            assert_eq!(
+                fs::read(&backup).map_err(|error| error.to_string())?,
+                original
+            );
+            assert!(harness_sibling_path(&backup, ".receipt.json").is_file());
+            assert!(
+                !restore_harness_settings_backup(&settings, &backup)
+                    .map_err(|error| error.message())?
+            );
+            assert!(
+                install_harness_settings_document(target, &settings, &backup, &snippets)
+                    .map_err(|error| error.message())?
+            );
+            assert!(
+                restore_harness_settings_backup(&settings, &backup)
+                    .map_err(|error| error.message())?
+            );
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                original
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn harness_publication_rejects_staged_bytes_changed_with_restored_mtime() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings = temp.path().join("settings.json");
+        let original = b"{}\n";
+        let intended = b"{\"new\":true}\n";
+        let tampered = b"{\"new\":null}\n";
+        assert_eq!(intended.len(), tampered.len());
+        fs::write(&settings, original).map_err(|error| error.to_string())?;
+        let expected =
+            read_harness_settings_snapshot(&settings).map_err(|error| error.message())?;
+        let error =
+            publish_harness_settings_file(&settings, expected.as_ref(), intended, None, || {
+                let staged = fs::read_dir(temp.path())
+                    .map_err(|error| harness_settings_io_error(temp.path(), error))?
+                    .filter_map(Result::ok)
+                    .find(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                    .ok_or_else(|| harness_settings_changed(&settings))?
+                    .path();
+                let modified = fs::metadata(&staged)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| harness_settings_io_error(&staged, error))?;
+                fs::write(&staged, tampered)
+                    .map_err(|error| harness_settings_io_error(&staged, error))?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&staged)
+                    .and_then(|file| file.set_modified(modified))
+                    .map_err(|error| harness_settings_io_error(&staged, error))
+            })
+            .expect_err("metadata-preserving staged edits must not reach live settings");
+        assert!(error.message().contains("changed during the operation"));
+        assert_eq!(
+            fs::read(&settings).map_err(|error| error.to_string())?,
+            original
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn harness_undo_rejects_a_late_edit_and_install_serializes_writers() -> TestResult {
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings = temp.path().join("settings.json");
+            let backup = harness_backup_path(&settings);
+            fs::write(&settings, "{}\n").map_err(|error| error.to_string())?;
+            let options = harness_options(target, settings.clone(), true, false);
+            let lock = HarnessSettingsLock::acquire(&backup).map_err(|error| error.message())?;
+            let blocked =
+                generate_harness_hook_install(&options).expect_err("a second writer must fail");
+            assert!(blocked.message().contains("Cannot lock harness settings"));
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                b"{}\n"
+            );
+            drop(lock);
+            generate_harness_hook_install(&options).map_err(|error| error.message())?;
+            let installed = fs::read(&settings).map_err(|error| error.to_string())?;
+            let receipt_path = harness_sibling_path(&backup, ".receipt.json");
+            let receipt = fs::read(&receipt_path).map_err(|error| error.to_string())?;
+            let edited = b"{\"editorSavedDuringUndo\":true}\n";
+            let error = restore_harness_settings_backup_before_publish(&settings, &backup, || {
+                fs::write(&settings, edited)
+                    .map_err(|error| harness_settings_io_error(&settings, error))
+            })
+            .expect_err("late edit must survive undo");
+            assert!(error.message().contains("changed during the operation"));
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                edited
+            );
+            assert_eq!(
+                fs::read(&receipt_path).map_err(|error| error.to_string())?,
+                receipt
+            );
+            let archive = harness_sibling_path(
+                &backup,
+                &format!(".sha256-{}", harness_settings_hash(&installed)),
+            );
+            assert_eq!(
+                fs::read(archive).map_err(|error| error.to_string())?,
+                installed
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_settings_publication_preserves_modes_and_rejects_late_readonly() -> TestResult {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings = temp.path().join("settings.json");
+        let backup = harness_backup_path(&settings);
+        fs::write(&settings, "{}\n").map_err(|error| error.to_string())?;
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o640))
+            .map_err(|error| error.to_string())?;
+        let target = HarnessHookTarget::ClaudeCode;
+        let snippets = harness_hook_snippets(target, &fixed_ee_binary());
+        let error = install_harness_settings_document_before_publish(
+            target,
+            &settings,
+            &backup,
+            &snippets,
+            || {
+                fs::set_permissions(&settings, fs::Permissions::from_mode(0o440))
+                    .map_err(|error| harness_settings_io_error(&settings, error))
+            },
+        )
+        .expect_err("a late read-only change must be respected");
+        assert!(error.message().contains("changed during the operation"));
+        assert_eq!(
+            fs::read(&settings).map_err(|error| error.to_string())?,
+            b"{}\n"
+        );
+        assert_eq!(
+            fs::metadata(&settings)
+                .map_err(|error| error.to_string())?
+                .mode()
+                & 0o777,
+            0o440
+        );
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o640))
+            .map_err(|error| error.to_string())?;
+        install_harness_settings_document(target, &settings, &backup, &snippets)
+            .map_err(|error| error.message())?;
+        assert_eq!(
+            fs::metadata(&settings)
+                .map_err(|error| error.to_string())?
+                .mode()
+                & 0o777,
+            0o640
+        );
+        restore_harness_settings_backup(&settings, &backup).map_err(|error| error.message())?;
+        assert_eq!(
+            fs::metadata(&settings)
+                .map_err(|error| error.to_string())?
+                .mode()
+                & 0o777,
+            0o640
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_new_private_preimage_never_inherits_old_public_backup_modes() -> TestResult {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings = temp.path().join("settings.json");
+        let backup = harness_backup_path(&settings);
+        let receipt = harness_sibling_path(&backup, ".receipt.json");
+        let private_settings = b"{\"privateSetting\":true}\n";
+        let old_backup = b"{}\n";
+        fs::write(&settings, private_settings).map_err(|error| error.to_string())?;
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        for path in [&backup, &receipt] {
+            fs::write(path, old_backup).map_err(|error| error.to_string())?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+                .map_err(|error| error.to_string())?;
+        }
+        generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings.clone(),
+            true,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        assert_eq!(
+            fs::read(&backup).map_err(|error| error.to_string())?,
+            private_settings
+        );
+        let historical = harness_sibling_path(
+            &backup,
+            &format!(".sha256-{}", harness_settings_hash(old_backup)),
+        );
+        let latest = harness_sibling_path(
+            &backup,
+            &format!(".sha256-{}", harness_settings_hash(private_settings)),
+        );
+        for path in [&settings, &backup, &receipt, &historical, &latest] {
+            assert_eq!(
+                fs::metadata(path)
+                    .map_err(|error| error.to_string())?
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_recovery_metadata_rejects_symlinks_readonly_and_special_files() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        for unsafe_kind in ["symlink", "readonly", "directory", "fifo"] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings = temp.path().join("settings.json");
+            let backup = harness_backup_path(&settings);
+            let receipt = harness_sibling_path(&backup, ".receipt.json");
+            let sensitive = temp.path().join("user-data.json");
+            fs::write(&settings, "{}\n").map_err(|error| error.to_string())?;
+            fs::write(&sensitive, "untouched\n").map_err(|error| error.to_string())?;
+            match unsafe_kind {
+                "symlink" => symlink(&sensitive, &receipt).map_err(|error| error.to_string())?,
+                "readonly" => {
+                    fs::write(&receipt, "{}\n").map_err(|error| error.to_string())?;
+                    fs::set_permissions(&receipt, fs::Permissions::from_mode(0o400))
+                        .map_err(|error| error.to_string())?;
+                }
+                "directory" => fs::create_dir(&receipt).map_err(|error| error.to_string())?,
+                _ => rustix::fs::mkfifo(&receipt, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+                    .map_err(|error| error.to_string())?,
+            }
+            assert!(
+                generate_harness_hook_install(&harness_options(
+                    HarnessHookTarget::ClaudeCode,
+                    settings.clone(),
+                    true,
+                    false,
+                ))
+                .is_err(),
+                "{unsafe_kind}"
+            );
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                b"{}\n"
+            );
+            assert_eq!(
+                fs::read(&sensitive).map_err(|error| error.to_string())?,
+                b"untouched\n"
+            );
+            assert!(
+                !backup.exists(),
+                "failed metadata preflight must precede backup publication"
+            );
+        }
         Ok(())
     }
 
