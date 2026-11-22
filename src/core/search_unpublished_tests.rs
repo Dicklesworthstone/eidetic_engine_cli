@@ -78,6 +78,40 @@ impl Fixture {
         self.memory_with_kind(number, body, "fact")
     }
 
+    #[cfg(unix)]
+    fn remember_deferred(&self, content: &str) -> crate::core::memory::RememberMemoryReport {
+        let database_path = self.root.join(".ee/ee.db");
+        let report = crate::core::memory::remember_memory_with_controls(
+            &crate::core::memory::RememberMemoryOptions {
+                workspace_path: &self.root,
+                database_path: Some(&database_path),
+                content,
+                workflow_id: None,
+                level: "semantic",
+                kind: "fact",
+                tags: None,
+                confidence: 1.0,
+                source: Some("manual://deferred-lexical-read"),
+                allow_secret_mention: false,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+            },
+            &crate::core::memory::RememberWriteControls {
+                reinforce: false,
+                idempotency_key: None,
+                defer_index_processing: true,
+            },
+        )
+        .unwrap();
+        assert!(report.persisted);
+        assert_eq!(report.index_status, "queued");
+        assert!(report.index_job_id.is_some());
+        report
+    }
+
     fn memory_with_kind(&self, number: u128, body: &str, kind: &str) -> String {
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         self.db
@@ -1384,6 +1418,143 @@ fn queued_writes_are_searchable_before_publication_without_consuming_their_jobs(
     assert_eq!(report.results[0].doc_id, memory);
     assert_eq!(fixture.state(), before);
     assert!(!fixture.root.join(".ee/index").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn lexical_search_reads_deferred_remember_without_publishing_at_default_or_quality_speed() {
+    with_test_search_timeouts(Duration::from_secs(300), || {
+        for stale_index in [false, true] {
+            let fixture = Fixture::new();
+            let index_dir = fixture.root.join(".ee/index");
+            let _embedder = if stale_index {
+                fixture.memory(802, "Previously published deployment guidance.");
+                Some(publish_store_index(
+                    &fixture.root,
+                    &fixture.root.join(".ee/ee.db"),
+                    &index_dir,
+                    &fixture.workspace,
+                ))
+            } else {
+                None
+            };
+            let remembered = fixture.remember_deferred(BODY);
+            let jobs_before = fixture
+                .db
+                .list_search_index_jobs(&fixture.workspace, None)
+                .unwrap();
+            assert!(jobs_before.iter().any(|job| {
+                Some(&job.id) == remembered.index_job_id.as_ref() && job.status == "pending"
+            }));
+            let index_before = index_file_hashes(&index_dir);
+
+            for speed in [SpeedMode::Default, SpeedMode::Quality] {
+                let mut options = fixture.options();
+                options.speed = speed;
+                options.strict_source_mode = true;
+                // Exercise the ordinary entry point, including its nonzero
+                // reconciliation budget; a retrieval-only helper would hide
+                // the eager embedding/index-publication regression.
+                let run = run_search_with_performance(&options).unwrap();
+                complete_lexical(&run.report);
+                assert!(!run.report.source_mode_fallback);
+                assert_eq!(run.report.results[0].doc_id, remembered.memory_id.to_string());
+                assert!(
+                    run.performance
+                        .timings()
+                        .all(|(name, _)| name != "search::embedderPrepare")
+                );
+                if stale_index {
+                    assert!(run.report.index_freshness.as_ref().unwrap().stale);
+                } else {
+                    assert!(
+                        run.report
+                            .degraded
+                            .iter()
+                            .any(|entry| entry.code == "index_missing")
+                    );
+                    assert!(!index_dir.exists());
+                }
+                assert_eq!(
+                    fixture
+                        .db
+                        .list_search_index_jobs(&fixture.workspace, None)
+                        .unwrap(),
+                    jobs_before,
+                    "lexical search must not claim, complete, or fail the deferred job"
+                );
+                assert_eq!(index_file_hashes(&index_dir), index_before);
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn persisting_lexical_pack_reads_deferred_remember_without_publishing_index() {
+    with_test_search_timeouts(Duration::from_secs(300), || {
+        let fixture = Fixture::new();
+        fixture.memory(803, "Previously published deployment guidance.");
+        let index_dir = fixture.root.join(".ee/index");
+        let _embedder = publish_store_index(
+            &fixture.root,
+            &fixture.root.join(".ee/ee.db"),
+            &index_dir,
+            &fixture.workspace,
+        );
+        let remembered = fixture.remember_deferred(BODY);
+        let jobs_before = fixture
+            .db
+            .list_search_index_jobs(&fixture.workspace, None)
+            .unwrap();
+        let index_before = index_file_hashes(&index_dir);
+
+        for speed in [SpeedMode::Default, SpeedMode::Quality] {
+            let mut options = fixture.pack_options();
+            options.speed = speed;
+            options.strict_source_mode = true;
+            // This caller authorizes requested repair as well as persisting
+            // the pack. Explicit lexical retrieval still must not embed.
+            options.persist_pack = true;
+            let packed = crate::core::context::run_context_pack_with_performance(
+                &options,
+                crate::pack::PACK_COMMAND,
+            )
+            .unwrap();
+            assert!(packed.response.success);
+            assert!(
+                packed
+                    .response
+                    .data
+                    .pack
+                    .items
+                    .iter()
+                    .any(|item| {
+                        item.memory_id.to_string() == remembered.memory_id.to_string()
+                    })
+            );
+            assert!(
+                packed
+                    .response
+                    .data
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_lexical")
+            );
+            for timing in packed.performance["data"]["timings"].as_array().unwrap() {
+                assert_ne!(timing["name"], "embedderPrepare");
+            }
+            assert_eq!(
+                fixture
+                    .db
+                    .list_search_index_jobs(&fixture.workspace, None)
+                    .unwrap(),
+                jobs_before,
+                "persisting a lexical pack must leave the index queue unchanged"
+            );
+            assert_eq!(index_file_hashes(&index_dir), index_before);
+        }
+    });
 }
 
 #[cfg(unix)]

@@ -13760,10 +13760,11 @@ async fn reconcile_search_index_before_read_with_cx_and_timeout(
     allow_requested_repair: bool,
     stack_override: Option<crate::search::EmbedderStack>,
 ) {
-    // Repair can load an embedding model even when retrieval itself uses
-    // only the lexical tier. Instant reads use the verified index or bounded
+    // Repair publishes every tier and can load an embedding model even when
+    // retrieval explicitly selected lexical-only at Default or Quality speed.
+    // All effective lexical reads use the verified index or bounded complete
     // live source snapshot and leave queued publication to an indexing task.
-    if !options.speed.uses_embeddings() {
+    if !options.execution_source_mode().uses_embeddings() {
         return;
     }
     let child_scope = cx.scope_with_budget(cx.budget_for_timeout(reconcile_timeout));
@@ -31659,8 +31660,8 @@ mod tests {
             include_stale: false,
             relevance_floor: Some(0.0),
             dedup_mode: SearchDedupMode::DocId,
-            source_mode: SearchSourceMode::LexicalOnly,
-            strict_source_mode: true,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
             strict_scope: false,
         })
