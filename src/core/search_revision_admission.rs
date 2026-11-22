@@ -85,7 +85,7 @@ fn states(
                 .insert(quarantine_workspace.clone());
         }
         let seal_sql = format!(
-            "SELECT memory_id, revealed_at FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
+            "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
         );
         let mut seal_states = BTreeMap::<String, Option<bool>>::new();
         for row in connection.query(&seal_sql, &parameters)? {
@@ -95,11 +95,13 @@ fn states(
                     message: "Could not read memory seal identity".to_owned(),
                 });
             };
-            let state = match row.get(1) {
-                Some(Value::Null) => Some(true),
-                Some(Value::Text(_)) => Some(false),
-                _ => None,
-            };
+            // A textual reveal alone is not authority: the commitment,
+            // timestamps and verified flag must form the same valid state
+            // required by storage and the other live readers. Isolate a
+            // malformed seal to this identity instead of dropping its page.
+            let state = crate::core::memory_lifecycle::decode_admission_seal(&row)
+                .ok()
+                .map(|seal| seal.is_sealed());
             seal_states.insert(seal_id.clone(), state);
         }
         // Read the same bounded identity page as the other authority tables.
@@ -130,10 +132,10 @@ fn states(
                     _ => RevisionState::Malformed,
                 }
             };
-            // Match MemorySeal::is_sealed: a present seal without revealed_at
-            // is closed. The clock, body spelling, indexed reveal flags and
-            // reveal_verified do not override this source authority. Retain
-            // malformed revision failures even while the body is sealed.
+            // Only a validated reveal may release the seal. The query clock,
+            // body spelling and indexed reveal claims never override current
+            // source authority. Retain malformed revision failures even while
+            // the body is sealed.
             let mut state = match seal_states.get(id) {
                 None => revision,
                 Some(Some(true)) => {
@@ -1012,6 +1014,136 @@ mod seal_tests {
         assert!(admit_hits(&options, vec![hit(HIDDEN)], &mut degraded, None).is_empty());
         assert_eq!(degraded[0].code, UNAVAILABLE);
         assert!(!degraded[0].message.contains("PRIVATE"));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_reveal_authority_isolated_before_ranking_and_similarity() -> TestResult {
+        let (_temp, mut options, db) = fixture()?;
+        seal(&db, HIDDEN)?;
+        let before = db.get_memory(HIDDEN).map_err(|error| error.to_string())?;
+        let audits = db
+            .count_table_rows("audit_log")
+            .map_err(|error| error.to_string())?;
+        let commitment = format!("blake3:{}", "a".repeat(64));
+        let invalid_commitment = format!("blake3:{}", "S".repeat(64));
+        // Each row satisfies the schema's shape constraints. A nonempty text
+        // reveal still needs valid public evidence before it can release a body.
+        for (stored_commitment, sealed_at, revealed_at, verified) in [
+            (commitment.as_str(), TIME, "PRIVATE-REVEAL-CANARY", 1),
+            (commitment.as_str(), TIME, "2025-12-31T23:59:59.999999999Z", 1),
+            (commitment.as_str(), TIME, TIME, 0),
+            (commitment.as_str(), "PRIVATE-SEALED-AT-CANARY", TIME, 1),
+            (invalid_commitment.as_str(), TIME, TIME, 1),
+        ] {
+            db.execute_raw(&format!(
+                "UPDATE memory_seals SET content_commitment = '{stored_commitment}', sealed_at = '{sealed_at}', revealed_at = '{revealed_at}', reveal_verified = {verified} WHERE memory_id = '{HIDDEN}'"
+            ))
+            .map_err(|error| error.to_string())?;
+            options.include_tombstoned = true;
+            options.include_expired = true;
+            options.include_future = true;
+            options.include_stale = true;
+            for reference in ["2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z"] {
+                options.as_of = Some(instant(reference)?);
+                let mut degraded = Vec::new();
+                let visible = admit_hits(
+                    &options,
+                    vec![hit(HIDDEN), hit(PUBLIC), hit("evd_other")],
+                    &mut degraded,
+                    Some(&db),
+                );
+                assert_eq!(ids(&visible), vec![PUBLIC, "evd_other"]);
+                assert_eq!(degraded.len(), 1);
+                assert_eq!(degraded[0].code, UNAVAILABLE);
+                assert!(!degraded[0].message.contains(HIDDEN));
+                assert!(!degraded[0].message.contains("PRIVATE"));
+                assert!(seed_is_visible(&db, HIDDEN, instant(reference)?).is_err());
+                assert!(
+                    seed_is_visible(&db, PUBLIC, instant(reference)?)
+                        .map_err(|error| error.to_string())?
+                );
+            }
+        }
+
+        // Chronological equality across different UTC offsets is a valid
+        // verified reveal. Fixing authority readmits the existing body without
+        // rebuilding an index or rewriting the memory.
+        db.execute_raw(&format!(
+            "UPDATE memory_seals SET content_commitment = '{commitment}', sealed_at = '{TIME}', revealed_at = '2025-12-31T19:00:00-05:00', reveal_verified = 1 WHERE memory_id = '{HIDDEN}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        let mut degraded = Vec::new();
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                vec![hit(HIDDEN), hit(PUBLIC)],
+                &mut degraded,
+                Some(&db),
+            )),
+            vec![HIDDEN, PUBLIC]
+        );
+        assert!(degraded.is_empty());
+        assert!(
+            seed_is_visible(&db, HIDDEN, instant(TIME)?).map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            db.get_memory(HIDDEN).map_err(|error| error.to_string())?,
+            before
+        );
+        assert_eq!(
+            db.count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?,
+            audits
+        );
+        assert!(!options.workspace_path.join("index").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reveal_validation_uses_the_callers_snapshot_in_both_directions() -> TestResult {
+        for initially_valid in [false, true] {
+            let (_temp, options, writer) = fixture()?;
+            seal(&writer, HIDDEN)?;
+            writer
+                .mark_memory_seal_revealed(HIDDEN, TIME)
+                .map_err(|error| error.to_string())?;
+            writer
+                .execute_raw(&format!(
+                    "UPDATE memory_seals SET reveal_verified = {} WHERE memory_id = '{HIDDEN}'",
+                    u8::from(initially_valid)
+                ))
+                .map_err(|error| error.to_string())?;
+            let reader = DbConnection::open_file_read_only(&options.resolve_database_path())
+                .map_err(|error| error.to_string())?;
+            reader
+                .begin_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let before = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
+            assert_eq!(!before.is_empty(), initially_valid);
+            writer
+                .execute_raw(&format!(
+                    "UPDATE memory_seals SET reveal_verified = {} WHERE memory_id = '{HIDDEN}'",
+                    u8::from(!initially_valid)
+                ))
+                .map_err(|error| error.to_string())?;
+            let captured = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
+            assert_eq!(ids(&captured), ids(&before));
+            assert_eq!(
+                seed_is_visible(&reader, HIDDEN, instant(TIME)?).is_ok(),
+                initially_valid
+            );
+            assert!(reader.begin_read_snapshot().is_err());
+            reader
+                .rollback_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let next = admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), Some(&reader));
+            assert_eq!(next.is_empty(), initially_valid);
+            assert_eq!(
+                seed_is_visible(&reader, HIDDEN, instant(TIME)?).is_err(),
+                initially_valid
+            );
+        }
         Ok(())
     }
 

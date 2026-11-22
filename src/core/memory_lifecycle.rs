@@ -118,7 +118,13 @@ fn seal_admission_error() -> crate::db::DbError {
     }
 }
 
-fn decode_admission_seal(row: &sqlmodel_core::Row) -> crate::db::Result<crate::models::MemorySeal> {
+/// Decode a body-free seal projection in canonical column order:
+/// `memory_id`, `content_commitment`, `sealed_at`, `revealed_at`, `reveal_verified`.
+/// Shared by workspace readers and bounded search/seed admission so an invalid
+/// reveal cannot gain authority at a less strict retrieval boundary.
+pub(crate) fn decode_admission_seal(
+    row: &sqlmodel_core::Row,
+) -> crate::db::Result<crate::models::MemorySeal> {
     use sqlmodel_core::Value;
 
     let text = |index| {

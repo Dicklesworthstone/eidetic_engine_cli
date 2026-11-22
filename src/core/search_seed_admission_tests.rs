@@ -163,6 +163,60 @@ fn public_similar_refuses_hidden_seeds_before_creating_or_opening_an_index() -> 
 }
 
 #[test]
+fn public_similar_rejects_invalid_reveal_authority_before_index_work() -> TestResult {
+    let (_root, db, options) = fixture()?;
+    db.insert_memory_seal(MEMORY, &format!("blake3:{}", "a".repeat(64)), CUTOFF)
+        .map_err(|error| error.to_string())?;
+    let before = db.get_memory(MEMORY).map_err(|error| error.to_string())?;
+    let audits = db
+        .count_table_rows("audit_log")
+        .map_err(|error| error.to_string())?;
+    for (revealed_at, verified) in [
+        ("PRIVATE-REVEAL-CANARY", 1),
+        ("2026-05-31T23:59:59.999999999Z", 1),
+        ("2026-06-01T00:00:00Z", 0),
+    ] {
+        db.execute_raw(&format!(
+            "UPDATE memory_seals SET revealed_at = '{revealed_at}', reveal_verified = {verified} WHERE memory_id = '{MEMORY}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        let error = resolve(&db, &options).expect_err("invalid reveal cannot authorize the seed");
+        assert!(
+            error
+                .to_string()
+                .contains("Could not verify similarity seed revision state")
+        );
+        assert!(!error.to_string().contains("PRIVATE-REVEAL-CANARY"));
+        let error = run_similar(&options).expect_err("invalid seed must fail before index work");
+        assert!(
+            error
+                .to_string()
+                .contains("Could not verify similarity seed revision state")
+        );
+        assert!(!error.to_string().contains("PRIVATE-REVEAL-CANARY"));
+        assert!(!options.index_dir.as_ref().ok_or("index path")?.exists());
+    }
+    db.execute_raw(&format!(
+        "UPDATE memory_seals SET revealed_at = '{CUTOFF}', reveal_verified = 1 WHERE memory_id = '{MEMORY}'"
+    ))
+    .map_err(|error| error.to_string())?;
+    assert_eq!(
+        resolve(&db, &options).map_err(|error| error.to_string())?.id,
+        MEMORY
+    );
+    assert_eq!(
+        db.get_memory(MEMORY).map_err(|error| error.to_string())?,
+        before
+    );
+    assert_eq!(
+        db.count_table_rows("audit_log")
+            .map_err(|error| error.to_string())?,
+        audits
+    );
+    Ok(())
+}
+
+#[test]
 fn seed_revision_and_body_obey_the_same_real_read_snapshot() -> TestResult {
     let (_root, writer, options) = fixture()?;
     let reader =
