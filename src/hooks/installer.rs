@@ -3263,47 +3263,29 @@ fn classify_harness_hook(
     HarnessHookOwnership::UserCustom
 }
 
-fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
-    let mut rest = command.strip_prefix("python3 -c '")?;
-    let mut script = String::new();
-    let mut closed = false;
+fn parse_single_quoted_hook_argument(argument: &str) -> Option<(String, &str)> {
+    let mut rest = argument.strip_prefix('\'')?;
+    let mut value = String::new();
     while !rest.is_empty() {
         if let Some(after_escape) = rest.strip_prefix("'\\''") {
-            script.push('\'');
+            value.push('\'');
             rest = after_escape;
         } else if let Some(after_quote) = rest.strip_prefix('\'') {
-            rest = after_quote;
-            closed = true;
-            break;
+            return Some((value, after_quote));
         } else if let Some(ch) = rest.chars().next() {
-            script.push(ch);
+            value.push(ch);
             rest = &rest[ch.len_utf8()..];
         }
     }
-    if !closed {
-        return None;
-    }
+    None
+}
+
+fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
+    let rest = command.strip_prefix("python3 -c ")?;
+    let (script, rest) = parse_single_quoted_hook_argument(rest)?;
     let after_script = rest.strip_prefix(' ')?;
-    let after_bin = if let Some(mut bin_rest) = after_script.strip_prefix('\'') {
-        let mut bin_closed = false;
-        let mut bin_non_empty = false;
-        while !bin_rest.is_empty() {
-            if let Some(after_escape) = bin_rest.strip_prefix("'\\''") {
-                bin_non_empty = true;
-                bin_rest = after_escape;
-            } else if let Some(after_quote) = bin_rest.strip_prefix('\'') {
-                bin_rest = after_quote;
-                bin_closed = true;
-                break;
-            } else if let Some(ch) = bin_rest.chars().next() {
-                bin_non_empty = true;
-                bin_rest = &bin_rest[ch.len_utf8()..];
-            }
-        }
-        if !bin_closed || !bin_non_empty {
-            return None;
-        }
-        bin_rest
+    let (executable, after_bin) = if after_script.starts_with('\'') {
+        parse_single_quoted_hook_argument(after_script)?
     } else {
         let bin_len = after_script
             .bytes()
@@ -3313,14 +3295,23 @@ fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
             return None;
         }
         let bin = &after_script[..bin_len];
-        if !bin.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':' | '\\')
-        }) {
+        if !bin
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':'))
+        {
             return None;
         }
-        &after_script[bin_len..]
+        (bin.to_owned(), &after_script[bin_len..])
     };
 
+    // A copied wrapper invoking another program belongs to the user. Quoted
+    // paths may contain spaces or apostrophes; never evaluate shell syntax to
+    // discover the executable, and reject unquoted backslash escapes.
+    if executable.chars().any(char::is_control)
+        || !matches!(executable.rsplit(['/', '\\']).next(), Some("ee" | "ee.exe"))
+    {
+        return None;
+    }
     if after_bin.is_empty() || after_bin == " 2>/dev/null || :" {
         Some(script)
     } else {
@@ -3329,48 +3320,51 @@ fn extract_python_inline_script_from_ee_hook(command: &str) -> Option<String> {
 }
 
 fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnippet) -> bool {
+    use sha2::{Digest as _, Sha256};
+
     let Some(script) = extract_python_inline_script_from_ee_hook(command) else {
         return false;
     };
-    if !script.contains("ee = sys.argv[1]")
-        || !script.contains("import ")
-        || !script.contains("subprocess")
+    // The current body with an older EE installation path is also ours. Any
+    // edited body must remain user-owned, even if it retains our schema,
+    // surface marker, imports, and EE subcommand strings.
+    if extract_python_inline_script_from_ee_hook(&snippet.command)
+        .is_some_and(|current| script == current)
     {
-        return false;
+        return true;
     }
-    match snippet.id.as_str() {
-        "ee-ambient-pre-edit-recall" => {
-            (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"pre_edit_recall\"")
-                && script.contains("\"recall\""))
-                || (script.contains("\"PreToolUse\"")
-                    && script.contains("cmd = [ee, \"recall\"]")
-                    && script.contains("\"--budget-tokens\""))
-                || (script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                    && script.contains("SURFACE = \"pre_risky_preflight\"")
-                    && script.contains("\"preflight\"")
-                    && script.contains("\"check\""))
-        }
-        "ee-journal-bash-failure" => {
-            script.contains("body = \"Harness observed a non-zero Bash exit code.\"")
-                && script.contains("\"journal\"")
-                && script.contains("\"append\"")
-                && script.contains("\"--source\"")
-                && script.contains("\"hook\"")
-        }
-        "ee-ambient-session-orient" => {
-            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"session_start_orient\"")
-                && script.contains("\"orient\"")
-        }
-        "ee-ambient-session-capture-suggest" => {
-            script.contains("SCHEMA = \"ee.ambient_context.v1\"")
-                && script.contains("SURFACE = \"session_end_capture_suggest\"")
-                && script.contains("\"capture\"")
-                && script.contains("\"suggest\"")
-        }
-        _ => false,
-    }
+
+    // SHA-256 of complete decoded bodies from released installer.rs templates.
+    // The fixture retains each exact body, source function, and release tags:
+    // tests/fixtures/released_ee_hook_wrappers.json. Do not expand this allowlist
+    // from marker matches or abbreviated test scripts: this grants ownership
+    // to remove a user's installed command on upgrade.
+    let known: &[&str] = match snippet.id.as_str() {
+        "ee-ambient-pre-edit-recall" => &[
+            // v0.10.0–v0.12.0, v0.13.0–v0.14.5, retired v0.13.0 preflight,
+            // and v0.15.0–v0.18.0, respectively.
+            "490859f62c4b20737581fad39e76ce8b93f98e51453669a910331e4e2e0afe22",
+            "e0c72f8ba026dd9d110081b30d573c5f2144a30cd4d8fcd40e86f3d8426a61dd",
+            "2aba702127ebac432e433dfc5a42a06c3cf7c066a3d40e7142777ddff2e1b3cb",
+            "4219e17718541be71bec15cb0c4cb74c0216661853e7d1e507b8075fea3f0014",
+        ],
+        "ee-journal-bash-failure" => &[
+            "7c0e4b9c603619c8e92bf113db805b914ce0b16d15458db822443ec2acab3fd1",
+            "406b9063abb9c6da10afe09224423196ce5be73f42fb8e9d019e164ce84e583c",
+            "7d8eb84181d312dd03ecc7cafd893558d7deb6595389ecbc51dfa2e3a1adc0fe",
+        ],
+        "ee-ambient-session-orient" => &[
+            "95fc71cc3d89ce5b87015fc83ab36d9a80a2c391f177f20a3fcb2e2d349c337c",
+            "4eaf6174f5ac01be0236932cedb45d4d8c47f2889c7678160584c4fa25444e80",
+        ],
+        "ee-ambient-session-capture-suggest" => &[
+            "5ca5423d0b8aefa6ded06fdb263f55ba69287b8eaa41a3f03eb72e02382dccd6",
+            "68013e18e5ddd40694c1a3700a5c280449944b4b00157ec1336c9e7e09db20bb",
+        ],
+        _ => return false,
+    };
+    let fingerprint = format!("{:x}", Sha256::digest(script.as_bytes()));
+    known.contains(&fingerprint.as_str())
 }
 
 fn validate_harness_conformance_case(case: &HarnessConformanceCase) -> Result<(), DomainError> {
@@ -4956,15 +4950,66 @@ mod tests {
     }
 
     #[test]
+    fn legacy_hook_parser_decodes_arguments_without_evaluating_shell_syntax() {
+        let script = "print('quoted é text')\n";
+        for executable in [
+            "ee",
+            "/opt/EE's older install/ee",
+            r"C:\Program Files\EE\ee.exe",
+        ] {
+            let command = format!(
+                "python3 -c {} {}",
+                shell_quote_str(script),
+                shell_quote_str(executable)
+            );
+            for suffix in ["", " 2>/dev/null || :"] {
+                assert_eq!(
+                    extract_python_inline_script_from_ee_hook(&format!("{command}{suffix}")),
+                    Some(script.to_owned())
+                );
+            }
+        }
+        let prefix = format!("python3 -c {} ", shell_quote_str(script));
+        assert_eq!(
+            extract_python_inline_script_from_ee_hook(&format!("{prefix}/opt/bin/ee")),
+            Some(script.to_owned())
+        );
+        for suffix in [
+            "''",
+            "'/opt/custom-runner'",
+            "'ee' --custom-option",
+            "'ee'; printf custom",
+            "'ee'$(printf custom)",
+            "ee;printf-custom",
+            "$(command -v ee)",
+            r"/opt/custom\ ee",
+            "'/opt/ee",
+            "'/opt/ee\n'",
+        ] {
+            assert!(
+                extract_python_inline_script_from_ee_hook(&format!("{prefix}{suffix}")).is_none(),
+                "custom or incomplete shell shape must be preserved: {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
     fn merge_harness_hooks_deduplicates_retired_v013_unmanaged_preflight_hook() -> TestResult {
-        let legacy_preflight = python_hook_command(
-            r#"import json, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "pre_risky_preflight"
-cmd = [ee, "preflight", "check", "--cmd", "ls", "--json"]
-"#,
-            Path::new("/old/ee"),
+        let released: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/released_ee_hook_wrappers.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        let script = released["wrappers"]
+            .as_array()
+            .ok_or("released wrappers array")?
+            .iter()
+            .find(|wrapper| wrapper["sourceFunction"] == "pre_bash_preflight_python")
+            .and_then(|wrapper| wrapper["script"].as_str())
+            .ok_or("released v0.13.0 preflight body")?;
+        let legacy_preflight = format!(
+            "python3 -c {} {}",
+            shell_quote_str(script),
+            shell_quote(Path::new("/old/ee"))
         );
         let custom_hook = serde_json::json!({
             "type": "command",
