@@ -2636,9 +2636,29 @@ def _ee_lock_context_state(lock, timeout_seconds):
             if remaining <= 0:
                 return False
             time.sleep(min(0.005, remaining))
+def _ee_write_json_atomic(path, value, lock=None):
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(path), prefix=".ee-hook-", suffix=".tmp", delete=False) as f:
+            pending = f.name
+            json.dump(value, f, sort_keys=True, separators=(",", ":"))
+        if lock is not None and not os.path.samestat(os.fstat(lock.fileno()), os.lstat(path + ".lock")):
+            raise OSError("ambient context lock changed before publication")
+        os.replace(pending, path)
+        pending = None
+    finally:
+        if pending is not None:
+            try:
+                os.unlink(pending)
+            except OSError:
+                pass
 def already_seen(text, lock_timeout_seconds=0.2):
     # All ambient surfaces share this transaction; failures may repeat context
     # but must never wait indefinitely or prevent the harness's tool from running.
+    # A missing session identity must not suppress context in unrelated runs.
+    session = data.get("session_id") or data.get("sessionId")
+    if not isinstance(session, str) or not session:
+        return False
     try:
         root = _ee_state_root()
         os.makedirs(root, mode=0o700, exist_ok=True)
@@ -2653,28 +2673,28 @@ def already_seen(text, lock_timeout_seconds=0.2):
             if not os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_path)):
                 return False
             try:
-                with os.fdopen(os.open(path, os.O_RDONLY | safe_flags), "r", encoding="utf-8") as state:
-                    if not stat.S_ISREG(os.fstat(state.fileno()).st_mode) or not stat.S_ISREG(os.lstat(path).st_mode):
+                with os.fdopen(os.open(path, os.O_RDONLY | safe_flags), "rb") as f:
+                    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode) or not stat.S_ISREG(os.lstat(path).st_mode):
                         return False
-                    seen = json.load(state)
+                    raw = f.read(262145)
+                seen = json.loads(raw) if len(raw) <= 262144 else {}
             except (FileNotFoundError, ValueError):
                 seen = {}
-            if not isinstance(seen, dict):
-                seen = {}
-            session = str(data.get("session_id") or data.get("sessionId") or "default")
-            key = SURFACE + ":" + session + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
-            if seen.get(key):
-                return True
-            seen[key] = True
-            # Readers see a complete document. Failed publication leaves the
-            # old state and the temporary file recoverable instead of truncating.
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".ambient_context_seen.", suffix=".tmp", dir=root, delete=False) as pending:
-                json.dump(seen, pending, sort_keys=True, separators=(",", ":"))
-            if not os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_path)):
-                return False
-            os.replace(pending.name, path)
-            return False
+            now = time.time()
+            # Bound both historical sessions and long-running active sessions.
+            seen = {key: stamp for key, stamp in seen.items() if isinstance(key, str) and len(key) <= 128 and isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and now - 604800 <= stamp <= now + 60} if isinstance(seen, dict) else {}
+            workspace = os.path.realpath(data.get("cwd") or os.getcwd())
+            scope = hashlib.blake2s(json.dumps([workspace, session], separators=(",", ":")).encode("utf-8"), digest_size=16).hexdigest()
+            key = SURFACE + ":" + scope + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+            duplicate = key in seen
+            seen.pop(key, None)
+            if len(seen) >= 1024:
+                seen = dict(sorted(seen.items(), key=lambda item: (item[1], item[0]))[-1023:])
+            seen[key] = now
+            _ee_write_json_atomic(path, seen, lock)
+            return duplicate
     except Exception:
+        # Optional dedup storage must never delay or prevent memory recall.
         return False
 def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
     try:
@@ -2689,8 +2709,7 @@ def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
             if isinstance(entry, dict) and isinstance(entry.get("message"), str):
                 message = "".join(ch for ch in entry["message"] if ch.isprintable() or ch.isspace())
                 record["degradedMessages"].append(" ".join(message.split())[:512])
-        with open(os.path.join(root, SURFACE + ".last.json"), "w", encoding="utf-8") as f:
-            json.dump(record, f, sort_keys=True, separators=(",", ":"))
+        _ee_write_json_atomic(os.path.join(root, SURFACE + ".last.json"), record)
     except Exception:
         pass
 "#
@@ -5604,6 +5623,90 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn ambient_hook_dedup_bounds_state_and_isolates_sessions_and_workspaces() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let probe = r#"import sys
+data = json.load(sys.stdin)
+SURFACE = "session_start_orient"
+root = _ee_state_root()
+os.makedirs(root, exist_ok=True)
+os.environ["EE_AMBIENT_CONTEXT_STATE_DIR"] = root
+path = os.path.join(root, "ambient_context_seen.json")
+now = time.time()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump({**{str(i): now - 1 for i in range(1100)}, "expired": 0, "legacy": True, "invalid": "stamp"}, f)
+assert already_seen("memory") is False
+assert already_seen("memory") is True
+with open(path, encoding="utf-8") as f:
+    seen = json.load(f)
+assert len(seen) == 1024, len(seen)
+assert not {"expired", "legacy", "invalid"}.intersection(seen)
+assert all("first-session" not in key for key in seen)
+data["cwd"] = os.path.join(data["cwd"], "other-workspace")
+assert already_seen("memory") is False
+assert already_seen("memory") is True
+data["session_id"] = "next-session"
+assert already_seen("memory") is False
+assert already_seen("memory") is True
+data.pop("session_id")
+assert already_seen("memory") is False
+assert already_seen("memory") is False
+data["sessionId"] = "camel-session"
+assert already_seen("memory") is False
+assert already_seen("memory") is True
+with open(path, "w", encoding="utf-8") as f:
+    f.write(" " * 262145)
+assert already_seen("bounded read") is False
+assert os.path.getsize(path) < 262144
+"#;
+        let event = serde_json::json!({"cwd": temp.path(), "session_id": "first-session"});
+        let output = run_python_hook_state_probe(probe, &event, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_hook_dedup_fails_open_on_contention_and_atomic_publish_failure() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let probe = r#"import fcntl, glob, sys
+data = json.load(sys.stdin)
+SURFACE = "session_start_orient"
+root = _ee_state_root()
+os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "ambient_context_seen.json")
+with open(path + ".lock", "a+b") as held:
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    assert already_seen("memory") is False
+    elapsed = time.monotonic() - started
+    assert 0.10 <= elapsed < 2, elapsed
+    assert not os.path.exists(path)
+assert already_seen("memory") is False
+assert already_seen("memory") is True
+with open(path, "rb") as f:
+    before = f.read()
+replace = os.replace
+def refuse_publish(*args):
+    raise OSError("injected atomic publication refusal")
+os.replace = refuse_publish
+assert already_seen("new context") is False
+os.replace = replace
+with open(path, "rb") as f:
+    assert f.read() == before
+assert not glob.glob(os.path.join(root, ".ee-hook-*.tmp"))
+assert already_seen("new context") is False
+assert already_seen("new context") is True
+"#;
+        let event = serde_json::json!({"cwd": temp.path(), "session_id": "contention-session"});
+        let output = run_python_hook_state_probe(probe, &event, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
     fn run_ambient_hook_dedup_probe(probe: &str) -> TestResult {
         let temp = TempDir::new().map_err(|error| error.to_string())?;
         let workspace = temp.path().join("workspace");
@@ -5743,7 +5846,8 @@ for definition in payload["definitions"]:
     state = workspace / ("blocked-" + str(index))
     state.mkdir()
     cache = state / "ambient_context_seen.json"
-    cache.write_text('{"previous":true}')
+    previous = time.time()
+    cache.write_text(json.dumps({"previous": previous}))
     before = cache.read_bytes()
     with open(str(cache) + ".lock", "a+b") as lock:
         lock.write(b"\0")
@@ -5761,7 +5865,7 @@ for definition in payload["definitions"]:
         assert cache.read_bytes() == before, "timed-out claim must not write unlocked"
     assert finish(spawn(definition, state, "shared", "blocked memory"))["seen"] is False
     assert finish(spawn(definition, state, "shared", "blocked memory"))["seen"] is True
-    assert json.loads(cache.read_text())["previous"] is True
+    assert json.loads(cache.read_text())["previous"] == previous
 
     invalid_lock = workspace / ("invalid-lock-" + str(index))
     invalid_lock.mkdir()

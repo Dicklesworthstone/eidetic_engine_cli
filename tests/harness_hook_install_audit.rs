@@ -460,6 +460,126 @@ fn options(
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn generated_ambient_hooks_preserve_context_and_converge_after_contention() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let root = temp.path();
+        let mut opts = options(target, &root.join("settings.json"), false, false);
+        opts.ee_binary_path = Some(root.join("ee"));
+        let report = generate_harness_hook_install(&opts).map_err(|error| error.message())?;
+        let ambient: Vec<_> = report
+            .snippets
+            .iter()
+            .filter(|snippet| snippet.id.starts_with("ee-ambient-"))
+            .collect();
+        assert_eq!(ambient.len(), 3);
+        let commands: Vec<_> = ambient.iter().map(|snippet| &snippet.command).collect();
+        let events: Vec<_> = ambient.iter().map(|snippet| &snippet.event).collect();
+        let event = json!({"cwd": root, "commands": commands, "events": events});
+        // The fixture only supplies an EE response. Every child executes the
+        // complete generated shell/Python wrapper and its real state helper.
+        let probe = r####"import concurrent.futures, glob, json, os, subprocess, sys, time
+data = json.load(sys.stdin)
+root = data["cwd"]
+barrier = os.path.join(root, "barrier")
+os.makedirs(barrier)
+stub = os.path.join(root, "ee")
+with open(stub, "w", encoding="utf-8") as f:
+    f.write('''#!/usr/bin/env python3
+import json, os, time
+root = os.environ["HOOK_TEST_BARRIER"]
+with open(os.path.join(root, str(os.getpid())), "w") as f:
+    f.write("ready")
+deadline = time.monotonic() + 10
+while not os.path.exists(os.path.join(root, "release")):
+    if time.monotonic() >= deadline:
+        raise RuntimeError("test barrier timed out")
+    time.sleep(0.005)
+print(json.dumps({"success": True, "degraded": [], "data": {"ambientContext": {"text": "Verify release checksums. provenance=file://release.md", "omittedBlocks": 0}, "suggestions": [{"proposedFields": {"content": "Verify release checksums.", "kind": "rule"}, "confidence": 0.8, "acceptCommand": "ee capture accept candidate", "rejectCommand": "ee capture reject candidate"}]}}))
+''')
+os.chmod(stub, 0o700)
+env = dict(os.environ, HOOK_TEST_BARRIER=barrier)
+events = data["events"]
+def invoke(index):
+    event = {"cwd": root, "session_id": "concurrent-session", "hook_event_name": events[index % 3], "tool_input": {"file_path": "src/lib.rs"}}
+    result = subprocess.run(["/bin/sh", "-c", data["commands"][index % 3]], input=json.dumps(event), text=True, capture_output=True, env=env, timeout=15)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert not result.stderr, result.stderr
+    return (index % 3, result.stdout)
+with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+    pending = [pool.submit(invoke, index) for index in range(6)]
+    deadline = time.monotonic() + 8
+    while len(os.listdir(barrier)) != 6 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    ready = os.listdir(barrier)
+    with open(os.path.join(barrier, "release"), "w") as f:
+        f.write("go")
+    results = [item.result() for item in pending]
+assert len(ready) == 6, ("EE fixture processes did not start before barrier deadline", ready, results)
+for index in range(3):
+    emitted = [text for surface, text in results if surface == index and text]
+    # A timed-out lock intentionally admits context. Scheduler delay can
+    # therefore produce two valid emissions; it must never lose the context.
+    assert 1 <= len(emitted) <= 2, (events[index], results)
+    for text in emitted:
+        payload = json.loads(text)["hookSpecificOutput"]
+        assert payload["hookEventName"] == events[index], payload
+        assert "Verify release checksums." in payload["additionalContext"], payload
+state = os.environ["EE_AMBIENT_CONTEXT_STATE_DIR"]
+with open(os.path.join(state, "ambient_context_seen.json"), encoding="utf-8") as f:
+    concurrent_seen = json.load(f)
+assert isinstance(concurrent_seen, dict) and 1 <= len(concurrent_seen) <= 3, concurrent_seen
+# Once contention ends, each surface converges to one retained key. A
+# fail-open race must not leave corrupt JSON or permanently disable dedup.
+for index in range(3):
+    _, first = invoke(index)
+    if first:
+        payload = json.loads(first)["hookSpecificOutput"]
+        assert payload["hookEventName"] == events[index], payload
+        assert "Verify release checksums." in payload["additionalContext"], payload
+    _, repeated = invoke(index)
+    assert not repeated, (events[index], "uncontended repetition must be suppressed", repeated)
+with open(os.path.join(state, "ambient_context_seen.json"), encoding="utf-8") as f:
+    seen = json.load(f)
+assert len(seen) == 3, seen
+assert {key.split(":", 1)[0] for key in seen} == {"pre_edit_recall", "session_start_orient", "session_end_capture_suggest"}, seen
+for path in glob.glob(os.path.join(state, "*.last.json")):
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f)["outcome"] in ("emitted", "duplicate")
+assert not glob.glob(os.path.join(state, ".ee-hook-*.tmp"))
+"####;
+        let mut child = isolated_command("python3", root)
+            .args(["-c", probe])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        child
+            .stdin
+            .take()
+            .ok_or("missing concurrency probe stdin")?
+            .write_all(event.to_string().as_bytes())
+            .map_err(|error| error.to_string())?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
+        assert!(
+            output.status.success(),
+            "{target:?} concurrent hook probe failed: {} code={:?}\nstdout: {}\nstderr: {}",
+            output.status,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    Ok(())
+}
+
 fn audit_status(target: HarnessHookTarget, settings_path: &Path) -> Result<String, String> {
     let report = generate_harness_hook_install(&options(target, settings_path, false, false))
         .map_err(|error| error.message())?;
