@@ -44,6 +44,12 @@ Rationale for the reversal:
   (`[memory] global_store_path`). It is resolved from the **user data dir**,
   never a project-local `.ee/` path — the store must follow the user, not the
   repo. (`GlobalStorePaths`, `src/core/global_store.rs`.)
+- User-data root resolution shares the built-in storage defaults: an absolute
+  `XDG_DATA_HOME` supplies `<XDG_DATA_HOME>/ee`; otherwise the platform home
+  supplies `<home>/.local/share/ee`. The home is `HOME` on Unix and `USERPROFILE`
+  on Windows, so native Windows shells do not need a Unix `HOME` alias. Empty
+  and relative XDG values are ignored. This preserves the existing storage
+  layout instead of moving durable memories to an application-cache directory.
 - The store opens with the same `DatabaseConfig` open + `migrate()` path as a
   workspace store, so schema/migration parity is automatic. No second schema.
 

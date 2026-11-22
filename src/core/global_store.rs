@@ -83,7 +83,8 @@ pub const GLOBAL_PROVENANCE_LANE: &str = "global";
 /// Directory name of the separate global store under the user data root.
 pub const GLOBAL_STORE_DIRNAME: &str = "global";
 
-/// Default ee user-data suffix under `$HOME` when `XDG_DATA_HOME` is absent.
+/// Default ee user-data suffix under the platform home directory when
+/// `XDG_DATA_HOME` is absent.
 pub const DEFAULT_USER_DATA_SUFFIX: &str = ".local/share/ee";
 
 /// Default fan-in budget for the global tier, in basis points of the pack
@@ -158,14 +159,23 @@ pub fn default_user_data_root_from_values(
 
 /// Resolve the current process' default ee user-data root.
 ///
-/// This intentionally uses XDG/HOME rather than a workspace-local `.ee` path:
-/// the global tier follows the user across repositories.
+/// Share configuration's home-directory policy: `HOME` on Unix and
+/// `USERPROFILE` on Windows. The global tier follows the user across
+/// repositories, never a workspace-local `.ee` path.
 pub fn default_user_data_root_from_env() -> Result<PathBuf, String> {
+    default_user_data_root_from_expander(&crate::config::PathExpander::from_process_env())
+        .ok_or_else(|| {
+            let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+            format!("global memory store requires an absolute XDG_DATA_HOME or {home_variable}")
+        })
+}
+
+fn default_user_data_root_from_expander(expander: &crate::config::PathExpander) -> Option<PathBuf> {
+    let xdg_data_home = expander.absolute_env_path("XDG_DATA_HOME");
     default_user_data_root_from_values(
-        std::env::var_os("XDG_DATA_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
+        xdg_data_home.as_deref().map(Path::as_os_str),
+        expander.home_dir().map(Path::as_os_str),
     )
-    .ok_or_else(|| "global memory store requires XDG_DATA_HOME or HOME".to_owned())
 }
 
 /// Resolve the current process' default separate global-store paths.
@@ -1121,6 +1131,89 @@ mod tests {
             super::default_user_data_root_from_values(None, Some(std::ffi::OsStr::new(""))),
             None
         );
+    }
+
+    #[test]
+    fn global_data_root_matches_config_for_unix_and_windows_home_snapshots() {
+        let xdg = std::env::temp_dir().join("ee-global-platform-data");
+        for (home_variable, home) in [
+            ("HOME", PathBuf::from("/home/agent")),
+            ("USERPROFILE", PathBuf::from(r"C:\Users\agent")),
+        ] {
+            for xdg_value in [
+                None,
+                Some(PathBuf::new()),
+                Some(PathBuf::from("relative-data")),
+                Some(PathBuf::from("~/.local/share")),
+                Some(xdg.clone()),
+            ] {
+                let mut environment =
+                    BTreeMap::from([(home_variable.to_owned(), home.clone().into_os_string())]);
+                if let Some(value) = &xdg_value {
+                    environment.insert("XDG_DATA_HOME".to_owned(), value.clone().into_os_string());
+                }
+                let expander =
+                    crate::config::PathExpander::with_env(Some(home.clone()), environment);
+                let expected = xdg_value.filter(|path| path.is_absolute()).map_or_else(
+                    || home.join(DEFAULT_USER_DATA_SUFFIX),
+                    |root| root.join("ee"),
+                );
+                let global_root = super::default_user_data_root_from_expander(&expander)
+                    .expect("the resolved platform home supplies a data root");
+                assert_eq!(global_root, expected, "home source: {home_variable}");
+                assert_eq!(
+                    crate::config::built_in_config(&expander)
+                        .storage
+                        .database_path,
+                    Some(global_root.join("ee.db")),
+                    "global and default workspace storage must share the user-data root"
+                );
+            }
+        }
+        assert_eq!(
+            super::default_user_data_root_from_expander(&crate::config::PathExpander::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn global_data_root_process_uses_platform_home_without_other_home_alias() {
+        const CHILD: &str = "EE_TEST_GLOBAL_DATA_ROOT_PLATFORM_HOME";
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let other_home_variable = if cfg!(windows) { "HOME" } else { "USERPROFILE" };
+        if std::env::var_os(CHILD).is_some() {
+            assert!(std::env::var_os(other_home_variable).is_none());
+            assert!(std::env::var_os("XDG_DATA_HOME").is_none());
+            let home = std::env::var_os(home_variable).expect("the child has its platform home");
+            let expected = PathBuf::from(home).join(DEFAULT_USER_DATA_SUFFIX);
+            assert_eq!(
+                super::default_user_data_root_from_env(),
+                Ok(expected.clone())
+            );
+            assert_eq!(
+                super::default_global_store_paths_from_env(),
+                Ok(GlobalStorePaths::from_data_root(&expected))
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("core::global_store::tests::global_data_root_process_uses_platform_home_without_other_home_alias")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .env(home_variable, std::env::temp_dir().join("ee-global-platform-home"))
+            .env_remove(other_home_variable)
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .expect("isolated global root probe must start");
+        assert!(
+            output.status.success(),
+            "platform-home probe failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     }
 
     #[test]
