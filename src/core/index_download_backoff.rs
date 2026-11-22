@@ -276,9 +276,88 @@ pub(crate) fn staging_search_roots_under(root: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn direct_model_destination_name(root: &Path) -> Option<&str> {
+    let name = root.file_name()?.to_str()?;
+    let model = frankensearch::embed::RegisteredModel2Vec::builtin(name)?.ok()?;
+    (super::index::model2vec_model_destination_dir(root, &model) == root).then_some(name)
+}
+
+fn direct_model_staging_parent(root: &Path) -> Option<PathBuf> {
+    if !root.is_absolute()
+        || root.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+        || super::path_safety::first_existing_symlink_component(root)
+            .ok()?
+            .is_some()
+    {
+        return None;
+    }
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if !metadata.is_dir() => return None,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        _ => {}
+    }
+    let parent = root.parent()?;
+    if super::path_safety::first_existing_symlink_component(parent)
+        .ok()?
+        .is_some()
+        || !std::fs::symlink_metadata(parent).ok()?.is_dir()
+    {
+        return None;
+    }
+    parent.canonicalize().ok()
+}
+
+/// Match only one canonical model destination's staging siblings. The parent
+/// directory is never an authorized repair root. Missing staging paths remain
+/// matchable so an audited quarantine can be undone without broadening scope.
 #[must_use]
-pub(crate) fn staging_search_roots() -> Vec<PathBuf> {
-    staging_search_roots_under(&staging_reclaim_root())
+pub(crate) fn direct_model_staging_path_is_authorized(root: &Path, path: &Path) -> bool {
+    let Some(model_name) = direct_model_destination_name(root) else {
+        return false;
+    };
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(parse_staging_dir_name)
+            .is_some_and(|(name, _)| name == model_name)
+    {
+        return false;
+    }
+    let Some(parent) = direct_model_staging_parent(root) else {
+        return false;
+    };
+    let Some(candidate_parent) = path.parent() else {
+        return false;
+    };
+    if (Some(candidate_parent) != root.parent() && candidate_parent != parent.as_path())
+        || !matches!(
+            super::path_safety::first_existing_symlink_component(path),
+            Ok(None)
+        )
+    {
+        return false;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => return false,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return false,
+        _ => {}
+    }
+    candidate_parent
+        .canonicalize()
+        .ok()
+        .is_some_and(|candidate_parent| candidate_parent == parent)
 }
 
 fn parse_staging_dir_name(name: &str) -> Option<(String, u32)> {
@@ -325,13 +404,39 @@ fn measure_dir_contents(path: &Path, depth: usize) -> Option<(bool, u64)> {
 
 #[must_use]
 pub(crate) fn inspect_staging_dirs_default() -> StagingDirInventory {
-    let roots = staging_search_roots();
-    inspect_staging_dirs_in_roots_at(&roots, SystemTime::now())
+    inspect_staging_dirs_under(&staging_reclaim_root())
+}
+
+#[must_use]
+pub(crate) fn inspect_staging_dirs_under(root: &Path) -> StagingDirInventory {
+    inspect_staging_dirs_under_at(root, SystemTime::now())
+}
+
+fn inspect_staging_dirs_under_at(root: &Path, now: SystemTime) -> StagingDirInventory {
+    // A canonical direct destination may also contain another model's cache.
+    // Preserve ordinary in-root discovery and filter only the added parent lane.
+    let mut roots = staging_search_roots_under(root);
+    let direct_parent = direct_model_destination_name(root)
+        .and_then(|name| direct_model_staging_parent(root).map(|parent| (parent, name)));
+    if let Some((parent, model_name)) = direct_parent {
+        roots.push(parent.clone());
+        inspect_staging_dirs_matching_at(&roots, now, Some((parent.as_path(), model_name)))
+    } else {
+        inspect_staging_dirs_in_roots_at(&roots, now)
+    }
 }
 
 pub(crate) fn inspect_staging_dirs_in_roots_at(
     roots: &[PathBuf],
     now: SystemTime,
+) -> StagingDirInventory {
+    inspect_staging_dirs_matching_at(roots, now, None)
+}
+
+fn inspect_staging_dirs_matching_at(
+    roots: &[PathBuf],
+    now: SystemTime,
+    model_name_filter: Option<(&Path, &str)>,
 ) -> StagingDirInventory {
     let mut inventory = StagingDirInventory::default();
     for root in roots {
@@ -351,6 +456,11 @@ pub(crate) fn inspect_staging_dirs_in_roots_at(
             let Some((model_name, pid)) = parse_staging_dir_name(dir_name) else {
                 continue;
             };
+            if model_name_filter.is_some_and(|(parent, expected)| {
+                root.as_path() == parent && model_name != expected
+            }) {
+                continue;
+            }
             let path = entry.path();
             let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 continue;
@@ -426,17 +536,16 @@ pub(crate) fn reclaim_abandoned_staging_dirs<E>(
     dry_run: bool,
     quarantine: impl FnMut(&StagingDirEntry) -> Result<(), E>,
 ) -> Result<StagingReclaimSummary, E> {
-    let roots = staging_search_roots_under(root);
-    reclaim_abandoned_staging_dirs_in_roots_at(&roots, dry_run, SystemTime::now(), quarantine)
+    reclaim_abandoned_staging_dirs_at(root, dry_run, SystemTime::now(), quarantine)
 }
 
-fn reclaim_abandoned_staging_dirs_in_roots_at<E>(
-    roots: &[PathBuf],
+fn reclaim_abandoned_staging_dirs_at<E>(
+    root: &Path,
     dry_run: bool,
     now: SystemTime,
     mut quarantine: impl FnMut(&StagingDirEntry) -> Result<(), E>,
 ) -> Result<StagingReclaimSummary, E> {
-    let inventory = inspect_staging_dirs_in_roots_at(roots, now);
+    let inventory = inspect_staging_dirs_under_at(root, now);
     let mut summary = StagingReclaimSummary {
         inspected_count: inventory.entries.len(),
         ..StagingReclaimSummary::default()
@@ -461,6 +570,8 @@ fn reclaim_abandoned_staging_dirs_in_roots_at<E>(
                     if staging_process_liveness(entry.pid) != StagingPidLiveness::Dead
                         || !std::fs::symlink_metadata(&entry.path)
                             .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+                        || (!entry.path.starts_with(root)
+                            && !direct_model_staging_path_is_authorized(root, &entry.path))
                     {
                         summary.kept_count = summary.kept_count.saturating_add(1);
                         ("keep_changed", 0u64)
@@ -787,6 +898,215 @@ mod tests {
     }
 
     #[test]
+    fn direct_model_destination_recognition_uses_registered_canonical_names() -> TestResult {
+        let root = temp_root("ee-staging-model-names-")?;
+        for name in ["potion-multilingual-128M", "potion-base-8m", "potion-base-32m"] {
+            let destination = root.path().join(name);
+            assert_eq!(direct_model_destination_name(&destination), Some(name));
+        }
+        for name in ["models", "model2vec", "custom-potion", "potion-base-8M"] {
+            assert_eq!(direct_model_destination_name(&root.path().join(name)), None);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_reclaim_preserves_other_models_and_active_downloads() -> TestResult {
+        let root = temp_root("ee-staging-direct-")?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let model = "potion-multilingual-128M";
+        let installed = parent.join(model);
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let dead_pid = child.id();
+        child.wait().map_err(|error| error.to_string())?;
+        let empty = parent.join(format!(".{model}-download-{dead_pid}-empty"));
+        let partial = parent.join(format!(".{model}-download-{dead_pid}-partial"));
+        let fresh = parent.join(format!(".{model}-download-{dead_pid}-fresh"));
+        let live = parent.join(format!(".{model}-download-{}-live", std::process::id()));
+        let unknown = parent.join(format!(".{model}-download-{}-unknown", u32::MAX));
+        let other = parent.join(format!(".potion-base-8m-download-{dead_pid}-other"));
+        let nested = installed.join(format!(".potion-base-8m-download-{dead_pid}-nested"));
+        let legacy_root = installed.join("model2vec");
+        let legacy = legacy_root.join(format!(".potion-base-32m-download-{dead_pid}-legacy"));
+        for path in [
+            &installed,
+            &empty,
+            &partial,
+            &fresh,
+            &live,
+            &unknown,
+            &other,
+            &nested,
+            &legacy_root,
+            &legacy,
+        ] {
+            std::fs::create_dir(path).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(installed.join("model.safetensors"), b"installed")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(partial.join("model.safetensors.part"), b"partial")
+            .map_err(|error| error.to_string())?;
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(25 * 60 * 60);
+        for path in [&empty, &partial, &live, &unknown, &other, &nested, &legacy] {
+            std::fs::File::open(path)
+                .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(old)))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let inventory = inspect_staging_dirs_under_at(&installed, now);
+        assert_eq!(inventory.entries.len(), 7);
+        assert_eq!(inventory.active_or_fresh_count, 3);
+        assert_eq!(inventory.abandoned_empty_count, 3);
+        assert_eq!(inventory.abandoned_non_empty_dead_pid_count, 1);
+        assert_eq!(inventory.reclaimable_bytes, 7);
+        assert!(inventory.entries.iter().any(|entry| entry.path == nested));
+        assert!(inventory.entries.iter().any(|entry| entry.path == legacy));
+        assert!(
+            inventory
+                .entries
+                .iter()
+                .filter(|entry| !entry.path.starts_with(&installed))
+                .all(|entry| entry.model_name == model)
+        );
+        let dry = reclaim_abandoned_staging_dirs_at(&installed, true, now, |_| {
+            Err("dry run must not quarantine a staging directory".to_owned())
+        })?;
+        assert_eq!(dry.reclaimed_count, 4);
+        assert!(empty.is_dir());
+        assert!(partial.is_dir());
+        assert!(nested.is_dir());
+        assert!(legacy.is_dir());
+
+        let quarantine = parent.join("quarantine");
+        std::fs::create_dir(&quarantine).map_err(|error| error.to_string())?;
+        let summary = reclaim_abandoned_staging_dirs_at(&installed, false, now, |entry| {
+            assert!(
+                entry.path.starts_with(&installed)
+                    || direct_model_staging_path_is_authorized(&installed, &entry.path)
+            );
+            std::fs::rename(&entry.path, quarantine.join(&entry.dir_name))
+                .map_err(|error| error.to_string())
+        })?;
+        assert_eq!(summary.reclaimed_count, 4);
+        assert_eq!(summary.kept_count, 3);
+        assert_eq!(summary.reclaimed_bytes, 7);
+        assert!(!empty.exists());
+        assert!(!partial.exists());
+        assert!(!nested.exists());
+        assert!(!legacy.exists());
+        assert!(fresh.is_dir());
+        assert!(live.is_dir());
+        assert!(unknown.is_dir());
+        assert!(other.is_dir());
+        assert_eq!(
+            std::fs::read(installed.join("model.safetensors"))
+                .map_err(|error| error.to_string())?,
+            b"installed"
+        );
+        assert_eq!(
+            std::fs::read(
+                quarantine
+                    .join(partial.file_name().ok_or("partial staging leaf")?)
+                    .join("model.safetensors.part")
+            )
+            .map_err(|error| error.to_string())?,
+            b"partial"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_staging_authority_matches_only_exact_safe_siblings() -> TestResult {
+        let root = temp_root("ee-staging-authority-")?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let model = "potion-multilingual-128M";
+        let installed = parent.join(model);
+        let staging_name = format!(".{model}-download-12345-retained");
+        let missing = parent.join(&staging_name);
+        // Both the destination and a quarantined staging path may be absent.
+        assert!(direct_model_staging_path_is_authorized(&installed, &missing));
+        assert!(!installed.exists());
+        assert!(!missing.exists());
+        std::fs::create_dir(&installed).map_err(|error| error.to_string())?;
+        let unrelated = parent.join("unrelated");
+        std::fs::create_dir(&unrelated).map_err(|error| error.to_string())?;
+        for path in [
+            parent.clone(),
+            installed.clone(),
+            parent.join(".potion-base-8m-download-12345-retained"),
+            parent.join(format!(".{model}-extra-download-12345-retained")),
+            parent.join(format!(".{model}-download-invalid-retained")),
+            unrelated.join(&staging_name),
+            unrelated.join("..").join(&staging_name),
+            missing.join(&staging_name),
+            PathBuf::from(&staging_name),
+        ] {
+            assert!(
+                !direct_model_staging_path_is_authorized(&installed, &path),
+                "unexpected sibling authority for {}",
+                path.display()
+            );
+        }
+        assert!(!direct_model_staging_path_is_authorized(
+            &unrelated.join("..").join(model),
+            &missing
+        ));
+        std::os::unix::fs::symlink(&installed, &missing)
+            .map_err(|error| error.to_string())?;
+        assert!(!direct_model_staging_path_is_authorized(&installed, &missing));
+
+        let linked_parent = parent.join("linked-parent");
+        std::os::unix::fs::symlink(&unrelated, &linked_parent)
+            .map_err(|error| error.to_string())?;
+        let linked_root = linked_parent.join(model);
+        let linked_candidate = linked_parent.join(staging_name);
+        assert!(!direct_model_staging_path_is_authorized(&linked_root, &linked_candidate));
+        assert!(inspect_staging_dirs_under(&linked_root).entries.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_reclaim_rechecks_scope_after_an_earlier_quarantine() -> TestResult {
+        let root = temp_root("ee-staging-scope-recheck-")?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let model = "potion-multilingual-128M";
+        let installed = parent.join(model);
+        std::fs::create_dir(&installed).map_err(|error| error.to_string())?;
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let dead_pid = child.id();
+        child.wait().map_err(|error| error.to_string())?;
+        let first = parent.join(format!(".{model}-download-{dead_pid}-0001"));
+        let second = parent.join(format!(".{model}-download-{dead_pid}-0002"));
+        for path in [&first, &second] {
+            std::fs::create_dir(path).map_err(|error| error.to_string())?;
+        }
+        let retained = parent.join("retained-model");
+        let quarantined = parent.join("quarantined-first");
+        let later = SystemTime::now() + ABANDONED_STAGING_AGE + Duration::from_secs(60);
+        let summary = reclaim_abandoned_staging_dirs_at(&installed, false, later, |entry| {
+            assert_eq!(entry.path, first, "changed scope must suppress the second callback");
+            std::fs::rename(&entry.path, &quarantined).map_err(|error| error.to_string())?;
+            std::fs::rename(&installed, &retained).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&retained, &installed)
+                .map_err(|error| error.to_string())
+        })?;
+        assert_eq!(summary.reclaimed_count, 1);
+        assert_eq!(summary.kept_count, 1);
+        assert!(quarantined.is_dir());
+        assert!(second.is_dir());
+        assert!(retained.is_dir());
+        Ok(())
+    }
+
+    #[test]
     fn reclaim_preserves_fresh_live_pid_symlink_and_installed_model_dirs() -> TestResult {
         let root = temp_root("ee-staging-preserve-")?;
         let model = "potion-multilingual-128M";
@@ -837,7 +1157,7 @@ mod tests {
 
         // Age never overrides a live or unmeasurable owner, even for an empty directory.
         let future = SystemTime::now() + ABANDONED_NON_EMPTY_STAGING_AGE + Duration::from_secs(60);
-        let summary = reclaim_abandoned_staging_dirs_in_roots_at(&roots, false, future, |_| {
+        let summary = reclaim_abandoned_staging_dirs_at(root.path(), false, future, |_| {
             Err("live or unknown PID staging must not be quarantined".to_owned())
         })?;
         assert_eq!(summary.reclaimed_count, 0);
@@ -903,7 +1223,7 @@ mod tests {
         // At 25h: dry-run sees all 3 reclaimable without deleting.
         let twenty_five_hours = SystemTime::now() + Duration::from_secs(25 * 60 * 60);
         let dry =
-            reclaim_abandoned_staging_dirs_in_roots_at(&roots, true, twenty_five_hours, |_| {
+            reclaim_abandoned_staging_dirs_at(root.path(), true, twenty_five_hours, |_| {
                 Err("dry run must not invoke the mutation callback".to_owned())
             })?;
         assert_eq!(dry.reclaimed_count, 3);
@@ -916,8 +1236,8 @@ mod tests {
         // a partial model or an empty directory itself.
         let quarantine = root.path().join("quarantine");
         std::fs::create_dir(&quarantine).map_err(|error| error.to_string())?;
-        let real = reclaim_abandoned_staging_dirs_in_roots_at(
-            &roots,
+        let real = reclaim_abandoned_staging_dirs_at(
+            root.path(),
             false,
             twenty_five_hours,
             |entry| {

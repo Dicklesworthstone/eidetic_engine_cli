@@ -4140,11 +4140,44 @@ Remaining execution and implementation work stays open:
   including prior unmanaged-body migration.
 - [ ] Complete `.85` cross-surface execution before closing `.80`, `.81`, or
   `.83`; the Beads were deliberately left open without runtime proof.
-- [ ] Extend `.81` for a direct model-directory override: its abandoned download
-  directories are siblings of the model, so inspection and repair need an
-  exact model-scoped parent boundary. Broad parent scanning is not authorized
-  by the current model-root repair contract.
+- [x] Implement `.81` direct model-directory staging discovery and audited
+  repair/undo under exact sibling-path authority (see §22.10). Execution
+  evidence remains pending; the broader Bead is still open.
 - [ ] Profile and prove the `.79` warm-daemon performance target on a compiled,
   source-matched binary. The existing opt-in `remember --defer-index` path
   remains available; changing the default would weaken freshness guarantees
   when live-snapshot fallback is unavailable.
+
+### 22.10 Source authority, deferred retrieval, and direct-model recovery — 2026-11-22
+
+Three follow-through changes address correctness and usability in the core
+capture, retrieval, and repair paths:
+
+- **Authoritative memory admission** (`061788cb`). Lifecycle admission now
+  performs bounded local source seeks even when a preload covers every hit.
+  Global-only rows keep their provenance; actual local rows win ID collisions,
+  tombstones and seals remain authoritative, and an unreadable local source
+  cannot be replaced by cached success. New cases extend the existing collision
+  and failed-read regressions.
+- **Explicit lexical retrieval** (`54a7200d`). Read-time index reconciliation
+  now respects the effective source mode at Default and Quality speed. Deferred
+  memories can be retrieved through the existing bounded complete-source path
+  without preparing embedding models or consuming queued publication jobs.
+  Regressions exercise ordinary search and persisted context packs, with missing
+  and stale indexes, queue preservation, and a hybrid reconciliation control.
+  Source-size limits and historical/corrupt-source refusal paths still apply.
+- **Direct-model staging recovery.** Canonical built-in model destinations now
+  include matching sibling downloads in inspection while preserving discovery
+  inside the configured root and its `model2vec` child. Default repair authority
+  includes only inspected reclaimable sibling paths, never their parent. Undo
+  revalidates absent quarantined paths against the current model configuration;
+  explicit operator boundaries remain restrictive. Regressions cover mixed
+  model layouts, fresh/live/unknown owners, symlinks, exact-path quarantine and
+  restoration, changed scope, and forged ledger authority. Arbitrary-basename
+  installed-model destinations remain outside this extension.
+
+Source/API review and `git diff --check` passed. RCH, Cargo, rustc, and rustfmt
+are unavailable in this environment, so Rust formatting, compilation, and
+behavioral execution remain unrun. These implementation records do not close
+`.79`, `.81`, `.83`, or `.85`. Run the new search/preload, unpublished-source,
+staging, and audited repair/undo tests through RCH before claiming acceptance.

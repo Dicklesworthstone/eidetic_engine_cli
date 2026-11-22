@@ -1449,10 +1449,49 @@ pub fn replay_undo_for_workspace(
     workspace: &Path,
     run_id: &str,
 ) -> Result<UndoSummary, DoctorRuntimeError> {
+    use crate::config::env_registry::{EnvVar, read};
+
     let workspace = canonical_doctor_workspace(workspace)?;
-    let allowed_roots = blast_radius_roots_from_env(&workspace)
-        .map_err(|reason| DoctorRuntimeError::InvalidBlastRadius { reason })?;
+    let override_value = read(EnvVar::DoctorBlastRadius);
+    let staging_root = super::index_download_backoff::staging_reclaim_root();
+    let allowed_roots = undo_blast_radius_roots(
+        &workspace,
+        run_id,
+        override_value.as_deref(),
+        &staging_root,
+    )?;
     replay_undo_with_authorized_roots(&workspace, run_id, &allowed_roots)
+}
+
+fn undo_blast_radius_roots(
+    workspace: &Path,
+    run_id: &str,
+    override_value: Option<&str>,
+    staging_root: &Path,
+) -> Result<Vec<PathBuf>, DoctorRuntimeError> {
+    if let Some(raw) = override_value.filter(|raw| !raw.trim().is_empty()) {
+        return parse_blast_radius_override(raw)
+            .map_err(|reason| DoctorRuntimeError::InvalidBlastRadius { reason });
+    }
+
+    let (_, state) = read_doctor_run_state(workspace, run_id)?;
+    let mut roots = default_blast_radius_roots_for_staging_root(workspace, staging_root);
+    // A quarantined direct-model staging directory is now absent, so live
+    // discovery cannot authorize its restoration. Revalidate each recorded
+    // exact sibling against the current configured model destination instead
+    // of trusting the old roots or granting authority over its whole parent.
+    // The action ledger still has to pass recorded/current root intersection,
+    // content fingerprint, and occupied-destination checks before restoration.
+    for path in state.blast_radius_roots {
+        if super::index_download_backoff::direct_model_staging_path_is_authorized(
+            staging_root,
+            &path,
+        ) && !roots.iter().any(|existing| path.starts_with(existing))
+        {
+            roots.push(path);
+        }
+    }
+    Ok(roots)
 }
 
 /// Replay with an explicit set of roots authorized by the caller for this
@@ -2506,21 +2545,44 @@ impl CapabilitiesReport {
 
 /// Default blast radius for an ee workspace: the canonical workspace roots,
 /// the user's local data root, and (when configured outside those roots) the
-/// resolved model staging reclaim root.
+/// resolved model staging reclaim root. A direct model-directory override
+/// adds only inspected reclaimable sibling staging paths, never its parent.
 #[must_use]
 pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
+    default_blast_radius_roots_for_staging_root(
+        workspace,
+        &super::index_download_backoff::staging_reclaim_root(),
+    )
+}
+
+fn default_blast_radius_roots_for_staging_root(
+    workspace: &Path,
+    staging_root: &Path,
+) -> Vec<PathBuf> {
     let mut roots = vec![workspace.join(".ee"), workspace.join(".doctor")];
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         roots.push(home.join(".local").join("share").join("ee"));
     }
-    let staging_root = super::index_download_backoff::staging_reclaim_root();
     if staging_root.is_absolute()
         && !roots
             .iter()
             .any(|existing| staging_root.starts_with(existing))
     {
-        roots.push(staging_root);
+        roots.push(staging_root.to_path_buf());
+    }
+    for entry in super::index_download_backoff::inspect_staging_dirs_under(staging_root).entries {
+        if entry.class != super::index_download_backoff::StagingDirClass::ActiveOrFresh
+            && super::index_download_backoff::direct_model_staging_path_is_authorized(
+                staging_root,
+                &entry.path,
+            )
+            && !roots
+                .iter()
+                .any(|existing| entry.path.starts_with(existing))
+        {
+            roots.push(entry.path);
+        }
     }
     roots
 }
@@ -5806,7 +5868,18 @@ mod tests {
 
     #[cfg(unix)]
     fn old_model_staging(root: &Path, pid: u32, suffix: &str, payload: Option<&[u8]>) -> PathBuf {
-        let directory = root.join(format!(".potion-test-download-{pid}-{suffix}"));
+        old_named_model_staging(root, "potion-test", pid, suffix, payload)
+    }
+
+    #[cfg(unix)]
+    fn old_named_model_staging(
+        root: &Path,
+        model: &str,
+        pid: u32,
+        suffix: &str,
+        payload: Option<&[u8]>,
+    ) -> PathBuf {
+        let directory = root.join(format!(".{model}-download-{pid}-{suffix}"));
         fs::create_dir_all(&directory).unwrap();
         if let Some(payload) = payload {
             fs::write(directory.join("model.safetensors.part"), payload).unwrap();
@@ -5822,6 +5895,238 @@ mod tests {
     #[cfg(unix)]
     fn model_staging_op() -> Op {
         Op::ReclaimModelStagingDirs { steps: Vec::new() }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_staging_repair_has_exact_authority_and_restores_absent_siblings() {
+        for installed in [false, true] {
+            let temp = fresh_workspace();
+            let root = temp.path().canonicalize().unwrap();
+            let workspace = root.join("workspace");
+            let models = root.join("models");
+            let model = models.join("potion-base-8m");
+            fs::create_dir(&workspace).unwrap();
+            fs::create_dir(&models).unwrap();
+            if installed {
+                fs::create_dir(&model).unwrap();
+                fs::write(model.join("model.safetensors"), b"installed model").unwrap();
+            }
+            let dead_pid = dead_staging_pid();
+            let empty =
+                old_named_model_staging(&models, "potion-base-8m", dead_pid, "empty", None);
+            let partial = old_named_model_staging(
+                &models,
+                "potion-base-8m",
+                dead_pid,
+                "partial",
+                Some(b"partial model bytes"),
+            );
+            let other_model = old_named_model_staging(
+                &models,
+                "potion-base-32m",
+                dead_pid,
+                "other",
+                Some(b"another model"),
+            );
+            let live = old_named_model_staging(
+                &models,
+                "potion-base-8m",
+                std::process::id(),
+                "live",
+                None,
+            );
+            let unknown = old_named_model_staging(
+                &models,
+                "potion-base-8m",
+                u32::MAX,
+                "unknown",
+                None,
+            );
+            let unrelated = models.join("unrelated.txt");
+            fs::write(&unrelated, b"keep unrelated bytes").unwrap();
+
+            let roots = default_blast_radius_roots_for_staging_root(&workspace, &model);
+            assert!(roots.contains(&empty));
+            assert!(roots.contains(&partial));
+            for excluded in [&models, &other_model, &live, &unknown, &unrelated] {
+                assert!(!is_path_in_blast_radius(excluded, &roots));
+            }
+            let mut ctx = RunContext::start(&workspace, "direct-staging", roots, false).unwrap();
+            let run_id = ctx.run_id().to_owned();
+            let run_dir = ctx.run_dir().to_path_buf();
+            assert!(matches!(
+                mutate(
+                    &mut ctx,
+                    &unrelated,
+                    Op::WriteFile {
+                        bytes: b"forbidden".to_vec()
+                    },
+                ),
+                Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+            ));
+            assert_eq!(
+                mutate(&mut ctx, &model, model_staging_op()).unwrap().kind,
+                "quarantine_by_rename"
+            );
+            assert_eq!(ctx.state.action_count, 2);
+            assert!(!empty.exists());
+            assert!(!partial.exists());
+            assert!(other_model.is_dir());
+            assert!(live.is_dir());
+            assert!(unknown.is_dir());
+            assert_eq!(fs::read(&unrelated).unwrap(), b"keep unrelated bytes");
+            if installed {
+                assert_eq!(
+                    fs::read(model.join("model.safetensors")).unwrap(),
+                    b"installed model"
+                );
+            } else {
+                assert!(!model.exists());
+            }
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+
+            // Live discovery no longer sees the moved candidates. Current
+            // model scope must independently authorize their exact old paths.
+            let roots = undo_blast_radius_roots(&workspace, &run_id, None, &model).unwrap();
+            assert!(roots.contains(&empty));
+            assert!(roots.contains(&partial));
+            assert!(!is_path_in_blast_radius(&models, &roots));
+            let summary =
+                replay_undo_with_authorized_roots(&workspace, &run_id, &roots).unwrap();
+            assert!(matches!(summary.status, RunStatus::Undone));
+            assert!(empty.is_dir());
+            assert_eq!(
+                fs::read(partial.join("model.safetensors.part")).unwrap(),
+                b"partial model bytes"
+            );
+            assert_eq!(fs::read(&unrelated).unwrap(), b"keep unrelated bytes");
+            assert!(run_dir.join("undo_log.jsonl").is_file());
+            assert!(matches!(
+                replay_undo_with_authorized_roots(&workspace, &run_id, &roots)
+                    .unwrap()
+                    .status,
+                RunStatus::Undone
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_staging_undo_honors_override_and_current_model_scope() {
+        let temp = fresh_workspace();
+        let root = temp.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let models = root.join("models");
+        let model = models.join("potion-base-8m");
+        fs::create_dir(&workspace).unwrap();
+        let staging = old_named_model_staging(
+            &models,
+            "potion-base-8m",
+            dead_staging_pid(),
+            "partial",
+            Some(b"retained in quarantine"),
+        );
+        let roots = default_blast_radius_roots_for_staging_root(&workspace, &model);
+        let mut ctx = RunContext::start(&workspace, "direct-staging-scope", roots, false).unwrap();
+        let run_id = ctx.run_id().to_owned();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let action = mutate(&mut ctx, &model, model_staging_op()).unwrap();
+        let quarantine = run_dir
+            .join("quarantine")
+            .join(action.quarantine_dest_rel.unwrap());
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let override_value = workspace.to_str().unwrap();
+        let overridden =
+            undo_blast_radius_roots(&workspace, &run_id, Some(override_value), &model).unwrap();
+        assert_eq!(overridden, vec![workspace.clone()]);
+        let different_model = models.join("potion-base-32m");
+        let changed_scope =
+            undo_blast_radius_roots(&workspace, &run_id, None, &different_model).unwrap();
+        for roots in [overridden, changed_scope] {
+            assert!(!is_path_in_blast_radius(&staging, &roots));
+            assert!(matches!(
+                replay_undo_with_authorized_roots(&workspace, &run_id, &roots),
+                Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+            ));
+            assert!(!staging.exists());
+            assert!(!run_dir.join("undo_log.jsonl").exists());
+            assert_eq!(
+                fs::read(quarantine.join("model.safetensors.part")).unwrap(),
+                b"retained in quarantine"
+            );
+        }
+        assert!(matches!(
+            undo_blast_radius_roots(&workspace, &run_id, Some("relative"), &model),
+            Err(DoctorRuntimeError::InvalidBlastRadius { .. })
+        ));
+
+        // Blank overrides retain the documented default behavior.
+        let roots = undo_blast_radius_roots(&workspace, &run_id, Some("  "), &model).unwrap();
+        replay_undo_with_authorized_roots(&workspace, &run_id, &roots).unwrap();
+        assert_eq!(
+            fs::read(staging.join("model.safetensors.part")).unwrap(),
+            b"retained in quarantine"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_model_staging_undo_does_not_trust_forged_recorded_parent_authority() {
+        let temp = fresh_workspace();
+        let root = temp.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let models = root.join("models");
+        let model = models.join("potion-base-8m");
+        fs::create_dir(&workspace).unwrap();
+        let staging = old_named_model_staging(
+            &models,
+            "potion-base-8m",
+            dead_staging_pid(),
+            "partial",
+            Some(b"retained in quarantine"),
+        );
+        let roots = default_blast_radius_roots_for_staging_root(&workspace, &model);
+        let mut ctx = RunContext::start(&workspace, "forged-direct-staging", roots, false).unwrap();
+        let run_id = ctx.run_id().to_owned();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let mut action = mutate(&mut ctx, &model, model_staging_op()).unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let forged = models.join(".potion-base-32m-download-1234-forged");
+        let (_, mut state) = read_doctor_run_state(&workspace, &run_id).unwrap();
+        state.blast_radius_roots.push(models.clone());
+        state.blast_radius_roots.push(forged.clone());
+        fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        action.path = forged.clone();
+        fs::write(
+            run_dir.join("actions.jsonl"),
+            format!("{}\n", serde_json::to_string(&action).unwrap()),
+        )
+        .unwrap();
+
+        let roots = undo_blast_radius_roots(&workspace, &run_id, None, &model).unwrap();
+        assert!(!is_path_in_blast_radius(&models, &roots));
+        assert!(!is_path_in_blast_radius(&forged, &roots));
+        assert!(matches!(
+            replay_undo_with_authorized_roots(&workspace, &run_id, &roots),
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        assert!(!staging.exists());
+        assert!(!forged.exists());
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+        let quarantine = run_dir
+            .join("quarantine")
+            .join(action.quarantine_dest_rel.unwrap());
+        assert_eq!(
+            fs::read(quarantine.join("model.safetensors.part")).unwrap(),
+            b"retained in quarantine"
+        );
     }
 
     #[cfg(unix)]
