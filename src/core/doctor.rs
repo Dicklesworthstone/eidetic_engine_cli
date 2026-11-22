@@ -2914,18 +2914,17 @@ fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
             }
         }
         Ok(None) => {}
-        // A config we could not READ also did not parse, and the catalog has
-        // no distinct read-failure code. The code carries the category while
-        // the MESSAGE carries the actual cause, so the two states stay
-        // distinguishable to a reader even though they share one code.
+        // Only a successful read followed by a TOML syntax error may authorize
+        // quarantine. Access failures, invalid UTF-8 and the bounded-read cap
+        // do not establish malformed TOML and must preserve the existing file.
         Err(error) => {
             return CheckResult::error(
                 "workspace",
                 format!(
-                    "Workspace config at {} could not be read: {error}",
+                    "Workspace config at {} could not be read: {error}. Preserve the file and resolve the read failure before retrying; automatic quarantine is unavailable.",
                     config_path.display()
                 ),
-                error_codes::CONFIG_PARSE_ERROR,
+                error_codes::CONFIG_UNAVAILABLE,
             );
         }
     }
@@ -5194,6 +5193,58 @@ mod tests {
             Some("EE-E101"),
             "malformed workspace config emits CONFIG_PARSE_ERROR",
         )
+    }
+
+    #[test]
+    fn workspace_config_read_failures_preserve_config_and_remain_actionable() -> TestResult {
+        use crate::core::doctor_fixers::{FixMode, fix_mode_for_check, unresolved_core_checks};
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        let config_path = ee.join("config.toml");
+        // A syntactically valid comment exceeds the reader's 4 MiB cap. Its
+        // contents have never reached the parser, so it cannot be quarantined.
+        let oversized_comment = format!("#{}\n", "x".repeat(4 * 1024 * 1024));
+        for bytes in [vec![0xff, 0xfe], oversized_comment.into_bytes()] {
+            std::fs::write(&config_path, &bytes).map_err(|error| error.to_string())?;
+            ensure(
+                crate::config::read_workspace_config_contents(temp.path()).is_err(),
+                true,
+                "fixture must fail during the bounded file read",
+            )?;
+            let result = check_workspace(Some(temp.path()));
+            ensure(result.severity, CheckSeverity::Error, "read failure severity")?;
+            ensure(
+                result.error_code,
+                Some(error_codes::CONFIG_UNAVAILABLE),
+                "read failure must not be a TOML syntax diagnosis",
+            )?;
+            ensure(
+                result.is_topline_healthy(),
+                false,
+                "inaccessible configuration must remain a core health failure",
+            )?;
+            ensure(
+                fix_mode_for_check(result.error_code.map(|code| code.id), result.name, false),
+                (FixMode::Manual, None),
+                "read failure must not authorize a writing fixer",
+            )?;
+            let pending = unresolved_core_checks(std::slice::from_ref(&result));
+            ensure(pending.len(), 1, "unreadable config must remain unresolved")?;
+            ensure(pending[0].name, "workspace", "unresolved check identity")?;
+            ensure(
+                pending[0].repair,
+                error_codes::CONFIG_UNAVAILABLE.default_repair,
+                "unreadable config keeps its manual recovery guidance",
+            )?;
+            ensure(
+                std::fs::read(&config_path).map_err(|error| error.to_string())?,
+                bytes,
+                "inspection must preserve the exact unreadable config bytes",
+            )?;
+        }
+        Ok(())
     }
 
     /// NEGATIVE CONTROL for the detector above: it must be keyed on the PARSE

@@ -1340,6 +1340,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_read_unavailability_never_dispatches_quarantine() {
+        let code = crate::models::error_codes::CONFIG_UNAVAILABLE.id;
+        for store_unreadable in [false, true] {
+            assert_eq!(
+                fix_finding_for_check(Some(code), "workspace", store_unreadable),
+                None,
+            );
+            assert_eq!(
+                fix_mode_for_check(Some(code), "workspace", store_unreadable),
+                (FixMode::Manual, None),
+            );
+        }
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E101"), "workspace", false),
+            (FixMode::AutoRepair, Some("workspace_config_malformed_toml")),
+            "a confirmed TOML syntax error retains the existing opt-in quarantine",
+        );
+    }
+
     /// NEGATIVE CONTROL for the guard: EE-E101 from any OTHER check must not
     /// quarantine `.ee/config.toml`.
     ///

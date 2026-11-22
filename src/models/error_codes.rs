@@ -137,6 +137,16 @@ pub const WORKSPACE_IDENTITY_MISMATCH: ErrorCode = ErrorCode {
     default_repair: Some("ee workspace resolve --workspace . --json"),
 };
 
+/// Failure to read a configuration file is not a TOML syntax diagnosis.
+pub const CONFIG_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E104",
+    category: ErrorCategory::Configuration,
+    description: "Workspace configuration could not be read; TOML validity is unknown",
+    default_repair: Some(
+        "Preserve the configuration file and resolve the reported read failure or size limit before rerunning ee doctor --workspace . --json",
+    ),
+};
+
 // Storage errors (EE-E200 - EE-E299)
 pub const DATABASE_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E200",
@@ -405,6 +415,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     CONFIG_PARSE_ERROR,
     CONFIG_INVALID_VALUE,
     WORKSPACE_IDENTITY_MISMATCH,
+    CONFIG_UNAVAILABLE,
     // Storage
     DATABASE_NOT_FOUND,
     DATABASE_LOCKED,

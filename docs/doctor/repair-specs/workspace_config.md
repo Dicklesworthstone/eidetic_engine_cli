@@ -27,3 +27,18 @@ Labels, fields and the coverage rule are defined in
 - **Oracle:** `doctor_fixture_assert` (the shared repair round trip) plus four assertions it does not make: detection before any repair, the fixer operation BY NAME, undo reporting `actionsUndone > 0`, and `EE-E101` returning after undo.
 - **Negative control:** The comment-only baseline config passes `ee search` and a healthy doctor report before it is broken.
 - **Pinned sha:** oracle measured 2026-10-14 on an RCH worker against a binary that job built from `.rch-target/debug/ee`. The previous pin was 02524267e, whose behaviour this entry no longer describes.
+
+### Configuration read failures
+
+A failed read is distinct from the malformed-TOML fixture above. Access or I/O
+errors, invalid UTF-8, and the bounded config reader's size limit emit
+`workspace` / `EE-E104` (`CONFIG_UNAVAILABLE`). The check remains a core error
+with manual recovery guidance. `--fix-plan` reports manual repair mode, and
+`--fix` leaves the existing config in place and lists the check as unresolved;
+it cannot quarantine a file whose TOML syntax was never inspected. Preserve the
+file and resolve the reported read failure before retrying. Only an observed
+TOML syntax error emits `EE-E101` and offers the existing opt-in quarantine.
+
+Regression coverage is in
+`workspace_config_read_failures_preserve_config_and_remain_actionable` and
+`config_read_unavailability_never_dispatches_quarantine`.
