@@ -2610,12 +2610,72 @@ fn python_hook_command(script: &str, ee_binary: &Path) -> String {
 }
 
 fn python_invocation_recorder() -> &'static str {
-    r#"import datetime, json, os, time
+    r#"import datetime, errno, hashlib, json, os, stat, tempfile, time
 _ee_started = time.monotonic()
 def _ee_state_root():
     cwd = data.get("cwd") or os.getcwd()
     root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(".ee", "hook-state")
     return root if os.path.isabs(root) else os.path.join(cwd, root)
+def _ee_lock_context_state(lock, timeout_seconds):
+    # Keep one stable lock inode: replacing or unlinking it splits the writers.
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.005, remaining))
+def already_seen(text, lock_timeout_seconds=0.2):
+    # All ambient surfaces share this transaction; failures may repeat context
+    # but must never wait indefinitely or prevent the harness's tool from running.
+    try:
+        root = _ee_state_root()
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        path = os.path.join(root, "ambient_context_seen.json")
+        lock_path = path + ".lock"
+        safe_flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT | safe_flags, 0o600), "r+b") as lock:
+            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode) or not stat.S_ISREG(os.lstat(lock_path).st_mode):
+                return False
+            if not _ee_lock_context_state(lock, lock_timeout_seconds):
+                return False
+            if not os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_path)):
+                return False
+            try:
+                with os.fdopen(os.open(path, os.O_RDONLY | safe_flags), "r", encoding="utf-8") as state:
+                    if not stat.S_ISREG(os.fstat(state.fileno()).st_mode) or not stat.S_ISREG(os.lstat(path).st_mode):
+                        return False
+                    seen = json.load(state)
+            except (FileNotFoundError, ValueError):
+                seen = {}
+            if not isinstance(seen, dict):
+                seen = {}
+            session = str(data.get("session_id") or data.get("sessionId") or "default")
+            key = SURFACE + ":" + session + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+            if seen.get(key):
+                return True
+            seen[key] = True
+            # Readers see a complete document. Failed publication leaves the
+            # old state and the temporary file recoverable instead of truncating.
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".ambient_context_seen.", suffix=".tmp", dir=root, delete=False) as pending:
+                json.dump(seen, pending, sort_keys=True, separators=(",", ":"))
+            if not os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_path)):
+                return False
+            os.replace(pending.name, path)
+            return False
+    except Exception:
+        return False
 def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
     try:
         root = _ee_state_root()
@@ -2666,35 +2726,6 @@ if not ambient_enabled():
 VERBOSITY = ambient_verbosity()
 BUDGET = {"quiet": QUIET_BUDGET, "standard": DEFAULT_BUDGET, "verbose": VERBOSE_BUDGET}[VERBOSITY]
 MAX_PATHS = {"quiet": QUIET_MAX_PATHS, "standard": DEFAULT_MAX_PATHS, "verbose": VERBOSE_MAX_PATHS}[VERBOSITY]
-def state_path():
-    try:
-        root = _ee_state_root()
-        os.makedirs(root, exist_ok=True)
-    except Exception:
-        return None
-    return os.path.join(root, "ambient_context_seen.json")
-def already_seen(text):
-    path = state_path()
-    if not path:
-        return False
-    session = str(data.get("session_id") or data.get("sessionId") or "default")
-    key = SURFACE + ":" + session + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            seen = json.load(f)
-    except Exception:
-        seen = {}
-    if not isinstance(seen, dict):
-        seen = {}
-    if seen.get(key):
-        return True
-    seen[key] = True
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
-    except Exception:
-        pass
-    return False
 def emit(text, codes):
     if already_seen(text):
         _ee_record_invocation("duplicate", degraded_codes=codes)
@@ -2791,36 +2822,6 @@ VERBOSITY = ambient_verbosity()
 if VERBOSITY == "quiet":
     sys.exit(0)
 BUDGET = VERBOSE_BUDGET if VERBOSITY == "verbose" else DEFAULT_BUDGET
-def state_path():
-    try:
-        root = _ee_state_root()
-        os.makedirs(root, exist_ok=True)
-    except Exception:
-        return None
-    return os.path.join(root, "ambient_context_seen.json")
-def already_seen(text):
-    path = state_path()
-    if not path:
-        return False
-    session = str(data.get("session_id") or data.get("sessionId") or "default")
-    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
-    key = SURFACE + ":" + session + ":" + digest
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            seen = json.load(f)
-    except Exception:
-        seen = {}
-    if not isinstance(seen, dict):
-        seen = {}
-    if seen.get(key):
-        return True
-    seen[key] = True
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
-    except Exception:
-        pass
-    return False
 task = str(data.get("task") or data.get("prompt") or "session start")[:240]
 # Budget the actual prompt, reserving room for the provenance header below.
 # The diagnostic envelope is parsed, never injected into the agent's context.
@@ -2882,36 +2883,6 @@ def ambient_verbosity():
     return "standard"
 if not ambient_enabled() or ambient_verbosity() == "quiet":
     sys.exit(0)
-def state_path():
-    try:
-        root = _ee_state_root()
-        os.makedirs(root, exist_ok=True)
-    except Exception:
-        return None
-    return os.path.join(root, "ambient_context_seen.json")
-def already_seen(text):
-    path = state_path()
-    if not path:
-        return False
-    session = str(data.get("session_id") or data.get("sessionId") or "default")
-    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
-    key = SURFACE + ":" + session + ":" + digest
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            seen = json.load(f)
-    except Exception:
-        seen = {}
-    if not isinstance(seen, dict):
-        seen = {}
-    if seen.get(key):
-        return True
-    seen[key] = True
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
-    except Exception:
-        pass
-    return False
 cmd = [ee, "capture", "suggest", "--from-recent", "--max", str(MAX_SUGGESTIONS), "--json"]
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
@@ -5608,7 +5579,7 @@ mod tests {
             let probe = format!(
                 "{prefix}\nassert already_seen('memory') is False\nassert already_seen('memory') is True\ndata['session_id'] = 'next-session'\nassert already_seen('memory') is False\n"
             );
-            for malformed in ["[]", "null", "42", "\"unexpected\""] {
+            for malformed in ["[]", "null", "42", "\"unexpected\"", "{truncated"] {
                 let temp = TempDir::new().map_err(|error| error.to_string())?;
                 let workspace = temp.path().join("workspace");
                 let state = workspace.join("relative-state");
@@ -5628,6 +5599,235 @@ mod tests {
                     !temp.path().join("relative-state").exists(),
                     "dedup state must use the event workspace, not launcher cwd"
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn run_ambient_hook_dedup_probe(probe: &str) -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let mut definitions = Vec::new();
+        for (script, stop_before) in [
+            (
+                pre_edit_python(),
+                "tool_input = data.get(\"tool_input\") or {}",
+            ),
+            (session_start_python(), "task = str(data.get(\"task\")"),
+            (session_end_capture_python(), "cmd = [ee, \"capture\""),
+        ] {
+            let prefix = script
+                .split_once(stop_before)
+                .ok_or("hook probe boundary missing")?
+                .0;
+            definitions.push(format!("{}\n{prefix}", python_invocation_recorder()));
+        }
+        let input = serde_json::json!({"cwd": workspace, "definitions": definitions});
+        let harness = r####"import json, os, pathlib, subprocess, sys, threading, time
+payload = json.load(sys.stdin)
+workspace = pathlib.Path(payload["cwd"])
+next_gate_id = 0
+def spawn(definition, state, session, text, gate=None, lock_timeout=None):
+    global next_gate_id
+    release_on_ready = gate is None
+    if release_on_ready:
+        gate = state / ("probe-ready-" + str(next_gate_id))
+        next_gate_id += 1
+    worker = definition + r"""
+print("ready", flush=True)
+while sys.argv[3] and not os.path.exists(sys.argv[3]):
+    time.sleep(0.001)
+started = time.monotonic()
+seen = already_seen(sys.argv[2], float(sys.argv[4])) if sys.argv[4] else already_seen(sys.argv[2])
+print(json.dumps({"seen": seen, "elapsed": time.monotonic() - started}), flush=True)
+"""
+    env = dict(os.environ)
+    env["EE_AMBIENT_CONTEXT_STATE_DIR"] = str(state)
+    child = subprocess.Popen(
+        [sys.executable, "-c", worker, "unused-ee", text, str(gate) if gate else "",
+         str(lock_timeout) if lock_timeout is not None else ""],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=workspace, env=env)
+    child.stdin.write(json.dumps({"cwd": str(workspace), "session_id": session}))
+    child.stdin.close()
+    child.stdin = None
+    assert child.stdout.readline() == "ready\n", "worker did not reach the claim boundary"
+    # Do not let readline prefetch the result before communicate takes over.
+    if release_on_ready:
+        gate.touch()
+    return child
+def finish(child):
+    output, error = child.communicate(timeout=5)
+    assert child.returncode == 0, (child.returncode, output, error)
+    assert not error, error
+    return json.loads(output)
+"####;
+        let output =
+            run_python_hook_state_probe(&format!("{harness}\n{probe}"), &input, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_hook_dedup_serializes_claims_across_processes() -> TestResult {
+        run_ambient_hook_dedup_probe(
+            r####"for index, definition in enumerate(payload["definitions"]):
+    state = workspace / ("parallel-" + str(index))
+    state.mkdir()
+    cache = state / "ambient_context_seen.json"
+    first_gate = state / "first-ready"
+    # Give contending claims a scheduler-tolerant budget; the production default
+    # is exercised separately against a deliberately held OS lock.
+    children = [spawn(definition, state, "shared", "same memory", first_gate, 3.0) for _ in range(6)]
+    first_gate.touch()
+    results = [finish(child) for child in children]
+    assert sum(result["seen"] is False for result in results) == 1, results
+    assert len(json.loads(cache.read_text())) == 1
+
+    # Keep a reader active while unrelated claims publish. No writer may expose
+    # truncated JSON or overwrite a different session's previously claimed key.
+    errors = []
+    stop = threading.Event()
+    def observe():
+        # Windows open readers can deny replacement; cooperative hook readers
+        # use the OS lock, while this extra publication observer is POSIX-only.
+        if os.name == "nt":
+            return
+        while not stop.is_set():
+            try:
+                assert isinstance(json.loads(cache.read_text()), dict)
+            except Exception as error:
+                errors.append(repr(error))
+                return
+            time.sleep(0.0005)
+    observer = threading.Thread(target=observe)
+    observer.start()
+    try:
+        next_gate = state / "next-ready"
+        children = [
+            spawn(definition, state, "session-" + str(n), "same memory", next_gate, 3.0)
+            for n in range(6)
+        ]
+        next_gate.touch()
+        results = [finish(child) for child in children]
+        assert all(result["seen"] is False for result in results), results
+    finally:
+        stop.set()
+        observer.join(timeout=2)
+    assert not errors, errors
+    assert len(json.loads(cache.read_text())) == 7
+    assert finish(spawn(definition, state, "shared", "same memory"))["seen"] is True
+    for n in range(6):
+        assert finish(spawn(definition, state, "session-" + str(n), "same memory"))["seen"] is True
+
+# Different hook surfaces share the same file, but must keep their own keys.
+state = workspace / "surfaces"
+state.mkdir()
+gate = state / "surfaces-ready"
+children = [spawn(definition, state, "shared", "same memory", gate, 3.0) for definition in payload["definitions"]]
+gate.touch()
+assert all(finish(child)["seen"] is False for child in children)
+assert len(json.loads((state / "ambient_context_seen.json").read_text())) == 3
+for definition in payload["definitions"]:
+    assert finish(spawn(definition, state, "shared", "same memory"))["seen"] is True
+"####,
+        )
+    }
+
+    #[test]
+    fn ambient_hook_dedup_fails_open_on_lock_contention_and_storage_errors() -> TestResult {
+        run_ambient_hook_dedup_probe(
+            r####"for index, definition in enumerate(payload["definitions"]):
+    state = workspace / ("blocked-" + str(index))
+    state.mkdir()
+    cache = state / "ambient_context_seen.json"
+    cache.write_text('{"previous":true}')
+    before = cache.read_bytes()
+    with open(str(cache) + ".lock", "a+b") as lock:
+        lock.write(b"\0")
+        lock.flush()
+        if os.name == "nt":
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = finish(spawn(definition, state, "shared", "blocked memory"))
+        assert result["seen"] is False, result
+        assert 0.15 <= result["elapsed"] < 2.0, result
+        assert cache.read_bytes() == before, "timed-out claim must not write unlocked"
+    assert finish(spawn(definition, state, "shared", "blocked memory"))["seen"] is False
+    assert finish(spawn(definition, state, "shared", "blocked memory"))["seen"] is True
+    assert json.loads(cache.read_text())["previous"] is True
+
+    invalid_lock = workspace / ("invalid-lock-" + str(index))
+    invalid_lock.mkdir()
+    (invalid_lock / "ambient_context_seen.json.lock").mkdir()
+    assert finish(spawn(definition, invalid_lock, "shared", "memory"))["seen"] is False
+    assert not (invalid_lock / "ambient_context_seen.json").exists()
+
+    # A failed read must release the lock so the next invocation can recover.
+    invalid_state = workspace / ("invalid-state-" + str(index))
+    invalid_state.mkdir()
+    invalid_cache = invalid_state / "ambient_context_seen.json"
+    invalid_cache.mkdir()
+    assert finish(spawn(definition, invalid_state, "shared", "memory"))["seen"] is False
+    invalid_cache.rename(invalid_state / "preserved-directory")
+    assert finish(spawn(definition, invalid_state, "shared", "memory"))["seen"] is False
+    assert finish(spawn(definition, invalid_state, "shared", "memory"))["seen"] is True
+"####,
+        )
+    }
+
+    #[test]
+    fn ambient_dedup_upgrade_recognizes_previous_unmanaged_hook_bodies() -> TestResult {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/released_ee_hook_wrappers.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        let previous: Vec<_> = fixture["wrappers"]
+            .as_array()
+            .ok_or("released wrappers array")?
+            .iter()
+            .filter(|wrapper| {
+                wrapper["sourceRefs"]
+                    .as_array()
+                    .is_some_and(|refs| refs.iter().any(|reference| reference == "v0.18.0"))
+            })
+            .collect();
+        assert_eq!(
+            previous.len(),
+            4,
+            "all four generated bodies change with the preamble"
+        );
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            let snippets = harness_hook_snippets(target, Path::new("/opt/current/ee"));
+            for wrapper in &previous {
+                let snippet = snippets
+                    .iter()
+                    .find(|snippet| wrapper["snippetId"] == snippet.id)
+                    .ok_or("previous body must map to a current hook")?;
+                let script = wrapper["script"].as_str().ok_or("previous Python body")?;
+                assert_ne!(
+                    extract_python_inline_script_from_ee_hook(&snippet.command).as_deref(),
+                    Some(script),
+                    "the historical allowlist, not current-body equality, must admit this upgrade"
+                );
+                let command = format!(
+                    "python3 -c {} {} 2>/dev/null || :",
+                    shell_quote_str(script),
+                    shell_quote(Path::new("/opt/previous/ee"))
+                );
+                assert!(is_legacy_unmanaged_ee_hook_command(&command, snippet));
+                let custom = format!(
+                    "python3 -c {} {} 2>/dev/null || :",
+                    shell_quote_str(&format!("{script}\nprint('user extension')\n")),
+                    shell_quote(Path::new("/opt/previous/ee"))
+                );
+                assert!(!is_legacy_unmanaged_ee_hook_command(&custom, snippet));
             }
         }
         Ok(())

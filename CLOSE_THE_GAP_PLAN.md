@@ -4084,3 +4084,67 @@ working environment has no RCH client, and the repository forbids local Cargo
 verification as a fallback. The `.80`, `.81`, and `.83` Beads therefore remain
 open pending their required executable evidence; the native Mac staging
 inventory/cleanup criterion and the broader `.83` debt are also still open.
+
+### 22.9 Core harness and repair follow-through — 2026-11-22
+
+This pass read the comprehensive plan and current Beads before selecting work.
+The deferred single-memory indexing path and much of `.77`, `.80`, and `.81`
+were already implemented. The remaining baselined doctor fixers also require
+real detectors or mutation implementations; adding dispatch entries alone would
+not deliver their advertised repairs. Work therefore targeted three concrete
+defects in the existing core harness and maintenance paths.
+
+- [x] **`.83` — preserve configurations when inspection fails**
+  (`3c96f335`). Workspace-config read failures now emit `EE-E104` /
+  `CONFIG_UNAVAILABLE`, remain unresolved core findings, and never authorize
+  malformed-TOML quarantine. Confirmed syntax errors retain their existing
+  audited repair. Regression cases cover invalid UTF-8, an oversized valid
+  comment, exact byte preservation, manual guidance, and both dispatch outcomes.
+- [x] **`.81` — repair relative model-cache paths** (`c382c6c4`). The shared
+  staging-root resolver makes relative `EE_EMBED_MODEL_DIR` overrides absolute
+  without following symlinks or creating missing directories. Inspection,
+  fixer selection, and the default repair boundary now use the same location.
+  Regression cases cover relative, missing, and symlinked roots.
+- [x] **`.80` — serialize ambient-context deduplication.** Pre-edit recall,
+  session-start orientation, and session-end suggestions now share one locked
+  read/claim/write operation and atomic cache publication. The production lock
+  wait is bounded at 200 ms; storage or lock failures preserve fail-open hook
+  behavior. Regression cases cover concurrent same-session claims, independent
+  session and surface keys, complete JSON publication, timeout/recovery,
+  malformed cache recovery, and recognition of the preceding unmanaged hooks.
+
+The checked boxes above record implementation and regression coverage,
+**not completed cross-surface acceptance**. The workspace volume was full and
+the execution environment repeatedly disconnected. After it returned, the
+exact embedded Python probes ran on Linux with Python 3.12.14 against hook blob
+`1119971aed022c71ceb3817b497f1f651e3a3021`: concurrent claims and lock/storage
+failure recovery both exited successfully with empty stdout/stderr; all four
+complete generated bodies passed syntax compilation; malformed, scalar, and
+truncated cache recovery passed 15 cases across the three consumers; all four
+previous-body hashes matched the existing allowlist and differed from the new
+bodies. These are direct Python executions, not Rust test or CLI install runs.
+
+Independent source review, remote diff scope, unchanged-base checks, and
+whitespace checks were also completed. RCH, Cargo, rustc, and rustfmt were not
+available; Rust formatting, compilation, Rust behavioral tests, and Windows
+execution remain unrun. No local-Cargo fallback or GitHub Actions run was used.
+Concurrent commits on `main` were preserved through expected-head updates.
+
+Remaining execution and implementation work stays open:
+
+- [ ] Run the new configuration/read-recovery tests and existing malformed-TOML
+  repair/undo fixtures through the pinned RCH lane.
+- [ ] Run `index_download_backoff` tests and an audited repair/undo scenario with
+  a relative model-cache override.
+- [ ] Run the ambient hook regression tests and both harness install/undo suites,
+  including prior unmanaged-body migration.
+- [ ] Complete `.85` cross-surface execution before closing `.80`, `.81`, or
+  `.83`; the Beads were deliberately left open without runtime proof.
+- [ ] Extend `.81` for a direct model-directory override: its abandoned download
+  directories are siblings of the model, so inspection and repair need an
+  exact model-scoped parent boundary. Broad parent scanning is not authorized
+  by the current model-root repair contract.
+- [ ] Profile and prove the `.79` warm-daemon performance target on a compiled,
+  source-matched binary. The existing opt-in `remember --defer-index` path
+  remains available; changing the default would weaken freshness guarantees
+  when live-snapshot fallback is unavailable.
