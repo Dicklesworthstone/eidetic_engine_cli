@@ -263,25 +263,10 @@ if [ "$self_test" = true ]; then
   exit 0
 fi
 
-if ! command -v br >/dev/null 2>&1; then
-  echo "error: br is required" >&2
-  exit 2
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SURFACE_EXTRACTOR="${SCRIPT_DIR}/extract_bead_file_surfaces.sh"
-
-if [ ! -x "$SURFACE_EXTRACTOR" ]; then
-  echo "error: missing executable $SURFACE_EXTRACTOR" >&2
-  exit 2
-fi
 
 cd "$REPO_ROOT"
-
-surfaces_json="$("$SURFACE_EXTRACTOR" --prefix bd-)"
-issues_json="$(br list --all --limit 0 --json)"
-claim_rows="$(printf '%s\n' "$issues_json" | extract_claim_rows "$surfaces_json")"
 
 status_rows="$(git status --porcelain=v1 | awk '
   {
@@ -295,6 +280,26 @@ status_rows="$(git status --porcelain=v1 | awk '
     print status "\t" path
   }
 ')"
+
+if [ -z "$status_rows" ]; then
+  build_report_json </dev/null
+  exit 0
+fi
+
+if ! command -v br >/dev/null 2>&1; then
+  echo "error: br is required" >&2
+  exit 2
+fi
+
+SURFACE_EXTRACTOR="${SCRIPT_DIR}/extract_bead_file_surfaces.sh"
+if [ ! -x "$SURFACE_EXTRACTOR" ]; then
+  echo "error: missing executable $SURFACE_EXTRACTOR" >&2
+  exit 2
+fi
+
+surfaces_json="$("$SURFACE_EXTRACTOR" --prefix bd-)"
+issues_json="$(br list --all --limit 0 --json)"
+claim_rows="$(printf '%s\n' "$issues_json" | extract_claim_rows "$surfaces_json")"
 
 match_rows="$(build_match_rows <(printf '%s' "$claim_rows") <(printf '%s' "$status_rows"))"
 report_json="$(printf '%s' "$match_rows" | build_report_json)"
