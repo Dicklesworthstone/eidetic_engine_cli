@@ -728,7 +728,9 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Shard Coverage Contract"
-expected_seconds_p50 = 1
+# Timed the full eight-command stage on native Apple Silicon on 2026-11-23.
+# Runs took 2.576, 2.567, and 2.643 seconds. The release probe alone took 1.9s.
+expected_seconds_p50 = 3
 regression_factor = 1.5
 
 [[stage]]
