@@ -9674,7 +9674,10 @@ mod tests {
             assert!(handoff.matches_request(&hybrid_options));
             assert!(handoff.snapshot_matches(&hybrid_options, &connection));
             assert!(!handoff.has_cached_local_embedder());
-            assert_eq!(handoff.report.embed_backend, EmbedBackend::HashFallback);
+            assert_eq!(
+                handoff.report.embed_backend,
+                crate::models::EmbedBackend::HashFallback,
+            );
             assert_eq!(
                 handoff.report.source_mode_applied,
                 SearchSourceMode::LexicalOnly
