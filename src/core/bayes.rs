@@ -136,12 +136,16 @@ impl BetaPosterior {
     /// Helpful signals add their positive event weight to alpha. Harmful
     /// signals add their event weight to beta, falling back to
     /// [`DEFAULT_HARMFUL_WEIGHT`] when the supplied weight is invalid so that
-    /// historical harmful rows still register. Neutral/unknown signals are
-    /// ignored.
+    /// historical harmful rows still register. Explicit zero weights carry no
+    /// learning evidence, matching live outcome admission. Neutral/unknown
+    /// signals are ignored.
     #[must_use]
     pub fn from_feedback_events(events: impl IntoIterator<Item = (FeedbackSignal, f64)>) -> Self {
         let mut posterior = Self::jeffreys();
         for (signal, weight) in events {
+            if weight == 0.0 {
+                continue;
+            }
             match signal {
                 FeedbackSignal::Helpful => {
                     posterior = posterior.update_helpful_weighted(valid_weight_or(weight, 1.0));
