@@ -800,7 +800,8 @@ pub struct DaemonServerHandle {
     /// `None` when the daemon was started without a bound workspace.
     write_handle: Option<crate::core::write_owner::WriteHandle>,
     /// Transferred to the drain thread after connection workers release their
-    /// producers, so accepted writes settle before runtime teardown.
+    /// producers, or during Drop if their drain times out. The thread retains
+    /// accepted writes until every producer closes and the actor settles.
     write_owner_task: Option<asupersync::runtime::JoinHandle<()>>,
     /// The asupersync runtime that drives the actor task and connection-thread
     /// `block_on` submits. The drain thread owns its final drop, which can join
@@ -1048,6 +1049,23 @@ impl Drop for DaemonServerHandle {
         // swallowed in Drop; the explicit `shutdown` method surfaces
         // them when callers care.
         let _ = self.shutdown();
+        if self.write_runtime.is_some() {
+            // A worker timeout leaves the actor here for an explicit retry,
+            // but destruction has no later caller to drive that retry. Close
+            // only our producer and transfer the actor to the existing drain
+            // thread; live workers keep their producers until they finish.
+            // Dropping the runtime here could discard an accepted request
+            // whose submitting worker stopped driving it.
+            self.write_handle.take();
+            if let Err(error) = self.drain_write_owner_with_timeout(Duration::ZERO)
+                && error.kind() != io::ErrorKind::TimedOut
+            {
+                tracing::warn!(
+                    error_kind = ?error.kind(),
+                    "daemon write-owner drain could not finish during handle destruction"
+                );
+            }
+        }
     }
 }
 
@@ -14554,6 +14572,104 @@ mod tests {
         assert!(
             matches!(outcome, Ok(WriteResult::Success { entity_id }) if entity_id.as_deref() == Some("drained")),
             "destroying the daemon handle must not cancel the accepted operation"
+        );
+    }
+
+    #[test]
+    fn daemon_drop_after_worker_timeout_drives_accepted_writes_to_completion() {
+        use crate::core::write_owner::WriteResult;
+
+        let BlockedWriteOwnerDrainFixture {
+            mut handle,
+            mut receipt,
+            entered_rx,
+            release_tx,
+            runtime_liveness,
+        } = blocked_write_owner_drain_fixture();
+        let socket_root = private_tempdir();
+        let broker = SocketBroker::new(socket_root.path().join("draining-worker.sock"));
+        let endpoint_lease = Arc::new(
+            broker
+                .acquire_publish_lock()
+                .expect("acquire endpoint lease"),
+        );
+        let lease_liveness = Arc::downgrade(&endpoint_lease);
+        let worker_endpoint_lease = Arc::clone(&endpoint_lease);
+        handle.socket_path = broker.socket_path().to_owned();
+        handle.socket_publish_lock = Some(endpoint_lease);
+        let permit = handle.pool.try_acquire().expect("retain a live worker");
+        let worker_router = DaemonWriteRouter {
+            runtime: Arc::clone(handle.write_runtime.as_ref().expect("hosted runtime")),
+            handle: handle.write_handle.as_ref().expect("hosted producer").clone(),
+        };
+        let first_result = handle
+            .shutdown_with_drain_timeouts(Duration::from_millis(10), Duration::from_millis(10));
+        assert_eq!(
+            first_result.expect_err("live worker must time out").kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(handle.write_owner_drain.is_none());
+        assert!(handle.write_owner_task.is_some());
+
+        // The request is already accepted, but its worker no longer polls a
+        // receipt. Only the daemon's drain can drive the current-thread actor.
+        let (drop_tx, drop_rx) = mpsc::channel();
+        let drop_thread = thread::spawn(move || {
+            drop(handle);
+            let _ = drop_tx.send(());
+        });
+        let dropped = drop_rx.recv_timeout(DAEMON_WORKER_DRAIN_TIMEOUT + Duration::from_secs(1));
+        let dropped_before_worker_release = dropped.is_ok();
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        // Release every live owner before assertions so a broken shutdown
+        // reports failure without leaving the test's actor or worker blocked.
+        drop(worker_router);
+        drop(permit);
+        drop(worker_endpoint_lease);
+        let runtime_owned_after_worker_release = runtime_liveness.strong_count() > 0;
+        let lease_owned_after_worker_release = matches!(
+            broker.acquire_publish_lock(),
+            Err(DaemonStartError::AlreadyRunning { .. })
+        );
+        let _ = release_tx.send(());
+        dropped
+            .or_else(|_| drop_rx.recv_timeout(Duration::from_secs(5)))
+            .expect("daemon destruction must finish once the worker is released");
+        drop_thread.join().expect("join daemon destructor");
+        let wait_started = Instant::now();
+        while (runtime_liveness.strong_count() > 0 || lease_liveness.strong_count() > 0)
+            && wait_started.elapsed() < Duration::from_secs(5)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let outcome = receipt.try_recv();
+
+        assert!(
+            dropped_before_worker_release,
+            "destruction must remain bounded while the connection worker is live"
+        );
+        assert!(entered, "destruction must drive the accepted write");
+        assert!(
+            runtime_owned_after_worker_release,
+            "the drain must own the runtime after the last connection worker exits"
+        );
+        assert!(
+            lease_owned_after_worker_release,
+            "accepted work must retain the endpoint lease after the last connection worker exits"
+        );
+        assert_eq!(
+            runtime_liveness.strong_count(),
+            0,
+            "drain must retire the runtime"
+        );
+        assert_eq!(lease_liveness.strong_count(), 0);
+        let _restarted_owner = broker
+            .acquire_publish_lock()
+            .expect("endpoint lease releases after the accepted write and runtime settle");
+        assert!(
+            matches!(outcome, Ok(WriteResult::Success { entity_id }) if entity_id.as_deref() == Some("drained")),
+            "worker timeout followed by destruction must not discard accepted work"
         );
     }
 
