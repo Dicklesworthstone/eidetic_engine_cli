@@ -3772,6 +3772,24 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // inventory checks above establish which artifact is being restored; a
     // dry run must not erase its evidence-loss or peer-repair requirements.
     let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    // Admit and freeze the primary projection before creating a destination,
+    // including dry-run. Bind the exact captured bytes to the authenticated
+    // manifest so a changed source cannot redefine the recovery expectation.
+    let expected_records = crate::core::jsonl_import::recovery::BackupRecordsExpectation::capture(
+        &source_records_path,
+        &side_path,
+        &restored_workspace.id,
+        Some(&source_auth),
+    )?;
+    let records_artifact = inspect
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == RECORDS_FILE)
+        .ok_or_else(|| work_history_error("backup manifest has no records artifact"))?;
+    expected_records.verify_source_artifact(
+        records_artifact.hash.as_deref(),
+        records_artifact.size_bytes,
+    )?;
     if inspect.counts.memory_count > 0
         && !backup_has_memory_provenance(&backup_path, &inspect)?
     {
@@ -3933,15 +3951,6 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         &restored_derived,
     )?;
 
-    // Freeze the authenticated primary projection before importing it. Both
-    // recovery fences compare against this same object, never against a file
-    // that a recovery writer or index rebuild could have rewritten.
-    let expected_records = crate::core::jsonl_import::recovery::BackupRecordsExpectation::capture(
-        &restore_records_path,
-        &side_path,
-        &restored_workspace.id,
-        Some(&source_auth),
-    )?;
     let import_report = import_verified_backup_jsonl_records(
         &JsonlImportOptions {
             workspace_path: side_path.clone(),

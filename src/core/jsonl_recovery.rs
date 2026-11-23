@@ -248,10 +248,13 @@ impl ExpectedRecords {
 /// recovery writers and derived rebuilding: rereading a mutable staging file
 /// could let a paired file/database rewrite redefine the expected result.
 /// This is not archive authentication; the caller must authenticate the
-/// manifest and copied records before capturing the projection.
+/// manifest, bind the captured bytes to its artifact entry, and verify the
+/// copied records before importing them.
 pub(crate) struct BackupRecordsExpectation {
     workspace_id: String,
     records: ExpectedRecords,
+    source_hash: String,
+    source_size: u64,
 }
 
 impl BackupRecordsExpectation {
@@ -271,7 +274,24 @@ impl BackupRecordsExpectation {
         Ok(Self {
             workspace_id: workspace_id.to_owned(),
             records: ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?,
+            source_hash: format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex()),
+            source_size: source.len() as u64,
         })
+    }
+
+    /// Bind the exact bytes used for preparation to the authenticated manifest,
+    /// including previews that do not create a destination or copied artifact.
+    pub(crate) fn verify_source_artifact(
+        &self,
+        expected_hash: Option<&str>,
+        expected_size: Option<u64>,
+    ) -> Result<(), DomainError> {
+        if expected_hash != Some(self.source_hash.as_str())
+            || expected_size != Some(self.source_size)
+        {
+            return Err(mismatch("captured record stream differs from its manifest"));
+        }
+        Ok(())
     }
 
     /// Read-only verification of the exact primary graph, including both live

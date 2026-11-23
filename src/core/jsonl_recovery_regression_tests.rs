@@ -139,6 +139,77 @@ impl Fixture {
 }
 
 #[test]
+fn frozen_primary_projection_binds_the_exact_source_bytes_to_the_manifest() -> TestResult {
+    let records = rows();
+    let fixture = Fixture::new(&records)?;
+    let original = fs::read(&fixture.options.source_path).map_err(|e| e.to_string())?;
+    let original_hash = format!("blake3:{}", blake3::hash(&original).to_hex());
+    let size = original.len() as u64;
+    let expected = recovery::BackupRecordsExpectation::capture(
+        &fixture.options.source_path,
+        &fixture.options.workspace_path,
+        &fixture.workspace,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    expected
+        .verify_source_artifact(Some(&original_hash), Some(size))
+        .map_err(|e| e.to_string())?;
+    expected
+        .verify_database(&database_path(&fixture.options))
+        .map_err(|e| e.to_string())?;
+
+    let mut changed = records;
+    changed[1]["content"] = json!("Remove the original release evidence.");
+    let replacement = source_text(&changed);
+    assert_eq!(replacement.len(), original.len(), "same-size substitution");
+    let changed_hash = format!("blake3:{}", blake3::hash(replacement.as_bytes()).to_hex());
+    for (hash, bytes) in [
+        (Some(changed_hash.as_str()), Some(size)),
+        (Some(original_hash.as_str()), Some(size + 1)),
+        (None, Some(size)),
+        (Some(original_hash.as_str()), None),
+    ] {
+        let error = expected
+            .verify_source_artifact(hash, bytes)
+            .err()
+            .ok_or("unbound primary records were accepted")?;
+        assert!(error.message().contains("captured record stream differs"));
+        assert!(!error.message().contains(&original_hash));
+        assert!(!error.message().contains(&changed_hash));
+    }
+
+    fs::write(&fixture.options.source_path, replacement).map_err(|e| e.to_string())?;
+    // A later source replacement cannot change either the admitted byte
+    // commitment or the primary-row expectation retained for publication.
+    expected
+        .verify_source_artifact(Some(&original_hash), Some(size))
+        .map_err(|e| e.to_string())?;
+    expected
+        .verify_database(&database_path(&fixture.options))
+        .map_err(|e| e.to_string())?;
+    let changed_expected = recovery::BackupRecordsExpectation::capture(
+        &fixture.options.source_path,
+        &fixture.options.workspace_path,
+        &fixture.workspace,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    assert!(
+        changed_expected
+            .verify_source_artifact(Some(&original_hash), Some(size))
+            .is_err()
+    );
+    assert!(
+        changed_expected
+            .verify_database(&database_path(&fixture.options))
+            .is_err()
+    );
+    fixture.db.close().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn verified_restore_preserves_missing_provenance_even_with_a_source_agent() -> TestResult {
     let mut records = rows();
     records[1]["provenance_uri"] = JsonValue::Null;
