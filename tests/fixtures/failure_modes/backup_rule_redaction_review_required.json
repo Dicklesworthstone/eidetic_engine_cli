@@ -1,0 +1,23 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "backup_rule_redaction_review_required",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.88",
+    "epic_letter": "C"
+  },
+  "surfaces": ["backup create", "backup inspect", "backup restore"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Export redaction changes the instructions or scope pattern of a live native rule. The authenticated recovery row becomes an unprotected draft, with capped trust and confidence and no prior positive feedback or validation authority. Negative history, feedback events and evidence relationships remain intact; unchanged and retired rules do not trigger this warning.",
+    "setup_commands": ["# Seed live validated native rules with a private path in the instructions or a secret-bearing scope pattern."],
+    "invocation": "ee backup create --workspace . --redaction standard --json"
+  },
+  "expected_emission": {
+    "code": "backup_rule_redaction_review_required",
+    "severity": "warning",
+    "message_contains": ["active native rules", "require fresh review as unprotected drafts", "without prior positive validation authority"],
+    "repair_contains": "ee rule list",
+    "repair_string": "Review changed rules with ee rule list --workspace <side-path> --maturity draft --json before proposing validation; for a private source-faithful recovery copy, run ee backup create --workspace . --redaction none --json."
+  }
+}

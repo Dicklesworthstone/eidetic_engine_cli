@@ -101,6 +101,7 @@ const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
 const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v2";
 const TRUST_HISTORY_SCHEMA_V1: &str = "ee.backup.trust_history.v1";
 pub const BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE: &str = "backup_memory_provenance_unavailable";
+const BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE: &str = "backup_rule_redaction_review_required";
 const MAINTENANCE_HISTORY_SCHEMA: &str = "ee.backup.maintenance_history.v1";
 const AUDIT_HISTORY_SCHEMA: &str = "ee.backup.audit_history.v1";
 const WORKSPACE_METADATA_SCHEMA: &str = "ee.backup.workspace.v1";
@@ -2499,7 +2500,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
-            collect_learning_history_payloads(
+            let rules_requiring_review = collect_learning_history_payloads(
                 &connection,
                 workspace_id,
                 &backup_id,
@@ -2508,6 +2509,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            if rules_requiring_review > 0 {
+                degraded.push(BackupDegradation::warning(
+                    BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE,
+                    format!(
+                        "export redaction changed {rules_requiring_review} active native rules; recovered rules require fresh review as unprotected drafts without prior positive validation authority"
+                    ),
+                    "Review changed rules with ee rule list --workspace <side-path> --maturity draft --json before proposing validation; for a private source-faithful recovery copy, run ee backup create --workspace . --redaction none --json.",
+                ));
+            }
             collect_procedure_history_payloads(
                 &connection,
                 workspace_id,
@@ -4422,6 +4432,7 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
                 "backup_source_rows_not_covered"
                     | "backup_table_inventory_unclassified"
                     | "backup_evidence_admission_reduced"
+                    | BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE
             )
         })
         .collect::<Vec<_>>();
@@ -8897,6 +8908,58 @@ fn recovery_rule_tag_identities(
     identities
 }
 
+/// A changed instruction or scope has not earned the original rule's authority.
+/// Prepare the authenticated recovery row without changing the source database.
+/// Retired rows remain history; changed live rows stay searchable for review but
+/// cannot enter a context pack until explicitly proposed for validation again.
+fn prepare_recovery_rule(
+    source: &StoredProceduralRule,
+    redaction: RedactionLevel,
+) -> Result<(StoredProceduralRule, bool), DomainError> {
+    use crate::models::{RuleMaturity, TrustClass};
+
+    let mut recovered = source.clone();
+    recovered.content = redact_content(&source.content, redaction);
+    recovered.scope_pattern = source
+        .scope_pattern
+        .as_deref()
+        .map(|pattern| redact_content(pattern, redaction));
+    let semantics_changed =
+        recovered.content != source.content || recovered.scope_pattern != source.scope_pattern;
+    if !semantics_changed || source.tombstoned_at.is_some() || source.superseded_by.is_some() {
+        return Ok((recovered, false));
+    }
+    let maturity = source
+        .maturity
+        .parse::<RuleMaturity>()
+        .map_err(|_| work_history_error("rule has invalid maturity during recovery"))?;
+    if !maturity.is_active() {
+        return Ok((recovered, false));
+    }
+    let trust = source
+        .trust_class
+        .parse::<TrustClass>()
+        .map_err(|_| work_history_error("rule has invalid trust class during recovery"))?;
+    let recovered_trust = match trust {
+        TrustClass::HumanExplicit | TrustClass::PeerHumanAttested | TrustClass::AgentValidated => {
+            TrustClass::AgentAssertion
+        }
+        TrustClass::AgentAssertion | TrustClass::CassEvidence | TrustClass::LegacyImport => trust,
+    };
+    recovered.maturity = RuleMaturity::Draft.as_str().to_owned();
+    recovered.protected = false;
+    recovered.trust_class = recovered_trust.as_str().to_owned();
+    recovered.confidence = source.confidence.min(recovered_trust.initial_confidence());
+    recovered.positive_feedback_count = 0;
+    recovered.validation_passes = 0;
+    recovered.last_applied_at = None;
+    recovered.last_validated_at = None;
+    // Keep harmful feedback, contradictions, and the complete event ledger.
+    // Prior successful observations remain auditable without endorsing the
+    // redacted instructions, and applied event markers prevent replay.
+    Ok((recovered, true))
+}
+
 fn collect_learning_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -8905,18 +8968,18 @@ fn collect_learning_history_payloads(
     redaction: RedactionLevel,
     memory_ids: &BTreeMap<String, String>,
     payloads: &mut Vec<BackupDerivedPayload>,
-) -> Result<(), DomainError> {
-    let mut rules = connection
+) -> Result<usize, DomainError> {
+    let source_rules = connection
         .list_procedural_rules(workspace_id, None, None, true)
         .map_err(work_history_error)?;
-    rules.sort_by(|a, b| a.id.cmp(&b.id));
-    for rule in &mut rules {
-        rule.content = redact_content(&rule.content, redaction);
-        rule.scope_pattern = rule
-            .scope_pattern
-            .as_deref()
-            .map(|s| redact_content(s, redaction));
+    let mut rules = Vec::with_capacity(source_rules.len());
+    let mut rules_requiring_review = 0;
+    for source in &source_rules {
+        let (recovered, requires_review) = prepare_recovery_rule(source, redaction)?;
+        rules.push(recovered);
+        rules_requiring_review += usize::from(requires_review);
     }
+    rules.sort_by(|a, b| a.id.cmp(&b.id));
     let mut sources = Vec::new();
     for (rule_id, ids) in connection
         .list_rule_source_memory_ids_for_workspace(workspace_id)
@@ -9041,7 +9104,7 @@ fn collect_learning_history_payloads(
             serialized_payload_bytes(&chunk).map_err(work_history_error)?,
         ));
     }
-    Ok(())
+    Ok(rules_requiring_review)
 }
 
 /// Preserve only references resolved against this snapshot. Arbitrary evidence
