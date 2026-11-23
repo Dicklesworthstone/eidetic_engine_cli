@@ -11814,6 +11814,52 @@ async fn run_search_inner_with_performance(
                 memory_filters.retain_hits(connection, &mut raw_hits)?;
                 trace.record_elapsed("search::memoryFilters", memory_filter_start);
             }
+            // Pack already supplements its own pinned source snapshot during
+            // assembly. Search needs the historical candidates before ranking
+            // and truncation, beside the results from the live generation.
+            let mut added_tombstones = false;
+            if !retrieval_only
+                && options.include_tombstoned
+                && match options.execution_source_mode() {
+                    SearchSourceMode::LexicalOnly => true,
+                    SearchSourceMode::Hybrid => !options.strict_source_mode,
+                    SearchSourceMode::SemanticOnly => false,
+                }
+            {
+                let historical_start = Instant::now();
+                let mut historical = tombstone_snapshot_hits(
+                    cx,
+                    options,
+                    read_connection,
+                    scoring_reference_time,
+                    &mut degraded,
+                )
+                .await?;
+                if !historical.is_empty() {
+                    let indexed_ids = raw_hits
+                        .iter()
+                        .map(|hit| hit.doc_id.as_str())
+                        .collect::<BTreeSet<_>>();
+                    historical.retain(|hit| !indexed_ids.contains(hit.doc_id.as_str()));
+                    if let Some(connection) = read_connection {
+                        memory_filters.retain_hits(connection, &mut historical)?;
+                    }
+                    added_tombstones = !historical.is_empty();
+                    if added_tombstones {
+                        degraded.push(SearchDegradation {
+                            code: "search_tombstone_snapshot_lexical".to_owned(),
+                            severity: "low".to_owned(),
+                            message: format!(
+                                "Scored {} supplemental tombstone candidates with Frankensearch lexical retrieval over the pinned source archive.",
+                                historical.len()
+                            ),
+                            repair: None,
+                        });
+                        raw_hits.extend(historical);
+                    }
+                }
+                trace.record_elapsed("search::tombstoneSnapshotRetrieve", historical_start);
+            }
             // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
             // filter so the floor metrics reflect the deduped pool.
             // After fusion, the same docId can appear multiple times
@@ -11853,7 +11899,7 @@ async fn run_search_inner_with_performance(
                     preloaded.entry(id).or_insert(memory);
                 }
             }
-            if !global_hits.is_empty() {
+            if added_tombstones || !global_hits.is_empty() {
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
             }
@@ -15785,7 +15831,7 @@ async fn retrieve_global_store_live_snapshot(
     trace: &mut SearchPerformanceTrace,
 ) -> Vec<SearchHit> {
     let global_search_start = Instant::now();
-    let result = global_store_live_snapshot_hits(cx, options, &memories).await;
+    let result = source_memory_lexical_hits(cx, options, &memories).await;
     trace.record_elapsed("search::globalRetrieve", global_search_start);
     match result {
         Ok(hits) => {
@@ -15809,7 +15855,87 @@ async fn retrieve_global_store_live_snapshot(
     }
 }
 
-async fn global_store_live_snapshot_hits(
+async fn tombstone_snapshot_hits(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    connection: Option<&DbConnection>,
+    reference_time: DateTime<Utc>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Result<Vec<SearchHit>, SearchError> {
+    let unavailable = |reason: &str| SearchDegradation {
+        code: "search_tombstone_snapshot_unavailable".to_owned(),
+        severity: "warning".to_owned(),
+        message: format!("Supplemental historical lexical retrieval was unavailable: {reason}."),
+        repair: None,
+    };
+    #[cfg(not(feature = "lexical-bm25"))]
+    {
+        let _ = (cx, options, connection, reference_time);
+        degraded.push(unavailable("this build has no lexical backend"));
+        Ok(Vec::new())
+    }
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let Some(connection) = connection
+            .filter(|connection| connection.mode() == crate::db::DatabaseOpenMode::ReadOnly)
+        else {
+            degraded.push(unavailable("no pinned read-only source snapshot"));
+            return Ok(Vec::new());
+        };
+        search_checkpoint(cx)?;
+        let workspace_id = bound_search_workspace_id(
+            &options.workspace_path,
+            options.database_path.as_deref(),
+            Some(connection),
+        );
+        let memories = connection.bounded_tombstoned_memories_for_retrieval(
+            &workspace_id,
+            SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS,
+            SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES,
+        );
+        search_checkpoint(cx)?;
+        let mut memories = match memories {
+            Ok(Some(memories)) if memories.is_empty() => return Ok(Vec::new()),
+            Ok(Some(memories)) => memories,
+            Ok(None) => {
+                degraded.push(unavailable(
+                    "the retired corpus exceeds the source retrieval limit",
+                ));
+                return Ok(Vec::new());
+            }
+            Err(error) => {
+                tracing::warn!(target: "ee::search", error = %error, "historical source read failed");
+                degraded.push(unavailable("could not read the retired source rows"));
+                return Ok(Vec::new());
+            }
+        };
+        let ids = memories.iter().map(|memory| memory.id.as_str()).collect();
+        let admitted = rule_admission::memory_revisions::admit_local_memory_ids(
+            connection,
+            &ids,
+            reference_time,
+            degraded,
+        );
+        memories.retain(|memory| admitted.contains(&memory.id));
+        if memories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = source_memory_lexical_hits(cx, options, &memories).await;
+        search_checkpoint(cx)?;
+        match result {
+            Ok(hits) => Ok(hits),
+            Err(error) => {
+                tracing::warn!(target: "ee::search", error = %error, "historical lexical execution failed");
+                degraded.push(unavailable(
+                    "the in-memory lexical engine could not serve the query",
+                ));
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
+async fn source_memory_lexical_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     memories: &[StoredMemory],
@@ -15817,7 +15943,7 @@ async fn global_store_live_snapshot_hits(
     #[cfg(not(feature = "lexical-bm25"))]
     {
         let _ = (cx, options, memories);
-        Err("this build has no lexical backend for global source retrieval".to_owned())
+        Err("this build has no lexical backend for source retrieval".to_owned())
     }
     #[cfg(feature = "lexical-bm25")]
     {
@@ -15829,9 +15955,7 @@ async fn global_store_live_snapshot_hits(
         if memories.len() > SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize
             || body_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES
         {
-            return Err(
-                "the complete global source corpus exceeds the live retrieval limit".to_owned(),
-            );
+            return Err("the complete memory corpus exceeds the source retrieval limit".to_owned());
         }
         let mut documents = Vec::with_capacity(memories.len());
         let mut projected_bytes = 0_u64;
@@ -15847,7 +15971,7 @@ async fn global_store_live_snapshot_hits(
                 );
             if projected_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES {
                 return Err(
-                    "the complete global source corpus exceeds the live retrieval limit".to_owned(),
+                    "the complete memory corpus exceeds the source retrieval limit".to_owned(),
                 );
             }
             documents.push(document);
@@ -24488,6 +24612,145 @@ mod tests {
         assert_eq!(recovery.len(), 2, "F4b chose the two-action rebuild recipe");
         assert_eq!(recovery[0]["command"], "ee index reembed --workspace .");
         assert_eq!(recovery[1]["command"], "cargo build --features embed-fast");
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn search_recovers_admitted_tombstones_after_rebuild() -> TestResult {
+        const WORKSPACE: &str = "wsp_00000000000000000000000920";
+        const RETIRED: &str = "mem_00000000000000000000000921";
+        const SEALED: &str = "mem_00000000000000000000000922";
+        const EXPIRED: &str = "mem_00000000000000000000000923";
+        const LIVE: &str = "mem_00000000000000000000000924";
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace_path.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let database = workspace_path.join("ee.db");
+        let index = workspace_path.join("index");
+        let writer = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        writer.migrate().map_err(|error| error.to_string())?;
+        writer
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, body) in [
+            (RETIRED, "archivelifecycle retired checklist"),
+            (SEALED, "archivelifecycle restricted checklist"),
+            (EXPIRED, "archivelifecycle expired checklist"),
+        ] {
+            let mut memory = test_memory_input(WORKSPACE, body);
+            if id == EXPIRED {
+                memory.valid_to = Some("2001-01-01T00:00:00Z".to_owned());
+            }
+            writer
+                .insert_memory(id, &memory)
+                .map_err(|error| error.to_string())?;
+            writer
+                .tombstone_memory(id)
+                .map_err(|error| error.to_string())?;
+        }
+        // A matching body behind a closed seal exercises authority independently
+        // of the placeholder spelling used by the normal capture command.
+        writer
+            .insert_memory_seal(
+                SEALED,
+                &crate::models::memory_seal_commitment(b"archivelifecycle restricted checklist"),
+                "2026-01-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(WORKSPACE);
+        let rebuild = crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            dry_run: false,
+        };
+        let options = SearchOptions {
+            workspace_path,
+            database_path: Some(database),
+            index_dir: Some(index.clone()),
+            query: "archivelifecycle".to_owned(),
+            speed: SpeedMode::Instant,
+            memory_scope: MemoryScope::Workspace,
+            ..source_mode_test_options(SearchSourceMode::LexicalOnly, true)
+        };
+        for include_live in [false, true] {
+            if include_live {
+                writer
+                    .insert_memory(
+                        LIVE,
+                        &test_memory_input(WORKSPACE, "archivelifecycle live checklist"),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            let report =
+                crate::core::index::rebuild_index(&rebuild).map_err(|error| error.to_string())?;
+            assert!(report.errors.is_empty());
+            assert_eq!(
+                crate::core::index::index_generation_is_verified_empty(&index)
+                    .map_err(|error| error.to_string())?,
+                !include_live
+            );
+            let default = run_search(&options).map_err(|error| error.to_string())?;
+            let mut expected: BTreeSet<&str> = include_live.then_some(LIVE).into_iter().collect();
+            assert_eq!(
+                default
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            let report = run_search(&SearchOptions {
+                include_tombstoned: true,
+                ..options.clone()
+            })
+            .map_err(|error| error.to_string())?;
+            expected.insert(RETIRED);
+            assert_eq!(report.results.len(), expected.len());
+            assert_eq!(
+                report
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            let retired = report
+                .results
+                .iter()
+                .find(|hit| hit.doc_id == RETIRED)
+                .ok_or("missing retired hit")?;
+            let metadata = retired
+                .metadata
+                .as_ref()
+                .ok_or("missing retired metadata")?;
+            assert_eq!(metadata["tombstoned"], true);
+            assert!(metadata["tombstoned_at"].as_str().is_some());
+            assert_eq!(retired.source, ScoreSource::Lexical);
+            assert!(
+                report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_tombstone_snapshot_lexical")
+            );
+        }
+        Ok(())
     }
 
     #[test]

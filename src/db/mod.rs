@@ -29776,14 +29776,61 @@ impl DbConnection {
         self.list_retrieval_memories_with_global(workspace_id, None, Some(true))
     }
 
+    const RETRIEVAL_MEMORY_SCOPE: &'static str = "(m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3)))";
+
+    /// Borrow the pinned source view and refuse oversized archives before
+    /// loading bodies. A partial snapshot would change lexical query scores.
+    #[cfg(feature = "lexical-bm25")]
+    pub(crate) fn bounded_tombstoned_memories_for_retrieval(
+        &self,
+        workspace_id: &str,
+        max_rows: u32,
+        max_body_bytes: u64,
+    ) -> Result<Option<Vec<StoredMemory>>> {
+        let sql = format!(
+            "SELECT count(*), coalesce(sum(length(CAST(content AS BLOB))), 0) FROM
+             (SELECT m.content FROM memories m WHERE {} AND m.tombstoned_at IS NOT NULL LIMIT ?4)
+             retired",
+            Self::RETRIEVAL_MEMORY_SCOPE,
+        );
+        let parameters = [
+            Value::Text(workspace_id.to_owned()),
+            Value::Text(GLOBAL_MEMORY_SCOPE_TAG.to_owned()),
+            Value::Text(HOUSE_RULE_MEMORY_SCOPE_TAG.to_owned()),
+            Value::BigInt(i64::from(max_rows) + 1),
+        ];
+        let sizes = self.query_for(DbOperation::Query, &sql, &parameters)?;
+        let read_size = |column| {
+            sizes
+                .first()
+                .and_then(|row| row.get(column))
+                .and_then(Value::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Invalid historical search source size".to_owned(),
+                })
+        };
+        let count = read_size(0)?;
+        if count == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        if count > u64::from(max_rows) || read_size(1)? > max_body_bytes {
+            return Ok(None);
+        }
+        self.list_tombstoned_memories_for_retrieval_with_global(workspace_id)
+            .map(Some)
+    }
+
     fn list_retrieval_memories_with_global(
         &self,
         workspace_id: &str,
         level: Option<&str>,
         tombstoned: Option<bool>,
     ) -> Result<Vec<StoredMemory>> {
-        let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3)))",
+        let mut sql = format!(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories m WHERE {}",
+            Self::RETRIEVAL_MEMORY_SCOPE,
         );
         let mut params: Vec<Value> = vec![
             Value::Text(workspace_id.to_string()),
