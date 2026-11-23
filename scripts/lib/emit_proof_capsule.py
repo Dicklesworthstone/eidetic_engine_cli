@@ -60,6 +60,10 @@ RFC3339_RE = re.compile(
 )
 ZERO_SHA40 = "0" * 40
 RELEASE_PROBE_SCHEMA = "ee.release_probe.v1"
+CORPUS_PROBE_SCHEMA = "ee.real_corpus_probe.v2"
+CORPUS_GRADING_SCHEMA = "ee.real_shape_cass.grading.v2"
+CORPUS_MANIFEST_SCHEMA = "ee.real_shape_cass.manifest.v2"
+CORPUS_JUDGMENTS_SCHEMA = "ee.real_shape_cass.judgments.v2"
 RELEASE_PROBE_CHECKS = {
     "neural_backend_active": "precondition",
     "walking_skeleton": "check",
@@ -1684,7 +1688,7 @@ def verify_corpus_receipt(
 ) -> None:
     source = report.get("candidate_identity", {}).get("source", {})
     if (
-        report.get("schema") != "ee.real_corpus_probe.v1"
+        report.get("schema") != CORPUS_PROBE_SCHEMA
         or report.get("mode") != "enforce"
         or report.get("harness_error")
         or report.get("plausible_irrelevant_control")
@@ -1703,6 +1707,7 @@ def verify_corpus_receipt(
         or len(set(query_ids)) != len(query_ids) or len(query_ids) < policy["corpus_min_queries"]
     ):
         raise ValueError("corpus receipt has incomplete span or query coverage")
+    verify_corpus_grading(report, policy)
     enforced = report["enforced_checks"]
     checks = [row for row in enforced["checks"] if row.get("state") == "enforce"]
     ids = {row["check"] for row in checks}
@@ -1714,6 +1719,143 @@ def verify_corpus_receipt(
         or any(row.get("passed") is not True for row in checks)
     ):
         raise ValueError("corpus receipt did not pass every required enforce check")
+
+
+def verify_corpus_grading(report: dict[str, Any], policy: dict[str, Any]) -> None:
+    """Bind scale qualification to exact concepts and independently count queries.
+
+    Original-only labels and same-scenario hits cannot establish this contract.
+    Recompute the bounded numerators from retained item judgments so duplicates
+    or a forged aggregate cannot replace coverage of a missing task.
+    """
+    grading = report.get("grading")
+    if not isinstance(grading, dict) or any(
+        grading.get(key) != expected
+        for key, expected in (
+            ("schema", CORPUS_GRADING_SCHEMA),
+            ("label_scope", "exact_equivalent_records"),
+            ("identity_join", "stored_session_source_path"),
+        )
+    ):
+        raise ValueError("corpus receipt lacks exact-equivalent record grading")
+    corpus = report.get("corpus")
+    if (
+        not isinstance(corpus, dict)
+        or corpus.get("manifest_schema") != CORPUS_MANIFEST_SCHEMA
+        or corpus.get("judgments_schema") != CORPUS_JUDGMENTS_SCHEMA
+        or not _is_strict_int(corpus.get("seed"))
+        or not _is_strict_int(corpus.get("total_records"))
+        or corpus["total_records"] < max(1, policy["corpus_min_spans"])
+        or corpus.get("digest_algorithm") != "blake2b-256"
+        or not isinstance(corpus.get("digest"), str)
+        or not HEX64_RE.fullmatch(corpus["digest"])
+        or corpus["digest"] == "0" * 64
+        or report.get("cass_mode") not in ("emulator", "real")
+    ):
+        raise ValueError("corpus receipt lacks its fixture, judgments, or CASS identity")
+
+    def labels(value: Any, field: str) -> set[str]:
+        if (
+            not isinstance(value, list)
+            or any(not isinstance(label, str) or not label for label in value)
+            or len(value) != len(set(value))
+        ):
+            raise ValueError(f"corpus receipt has invalid or duplicate {field}")
+        return set(value)
+
+    def count(value: Any, expected: int, field: str) -> None:
+        if not _is_strict_int(value) or value != expected:
+            raise ValueError(f"corpus receipt {field} differs from its query judgments")
+
+    def ratio(value: Any, expected: float, field: str) -> None:
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not 0.0 <= value <= 1.0
+            or not math.isclose(value, expected, rel_tol=0.0, abs_tol=0.00005)
+        ):
+            raise ValueError(f"corpus receipt {field} differs from its query judgments")
+
+    rows = report["per_query"]
+    query_ids = set()
+    recall = []
+    packed_items = relevant_items = distractor_items = relevant_queries = 0
+    for row in rows:
+        query_id = row.get("id")
+        if not isinstance(query_id, str) or not query_id or query_id in query_ids:
+            raise ValueError("corpus receipt has missing or duplicate query identities")
+        query_ids.add(query_id)
+        relevant = labels(row.get("relevant_labels"), "relevant_labels")
+        distractors = labels(row.get("distractor_labels"), "distractor_labels")
+        if not relevant:
+            raise ValueError("corpus receipt has a query without positive judgments")
+        count(row.get("relevant_label_count"), len(relevant), "relevant_label_count")
+        top_labels = row.get("search_top_labels")
+        if not isinstance(top_labels, list) or len(top_labels) > 5:
+            raise ValueError("corpus receipt lacks bounded top-five label judgments")
+        retrieved = set()
+        for hit_labels in top_labels:
+            retrieved.update(labels(hit_labels, "search_top_labels") & relevant)
+        count(row.get("retrieved_relevant_label_count"), len(retrieved),
+              "retrieved_relevant_label_count")
+        recall.append(len(retrieved) / len(relevant))
+
+        items = row.get("pack_items")
+        if not isinstance(items, list):
+            raise ValueError("corpus receipt lacks per-query pack item judgments")
+        packed_labels = set()
+        locators = set()
+        for item in items:
+            item_labels = labels(item.get("labels"), "pack item labels")
+            item_relevant = labels(item.get("relevant_labels"), "pack item relevant_labels")
+            if item_relevant != item_labels & relevant:
+                raise ValueError("corpus receipt credits an unjudged pack item")
+            classification = item.get("classification")
+            expected_classification = (
+                "distractor" if item_labels & distractors else
+                "relevant" if item_relevant else
+                "other_labeled" if item_labels else "unlabeled"
+            )
+            if classification != expected_classification:
+                raise ValueError("corpus receipt pack classification conflicts with its labels")
+            locator = item.get("locator")
+            if locator is not None or item_labels:
+                if (
+                    not isinstance(locator, list) or len(locator) != 3
+                    or not isinstance(locator[0], str) or not locator[0]
+                    or not _is_strict_int(locator[1]) or locator[1] < 1
+                    or not _is_strict_int(locator[2]) or locator[2] < locator[1]
+                ):
+                    raise ValueError("corpus receipt lacks an exact pack item locator")
+                key = tuple(locator)
+                if key in locators:
+                    raise ValueError("corpus receipt repeats a pack item locator within a query")
+                locators.add(key)
+            packed_labels.update(item_relevant)
+            packed_items += 1
+            relevant_items += bool(item_relevant)
+            distractor_items += classification == "distractor"
+        if labels(row.get("pack_relevant_labels"), "pack_relevant_labels") != packed_labels:
+            raise ValueError("corpus receipt pack query numerator differs from its item judgments")
+        relevant_queries += bool(packed_labels)
+
+    if not rows or packed_items == 0:
+        raise ValueError("corpus receipt has no measured queries or pack items")
+    metrics = report["metrics"]
+    coverage = metrics["pack_query_coverage"]
+    count(coverage.get("queries"), len(rows), "pack_query_coverage.queries")
+    count(coverage.get("relevant_queries"), relevant_queries, "pack_query_coverage.relevant_queries")
+    ratio(coverage.get("value"), relevant_queries / len(rows), "pack_query_coverage.value")
+    ratio(metrics["pack_exact_precision"].get("value"), relevant_items / packed_items,
+          "pack_exact_precision.value")
+    ratio(metrics["equivalent_recall_at_5"].get("mean"), sum(recall) / len(rows),
+          "equivalent_recall_at_5.mean")
+    far = metrics["FAR"]
+    count(far.get("packed_items"), packed_items, "FAR.packed_items")
+    count(far.get("relevant_items"), relevant_items, "FAR.relevant_items")
+    count(far.get("distractor_items"), distractor_items, "FAR.distractor_items")
+    ratio(far.get("value"), distractor_items / packed_items, "FAR.value")
+    if relevant_queries < max(1, (len(rows) + 1) // 2):
+        raise ValueError("corpus receipt has insufficient exact-equivalent pack query coverage")
 
 
 GREEN_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
@@ -1913,9 +2055,37 @@ def self_test() -> int:
             "stages": ["PASS Formatting (1s; budget OK)", "PASS Vision (1s; budget OK)"],
         }
         corpus = {
-            "schema": "ee.real_corpus_probe.v1", "mode": "enforce", "ee": str(bin_path),
+            "schema": CORPUS_PROBE_SCHEMA, "mode": "enforce", "ee": str(bin_path),
             "candidate_identity": {"source": {"gitCommit": sha_a, "gitDirty": False}},
-            "import": {"spans": 4}, "per_query": [{"id": "one"}, {"id": "two"}],
+            "cass_mode": "emulator",
+            "corpus": {
+                "manifest_schema": CORPUS_MANIFEST_SCHEMA,
+                "judgments_schema": CORPUS_JUDGMENTS_SCHEMA,
+                "seed": 43, "total_records": 4, "digest": "c" * 64,
+                "digest_algorithm": "blake2b-256",
+            },
+            "grading": {
+                "schema": CORPUS_GRADING_SCHEMA,
+                "label_scope": "exact_equivalent_records",
+                "identity_join": "stored_session_source_path",
+            },
+            "import": {"spans": 4},
+            "per_query": [{
+                "id": name, "relevant_labels": [name], "relevant_label_count": 1,
+                "distractor_labels": ["distractor"],
+                "retrieved_relevant_label_count": 1, "search_top_labels": [[name]],
+                "pack_relevant_labels": [name],
+                "pack_items": [{
+                    "labels": [name], "relevant_labels": [name], "classification": "relevant",
+                    "locator": [f"{name}.jsonl", 1, 1],
+                }],
+            } for name in ("one", "two")],
+            "metrics": {
+                "pack_query_coverage": {"queries": 2, "relevant_queries": 2, "value": 1.0},
+                "pack_exact_precision": {"value": 1.0},
+                "equivalent_recall_at_5": {"mean": 1.0},
+                "FAR": {"packed_items": 2, "relevant_items": 2, "distractor_items": 0, "value": 0.0},
+            },
             "enforced_checks": {
                 "enforced_count": 1, "failed_count": 0, "failures": [],
                 "checks": [{"check": "test-corpus", "state": "enforce", "passed": True}],
@@ -1938,6 +2108,88 @@ def self_test() -> int:
             check("corpus qualification rejects report mode", True)
         else:
             check("corpus qualification rejects report mode", False)
+
+        def corpus_refused(name: str, forged: dict[str, Any]) -> None:
+            try:
+                verify_corpus_receipt(forged, populated, auxiliary, cand_repo)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                check(name, True)
+            else:
+                check(name, False)
+
+        corpus_refused("corpus qualification rejects original-only v1 receipts",
+                       dict(corpus, schema="ee.real_corpus_probe.v1"))
+        corpus_refused("corpus qualification rejects missing grading identity",
+                       {key: value for key, value in corpus.items() if key != "grading"})
+        corpus_refused("corpus qualification rejects missing CASS mode",
+                       {key: value for key, value in corpus.items() if key != "cass_mode"})
+        for field, value in (
+            ("manifest_schema", "ee.real_shape_cass.manifest.v1"),
+            ("judgments_schema", "ee.real_shape_cass.judgments.v1"),
+            ("digest", ""), ("digest_algorithm", "sha256"),
+            ("seed", True), ("total_records", 0),
+        ):
+            forged = copy.deepcopy(corpus)
+            forged["corpus"][field] = value
+            corpus_refused(f"corpus qualification rejects invalid fixture {field}", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][1]["id"] = "one"
+        corpus_refused("corpus qualification rejects duplicated query contributions", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][0]["pack_relevant_labels"].append("one")
+        corpus_refused("corpus qualification rejects repeated positive concepts", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][0]["pack_items"] *= 10
+        forged["metrics"]["FAR"].update({"packed_items": 11, "relevant_items": 11})
+        corpus_refused("corpus qualification rejects duplicate item inflation", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][1]["pack_relevant_labels"] = []
+        forged["per_query"][1]["pack_items"] = []
+        forged["metrics"]["FAR"].update({"packed_items": 1, "relevant_items": 1})
+        corpus_refused("corpus qualification rejects unobserved query coverage", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][0]["retrieved_relevant_label_count"] = 2
+        corpus_refused("corpus qualification rejects an inflated retrieval numerator", forged)
+        forged = copy.deepcopy(corpus)
+        forged["per_query"][0]["pack_items"][0]["labels"] = ["unjudged"]
+        corpus_refused("corpus qualification rejects unjudged pack relevance", forged)
+        for metric, field in (
+            ("pack_exact_precision", "value"), ("equivalent_recall_at_5", "mean"),
+            ("pack_query_coverage", "value"), ("FAR", "relevant_items"),
+        ):
+            forged = copy.deepcopy(corpus)
+            forged["metrics"][metric][field] = 0
+            corpus_refused(f"corpus qualification recomputes {metric}.{field}", forged)
+        reordered = copy.deepcopy(corpus)
+        reordered["per_query"].reverse()
+        verify_corpus_receipt(reordered, populated, auxiliary, cand_repo)
+        check("exact-equivalent corpus acceptance is query-order independent", True)
+        mixed = copy.deepcopy(corpus)
+        mixed["per_query"][0]["pack_items"][0]["labels"].append("distractor")
+        mixed["per_query"][0]["pack_items"][0]["classification"] = "distractor"
+        mixed["metrics"]["FAR"].update({"distractor_items": 1, "value": 0.5})
+        verify_corpus_receipt(mixed, populated, auxiliary, cand_repo)
+        check("wide evidence counts both relevant and distractor concepts", True)
+        mixed["per_query"][0]["pack_items"][0]["classification"] = "relevant"
+        mixed["metrics"]["FAR"].update({"distractor_items": 0, "value": 0.0})
+        corpus_refused("corpus qualification rejects hidden mixed-span distractors", mixed)
+
+        odd = copy.deepcopy(corpus)
+        third = copy.deepcopy(odd["per_query"][1])
+        third["id"] = "three"
+        third["pack_relevant_labels"] = []
+        third["pack_items"] = []
+        odd["per_query"].append(third)
+        odd["metrics"]["pack_query_coverage"].update(
+            {"queries": 3, "relevant_queries": 2, "value": round(2 / 3, 4)})
+        verify_corpus_receipt(odd, populated, auxiliary, cand_repo)
+        check("odd query counts require at least half the queries rounded up", True)
+        odd["per_query"][1]["pack_relevant_labels"] = []
+        odd["per_query"][1]["pack_items"] = []
+        odd["metrics"]["pack_query_coverage"].update(
+            {"relevant_queries": 1, "value": round(1 / 3, 4)})
+        odd["metrics"]["FAR"].update({"packed_items": 1, "relevant_items": 1})
+        corpus_refused("corpus qualification rejects rounded-down odd query coverage", odd)
 
         policy = {"schema": "ee.release_rch_policy.v1", "targets": ["contracts"], "mcp_targets": ["mcp_parity"]}
         config = {"test": [{"name": target, "path": f"tests/{target}.rs"}

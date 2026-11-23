@@ -254,19 +254,17 @@ def vary(session, rng: random.Random, generation: int):
             return type(v)(fix(x) for x in v)
         return v
 
-    turns = [fix(t) for t in s["turns"]]
-    # Drop labels on copies: judgments refer to the authored core only.
-    stripped = []
-    for t in turns:
-        if t[0] in ("user", "assistant") and len(t) > 2:
-            t = t[:2]
-        if t[0] == "tool" and len(t) > 5:
-            t = t[:5]
-        stripped.append(t)
+    turns = []
+    for turn in s["turns"]:
+        # Labels identify concepts, not crate names. Transform only the payload
+        # so substitutions cannot silently rename a concept on a scale variant.
+        payload_end = 2 if turn[0] in ("user", "assistant") else 5 if turn[0] == "tool" else len(turn)
+        turns.append(fix(turn[:payload_end]) + turn[payload_end:])
     noise_keys = sorted(S.NOISE)
     for _ in range(rng.randint(0, 4)):
-        stripped.insert(rng.randint(1, len(stripped)), ("noise", rng.choice(noise_keys)))
-    s["turns"] = stripped
+        turns.insert(rng.randint(1, len(turns)), ("noise", rng.choice(noise_keys)))
+    s["turns"] = turns
+    s["scenario"] = session["slug"]
     s["slug"] = f"{s['slug']}-g{generation:05d}"
     return s
 
@@ -285,6 +283,7 @@ def generate(out: str, ws: str, seed: int, target_records: int):
     home = os.path.join(out, "home")
     manifest_sessions = []
     locators = {}
+    label_instances = {}
     total_records = 0
     start = EPOCH
 
@@ -303,13 +302,21 @@ def generate(out: str, ws: str, seed: int, target_records: int):
         manifest_sessions.append({
             "path": rel, "agent": agent, "slug": session["slug"], "title": session.get("title", ""),
             "core": core, "session_id": session_id, "started_at": ts(start), "ended_at": ts(end),
+            "scenario": session.get("scenario", session["slug"]),
             "message_count": len(records),
+            "labeled_record_count": len(set(labels.values())),
+            "unlabeled_record_count": len(records) - len(set(labels.values())),
         })
-        if core:
-            for label, line in labels.items():
+        for label, line in labels.items():
+            locator = {
+                "path": rel, "line": line, "slug": session["slug"],
+                "session_id": session_id, "record_id": f"{session_id}:{line}", "core": core,
+            }
+            label_instances.setdefault(label, []).append(locator)
+            if core:
                 if label in locators:
                     raise ValueError(f"duplicate label {label}")
-                locators[label] = {"path": rel, "line": line, "slug": session["slug"]}
+                locators[label] = dict(locator)
         total_records += len(records)
         start = end + timedelta(minutes=37)
 
@@ -326,7 +333,7 @@ def generate(out: str, ws: str, seed: int, target_records: int):
         emit(vary(base, rng, generation), agent, False)
 
     manifest = {
-        "schema": "ee.real_shape_cass.manifest.v1",
+        "schema": "ee.real_shape_cass.manifest.v2",
         "seed": seed,
         "workspace": ws,
         "target_records": target_records,
@@ -335,6 +342,7 @@ def generate(out: str, ws: str, seed: int, target_records: int):
         "codex_cli_version": CODEX_CLI_VERSION,
         "sessions": manifest_sessions,
         "labels": locators,
+        "label_instances": label_instances,
     }
     judgments = build_judgments(locators)
     for name, doc in (("manifest.json", manifest), ("judgments.json", judgments)):
@@ -359,7 +367,7 @@ def build_judgments(locators):
             "distractors": [need(k) for k in distractors],
         })
     return {
-        "schema": "ee.real_shape_cass.judgments.v1",
+        "schema": "ee.real_shape_cass.judgments.v2",
         "retrieval": queries,
         "negative_queries": S.NEGATIVE_QUERIES,
         "learn": S.LEARN_JUDGMENTS,
@@ -389,40 +397,243 @@ CLAUDE_BLOCKS = {"text": ["text"], "thinking": ["thinking", "signature"],
 
 
 def validate(out: str) -> list:
-    """Return shape problems for every record in a generated corpus."""
+    """Return envelope, exact-identity and judgment problems in a v2 corpus."""
     problems = []
-    with open(os.path.join(out, "manifest.json"), encoding="utf-8") as fh:
-        manifest = json.load(fh)
-    for session in manifest["sessions"]:
-        path = os.path.join(out, session["path"])
-        with open(path, encoding="utf-8") as fh:
-            for number, line in enumerate(fh, 1):
-                where = f"{session['path']}:{number}"
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    problems.append(f"{where}: not JSON")
-                    continue
-                table = CLAUDE_REQUIRED if session["agent"] == "claude_code" else CODEX_REQUIRED
-                kind = rec.get("type")
-                if kind not in table:
-                    problems.append(f"{where}: unknown record type {kind!r}")
-                    continue
-                missing = [k for k in table[kind] if k not in rec]
-                if missing:
-                    problems.append(f"{where}: missing envelope fields {missing}")
-                if session["agent"] == "claude_code" and kind in ("user", "assistant"):
-                    content = rec.get("message", {}).get("content")
-                    if kind == "assistant" and not isinstance(content, list):
-                        problems.append(f"{where}: assistant content must be a block list")
-                    if isinstance(content, list):
-                        for block in content:
-                            need = CLAUDE_BLOCKS.get(block.get("type"))
-                            if need is None or any(k not in block for k in need):
-                                problems.append(f"{where}: malformed {block.get('type')!r} block")
-    for label, where in manifest["labels"].items():
-        if not os.path.exists(os.path.join(out, where["path"])):
-            problems.append(f"label {label}: missing session file")
+    documents = {}
+    for name in ("manifest.json", "judgments.json"):
+        try:
+            with open(os.path.join(out, name), encoding="utf-8") as fh:
+                documents[name] = json.load(fh)
+        except (OSError, ValueError) as error:
+            problems.append(f"{name}: cannot read JSON: {error}")
+    if len(documents) != 2:
+        return problems
+    manifest = documents["manifest.json"]
+    judgments = documents["judgments.json"]
+    if not isinstance(manifest, dict) or not isinstance(judgments, dict):
+        return problems + ["manifest.json and judgments.json must be objects"]
+    if manifest.get("schema") != "ee.real_shape_cass.manifest.v2":
+        problems.append("manifest.json: expected ee.real_shape_cass.manifest.v2")
+    if judgments.get("schema") != "ee.real_shape_cass.judgments.v2":
+        problems.append("judgments.json: expected ee.real_shape_cass.judgments.v2")
+    sessions = manifest.get("sessions")
+    labels = manifest.get("labels")
+    instances = manifest.get("label_instances")
+    if not isinstance(sessions, list) or not sessions:
+        problems.append("manifest.json: sessions must be a nonempty list")
+        sessions = []
+    if not isinstance(labels, dict) or not labels:
+        problems.append("manifest.json: labels must be a nonempty object")
+        labels = {}
+    if not isinstance(instances, dict) or not instances:
+        problems.append("manifest.json: label_instances must be a nonempty object")
+        instances = {}
+    if set(labels) != set(instances):
+        problems.append("manifest.json: labels and label_instances must name the same concepts")
+
+    by_path = {}
+    session_ids = set()
+    core_scenarios = {}
+    record_counts = {}
+    total_records = 0
+    root = os.path.realpath(out)
+    for index, session in enumerate(sessions):
+        if not isinstance(session, dict):
+            problems.append(f"session {index}: must be an object")
+            continue
+        fields = ("path", "session_id", "slug", "scenario")
+        if any(not isinstance(session.get(key), str) or not session[key] for key in fields):
+            problems.append(f"session {index}: missing path/session_id/slug/scenario")
+            continue
+        rel = session["path"]
+        if type(session.get("core")) is not bool:
+            problems.append(f"{rel}: core must be a boolean")
+            continue
+        if session.get("agent") not in ("claude_code", "codex"):
+            problems.append(f"{rel}: unknown agent")
+            continue
+        path = os.path.realpath(os.path.join(out, rel))
+        if os.path.isabs(rel) or os.path.normpath(rel) != rel or os.path.commonpath([root, path]) != root:
+            problems.append(f"{rel}: session path escapes the corpus or is not normalized")
+            continue
+        if rel in by_path:
+            problems.append(f"{rel}: duplicate session path")
+            continue
+        by_path[rel] = session
+        if session["session_id"] in session_ids:
+            problems.append(f"{rel}: duplicate source session_id")
+        session_ids.add(session["session_id"])
+        if session["core"]:
+            if session["scenario"] != session["slug"]:
+                problems.append(f"{rel}: core scenario must equal its slug")
+            if session["scenario"] in core_scenarios:
+                problems.append(f"{rel}: conflicting core scenario")
+            else:
+                core_scenarios[session["scenario"]] = session
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = list(fh)
+        except (OSError, UnicodeError) as error:
+            problems.append(f"{rel}: cannot read session: {error}")
+            lines = []
+        record_counts[rel] = len(lines)
+        total_records += len(lines)
+        if type(session.get("message_count")) is not int or session["message_count"] != len(lines):
+            problems.append(f"{rel}: message_count does not match its records")
+        for number, line in enumerate(lines, 1):
+            where = f"{rel}:{number}"
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                problems.append(f"{where}: not JSON")
+                continue
+            if not isinstance(rec, dict):
+                problems.append(f"{where}: record must be an object")
+                continue
+            table = CLAUDE_REQUIRED if session["agent"] == "claude_code" else CODEX_REQUIRED
+            kind = rec.get("type")
+            if not isinstance(kind, str) or kind not in table:
+                problems.append(f"{where}: unknown record type {kind!r}")
+                continue
+            missing = [key for key in table[kind] if key not in rec]
+            if missing:
+                problems.append(f"{where}: missing envelope fields {missing}")
+            if session["agent"] == "claude_code" and kind in ("user", "assistant"):
+                if rec.get("sessionId") != session["session_id"]:
+                    problems.append(f"{where}: source sessionId conflicts with manifest")
+                message = rec.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if kind == "assistant" and not isinstance(content, list):
+                    problems.append(f"{where}: assistant content must be a block list")
+                if isinstance(content, list):
+                    for block in content:
+                        block_type = block.get("type") if isinstance(block, dict) else None
+                        need = CLAUDE_BLOCKS.get(block_type) if isinstance(block_type, str) else None
+                        if need is None or any(key not in block for key in need):
+                            problems.append(f"{where}: malformed {block_type!r} block")
+            if session["agent"] == "codex" and number == 1:
+                payload = rec.get("payload")
+                if kind != "session_meta" or not isinstance(payload, dict) or payload.get("id") != session["session_id"]:
+                    problems.append(f"{where}: initial session_meta conflicts with manifest")
+    if type(manifest.get("total_records")) is not int or manifest["total_records"] != total_records:
+        problems.append("manifest.json: total_records does not match session files")
+
+    def locate(label, locator, source):
+        where = f"{source} {label}"
+        if not isinstance(locator, dict):
+            problems.append(f"{where}: locator must be an object")
+            return None
+        rel = locator.get("path")
+        session = by_path.get(rel) if isinstance(rel, str) else None
+        if session is None:
+            problems.append(f"{where}: missing session locator")
+            return None
+        line = locator.get("line")
+        if type(line) is not int or not 1 <= line <= record_counts[rel]:
+            problems.append(f"{where}: line is outside the session")
+            return None
+        if locator.get("slug") != session["slug"] or locator.get("session_id") != session["session_id"]:
+            problems.append(f"{where}: conflicting slug or source session_id")
+        if type(locator.get("core")) is not bool or locator["core"] != session["core"]:
+            problems.append(f"{where}: conflicting core flag")
+        if locator.get("record_id") != f"{session['session_id']}:{line}":
+            problems.append(f"{where}: conflicting exact record_id")
+        return rel, line
+
+    original_sessions = {}
+    for label, locator in labels.items():
+        key = locate(label, locator, "label")
+        if key is not None:
+            session = by_path[key[0]]
+            if not session["core"]:
+                problems.append(f"label {label}: original locator must belong to the authored core")
+            original_sessions[label] = session
+    seen_records = {}
+    seen_concept_sessions = set()
+    concepts_by_path = {rel: set() for rel in by_path}
+    lines_by_path = {rel: set() for rel in by_path}
+    for label, locators in instances.items():
+        if not isinstance(locators, list) or not locators:
+            problems.append(f"label_instances {label}: must be a nonempty list")
+            continue
+        original = labels.get(label)
+        if sum(locator == original for locator in locators) != 1:
+            problems.append(f"label_instances {label}: must contain the original locator exactly once")
+        for locator in locators:
+            key = locate(label, locator, "label_instances")
+            if key is None:
+                continue
+            rel, line = key
+            if key in seen_records:
+                problems.append(f"label_instances {label}: duplicate or conflicting exact record with {seen_records[key]}")
+            else:
+                seen_records[key] = label
+            concept_session = label, rel
+            if concept_session in seen_concept_sessions:
+                problems.append(f"label_instances {label}: duplicate concept in one source session")
+            seen_concept_sessions.add(concept_session)
+            session = by_path[rel]
+            origin = original_sessions.get(label)
+            if origin is None or session["scenario"] != origin["scenario"]:
+                problems.append(f"label_instances {label}: instance belongs to a different scenario")
+            if session["core"] and locator != original:
+                problems.append(f"label_instances {label}: conflicting authored-core locator")
+            concepts_by_path[rel].add(label)
+            lines_by_path[rel].add(line)
+    for rel, session in by_path.items():
+        origin = core_scenarios.get(session["scenario"])
+        if origin is None:
+            problems.append(f"{rel}: missing authored core for scenario")
+        elif session["agent"] != origin["agent"]:
+            problems.append(f"{rel}: variant agent conflicts with its core scenario")
+        elif concepts_by_path[rel] != concepts_by_path[origin["path"]]:
+            problems.append(f"{rel}: missing or extra concept locators for its scenario")
+        labeled_count = len(lines_by_path[rel])
+        if type(session.get("labeled_record_count")) is not int or session["labeled_record_count"] != labeled_count:
+            problems.append(f"{rel}: labeled_record_count does not match exact locators")
+        if type(session.get("unlabeled_record_count")) is not int or session["unlabeled_record_count"] != record_counts[rel] - labeled_count:
+            problems.append(f"{rel}: unlabeled_record_count does not match exact locators")
+
+    queries = judgments.get("retrieval")
+    if not isinstance(queries, list) or not queries:
+        problems.append("judgments.json: retrieval must be a nonempty list")
+        queries = []
+    query_ids = set()
+    for index, query in enumerate(queries):
+        if not isinstance(query, dict):
+            problems.append(f"retrieval {index}: query must be an object")
+            continue
+        query_id = query.get("id")
+        where = f"retrieval {index}"
+        if not isinstance(query_id, str) or not query_id:
+            problems.append(f"{where}: missing query id")
+        elif query_id in query_ids:
+            problems.append(f"{where}: duplicate query id {query_id}")
+        else:
+            query_ids.add(query_id)
+        relevant = query.get("relevant")
+        distractors = query.get("distractors")
+        if not isinstance(relevant, dict) or not relevant:
+            problems.append(f"{where}: relevant must be a nonempty object")
+            relevant = {}
+        if not isinstance(distractors, list):
+            problems.append(f"{where}: distractors must be a list")
+            distractors = []
+        for label, grade in relevant.items():
+            if label not in labels:
+                problems.append(f"{where}: missing relevant concept {label}")
+            if type(grade) is not int or grade <= 0:
+                problems.append(f"{where}: relevance grade for {label} must be a positive integer")
+        seen_distractors = set()
+        for label in distractors:
+            if not isinstance(label, str) or label not in labels:
+                problems.append(f"{where}: missing distractor concept {label!r}")
+                continue
+            if label in seen_distractors:
+                problems.append(f"{where}: duplicate distractor concept {label}")
+            seen_distractors.add(label)
+            if label in relevant:
+                problems.append(f"{where}: concept {label} is both relevant and a distractor")
     return problems
 
 
