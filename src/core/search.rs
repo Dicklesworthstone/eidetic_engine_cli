@@ -16109,12 +16109,13 @@ fn option_scores_equivalent(left: Option<f32>, right: Option<f32>) -> bool {
     }
 }
 
-fn search_hit_component_scores_equivalent(left: &SearchHit, right: &SearchHit) -> bool {
-    left.source == right.source
-        && option_scores_equivalent(left.fast_score, right.fast_score)
-        && option_scores_equivalent(left.quality_score, right.quality_score)
-        && option_scores_equivalent(left.lexical_score, right.lexical_score)
-        && option_scores_equivalent(left.rerank_score, right.rerank_score)
+fn search_hit_component_scores(hit: &SearchHit) -> [Option<f32>; 4] {
+    [
+        hit.fast_score,
+        hit.quality_score,
+        hit.lexical_score,
+        hit.rerank_score,
+    ]
 }
 
 fn canonicalize_equivalent_component_scores(
@@ -16129,17 +16130,76 @@ fn canonicalize_equivalent_component_scores(
         "threaded deterministic token through equivalent-score canonicalization"
     );
 
-    for left_index in 0..hits.len() {
-        for right_index in (left_index + 1)..hits.len() {
-            if search_hit_component_scores_equivalent(&hits[left_index], &hits[right_index])
-                && hits[left_index].score.is_finite()
-                && hits[right_index].score.is_finite()
+    // Approximate equality is not transitive: A can tie B and B can tie C
+    // without A tying C. An in-place pairwise maximum therefore propagates
+    // scores differently when a rebuilt index returns a different ordering.
+    // Establish groups from immutable component tuples, never from already
+    // rewritten final scores. Every component's full group range must stay
+    // within the existing tolerance, so an epsilon chain cannot amplify a
+    // distinct candidate. An incompatible tuple ends the contiguous group;
+    // later tuples never bridge that boundary, even if they nearly match an
+    // earlier member. Sorting indices preserves the caller's order, raw
+    // component scores, explanations and metadata, and costs O(n log n),
+    // not O(n²).
+    let mut ordered: Vec<usize> = (0..hits.len())
+        .filter(|&index| hits[index].score.is_finite())
+        .collect();
+    ordered.sort_unstable_by(|&left, &right| {
+        hits[left]
+            .source
+            .as_str()
+            .cmp(hits[right].source.as_str())
+            .then_with(|| {
+                search_hit_component_scores(&hits[left])
+                    .into_iter()
+                    .zip(search_hit_component_scores(&hits[right]))
+                    .map(|(left, right)| match (left, right) {
+                        (Some(left), Some(right)) => left.total_cmp(&right),
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                    })
+                    .find(|order| !order.is_eq())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    let mut start = 0;
+    while start < ordered.len() {
+        let first = ordered[start];
+        let mut minimum = search_hit_component_scores(&hits[first]);
+        let mut maximum = minimum;
+        let mut canonical_score = hits[first].score;
+        let mut end = start + 1;
+        while end < ordered.len() {
+            let next = ordered[end];
+            let components = search_hit_component_scores(&hits[next]);
+            if hits[first].source != hits[next].source
+                || components.iter().enumerate().any(|(index, &component)| {
+                    !option_scores_equivalent(minimum[index], component)
+                        || !option_scores_equivalent(maximum[index], component)
+                })
             {
-                let canonical_score = hits[left_index].score.max(hits[right_index].score);
-                hits[left_index].score = canonical_score;
-                hits[right_index].score = canonical_score;
+                break;
             }
+            for (index, component) in components.into_iter().enumerate() {
+                if let Some(value) = component {
+                    if minimum[index].is_some_and(|current| value.total_cmp(&current).is_lt()) {
+                        minimum[index] = component;
+                    }
+                    if maximum[index].is_some_and(|current| value.total_cmp(&current).is_gt()) {
+                        maximum[index] = component;
+                    }
+                }
+            }
+            if hits[next].score.total_cmp(&canonical_score).is_gt() {
+                canonical_score = hits[next].score;
+            }
+            end += 1;
         }
+        for &index in &ordered[start..end] {
+            hits[index].score = canonical_score;
+        }
+        start = end;
     }
 }
 
@@ -30358,6 +30418,189 @@ mod tests {
         assert_eq!(ids_a, ids_b);
         assert_eq!(seeded_a[0].score, seeded_b[0].score);
         assert_eq!(seeded_a[1].score, seeded_b[1].score);
+    }
+
+    #[test]
+    fn component_score_epsilon_chains_are_order_independent_and_idempotent() {
+        let mut original = [
+            synthetic_hit("mem_a", 0.3),
+            synthetic_hit("mem_b", 0.2),
+            synthetic_hit("mem_c", 0.1),
+        ];
+        for (hit, component) in original.iter_mut().zip([0.0, 0.000_000_75, 0.000_001_5]) {
+            hit.fast_score = Some(component);
+            hit.metadata = Some(serde_json::json!({"provenance": hit.doc_id}));
+        }
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for order in permutations {
+            let mut hits: Vec<_> = order
+                .into_iter()
+                .map(|index| original[index].clone())
+                .collect();
+            let before = hits.clone();
+            canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
+            for (hit, before) in hits.iter().zip(&before) {
+                assert_eq!(
+                    hit.doc_id, before.doc_id,
+                    "canonicalization must not reorder hits"
+                );
+                assert_eq!(
+                    search_hit_component_scores(hit),
+                    search_hit_component_scores(before)
+                );
+                assert_eq!(hit.metadata, before.metadata);
+            }
+            let once = serde_json::to_value(&hits).expect("first canonicalization");
+            canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(99));
+            assert_eq!(
+                serde_json::to_value(&hits).expect("second canonicalization"),
+                once
+            );
+            sort_search_hits_by_score_order(&mut hits);
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.doc_id.as_str(), hit.score))
+                    .collect::<Vec<_>>(),
+                [("mem_a", 0.3), ("mem_b", 0.3), ("mem_c", 0.1)],
+                "a near-tie chain must neither inherit physical index order nor exceed its tolerance"
+            );
+        }
+    }
+
+    #[test]
+    fn component_score_groups_bound_every_component_range() {
+        let mut hits = vec![
+            synthetic_hit("mem_c", 0.4),
+            synthetic_hit("mem_b", 0.9),
+            synthetic_hit("mem_a", 0.6),
+        ];
+        for (hit, (fast, quality)) in hits.iter_mut().zip([
+            (0.100_000_6, -0.000_000_8),
+            (0.100_000_3, 0.000_000_8),
+            (0.1, 0.0),
+        ]) {
+            hit.fast_score = Some(fast);
+            hit.quality_score = Some(quality);
+        }
+        canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
+        sort_search_hits_by_score_order(&mut hits);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.doc_id.as_str(), hit.score))
+                .collect::<Vec<_>>(),
+            [("mem_a", 0.9), ("mem_b", 0.9), ("mem_c", 0.4)],
+            "both extremes must be checked: a and c tie but b and c do not"
+        );
+    }
+
+    #[test]
+    fn component_score_groups_do_not_bridge_an_incompatible_tuple() {
+        let original = [
+            ("mem_a", 0.3, 0.0, 0.0),
+            ("mem_b", 0.9, 0.000_000_5, 1.0),
+            ("mem_c", 0.1, 0.000_000_75, 0.0),
+        ];
+        for reverse in [false, true] {
+            let mut hits = original
+                .iter()
+                .map(|&(id, score, fast, quality)| {
+                    let mut hit = synthetic_hit(id, score);
+                    hit.fast_score = Some(fast);
+                    hit.quality_score = Some(quality);
+                    hit
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                hits.reverse();
+            }
+            canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
+            sort_search_hits_by_score_order(&mut hits);
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.doc_id.as_str(), hit.score))
+                    .collect::<Vec<_>>(),
+                [("mem_b", 0.9), ("mem_a", 0.3), ("mem_c", 0.1)],
+                "incompatible evidence ends a group rather than bridging approximate ties"
+            );
+        }
+    }
+
+    #[test]
+    fn component_score_groups_preserve_source_presence_and_nonfinite_boundaries() {
+        let mut hits = vec![
+            synthetic_hit("finite", 0.1),
+            synthetic_hit("finite_twin", 0.2),
+            synthetic_hit("missing", 0.9),
+            synthetic_hit("different_source", 0.8),
+            synthetic_hit("infinity", 0.3),
+            synthetic_hit("infinity_twin", 0.4),
+            synthetic_hit("negative_infinity", 0.5),
+            synthetic_hit("nan_a", 0.6),
+            synthetic_hit("nan_a_twin", 0.7),
+            synthetic_hit("nan_b", 0.95),
+            synthetic_hit("nonfinite_final", f32::INFINITY),
+        ];
+        for hit in &mut hits {
+            hit.fast_score = Some(0.5);
+        }
+        hits[2].fast_score = None;
+        hits[3].source = ScoreSource::HashControl;
+        hits[4].fast_score = Some(f32::INFINITY);
+        hits[5].fast_score = Some(f32::INFINITY);
+        hits[6].fast_score = Some(f32::NEG_INFINITY);
+        hits[7].fast_score = Some(f32::from_bits(0x7fc0_0001));
+        hits[8].fast_score = Some(f32::from_bits(0x7fc0_0001));
+        hits[9].fast_score = Some(f32::from_bits(0x7fc0_0002));
+        let before = hits.clone();
+        canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
+        let expected = [
+            0.2,
+            0.2,
+            0.9,
+            0.8,
+            0.4,
+            0.4,
+            0.5,
+            0.7,
+            0.7,
+            0.95,
+            f32::INFINITY,
+        ];
+        for ((hit, before), expected) in hits.iter().zip(&before).zip(expected) {
+            assert_eq!(hit.doc_id, before.doc_id);
+            assert_eq!(hit.score.to_bits(), expected.to_bits(), "{}", hit.doc_id);
+            assert_eq!(
+                hit.fast_score.map(f32::to_bits),
+                before.fast_score.map(f32::to_bits),
+                "component identity must be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn component_score_signed_zero_ties_choose_the_same_native_score() {
+        for reverse in [false, true] {
+            let mut hits = vec![synthetic_hit("mem_a", -0.0), synthetic_hit("mem_b", 0.0)];
+            if reverse {
+                hits.reverse();
+            }
+            canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
+            sort_search_hits_by_score_order(&mut hits);
+            assert_eq!(hits[0].doc_id, "mem_a");
+            assert_eq!(hits[1].doc_id, "mem_b");
+            assert!(hits.iter().all(|hit| hit.score.to_bits() == 0.0_f32.to_bits()));
+            assert_eq!(
+                hits[0].fast_score.expect("negative zero").to_bits(),
+                (-0.0_f32).to_bits()
+            );
+        }
     }
 
     #[test]
