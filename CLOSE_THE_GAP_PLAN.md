@@ -4506,7 +4506,9 @@ failures.
   reported recency minute. The broader 16-process live sample kept one
   ordered selection, omissions, hash and rendered text across three
   recency minutes. Score changes aligned with those minute boundaries,
-  and source bytes remained stable.
+  and source bytes remained stable. The exact `3021755c6` candidate
+  reproduced both the broader result and the twelve-process
+  same-minute result.
 - [ ] Register `.91` in the release-stage inventory after the CLI
   edit-scope collision clears.
 - [x] Run the `.80` reinstall cycle on the standalone build for Claude Code
