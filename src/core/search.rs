@@ -2200,9 +2200,13 @@ impl PackSearchHandoff {
     /// assembly. Bodies are always reloaded from the caller's own store.
     pub(crate) fn matches_request(&self, options: &SearchOptions) -> bool {
         let report = &self.report;
-        self.snapshot.request_identity.as_ref().is_some_and(|identity| {
-            global_handoff::request_identity(options).as_ref() == Some(identity)
-        }) && report.query == options.query
+        self.snapshot
+            .request_identity
+            .as_ref()
+            .is_some_and(|identity| {
+                global_handoff::request_identity(options).as_ref() == Some(identity)
+            })
+            && report.query == options.query
             && self.quality_reference_time == options.as_of
             && options
                 .as_of
@@ -2243,15 +2247,17 @@ impl PackSearchHandoff {
     /// canonical read repair whenever this result cannot establish freshness.
     pub(crate) fn can_reuse_for_pack(&self) -> bool {
         let complete_live_snapshot = self.has_complete_live_source_retrieval();
-        self.snapshot.global_snapshot.is_some() && matches!(
-            self.report.status,
-            SearchStatus::Success | SearchStatus::NoResults
-        ) && (complete_live_snapshot
-            || !self
-                .report
-                .index_freshness
-                .as_ref()
-                .is_some_and(|freshness| freshness.stale))
+        self.snapshot.global_snapshot.is_some()
+            && matches!(
+                self.report.status,
+                SearchStatus::Success | SearchStatus::NoResults
+            )
+            && (complete_live_snapshot
+                || !self
+                    .report
+                    .index_freshness
+                    .as_ref()
+                    .is_some_and(|freshness| freshness.stale))
             && !self.report.degraded.iter().any(|degradation| {
                 // A complete source-only lexical response is useful even before
                 // its first persisted index exists. Integrity failures remain
@@ -15416,8 +15422,7 @@ async fn global_store_frankensearch_hits(
     source_only: bool,
     pack_witness: Option<&mut Option<global_handoff::GlobalPackSearchWitness>>,
 ) -> Vec<SearchHit> {
-    if !global_store_participates_in_scope(options.memory_scope)
-        || options.query.trim().is_empty()
+    if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
     {
         if let Some(pack_witness) = pack_witness {
             *pack_witness = global_handoff::capture(options, memory_config, None);
@@ -18521,7 +18526,11 @@ fn open_lexical_searcher_uncached(lexical_dir: &Path) -> Result<Arc<dyn LexicalR
     // semantic-only ranking (`source_mode_fallback`). The read-only open holds
     // no writer, no writer lock, and no indexing thread pool.
     crate::search::open_lexical_index_read_only(lexical_dir)
-        .map(|lexical| Arc::new(lexical) as Arc<dyn LexicalRead>)
+        .map(|lexical| {
+            Arc::new(crate::search::lexical_order::CanonicalLexicalReader::new(
+                Arc::new(lexical),
+            )) as Arc<dyn LexicalRead>
+        })
         .map_err(|error| {
             format!(
                 "Failed to open lexical index at {}: {error}",

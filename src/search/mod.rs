@@ -15,6 +15,8 @@ pub mod bloom_prefilter;
 #[cfg(test)]
 mod bm25_simd;
 pub mod hot_path;
+#[cfg(feature = "lexical-bm25")]
+pub(crate) mod lexical_order;
 pub mod lexical_ram_tier;
 pub mod plan_cache;
 pub mod query;
