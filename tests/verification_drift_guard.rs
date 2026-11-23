@@ -4494,7 +4494,7 @@ fn declared_evidence_contract_holds_in_verify_sh() {
 /// next one.
 #[test]
 fn bench_test_functions_do_not_accumulate() {
-    const BENCH_TEST_FLOOR: usize = 97;
+    const BENCH_TEST_FLOOR: usize = 100;
 
     let bench_contracts_body =
         std::fs::read_to_string("tests/bench_contracts.rs").expect("read tests/bench_contracts.rs");
