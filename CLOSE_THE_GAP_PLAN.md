@@ -4527,8 +4527,15 @@ failures.
   directories.
 - [ ] Qualify `.88` with exact-candidate real CASS, evolved authenticated
   restore, admission parity, write-cost slope, and generation retention.
-- [ ] Fix `.92` on the direct search surface. The known-red fixture rebuilds
-  a mixed index and checks the exact retired docId alongside the live one.
+- [x] Fix `.92` on the direct search surface. At `3021755c6`, the public
+  CLI returned the exact requested retired ID from a bounded read of
+  the source snapshot after empty and mixed index rebuilds. The mixed
+  case retained the live hit. The fixture exercised lifecycle metadata,
+  seal exclusion, expiry, scope and kind filters, and matched the
+  published index generation and file hashes before and after search.
+  With a verified neural model, strict semantic and strict hybrid
+  searches returned the live ID. Best-effort hybrid returned both IDs
+  and marked the retired hit as lexical.
 - [ ] Complete `.75` with the existing formatting debt and the
   remaining suite at one source revision.
 - [ ] Qualify the embedder upgrade in `bd-xayfm` with measured parity. On
