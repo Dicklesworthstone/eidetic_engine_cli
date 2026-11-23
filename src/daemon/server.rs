@@ -847,9 +847,22 @@ impl DaemonServerHandle {
         let scheduler_result = self.join_scheduler_with_timeout();
 
         let workers_drained = self.pool.wait_until_drained(worker_drain_timeout);
-        if workers_drained {
-            self.workers_drained.store(true, Ordering::Release);
+        if !workers_drained {
+            // A live connection worker still owns a write-router handle. Joining
+            // the actor now would wait for that producer to disappear, defeating
+            // the bounded worker drain. Keep the actor, submit handle and runtime
+            // alive so accepted writes can finish and a later shutdown can retry.
+            unlink_result?;
+            scheduler_result?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "daemon worker threads did not drain within {}ms",
+                    worker_drain_timeout.as_millis()
+                ),
+            ));
         }
+        self.workers_drained.store(true, Ordering::Release);
 
         // Tear down the write-owner actor (Inc 2, bd-wx6ou.3) AFTER the accept
         // loop joined and connection workers drained: by now the dispatch
@@ -874,15 +887,6 @@ impl DaemonServerHandle {
 
         unlink_result?;
         scheduler_result?;
-        if !workers_drained {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "daemon worker threads did not drain within {}ms",
-                    worker_drain_timeout.as_millis()
-                ),
-            ));
-        }
         Ok(())
     }
 
@@ -13814,6 +13818,112 @@ mod tests {
             handle.workers_drained.load(Ordering::Acquire),
             "successful retry must latch drained worker state"
         );
+    }
+
+    #[test]
+    fn daemon_shutdown_worker_timeout_retains_write_actor_until_retry() {
+        use crate::core::write_owner::{
+            DEFAULT_CHANNEL_CAPACITY, WriteHotPathConfig, WriteOperation, WriteOwner, WriteResult,
+        };
+
+        let runtime = Arc::new(crate::core::build_cli_runtime().expect("build write runtime"));
+        let (owner, write_handle) = WriteOwner::new(DEFAULT_CHANNEL_CAPACITY);
+        let worker_write_handle = write_handle.clone();
+        let mut receipt = worker_write_handle
+            .try_submit(WriteOperation::Custom {
+                operation_type: "ee.daemon.unsupported".to_owned(),
+                payload: serde_json::json!({}),
+            })
+            .expect("accept queued work before shutdown");
+        let task = runtime
+            .handle()
+            .try_spawn(async move {
+                let cx = asupersync::Cx::current().expect("actor task has a request context");
+                let _ = owner
+                    .run_group_commit(&cx, WriteHotPathConfig::default(), |operations| {
+                        Ok(operations
+                            .iter()
+                            .map(execute_write_operation)
+                            .collect::<Vec<_>>())
+                    })
+                    .await;
+            })
+            .expect("spawn write actor");
+        let pool = InflightPool::new(1);
+        let permit = pool.try_acquire().expect("reserve live connection worker");
+        let mut handle = DaemonServerHandle {
+            socket_path: std::env::temp_dir().join(format!(
+                "ee-daemon-write-drain-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            )),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            read_pools: Arc::new(DaemonReadPools::default()),
+            pool,
+            accept_thread: None,
+            accept_wakeup: None,
+            scheduler_thread: None,
+            warm_thread: None,
+            shutdown_done: AtomicBool::new(false),
+            workers_drained: AtomicBool::new(false),
+            write_handle: Some(write_handle),
+            write_owner_task: Some(task),
+            write_runtime: Some(runtime),
+        };
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let shutdown_thread = thread::spawn(move || {
+            let result = handle.shutdown_with_worker_drain_timeout(Duration::from_millis(10));
+            result_tx
+                .send((handle, result))
+                .expect("return shutdown result and retained ownership");
+        });
+        // The old code waited indefinitely for worker_write_handle to close the
+        // actor's queue. Release that sender even on failure, so this regression
+        // reports a bounded assertion failure rather than hanging the test suite.
+        let first_result = result_rx.recv_timeout(Duration::from_secs(1));
+        let returned_before_worker_release = first_result.is_ok();
+        drop(worker_write_handle);
+        drop(permit);
+        let (mut handle, first_result) = first_result
+            .or_else(|_| result_rx.recv_timeout(Duration::from_secs(5)))
+            .expect("shutdown must finish after releasing the worker");
+        shutdown_thread.join().expect("join shutdown caller");
+
+        assert!(
+            returned_before_worker_release,
+            "worker timeout must return while the worker still owns a write producer"
+        );
+        assert_eq!(
+            first_result.expect_err("live worker must time out").kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(handle.write_handle.is_some(), "retain the actor producer");
+        assert!(handle.write_owner_task.is_some(), "retain the actor join");
+        assert!(handle.write_runtime.is_some(), "retain the write runtime");
+        assert!(!handle.workers_drained.load(Ordering::Acquire));
+
+        let outcome = handle
+            .write_runtime
+            .as_ref()
+            .expect("timeout retains runtime for accepted work")
+            .block_on(async {
+                let cx = asupersync::Cx::current().expect("receipt wait has a request context");
+                receipt.recv(&cx).await
+            });
+        assert!(
+            matches!(outcome, Ok(WriteResult::Failed { .. })),
+            "accepted work must settle normally after shutdown times out"
+        );
+
+        handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(50))
+            .expect("retry drains the actor after its worker finishes");
+        assert!(handle.workers_drained.load(Ordering::Acquire));
+        assert!(handle.write_handle.is_none());
+        assert!(handle.write_owner_task.is_none());
+        assert!(handle.write_runtime.is_none());
     }
 
     #[test]
