@@ -7963,7 +7963,8 @@ pub enum RememberOutcome {
     /// A new memory row was created (or previewed under `--dry-run`).
     Created(Box<RememberMemoryReport>),
     /// The idempotency key + content hash matched a prior write; the
-    /// original memory id is returned and nothing is written.
+    /// original memory id is returned without repeating source mutations.
+    /// A live retry may finish the original write's pending index publication.
     AlreadyRecorded(RememberAlreadyRecordedReport),
     /// The top near-duplicate neighbor absorbed this write.
     Reinforced(RememberReinforceReport),
@@ -7985,6 +7986,9 @@ pub struct RememberAlreadyRecordedReport {
     pub idempotency_key: String,
     /// Whether the replay ran under `--dry-run`.
     pub dry_run: bool,
+    /// Derived-index posture after replay: `indexed`, `queued`, `failed`, or
+    /// `not_applicable` for a dry run.
+    pub index_status: String,
 }
 
 impl RememberAlreadyRecordedReport {
@@ -8002,14 +8006,15 @@ impl RememberAlreadyRecordedReport {
             "reinforced": false,
             "persisted": false,
             "dryRun": self.dry_run,
+            "indexStatus": &self.index_status,
         })
     }
 
     #[must_use]
     pub fn human_summary(&self) -> String {
         format!(
-            "Already recorded: {} (idempotency key `{}`)\n  No new memory row was written.\n",
-            self.memory_id, self.idempotency_key
+            "Already recorded: {} (idempotency key `{}`)\n  No new memory row was written.\n  Index: {}\n",
+            self.memory_id, self.idempotency_key, self.index_status
         )
     }
 }
@@ -8637,6 +8642,7 @@ fn remember_idempotency_replay_outcome(
                 memory_id: existing.memory_id,
                 idempotency_key: existing.idempotency_key,
                 dry_run,
+                index_status: if dry_run { "not_applicable" } else { "queued" }.to_owned(),
             },
         ))
     };
@@ -8651,6 +8657,104 @@ fn remember_idempotency_replay_outcome(
             verify,
         )
     }
+}
+
+fn reconcile_remember_replay_index(
+    outcome: RememberOutcome,
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    store_override: Option<&RememberStoreOverride>,
+) -> RememberOutcome {
+    let RememberOutcome::AlreadyRecorded(mut report) = outcome else {
+        return outcome;
+    };
+    if report.dry_run {
+        return RememberOutcome::AlreadyRecorded(report);
+    }
+
+    let workspace_path = match store_override {
+        Some(store) => Ok(store.workspace_path.clone()),
+        None if options.database_path.is_some() => {
+            resolve_workspace_path(options.workspace_path, false)
+        }
+        None => resolve_memory_write_workspace_path(options.workspace_path, false),
+    };
+    let workspace_path = match workspace_path {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id = %report.workspace_id,
+                error = %error.message(),
+                "remember replay retained its committed identity but could not resolve index publication; reporting queued"
+            );
+            return RememberOutcome::AlreadyRecorded(report);
+        }
+    };
+    let index_dir = store_override.map_or_else(
+        || {
+            crate::config::workspace::resolve_store_index_dir(
+                &workspace_path,
+                Some(&report.database_path),
+                None,
+            )
+        },
+        |store| store.index_dir.clone(),
+    );
+
+    // Replay verification and the source write must release their writer
+    // fences before publication. Batch callers use the inner write boundary
+    // directly and retain their one drain after the final line.
+    let mut provisional_status = "queued".to_owned();
+    if !controls.defer_index_processing {
+        match open_remember_database_with_retry(&report.database_path) {
+            Ok(connection) => {
+                match reconcile_pending_remember_index_jobs(
+                    &connection,
+                    &report.workspace_id,
+                    &index_dir,
+                ) {
+                    Ok(None) => provisional_status = "indexed".to_owned(),
+                    Ok(Some(index_report)) => {
+                        provisional_status = remember_index_status(&index_report);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "ee::memory",
+                            workspace_id = %report.workspace_id,
+                            error = %error,
+                            "remember replay retained its committed identity but could not reconcile the derived index; reporting queued"
+                        );
+                    }
+                }
+                if let Err(error) = connection.close() {
+                    tracing::warn!(
+                        target: "ee::memory",
+                        workspace_id = %report.workspace_id,
+                        error = %error,
+                        "remember replay index connection close failed"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id = %report.workspace_id,
+                    error = %error.message(),
+                    "remember replay retained its committed identity but could not open index publication; reporting queued"
+                );
+            }
+        }
+    }
+    report.index_status = authoritative_remember_index_status(
+        &report.workspace_id,
+        &workspace_path,
+        &report.database_path,
+        &index_dir,
+        &[],
+        &provisional_status,
+    );
+    RememberOutcome::AlreadyRecorded(report)
 }
 
 /// `remember_memory` layered with the bd-1pi9m.4 write controls:
@@ -8702,14 +8806,17 @@ pub(crate) fn remember_memory_with_creation_companions(
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     creation_companions: RememberCreationCompanions<'_>,
 ) -> Result<RememberOutcome, DomainError> {
-    remember_memory_with_creation_companions_and_batch_session(
+    let outcome = remember_memory_with_creation_companions_and_batch_session(
         options,
         controls,
         typed_field_assignments,
         attempt_family,
         creation_companions,
         None,
-    )
+    )?;
+    Ok(reconcile_remember_replay_index(
+        outcome, options, controls, None,
+    ))
 }
 
 fn remember_memory_with_creation_companions_and_batch_session(
@@ -9048,19 +9155,33 @@ fn remember_global_memory_with_creation_companions_at_paths(
                     repair: Some("ee doctor --json".to_owned()),
                 })?
             {
-                return remember_idempotency_replay_outcome(
+                let outcome = remember_idempotency_replay_outcome(
                     &connection,
                     existing,
                     request,
                     &paths.database_path,
                     options.dry_run,
-                );
+                )?;
+                if let Err(error) = connection.close() {
+                    tracing::warn!(
+                        target: "ee::memory",
+                        workspace_id,
+                        error = %error,
+                        "global remember replay lookup connection close failed"
+                    );
+                }
+                return Ok(reconcile_remember_replay_index(
+                    outcome,
+                    &global_options,
+                    controls,
+                    Some(&store_override),
+                ));
             }
         }
     }
 
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_outcome_inner_with_store(
+    let outcome = remember_memory_outcome_inner_with_store(
         &global_options,
         &mut id_source,
         None,
@@ -9071,7 +9192,13 @@ fn remember_global_memory_with_creation_companions_at_paths(
         idempotency,
         creation_companions,
         RememberWriteOrigin::Manual,
-    )
+    )?;
+    Ok(reconcile_remember_replay_index(
+        outcome,
+        &global_options,
+        controls,
+        Some(&store_override),
+    ))
 }
 
 fn remember_tags_with_global_scope(tags: Option<&str>) -> String {
@@ -23890,15 +24017,27 @@ mod tests {
                 "audit-failure-key",
                 &remember_content_hash(content),
             )?;
+            let memories_before = connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            let audits_before = connection
+                .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+                .map_err(|error| error.to_string())?;
+            let jobs_before = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                jobs_before[0].status_enum(),
+                Some(SearchIndexJobStatus::Pending)
+            );
             connection.close().map_err(|error| error.to_string())?;
-            // Leave audit.jsonl as a directory: replay must not attempt postwork.
+            // Leave audit.jsonl as a directory: replay must not repeat the append.
             for _ in 0..2 {
                 match write().map_err(|error| error.message())? {
-                    RememberOutcome::AlreadyRecorded(report) => ensure(
-                        report.memory_id,
-                        memory_id.clone(),
-                        "retry returns committed memory",
-                    )?,
+                    RememberOutcome::AlreadyRecorded(report) => {
+                        assert_eq!(report.memory_id, memory_id);
+                        assert_eq!(report.index_status, "queued");
+                    }
                     other => {
                         return Err(format!(
                             "expected replay after audit failure, got {other:?}"
@@ -23906,6 +24045,57 @@ mod tests {
                     }
                 }
             }
+            let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+            let recover_controls = RememberWriteControls {
+                defer_index_processing: false,
+                ..controls
+            };
+            let recover = || {
+                if global {
+                    remember_global_memory_with_controls_at_paths(
+                        &options,
+                        &recover_controls,
+                        &[],
+                        paths.clone(),
+                    )
+                } else {
+                    remember_memory_with_controls(&options, &recover_controls)
+                }
+            };
+            let recovered = match recover().map_err(|error| error.message())? {
+                RememberOutcome::AlreadyRecorded(report) => report,
+                other => return Err(format!("expected publication recovery, got {other:?}")),
+            };
+            assert_eq!(recovered.memory_id, memory_id);
+            assert_eq!(recovered.index_status, "indexed");
+            assert_eq!(recovered.data_json()["indexStatus"], "indexed");
+            assert!(recovered.human_summary().contains("Index: indexed"));
+            let index_dir = if global {
+                paths.index_dir.clone()
+            } else {
+                temp.path().join(".ee/index")
+            };
+            let metadata_path = index_dir.join("meta.json");
+            let metadata_before = fs::read(&metadata_path).map_err(|error| error.to_string())?;
+            let modified_before = fs::metadata(&metadata_path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| error.to_string())?;
+            let healthy = match recover().map_err(|error| error.message())? {
+                RememberOutcome::AlreadyRecorded(report) => report,
+                other => return Err(format!("expected healthy replay, got {other:?}")),
+            };
+            assert_eq!(healthy.index_status, "indexed");
+            assert_eq!(
+                fs::read(&metadata_path).map_err(|error| error.to_string())?,
+                metadata_before,
+            );
+            assert_eq!(
+                fs::metadata(&metadata_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| error.to_string())?,
+                modified_before,
+                "a healthy replay does not republish the derived generation",
+            );
             let connection =
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
             assert_single_keyed_remember(
@@ -23914,8 +24104,240 @@ mod tests {
                 "audit-failure-key",
                 &remember_content_hash(content),
             )?;
+            assert_eq!(
+                connection
+                    .list_memories(&workspace_id, None, true)
+                    .map_err(|error| error.to_string())?,
+                memories_before,
+                "publication recovery preserves the original source row",
+            );
+            assert_eq!(
+                connection
+                    .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+                    .map_err(|error| error.to_string())?,
+                audits_before,
+                "publication recovery does not repeat creation audits",
+            );
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].id, jobs_before[0].id);
+            assert_eq!(jobs[0].status_enum(), Some(SearchIndexJobStatus::Completed));
+            let status = get_index_status_with_connection(
+                &IndexStatusOptions {
+                    workspace_path: if global {
+                        paths.root.clone()
+                    } else {
+                        temp.path().to_path_buf()
+                    },
+                    database_path: Some(database.clone()),
+                    index_dir: Some(index_dir),
+                },
+                Some(&connection),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(status.health, IndexHealth::Ready);
+            assert_eq!(status.db_generation, status.index_generation);
+            assert!(status.index_generation.is_some());
+            assert!(
+                audit_path.is_dir(),
+                "replay leaves the unavailable audit sink intact"
+            );
             connection.close().map_err(|error| error.to_string())?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_idempotent_preview_deferred_and_conflicting_retries_preserve_pending_jobs()
+    -> TestResult {
+        for global in [false, true] {
+            let temp = upgrade_test_workspace()?;
+            let paths = super::super::global_store::GlobalStorePaths::from_data_root(
+                &temp.path().join("user-data"),
+            );
+            let content = "A deferred keyed lesson stays pending until publication is requested.";
+            let options = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+            let controls = RememberWriteControls {
+                idempotency_key: Some("deferred-replay-controls"),
+                defer_index_processing: true,
+                ..RememberWriteControls::default()
+            };
+            let write = |options: &RememberMemoryOptions<'_>, controls: &RememberWriteControls<'_>| {
+                if global {
+                    remember_global_memory_with_controls_at_paths(
+                        options,
+                        controls,
+                        &[],
+                        paths.clone(),
+                    )
+                } else {
+                    remember_memory_with_controls(options, controls)
+                }
+            };
+            let seed = upgrade_created_report(
+                write(&options, &controls).map_err(|error| error.message())?,
+                "deferred replay seed",
+            )?;
+            let connection =
+                DbConnection::open_file(&seed.database_path).map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let index_dir = if global {
+                paths.index_dir.clone()
+            } else {
+                temp.path().join(".ee/index")
+            };
+            let metadata_before = fs::read(index_dir.join("meta.json")).ok();
+
+            for (dry_run, defer, conflict) in [
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ] {
+                let retry_options = RememberMemoryOptions {
+                    dry_run,
+                    content: if conflict {
+                        "A conflicting keyed lesson."
+                    } else {
+                        content
+                    },
+                    ..options
+                };
+                let retry_controls = RememberWriteControls {
+                    defer_index_processing: defer,
+                    ..controls
+                };
+                match write(&retry_options, &retry_controls) {
+                    Err(error) if conflict => {
+                        assert_eq!(error.code(), REMEMBER_IDEMPOTENCY_CONFLICT_CODE);
+                    }
+                    Ok(RememberOutcome::AlreadyRecorded(report)) if !conflict => {
+                        assert_eq!(report.memory_id, seed.memory_id.to_string());
+                        assert_eq!(report.dry_run, dry_run);
+                        assert_eq!(
+                            report.index_status,
+                            if dry_run { "not_applicable" } else { "queued" },
+                        );
+                    }
+                    other => return Err(format!("unexpected replay control outcome: {other:?}")),
+                }
+                let connection =
+                    DbConnection::open_file(&seed.database_path).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?,
+                    before,
+                    "preview, deferred and conflicting retries preserve source and job state",
+                );
+                connection.close().map_err(|error| error.to_string())?;
+                assert_eq!(fs::read(index_dir.join("meta.json")).ok(), metadata_before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_idempotent_retry_respects_live_publisher_and_recovers_released_job() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let options = upgrade_remember_options(
+            &canonical,
+            "Indigo retry preserves the publisher's committed memory identity.",
+            0.8,
+            None,
+            false,
+        );
+        let controls = RememberWriteControls {
+            idempotency_key: Some("live-publisher-replay"),
+            defer_index_processing: true,
+            ..RememberWriteControls::default()
+        };
+        let seed = upgrade_created_report(
+            remember_memory_with_controls(&options, &controls).map_err(|error| error.message())?,
+            "publisher replay seed",
+        )?;
+        let connection = open_upgrade_test_db(&canonical)?;
+        let job_id = seed
+            .index_job_id
+            .as_ref()
+            .ok_or_else(|| "seed job missing".to_owned())?;
+        let publish_lock = AdvisoryLockId::index(&workspace_id);
+        let holder = format!("remember:{}:single-replay-publisher", std::process::id());
+        assert!(
+            connection
+                .acquire_advisory_lock(&publish_lock, &holder, Some(60), Some("replay test"))
+                .map_err(|error| error.to_string())?
+                .is_acquired()
+        );
+        assert!(
+            connection
+                .start_search_index_job(job_id)
+                .map_err(|error| error.to_string())?
+        );
+        let running = connection
+            .get_search_index_job(job_id)
+            .map_err(|error| error.to_string())?;
+        let retry_controls = RememberWriteControls {
+            defer_index_processing: false,
+            ..controls
+        };
+        let retry = match remember_memory_with_controls(&options, &retry_controls)
+            .map_err(|error| error.message())?
+        {
+            RememberOutcome::AlreadyRecorded(report) => report,
+            other => return Err(format!("expected replay beside live publisher, got {other:?}")),
+        };
+        assert_eq!(retry.memory_id, seed.memory_id.to_string());
+        assert_eq!(
+            retry.index_status, "queued",
+            "an empty pending list is not publication proof"
+        );
+        assert_eq!(
+            connection
+                .get_search_index_job(job_id)
+                .map_err(|error| error.to_string())?,
+            running
+        );
+        assert!(
+            connection
+                .release_advisory_lock(&publish_lock, &holder)
+                .map_err(|error| error.to_string())?
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        let recovered = match remember_memory_with_controls(&options, &retry_controls)
+            .map_err(|error| error.message())?
+        {
+            RememberOutcome::AlreadyRecorded(report) => report,
+            other => return Err(format!("expected replay after publisher release, got {other:?}")),
+        };
+        assert_eq!(recovered.memory_id, seed.memory_id.to_string());
+        assert_eq!(recovered.index_status, "indexed");
+        let connection = open_upgrade_test_db(&canonical)?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(&jobs[0].id, job_id);
+        assert_eq!(jobs[0].status_enum(), Some(SearchIndexJobStatus::Completed));
+        assert_eq!(
+            connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        connection.close().map_err(|error| error.to_string())?;
         Ok(())
     }
 
