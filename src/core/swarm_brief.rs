@@ -6605,7 +6605,16 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
         });
     }
 
-    for bead in all_swarm_brief_beads(&report.beads) {
+    // Deferred Beads remain visible in the brief. Their inferred paths do
+    // not occupy an edit surface while the work is deferred. The direct
+    // dirty-file and reservation observations above still apply.
+    for bead in report
+        .beads
+        .ready
+        .iter()
+        .chain(&report.beads.blocked)
+        .chain(&report.beads.in_progress)
+    {
         for pattern in likely_surfaces_for_bead(bead) {
             observations.push(SurfaceObservation {
                 pattern,
@@ -7490,16 +7499,6 @@ fn derive_host_pressure_hints(
             profile.recommended_profile
         ),
     }]
-}
-
-fn all_swarm_brief_beads(summary: &SwarmBriefBeadsSummary) -> Vec<&SwarmBriefBead> {
-    summary
-        .ready
-        .iter()
-        .chain(summary.blocked.iter())
-        .chain(summary.in_progress.iter())
-        .chain(summary.deferred.iter())
-        .collect()
 }
 
 fn likely_surfaces_for_bead(bead: &SwarmBriefBead) -> Vec<String> {
@@ -11762,6 +11761,50 @@ mod tests {
         assert!(
             rec.evidence
                 .contains(&"likely_surface:src/core/swarm_brief.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn deferred_beads_do_not_supply_file_collision_evidence() {
+        let mut report = report_with_ready_sources();
+        let deferred = bead("bd-deferred", "Fix unrelated command runner", "deferred");
+        report.beads.deferred.push(deferred.clone());
+
+        apply_swarm_brief_advice(&mut report);
+        assert!(report.file_surface_risks.is_empty());
+        assert_eq!(report.beads.deferred, vec![deferred]);
+
+        let path = "src/cli/mod.rs";
+        report.file_reservations.push(SwarmBriefFileReservation {
+            path_pattern: path.to_owned(),
+            holder: "OtherAgent".to_owned(),
+            exclusive: true,
+            expires_at: None,
+        });
+        report.dirty_files.push(SwarmBriefDirtyFile {
+            path: path.to_owned(),
+            status: "M".to_owned(),
+        });
+        report
+            .beads
+            .in_progress
+            .push(bead("bd-active", "Repair command output", "in_progress"));
+
+        apply_swarm_brief_advice(&mut report);
+        let risk = require_some(
+            report
+                .file_surface_risks
+                .iter()
+                .find(|risk| risk.path_pattern == path),
+            "direct surface risk",
+        );
+        assert_eq!(risk.git_status_buckets, ["M"]);
+        assert_eq!(risk.reservation_holders, ["OtherAgent"]);
+        assert_eq!(risk.related_bead_ids, ["bd-active"]);
+        assert!(
+            risk.risk_factors
+                .iter()
+                .any(|factor| factor == "dirty_reservation_overlap")
         );
     }
 
