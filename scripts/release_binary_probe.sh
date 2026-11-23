@@ -41,6 +41,7 @@
 # Output (--json): one `ee.release_probe.v1` object on stdout, keyed by the
 # archive SHA-256 and the binary's self-reported gitCommit, with one row per
 # check: id, kind, expected, observed, pass.
+# Live runs include the near-tie pack stage and retain its raw captures for replay.
 #
 # Exit: 0 every check passed, 1 a check failed, 2 self-test failure,
 #       3 environment error or incomplete verdict (checksum, download, missing
@@ -54,6 +55,7 @@ set -uo pipefail
 SCHEMA="ee.release_probe.v1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PACK_STAGE_REQUIRED=0
 # Captured before HOME is redirected into the isolated tree.
 OPERATOR_HOME="${HOME:-}"
 
@@ -213,6 +215,10 @@ run_probe() {
     done
     wait "${wpids[@]}"
     capture cwrite_list memory list --workspace "$ws" --limit 200 --json
+
+    python3 "$SCRIPT_DIR/lib/release_pack_determinism.py" capture \
+        --binary "$EE_BIN" --work "$WORK/near-tie" --captures "$CAP/near-tie" \
+        >"$CAP/near-tie.result.json" 2>"$CAP/near-tie.stderr"
 }
 
 # --------------------------------------------------------------------------
@@ -674,6 +680,24 @@ grade() {
             "binary self-reported targetTriple matches archive target $want_target" \
             "targetTriple=${got_target:-<absent>} expected=$want_target" "$target_ok"
     fi
+
+    if [ "$PACK_STAGE_REQUIRED" = 1 ] || [ -d "$CAP/near-tie" ]; then
+        local near_tie="" near_tie_ok=false commit="" binary_sha=""
+        q_into commit version '.data.source.gitCommit // empty'
+        if [ -f "$CAP/binary.sha256" ]; then
+            IFS= read -r binary_sha <"$CAP/binary.sha256" || true
+        fi
+        if near_tie="$(python3 "$SCRIPT_DIR/lib/release_pack_determinism.py" grade \
+            --captures "$CAP/near-tie")" && [ -n "$commit" ] && [ -n "$binary_sha" ] &&
+            jq -e --arg commit "$commit" --arg sha "$binary_sha" \
+                '.pass == true and .sourceCommit == $commit and .binarySha256 == $sha' \
+                <<<"$near_tie" >/dev/null; then
+            near_tie_ok=true
+        fi
+        row pack_near_tie_determinism check \
+            "12 live and 12 fixed packs in each mode preserve ordered typed decisions and durable source state" \
+            "${near_tie:-<missing pack stage>}" "$near_tie_ok"
+    fi
     if [ "$GRADE_PRE_FAIL" -gt 0 ]; then
         GRADE_VERDICT="incomplete"
     elif [ -n "$GRADE_FAILED" ]; then
@@ -852,6 +876,10 @@ self_test() {
 
     local d
     d="$(case_dir good)"; expect "all checks pass" "$d" pass ""
+    local missing_pack_stage="$root/missing-pack-stage"
+    cp -R "$root/_template" "$missing_pack_stage"
+    mkdir "$missing_pack_stage/near-tie"
+    expect "near-tie stage without captures fails" "$missing_pack_stage" fail "pack_near_tie_determinism"
 
     d="$(case_dir empty_world)"; command find "$d" -name '*.json' -exec sh -c ': >"$1"' _ {} \;
     expect "empty captures cannot pass" "$d" incomplete \
@@ -1114,6 +1142,16 @@ EOF
         printf '  FAIL  %-40s -> exit %s want 0\n' "verify-release-dir bound proof capsule" "$rc_out" >&2
         failures=$((failures + 1))
     fi
+    ( "$0" --verify-release-dir "$rdir_cap" --proof-capsule "$cap_good" \
+        --candidate-sha "$sha_good" --candidate-version 0.19.0 ) 2>"$root/missing-pack-stage.stderr"
+    rc_out=$?
+    if [ "$rc_out" -eq 1 ] && grep -q 'requires a passing pack_near_tie_determinism check' \
+        "$root/missing-pack-stage.stderr"; then
+        printf '  ok    %-40s -> exit 1\n' "candidate requires near-tie stage" >&2
+    else
+        printf '  FAIL  %-40s -> exit %s want stage refusal\n' "candidate requires near-tie stage" "$rc_out" >&2
+        failures=$((failures + 1))
+    fi
 
     local rdir_cap_bad_sha="$root/rel-capsule-bad-sha"
     mkdir -p "$rdir_cap_bad_sha"
@@ -1254,6 +1292,12 @@ verify_release_dir() {
             continue
         fi
         if [ -n "$CANDIDATE_SHA" ]; then
+            if ! jq -e '[.checks[] | select(.id == "pack_near_tie_determinism")] |
+                length == 1 and .[0].kind == "check" and .[0].pass == true' "$probe_file" >/dev/null; then
+                printf 'release_binary_probe: %s requires a passing pack_near_tie_determinism check\n' "$probe_file" >&2
+                failures=$((failures + 1))
+                continue
+            fi
             if python3 "$ROOT/scripts/lib/emit_proof_capsule.py" \
                 --verify-capsule "$PROOF_CAPSULE" --expected-sha "$CANDIDATE_SHA" --verify-logs \
                 --release-archive "$archive" --release-probe "$probe_file" \
@@ -1433,6 +1477,7 @@ fi
 [ -n "$ARCHIVE" ] || die_env "--archive <url|path> is required (or --replay / --self-test)"
 need tar
 need seq
+need python3
 
 if [ -z "$WORKDIR" ]; then
     WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ee-release-probe.XXXXXX")" || die_env "cannot create a work directory"
@@ -1500,6 +1545,7 @@ else
         "$MODEL_CACHE" >&2
 fi
 
+PACK_STAGE_REQUIRED=1
 run_probe
 grade
 emit "$(verdict_json "$ARCHIVE" "$ARCHIVE_SHA")"
