@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use super::*;
 use crate::config::WORKSPACE_MARKER;
 use crate::core::backup::{
-    BackupCreateOptions, BackupRestoreOptions, BackupVerifyOptions, create_backup, hash_bytes,
+    BackupCreateOptions, BackupRestoreOptions, BackupVerifyOptions, authenticate_backup_manifest,
+    backup_verification_issue_is_blocking, create_backup, hash_bytes, read_backup_manifest,
     restore_backup_to_side_path, restore_backup_to_side_path_with_recovery_hooks,
     restore_backup_to_side_path_with_verification_hook, verify_backup, work_history_error,
 };
@@ -15,6 +16,8 @@ use crate::models::{
     MEMORY_SEAL_PLACEHOLDER_CONTENT, MemoryId, MemorySeal, RedactionLevel, WorkspaceId,
     memory_seal_commitment,
 };
+use crate::policy::import_auth::{authenticate_artifact, canonical_record_hash, verify_artifact};
+use crate::policy::store_auth::{MacDomain, StoreAuthRoot, workspace_keys_dir};
 use uuid::Uuid;
 
 type TestResult = Result<(), String>;
@@ -849,6 +852,289 @@ fn legacy_provenance_fence_requires_missing_commitments_including_historical_row
         .verify_connection(&db)
         .map_err(|error| error.message())?;
     db.close().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn sign_admission_trust_chunk(
+    chunk: &mut BackupTrustHistory,
+    root: &StoreAuthRoot,
+) -> TestResult {
+    // Sign the encoded shape directly: malformed-shape controls must reach
+    // semantic admission with valid authentication, not fail in a test signer.
+    chunk.authentication = None;
+    let hash = canonical_record_hash(
+        &serde_json::to_vec(&chunk).map_err(|error| error.to_string())?,
+    );
+    let context = crate::core::backup::trust_history_auth_context(
+        &chunk.schema,
+        &chunk.workspace_id,
+    );
+    let header = authenticate_artifact(
+        root,
+        MacDomain::NativeImportRecordsRoot,
+        &context,
+        &hash,
+        1,
+    )
+    .map_err(|error| error.to_string())?;
+    assert!(
+        verify_artifact(
+            root,
+            MacDomain::NativeImportRecordsRoot,
+            &context,
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(|error| error.to_string())?
+        .is_authenticated(),
+        "semantic controls require a valid family MAC"
+    );
+    chunk.authentication = Some(header);
+    Ok(())
+}
+
+fn write_admission_archive(
+    fixture: &Fixture,
+    original_manifest: &serde_json::Value,
+    chunks: &[BackupTrustHistory],
+    root: &StoreAuthRoot,
+) -> TestResult {
+    let mut manifest = original_manifest.clone();
+    let derived = manifest["derived"]
+        .as_array_mut()
+        .ok_or("source derived inventory missing")?;
+    let template = derived
+        .iter()
+        .find(|asset| asset["kind"] == "trust_history")
+        .cloned()
+        .ok_or("source trust-history inventory missing")?;
+    derived.retain(|asset| asset["kind"] != "trust_history");
+    for (index, chunk) in chunks.iter().enumerate() {
+        let relative = format!("derived/trust-history/{index:08}.json");
+        let bytes = serde_json::to_vec(chunk).map_err(|error| error.to_string())?;
+        std::fs::write(fixture.options.backup_path.join(&relative), &bytes)
+            .map_err(|error| error.to_string())?;
+        let mut asset = template.clone();
+        asset["path"] = serde_json::json!(relative);
+        asset["hash"] = serde_json::json!(hash_bytes(&bytes));
+        asset["byte_size"] = serde_json::json!(bytes.len());
+        derived.push(asset);
+    }
+    authenticate_backup_manifest(&mut manifest, root).map_err(|error| error.message())?;
+    std::fs::write(
+        fixture.options.backup_path.join("manifest.json"),
+        serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn key_file_fingerprints(
+    directory: &std::path::Path,
+) -> Result<BTreeMap<PathBuf, String>, String> {
+    let mut fingerprints = BTreeMap::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            fingerprints.extend(key_file_fingerprints(&path)?);
+        } else {
+            fingerprints.insert(
+                path.clone(),
+                hash_bytes(&std::fs::read(path).map_err(|error| error.to_string())?),
+            );
+        }
+    }
+    Ok(fingerprints)
+}
+
+#[test]
+fn public_verification_rejects_invalid_provenance_before_any_restore_writes() -> TestResult {
+    let fixture = provenance_fixture(RedactionLevel::None, |_| Ok(()))?;
+    let verify_options = BackupVerifyOptions {
+        workspace_path: fixture.options.workspace_path.clone(),
+        backup_path: fixture.options.backup_path.clone(),
+    };
+    let positive = verify_backup(&verify_options).map_err(|error| error.message())?;
+    assert_eq!(positive.status, "verified", "{:?}", positive.issues);
+    let (_, original_manifest) =
+        read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
+    let original: BackupTrustHistory = serde_json::from_slice(
+        &std::fs::read(
+            fixture.options.backup_path.join("derived/trust-history/00000000.json"),
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let key_directory = workspace_keys_dir(&fixture.options.workspace_path);
+    let root = StoreAuthRoot::open(&key_directory).map_err(|error| error.to_string())?;
+    let keys_before = key_file_fingerprints(&key_directory)?;
+    let database_before = hash_bytes(
+        &std::fs::read(&fixture.database).map_err(|error| error.to_string())?,
+    );
+    for defect in [
+        "empty",
+        "missing",
+        "duplicate",
+        "orphan",
+        "missing_carrier",
+        "mixed_schema",
+        "wrong_version",
+        "wrong_status",
+        "foreign_workspace",
+        "missing_chunk",
+        "tampered_mac",
+        "unsigned",
+    ] {
+        let mut chunk = original.clone();
+        let mut additional = None;
+        match defect {
+            "empty" => chunk.memory_provenance = Some(Vec::new()),
+            "missing" => {
+                chunk
+                    .memory_provenance
+                    .as_mut()
+                    .ok_or("missing carrier")?
+                    .pop()
+                    .ok_or("empty carrier")?;
+            }
+            "duplicate" => {
+                let rows = chunk.memory_provenance.as_mut().ok_or("missing carrier")?;
+                let first = rows.first().cloned().ok_or("empty carrier")?;
+                *rows.last_mut().ok_or("empty carrier")? = first;
+            }
+            "orphan" => {
+                chunk
+                    .memory_provenance
+                    .as_mut()
+                    .and_then(|rows| rows.first_mut())
+                    .ok_or("empty carrier")?
+                    .memory_id = provenance_memory_id(999);
+            }
+            "missing_carrier" => chunk.memory_provenance = None,
+            "mixed_schema" => {
+                chunk.chunk_count = 2;
+                let mut legacy = original.clone();
+                legacy.chunk_count = 2;
+                legacy.chunk_index = 1;
+                legacy.schema = crate::core::backup::TRUST_HISTORY_SCHEMA_V1.to_owned();
+                legacy.memory_provenance = None;
+                sign_admission_trust_chunk(&mut legacy, &root)?;
+                additional = Some(legacy);
+            }
+            "wrong_version" | "wrong_status" | "tampered_mac" => {
+                let row = chunk
+                    .memory_provenance
+                    .as_mut()
+                    .and_then(|rows| rows.first_mut())
+                    .ok_or("empty carrier")?;
+                match defect {
+                    "wrong_version" => {
+                        row.provenance_chain_hash_version = "unsupported-version".to_owned();
+                    }
+                    "wrong_status" => {
+                        row.provenance_verification_status =
+                            "PRIVATE_ADMISSION_SENTINEL".to_owned();
+                    }
+                    _ => {
+                        row.provenance_verification_note =
+                            Some("PRIVATE_ADMISSION_SENTINEL".to_owned());
+                    }
+                }
+            }
+            "foreign_workspace" => {
+                chunk.workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(999)).to_string();
+            }
+            "missing_chunk" => chunk.chunk_count = 2,
+            "unsigned" => chunk.authentication = None,
+            _ => return Err("unhandled public provenance admission control".to_owned()),
+        }
+        if !matches!(defect, "tampered_mac" | "unsigned") {
+            sign_admission_trust_chunk(&mut chunk, &root)?;
+        }
+        let mut chunks = vec![chunk];
+        if let Some(additional) = additional {
+            chunks.push(additional);
+        }
+        write_admission_archive(&fixture, &original_manifest, &chunks, &root)?;
+        let report = verify_backup(&verify_options).map_err(|error| error.message())?;
+        assert_eq!(report.status, "failed", "accepted {defect}");
+        let blocking = report
+            .issues
+            .iter()
+            .filter(|issue| backup_verification_issue_is_blocking(issue))
+            .map(|issue| issue.code.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(blocking, vec!["trust_history_invalid"], "wrong boundary for {defect}");
+        assert!(report.checked_derived.iter().any(|asset| asset.kind == "trust_history"));
+        assert!(!report.data_json().to_string().contains("PRIVATE_ADMISSION_SENTINEL"));
+        for dry_run in [true, false] {
+            let mut options = fixture.options.clone();
+            options.side_path = fixture.root.path().join(format!("refused-{defect}-{dry_run}"));
+            options.dry_run = dry_run;
+            let error = restore_backup_to_side_path(&options)
+                .err()
+                .ok_or_else(|| format!("accepted {defect} with dry_run={dry_run}"))?;
+            assert!(
+                error.message().contains("failed integrity verification"),
+                "{defect}: {}",
+                error.message()
+            );
+            assert!(!options.side_path.exists(), "created a destination for {defect}");
+            assert!(!workspace_keys_dir(&options.side_path).exists());
+        }
+        assert_eq!(key_file_fingerprints(&key_directory)?, keys_before);
+        assert_eq!(
+            hash_bytes(&std::fs::read(&fixture.database).map_err(|error| error.to_string())?),
+            database_before
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history() -> TestResult {
+    for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+        let fixture = provenance_fixture(redaction, |_| Ok(()))?;
+        let verify_options = BackupVerifyOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            backup_path: fixture.options.backup_path.clone(),
+        };
+        let report = verify_backup(&verify_options).map_err(|error| error.message())?;
+        assert_eq!(report.status, "verified", "{:?}", report.issues);
+        let mut options = fixture.options.clone();
+        options.dry_run = true;
+        let preview = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        assert!(!preview.degraded.iter().any(|entry| {
+            entry.code == "backup_memory_provenance_unavailable"
+        }));
+        assert!(!options.side_path.exists());
+        let (_, manifest) =
+            read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
+        let mut legacy: BackupTrustHistory = serde_json::from_slice(
+            &std::fs::read(
+                fixture.options.backup_path.join("derived/trust-history/00000000.json"),
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        legacy.schema = crate::core::backup::TRUST_HISTORY_SCHEMA_V1.to_owned();
+        legacy.memory_provenance = None;
+        let root = StoreAuthRoot::open(workspace_keys_dir(&fixture.options.workspace_path))
+            .map_err(|error| error.to_string())?;
+        sign_admission_trust_chunk(&mut legacy, &root)?;
+        write_admission_archive(&fixture, &manifest, &[legacy], &root)?;
+        let report = verify_backup(&verify_options).map_err(|error| error.message())?;
+        assert_eq!(report.status, "verified", "{:?}", report.issues);
+        let preview = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        assert!(preview.degraded.iter().any(|entry| {
+            entry.code == "backup_memory_provenance_unavailable"
+        }));
+        assert!(!options.side_path.exists());
+    }
     Ok(())
 }
 

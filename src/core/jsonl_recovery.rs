@@ -266,11 +266,33 @@ impl BackupRecordsExpectation {
     ) -> Result<Self, DomainError> {
         ensure_import_source_path_is_regular_file(records_path).map_err(unreadable)?;
         let source = read_jsonl_source_bounded(records_path).map_err(unreadable)?;
+        if let Some(root) = source_auth {
+            return Self::from_manifest_bound_source(&source, workspace_id, root);
+        }
         let parsed = parse_jsonl_source(&source);
-        let auth = match source_auth {
-            Some(root) => native_import_auth_state_with_root(&parsed, root, workspace_id),
-            None => native_import_auth_state(&parsed, workspace_path, workspace_id),
-        };
+        let auth = native_import_auth_state(&parsed, workspace_path, workspace_id);
+        Ok(Self {
+            workspace_id: workspace_id.to_owned(),
+            records: ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?,
+            source_hash: format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex()),
+            source_size: source.len() as u64,
+        })
+    }
+
+    /// Prepare the exact bytes already checked against an authenticated
+    /// manifest. This avoids reopening a mutable artifact after its hash check.
+    /// The records MAC still controls native trust independently: a missing
+    /// footer MAC retains the existing recovery trust cap, not new authority.
+    pub(crate) fn from_manifest_bound_source(
+        source: &str,
+        workspace_id: &str,
+        source_auth: &StoreAuthRoot,
+    ) -> Result<Self, DomainError> {
+        if source.len() as u64 > JSONL_IMPORT_MAX_INPUT_BYTES {
+            return Err(mismatch("backup record stream exceeds the import byte limit"));
+        }
+        let parsed = parse_jsonl_source(source);
+        let auth = native_import_auth_state_with_root(&parsed, source_auth, workspace_id);
         Ok(Self {
             workspace_id: workspace_id.to_owned(),
             records: ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?,
@@ -292,6 +314,11 @@ impl BackupRecordsExpectation {
             return Err(mismatch("captured record stream differs from its manifest"));
         }
         Ok(())
+    }
+
+    /// Identities after the importer's redaction and revision validation.
+    pub(crate) fn memory_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.records.memories.iter().map(|memory| memory.id.as_str())
     }
 
     /// Read-only verification of the exact primary graph, including both live

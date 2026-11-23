@@ -38,6 +38,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::config::{EnvVar, WORKSPACE_MARKER, read_env_var, read_env_var_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::jsonl_import::recovery::BackupRecordsExpectation;
 use crate::core::jsonl_import::{
     IMPORT_ACTION, JsonlImportIssueSeverity, JsonlImportOptions, import_memory_id,
     import_verified_backup_jsonl_records,
@@ -3284,6 +3285,7 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         manifest_bytes.len() as u64,
         &inspect,
     )
+    .map(|(report, _)| report)
 }
 
 fn read_backup_workspace_metadata(
@@ -3351,11 +3353,15 @@ fn verify_backup_manifest(
     manifest: &JsonValue,
     manifest_size: u64,
     inspect: &BackupInspectReport,
-) -> Result<BackupVerifyReport, DomainError> {
+) -> Result<(BackupVerifyReport, Option<VerifiedMemoryRecords>), DomainError> {
     let mut issues = inspect.issues.clone();
-    if let Err(issue) = verify_backup_manifest_authentication(workspace_path, manifest) {
-        issues.push(issue);
-    }
+    let source_auth = match verify_backup_manifest_authentication(workspace_path, manifest) {
+        Ok(root) => Some(root),
+        Err(issue) => {
+            issues.push(issue);
+            None
+        }
+    };
     if let Err(error) = read_backup_workspace_metadata(manifest) {
         issues.push(BackupVerificationIssue::error(
             "manifest_workspace_invalid",
@@ -3452,17 +3458,20 @@ fn verify_backup_manifest(
     // In particular, an unreadable artifact must not mask the authentication
     // failure, and malformed producer output must fail before restore writes.
     if issues.iter().any(backup_verification_issue_is_blocking) {
-        return Ok(BackupVerifyReport {
-            schema: BACKUP_VERIFY_SCHEMA_V1,
-            backup_id: inspect.backup_id.clone(),
-            status: "failed".to_owned(),
-            backup_path: inspect.backup_path.clone(),
-            manifest_path: inspect.manifest_path.clone(),
-            manifest_hash: inspect.manifest_hash.clone(),
-            checked_artifacts: Vec::new(),
-            checked_derived: Vec::new(),
-            issues,
-        });
+        return Ok((
+            BackupVerifyReport {
+                schema: BACKUP_VERIFY_SCHEMA_V1,
+                backup_id: inspect.backup_id.clone(),
+                status: "failed".to_owned(),
+                backup_path: inspect.backup_path.clone(),
+                manifest_path: inspect.manifest_path.clone(),
+                manifest_hash: inspect.manifest_hash.clone(),
+                checked_artifacts: Vec::new(),
+                checked_derived: Vec::new(),
+                issues,
+            },
+            None,
+        ));
     }
     let mut checked_artifacts = Vec::new();
     let mut checked_derived = Vec::new();
@@ -3665,6 +3674,18 @@ fn verify_backup_manifest(
             ));
         }
     }
+    let mut verified_records = None;
+    if !issues.iter().any(backup_verification_issue_is_blocking)
+        && let Some(source_auth) = source_auth.as_ref()
+    {
+        match verify_backup_memory_provenance(backup_path, inspect, source_auth) {
+            Ok(records) => verified_records = records,
+            Err(error) => issues.push(BackupVerificationIssue::error(
+                "trust_history_invalid",
+                error.message(),
+            )),
+        }
+    }
     let status = if issues.iter().any(backup_verification_issue_is_blocking) {
         "failed"
     } else if issues.is_empty() {
@@ -3672,17 +3693,20 @@ fn verify_backup_manifest(
     } else {
         "degraded"
     };
-    Ok(BackupVerifyReport {
-        schema: BACKUP_VERIFY_SCHEMA_V1,
-        backup_id: inspect.backup_id.clone(),
-        status: status.to_owned(),
-        backup_path: inspect.backup_path.clone(),
-        manifest_path: inspect.manifest_path.clone(),
-        manifest_hash: inspect.manifest_hash.clone(),
-        checked_artifacts,
-        checked_derived,
-        issues,
-    })
+    Ok((
+        BackupVerifyReport {
+            schema: BACKUP_VERIFY_SCHEMA_V1,
+            backup_id: inspect.backup_id.clone(),
+            status: status.to_owned(),
+            backup_path: inspect.backup_path.clone(),
+            manifest_path: inspect.manifest_path.clone(),
+            manifest_hash: inspect.manifest_hash.clone(),
+            checked_artifacts,
+            checked_derived,
+            issues,
+        },
+        verified_records,
+    ))
 }
 
 /// Restore one verified backup into an isolated side path.
@@ -3723,7 +3747,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         &hash_bytes(&manifest_bytes),
         &manifest,
     );
-    let verify = verify_backup_manifest(
+    let (verify, verified_records) = verify_backup_manifest(
         &workspace_path,
         &backup_path,
         &manifest,
@@ -3772,15 +3796,22 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // inventory checks above establish which artifact is being restored; a
     // dry run must not erase its evidence-loss or peer-repair requirements.
     let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
-    // Admit and freeze the primary projection before creating a destination,
-    // including dry-run. Bind the exact captured bytes to the authenticated
-    // manifest so a changed source cannot redefine the recovery expectation.
-    let expected_records = crate::core::jsonl_import::recovery::BackupRecordsExpectation::capture(
-        &source_records_path,
-        &side_path,
-        &restored_workspace.id,
-        Some(&source_auth),
-    )?;
+    // Admit and freeze the primary projection before any destination work,
+    // including previews of legacy archives with no provenance carrier.
+    // Reuse v2 preparation when its source key window is unchanged; rotation
+    // retains the previous fresh-root native trust cap through recapture.
+    let memory_provenance_available = verified_records.is_some();
+    let expected_records = match verified_records {
+        Some(records) if records.source_key_ids == source_auth.window_key_ids() => {
+            records.expectation
+        }
+        _ => BackupRecordsExpectation::capture(
+            &source_records_path,
+            &side_path,
+            &restored_workspace.id,
+            Some(&source_auth),
+        )?,
+    };
     let records_artifact = inspect
         .artifacts
         .iter()
@@ -3790,9 +3821,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         records_artifact.hash.as_deref(),
         records_artifact.size_bytes,
     )?;
-    if inspect.counts.memory_count > 0
-        && !backup_has_memory_provenance(&backup_path, &inspect)?
-    {
+    if inspect.counts.memory_count > 0 && !memory_provenance_available {
         restore_degraded.push(BackupDegradation::warning(
             BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE,
             "Backup has no authenticated memory provenance history; recovered memories retain missing commitments and are not reverified.",
@@ -10523,13 +10552,20 @@ fn backup_memory_provenance(
     Ok(row)
 }
 
-/// Preview legacy provenance loss against the same manifest-bound asset bytes
-/// that real recovery will copy and authenticate. Do not silently report a v2
-/// carrier when an asset has changed since the general verification pass.
-fn backup_has_memory_provenance(
+struct VerifiedMemoryRecords {
+    expectation: BackupRecordsExpectation,
+    source_key_ids: Vec<crate::policy::store_auth::KeyId>,
+}
+
+/// Admit trust-history authentication and provenance coverage before public
+/// verification succeeds or restore creates any destination files. Legacy
+/// carriers remain recoverable; v2 must cover the exact prepared memory IDs.
+/// Return the frozen primary projection for reuse by the publication fences.
+fn verify_backup_memory_provenance(
     backup_path: &Path,
     inspect: &BackupInspectReport,
-) -> Result<bool, DomainError> {
+    source_auth: &StoreAuthRoot,
+) -> Result<Option<VerifiedMemoryRecords>, DomainError> {
     let assets = inspect
         .derived
         .iter()
@@ -10537,28 +10573,17 @@ fn backup_has_memory_provenance(
         .collect::<Vec<_>>();
     let mut schema: Option<String> = None;
     let mut slots = BTreeSet::new();
+    let mut memory_ids = BTreeSet::new();
     for asset in &assets {
-        let path = safe_artifact_path(backup_path, &asset.path, &mut Vec::new())
-            .ok_or_else(|| work_history_error("invalid trust-history asset path"))?;
-        let file = open_backup_artifact_for_read(&path).map_err(work_history_error)?;
-        let metadata = file.metadata().map_err(work_history_error)?;
-        if !metadata.is_file() || metadata.len() > MAX_DERIVED_ASSET_BYTES {
-            return Err(work_history_error("invalid trust-history asset size"));
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_DERIVED_ASSET_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(work_history_error)?;
-        if bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES
-            || asset.byte_size != Some(bytes.len() as u64)
-            || asset.hash.as_deref() != Some(hash_bytes(&bytes).as_str())
-        {
-            return Err(work_history_error(
-                "trust-history asset differs from the authenticated manifest",
-            ));
-        }
-        let chunk: BackupTrustHistory =
-            serde_json::from_slice(&bytes).map_err(work_history_error)?;
+        let bytes = read_manifest_bound_backup_asset(
+            backup_path,
+            &asset.path,
+            asset.hash.as_deref(),
+            asset.byte_size,
+            MAX_DERIVED_ASSET_BYTES,
+        )?;
+        let mut chunk: BackupTrustHistory = serde_json::from_slice(&bytes)
+            .map_err(|_| work_history_error("invalid trust-history asset encoding"))?;
         if !valid_trust_history_schema(&chunk)
             || schema.as_ref().is_some_and(|expected| *expected != chunk.schema)
             || chunk.backup_id != inspect.backup_id
@@ -10566,14 +10591,123 @@ fn backup_has_memory_provenance(
             || chunk.chunk_count != assets.len()
             || chunk.chunk_index >= assets.len()
             || !slots.insert(chunk.chunk_index)
+            || [
+                chunk.seals.len(),
+                chunk.quarantines.len(),
+                chunk.certificates.len(),
+                chunk.agents.len(),
+                chunk.memory_provenance.as_ref().map_or(0, Vec::len),
+            ]
+            .into_iter()
+            .any(|count| count > WORK_HISTORY_CHUNK_ROWS)
         {
             return Err(work_history_error(
                 "unsupported, incomplete, duplicate, or substituted trust-history chunks",
             ));
         }
+        let authentication = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("trust history requires source-store authentication")
+        })?;
+        let canonical = serde_json::to_vec(&chunk)
+            .map_err(|_| work_history_error("invalid trust-history canonical encoding"))?;
+        if !verify_artifact(
+            source_auth,
+            MacDomain::NativeImportRecordsRoot,
+            &trust_history_auth_context(&chunk.schema, &chunk.workspace_id),
+            &authentication,
+            &canonical_record_hash(&canonical),
+            1,
+        )
+        .map_err(|_| work_history_error("trust-history authentication failed"))?
+        .is_authenticated()
+        {
+            return Err(work_history_error("trust-history authentication failed"));
+        }
+        for row in chunk.memory_provenance.into_iter().flatten() {
+            validate_memory_provenance(&row)?;
+            if !memory_ids.insert(row.memory_id) {
+                return Err(work_history_error(
+                    "duplicate memory identity in authenticated provenance history",
+                ));
+            }
+        }
         schema = Some(chunk.schema);
     }
-    Ok(schema.as_deref() == Some(TRUST_HISTORY_SCHEMA))
+    if schema.as_deref() != Some(TRUST_HISTORY_SCHEMA) {
+        return Ok(None);
+    }
+
+    let records = inspect
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == RECORDS_FILE && artifact.kind == "jsonl_export")
+        .ok_or_else(|| work_history_error("backup manifest has no primary records artifact"))?;
+    let bytes = read_manifest_bound_backup_asset(
+        backup_path,
+        &records.path,
+        records.hash.as_deref(),
+        records.size_bytes,
+        crate::core::jsonl_import::JSONL_IMPORT_MAX_INPUT_BYTES,
+    )?;
+    let source = std::str::from_utf8(&bytes)
+        .map_err(|_| work_history_error("backup primary records are not valid UTF-8"))?;
+    let workspace_id = inspect
+        .workspace_id
+        .as_deref()
+        .ok_or_else(|| work_history_error("backup manifest has no workspace identity"))?;
+    let expected =
+        BackupRecordsExpectation::from_manifest_bound_source(source, workspace_id, source_auth)
+            .map_err(|_| work_history_error("backup primary records failed recovery admission"))?;
+    {
+        let expected_ids = expected.memory_ids().collect::<BTreeSet<_>>();
+        let archived_ids = memory_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        if expected_ids.len() != expected.memory_ids().len()
+            || expected_ids.len() as u64 != inspect.counts.memory_count
+            || expected_ids != archived_ids
+        {
+            return Err(work_history_error(
+                "authenticated memory provenance does not cover the exact primary memory identities",
+            ));
+        }
+    }
+    Ok(Some(VerifiedMemoryRecords {
+        expectation: expected,
+        source_key_ids: source_auth.window_key_ids(),
+    }))
+}
+
+/// Read and authenticate the same bounded buffer that the caller will parse.
+/// Reopening a path after a separate hash pass can admit a substituted stream.
+fn read_manifest_bound_backup_asset(
+    backup_path: &Path,
+    relative_path: &str,
+    expected_hash: Option<&str>,
+    expected_size: Option<u64>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, DomainError> {
+    let path = safe_artifact_path(backup_path, relative_path, &mut Vec::new())
+        .ok_or_else(|| work_history_error("invalid authenticated backup asset path"))?;
+    let file = open_backup_artifact_for_read(&path)
+        .map_err(|_| work_history_error("authenticated backup asset cannot be opened"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| work_history_error("authenticated backup asset cannot be inspected"))?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(work_history_error("invalid authenticated backup asset size"));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| work_history_error("authenticated backup asset cannot be read"))?;
+    if bytes.len() as u64 > max_bytes
+        || expected_size != Some(bytes.len() as u64)
+        || expected_hash != Some(hash_bytes(&bytes).as_str())
+    {
+        return Err(work_history_error(
+            "backup asset differs from the authenticated manifest",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn valid_trust_history_schema(chunk: &BackupTrustHistory) -> bool {
@@ -17958,7 +18092,7 @@ mod tests {
         let mut reformatted = manifest_bytes.clone();
         reformatted.extend_from_slice(b"\n\n\n");
         fs::write(&created.manifest_path, reformatted).map_err(|e| e.to_string())?;
-        let verified = verify_backup_manifest(
+        let (verified, _) = verify_backup_manifest(
             Path::new(&created.workspace_path),
             backup_path,
             &manifest,

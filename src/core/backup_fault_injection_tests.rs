@@ -155,7 +155,17 @@ fn authenticated_incomplete_primary_records_fail_before_restore_side_effects() -
         backup_path: options.backup_path.clone(),
     })
     .map_err(|e| e.message())?;
-    assert_eq!(verified.status, "verified", "{:?}", verified.issues);
+    assert_eq!(verified.status, "failed", "{:?}", verified.issues);
+    assert_eq!(
+        verified
+            .issues
+            .iter()
+            .filter(|issue| backup_verification_issue_is_blocking(issue))
+            .map(|issue| issue.code.as_str())
+            .collect::<Vec<_>>(),
+        vec!["trust_history_invalid"],
+        "v2 provenance admission must reject the incomplete primary stream"
+    );
 
     for dry_run in [true, false] {
         options.dry_run = dry_run;
@@ -163,8 +173,7 @@ fn authenticated_incomplete_primary_records_fail_before_restore_side_effects() -
             .err()
             .ok_or("incomplete authenticated records were accepted")?;
         assert!(
-            error.message().contains("incomplete")
-                || error.message().contains("malformed records"),
+            error.message().contains("failed integrity verification"),
             "{}",
             error.message()
         );

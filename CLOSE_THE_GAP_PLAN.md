@@ -4592,3 +4592,21 @@ wrapper refused source admission before Cargo ran because all seven dependency
 repositories were unavailable; no Rust compiler, formatter, or RCH worker was
 available locally. This implementation does not close `.88` or establish its
 remaining evolved-recovery, scale, and release-stage acceptance.
+
+Public `backup verify` and restore previews now enforce the same provenance
+admission boundary before any destination writes. They authenticate each
+trust-history chunk, validate its scope and complete chunk population, and
+compare the exact carrier identities with the importer's canonical memory
+identities from manifest-bound primary bytes. An authenticated manifest and
+the right row count cannot conceal a substituted or incomplete carrier.
+Reads remain bounded and parse the same buffers whose hashes were checked.
+
+Real recovery reuses that immutable primary projection after checking the
+copied records, avoiding an additional full-corpus parse. A changed source
+key window falls back to preparing against the freshly admitted keys, retaining
+the existing native-trust cap when records-footer authentication is unavailable.
+Added public verification, preview, and real-restore rejection controls for
+malformed populations, scope/version/status changes, missing chunks, unsigned
+carriers, and stale family signatures, plus redacted-ID and legacy positives.
+These tests are also unexecuted here; the pinned verification attempt timed out
+during dependency materialization before Cargo or a remote worker ran.
