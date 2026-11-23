@@ -7018,6 +7018,7 @@ fn work_packet_candidate_conflict_evidence(
             evidence.insert(format!("dirty_path_overlap:{dirty_path}"));
         }
     }
+    let unowned_plans = work_packet_unowned_plans(brief);
     for risk in &brief.file_surface_risks {
         if !likely_paths
             .iter()
@@ -7030,12 +7031,20 @@ fn work_packet_candidate_conflict_evidence(
             .iter()
             .filter(|holder| current_agent_name != Some(holder.as_str()))
             .collect::<Vec<_>>();
-        let competing_bead_ids = risk
+        let has_competing_beads = risk
             .related_bead_ids
             .iter()
-            .filter(|bead_id| bead_id.as_str() != candidate.id)
-            .collect::<Vec<_>>();
-        if peer_reservation_holders.is_empty() && competing_bead_ids.is_empty() {
+            .any(|id| id != &candidate.id && !unowned_plans.contains(id.as_str()));
+        if !peer_reservation_holders.is_empty()
+            || risk.related_bead_ids.iter().any(|id| id != &candidate.id)
+        {
+            evidence.extend(work_packet_same_file_proof_debt_evidence(
+                risk,
+                likely_paths,
+                snapshot,
+            ));
+        }
+        if peer_reservation_holders.is_empty() && !has_competing_beads {
             continue;
         }
         if risk.severity == "high" {
@@ -7044,14 +7053,9 @@ fn work_packet_candidate_conflict_evidence(
         if !peer_reservation_holders.is_empty() {
             evidence.insert(format!("reservation_collision:{}", risk.path_pattern));
         }
-        if !competing_bead_ids.is_empty() {
+        if has_competing_beads {
             evidence.insert(format!("related_bead_collision:{}", risk.path_pattern));
         }
-        evidence.extend(work_packet_same_file_proof_debt_evidence(
-            risk,
-            likely_paths,
-            snapshot,
-        ));
     }
     evidence.into_iter().collect()
 }
@@ -7195,6 +7199,23 @@ fn work_packet_candidate_source_refs(candidate: &SwarmNextActionCandidate) -> Ve
     refs.into_iter().collect()
 }
 
+fn work_packet_unowned_plans(brief: &SwarmBriefReport) -> BTreeSet<&str> {
+    let pending = brief.beads.ready.iter().chain(&brief.beads.blocked);
+    let mut unowned_plans = pending
+        .clone()
+        .filter(|bead| bead.status == "open" && bead.assignee.is_none())
+        .map(|bead| bead.id.as_str())
+        .collect::<BTreeSet<_>>();
+    // Conflicting tracker observations can occur as a bead is being claimed.
+    for bead in pending
+        .filter(|bead| bead.status != "open" || bead.assignee.is_some())
+        .chain(&brief.beads.in_progress)
+    {
+        unowned_plans.remove(bead.id.as_str());
+    }
+    unowned_plans
+}
+
 fn work_packet_coordination(
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
@@ -7214,20 +7235,30 @@ fn work_packet_coordination(
     active_claims.sort();
     active_claims.dedup();
 
+    let unowned_plans = work_packet_unowned_plans(brief);
     let mut file_collisions = brief
         .file_surface_risks
         .iter()
-        .filter(|risk| {
-            !risk.reservation_holders.is_empty()
-                || !risk.related_bead_ids.is_empty()
-                || risk.severity == "high"
-        })
-        .map(|risk| SwarmWorkPacketFileCollision {
-            path_pattern: risk.path_pattern.clone(),
-            risk: work_packet_file_collision_risk(&risk.severity),
-            owners: risk.reservation_holders.clone(),
-            related_bead_ids: risk.related_bead_ids.clone(),
-            evidence: risk.evidence.clone(),
+        .filter_map(|risk| {
+            let related_bead_ids = risk
+                .related_bead_ids
+                .iter()
+                .filter(|id| !unowned_plans.contains(id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if risk.reservation_holders.is_empty()
+                && related_bead_ids.is_empty()
+                && risk.severity != "high"
+            {
+                return None;
+            }
+            Some(SwarmWorkPacketFileCollision {
+                path_pattern: risk.path_pattern.clone(),
+                risk: work_packet_file_collision_risk(&risk.severity),
+                owners: risk.reservation_holders.clone(),
+                related_bead_ids,
+                evidence: risk.evidence.clone(),
+            })
         })
         .collect::<Vec<_>>();
     file_collisions.sort();
@@ -16395,6 +16426,74 @@ mod tests {
     }
 
     #[test]
+    fn work_packet_distinguishes_unowned_plans_from_active_collisions() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![requested_candidate_bead("bd-ready", "Tests", "open", None)];
+        brief.beads.blocked = vec![requested_candidate_bead(
+            "bd-blocked",
+            "Tests after prerequisite",
+            "open",
+            None,
+        )];
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "tests/**",
+            &["bd-ready", "bd-blocked"],
+            &[],
+            &[],
+            &[],
+        )];
+        brief.file_surface_risks[0].severity = "medium".to_owned();
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-candidate",
+            "Restore green main static gates and compile/test unverified commits",
+            "beads_ready",
+            Some(0),
+        )]);
+
+        let gate = |brief: &SwarmBriefReport, snapshot: &SwarmNextActionSnapshot| {
+            SwarmWorkPacket::from_brief_and_next_action(brief, snapshot)
+                .claim_gate(Some("bd-candidate"))
+        };
+        let planned = gate(&brief, &snapshot);
+        assert!(planned.safe_to_claim, "{:?}", planned.unsafe_reasons);
+        assert!(planned.claim_command_action.is_some());
+
+        brief.beads.ready[0].assignee = Some("PeerAgent".to_owned());
+        let assigned = gate(&brief, &snapshot);
+        assert!(!assigned.safe_to_claim);
+        assert!(assigned.claim_command_action.is_none());
+        brief.beads.ready[0].assignee = None;
+        brief.beads.in_progress = vec![requested_candidate_bead(
+            "bd-ready",
+            "Tests",
+            "in_progress",
+            None,
+        )];
+        let active = gate(&brief, &snapshot);
+        assert!(!active.safe_to_claim);
+        assert!(active.claim_command_action.is_none());
+        brief.beads.in_progress.clear();
+
+        brief.file_surface_risks[0].reservation_holders = vec!["PeerAgent".to_owned()];
+        let reserved = gate(&brief, &snapshot);
+        assert!(!reserved.safe_to_claim);
+        assert!(reserved.claim_command_action.is_none());
+        brief.file_surface_risks[0].reservation_holders.clear();
+
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["tests/changed.rs".to_owned()];
+        let dirty = gate(&brief, &snapshot);
+        assert!(!dirty.safe_to_claim);
+        assert!(dirty.claim_command_action.is_none());
+        assert!(
+            dirty
+                .unsafe_reasons
+                .iter()
+                .any(|reason| reason == "dirty_path_overlap:tests/changed.rs")
+        );
+    }
+
+    #[test]
     fn work_packet_marks_same_file_proof_debt_as_coordination_blocker() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         brief.file_surface_risks = vec![same_file_proof_debt_risk(
@@ -16444,6 +16543,22 @@ mod tests {
                 .contains(&SAME_FILE_PROOF_DEBT_REASON.to_owned())
         );
         assert_eq!(gate.source_authority.source_test_verdict, "not_evaluated");
+
+        brief.beads.ready = vec![requested_candidate_bead(
+            "bd-2pos6.2",
+            "Source complete, proof owed",
+            "open",
+            None,
+        )];
+        brief.file_surface_risks[0].reservation_holders.clear();
+        let gate = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot)
+            .claim_gate(Some("bd-2pos6.3"));
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&SAME_FILE_PROOF_DEBT_REASON.to_owned())
+        );
     }
 
     #[test]
