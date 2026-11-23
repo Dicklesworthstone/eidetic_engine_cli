@@ -11698,9 +11698,13 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
         assert_eq!(
             rebuilt.status,
-            crate::core::index::IndexRebuildStatus::Success
+            crate::core::index::IndexRebuildStatus::NoDocuments
         );
         assert_eq!(rebuilt.documents_total, 0);
+        assert!(rebuilt.errors.is_empty(), "{rebuilt:?}");
+        assert!(crate::core::index::index_generation_is_verified_empty(
+            &empty_index_dir
+        )?);
 
         let default_response = super::run_context_pack(&base_options)
             .map_err(|error| format!("default context pack failed: {error:?}"))?;
@@ -11762,6 +11766,7 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(rebuilt.documents_total, 1);
 
         include_options.persist_pack = false;
+        include_options.speed = crate::search::SpeedMode::Instant;
         let mixed = super::run_context_pack(&include_options).map_err(|error| error.to_string())?;
         let by_id: BTreeMap<_, _> = mixed
             .data
