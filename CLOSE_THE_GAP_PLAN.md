@@ -4484,9 +4484,9 @@ that mixed index, now tracked in `.92`.
 identity, recency, lexical cutoff ties, fallback admission, and hook status.
 The first tombstone unit stopped at an incorrect setup assertion. The
 corrected fixture verifies that a successful empty publication reports
-`NoDocuments` and writes a genuine empty generation. Its first remote
-retry exhausted the worker's build filesystem before execution, so the
-fixture remains in the test-gate backlog.
+`NoDocuments` and writes a genuine empty generation. The locked pinned
+retry at `e07bf74e3` executed the corrected test with one pass and zero
+failures.
 
 #### Remaining qualification
 
@@ -4499,8 +4499,16 @@ fixture remains in the test-gate backlog.
   twelve omitted. The expiry control changed selection and identity at the
   validity boundary, and the store bytes and index generation remained
   stable during read-only retrieval.
-- [ ] Complete `.91` with verified hybrid retrieval and release-stage
-  registration after the CLI edit-scope collision clears.
+- [x] Execute the verified-hybrid selection arm at `e07bf74e3`. The
+  fixture returned 22 hybrid hits with a 20-way lexical tie. Twelve
+  explicit-time processes agreed on one decision vector. In a separate
+  synchronized run, twelve fresh live processes agreed within one
+  reported recency minute. The broader 16-process live sample kept one
+  ordered selection, omissions, hash and rendered text across three
+  recency minutes. Score changes aligned with those minute boundaries,
+  and source bytes remained stable.
+- [ ] Register `.91` in the release-stage inventory after the CLI
+  edit-scope collision clears.
 - [x] Run the `.80` reinstall cycle on the standalone build for Claude Code
   and Codex. Each status command reported four duplicate events, each
   with two EE commands. Installation preserved all four custom hooks per
@@ -4509,12 +4517,20 @@ fixture remains in the test-gate backlog.
   commands. Duplicate totals currently appear in message text.
 - [ ] Finish `.80` with machine-readable per-event duplicate counts and
   the full release-stage audit.
+- [x] Execute `.81`'s strict root and fuzz audit and the three stale-lock
+  controls at `e07bf74e3`. Both locks remained unchanged. The same
+  source-built CLI quarantined two abandoned staging directories,
+  preserved three fresh or live controls, and restored the original
+  payload on undo.
+- [ ] Qualify staging diagnostics and reversible repair with a current
+  native artifact. The native cache still contains 414 empty staging
+  directories.
 - [ ] Qualify `.88` with exact-candidate real CASS, evolved authenticated
   restore, admission parity, write-cost slope, and generation retention.
 - [ ] Fix `.92` on the direct search surface. The known-red fixture rebuilds
   a mixed index and checks the exact retired docId alongside the live one.
-- [ ] Complete `.75` with the corrected fixture verdict, existing
-  formatting debt, and the remaining suite at one source revision.
+- [ ] Complete `.75` with the existing formatting debt and the
+  remaining suite at one source revision.
 - [ ] Qualify the embedder upgrade in `bd-xayfm` with measured parity. On
   identical admitted local model bytes, `ee model fetch embedding-default`
   minted a receipt with no download and reduced median preparation from
