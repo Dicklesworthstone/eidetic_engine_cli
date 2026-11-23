@@ -2782,11 +2782,8 @@ pub fn review_feedback_quarantine(
     }
     if options.dry_run {
         if !options.reject {
-            require_current_memory_outcome_revision(
-                &connection,
-                &row.target_type,
-                &row.target_id,
-            )?;
+            let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
+            validate_quarantined_feedback_target(&connection, &feedback_input, &event_id)?;
         }
         return Ok(outcome_quarantine_review_report(
             &prepared,
@@ -2811,28 +2808,7 @@ pub fn review_feedback_quarantine(
         ));
     }
 
-    let event_id = row
-        .proposed_event_id
-        .clone()
-        .unwrap_or_else(generate_feedback_event_id);
-    let feedback_input = CreateFeedbackEventInput {
-        workspace_id: row.workspace_id.clone(),
-        target_type: row.target_type.clone(),
-        target_id: row.target_id.clone(),
-        signal: row.signal.clone(),
-        weight: row.weight,
-        source_type: row.source_type.clone(),
-        source_id: Some(row.source_id.clone()),
-        reason: row.event_reason.clone(),
-        evidence_json: row.evidence_json.clone(),
-        session_id: row.session_id.clone(),
-    };
-    if !quarantined_feedback_hash_matches(&event_id, &feedback_input, &row.raw_event_hash)? {
-        return Err(DomainError::PolicyDenied {
-            message: format!("quarantined feedback payload hash mismatch for {}", row.id),
-            repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
-        });
-    }
+    let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
     let summary = release_feedback_quarantine_audited(
         &connection,
         &row,
@@ -3102,15 +3078,41 @@ fn reject_feedback_quarantine_audited(
         })
 }
 
-fn release_feedback_quarantine_audited(
-    connection: &DbConnection,
+fn quarantined_feedback_event(
     row: &StoredFeedbackQuarantine,
-    event_id: &str,
+) -> Result<(String, CreateFeedbackEventInput), DomainError> {
+    let event_id = row
+        .proposed_event_id
+        .clone()
+        .unwrap_or_else(generate_feedback_event_id);
+    let feedback_input = CreateFeedbackEventInput {
+        workspace_id: row.workspace_id.clone(),
+        target_type: row.target_type.clone(),
+        target_id: row.target_id.clone(),
+        signal: row.signal.clone(),
+        weight: row.weight,
+        source_type: row.source_type.clone(),
+        source_id: Some(row.source_id.clone()),
+        reason: row.event_reason.clone(),
+        evidence_json: row.evidence_json.clone(),
+        session_id: row.session_id.clone(),
+    };
+    if !quarantined_feedback_hash_matches(&event_id, &feedback_input, &row.raw_event_hash)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!("quarantined feedback payload hash mismatch for {}", row.id),
+            repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
+        });
+    }
+    Ok((event_id, feedback_input))
+}
+
+/// Review releases the held observation, not its historical authorization.
+/// Callers publishing feedback must hold the same transaction as these reads.
+fn validate_quarantined_feedback_target(
+    connection: &DbConnection,
     feedback_input: &CreateFeedbackEventInput,
-    actor: Option<&str>,
-) -> Result<QuarantineReviewSummary<'static>, DomainError> {
-    let audit_id = generate_audit_id();
-    let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
+    event_id: &str,
+) -> Result<Option<(String, crate::db::CreateLearningObservationInput)>, DomainError> {
     let learning_observation = crate::core::learn::learning_observation_for_feedback(
         feedback_input,
         event_id,
@@ -3121,6 +3123,46 @@ fn release_feedback_quarantine_audited(
             "Inspect the preserved evidence before releasing this quarantine row.".to_owned(),
         ),
     })?;
+    // Typed learn envelopes can target external experiment IDs. A document
+    // merely cited as evidence does not select that lane, and a live native
+    // candidate always retains its current workspace ownership.
+    let external_experiment = feedback_input.target_type == "candidate"
+        && learning_observation.is_some()
+        && connection
+            .get_curation_candidate_workspace_id(&feedback_input.target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query candidate target: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .is_none();
+    if external_experiment {
+        resolve_external_outcome_workspace(connection, Some(&feedback_input.workspace_id))?;
+    } else {
+        resolve_target_workspace(
+            connection,
+            &feedback_input.target_type,
+            &feedback_input.target_id,
+            Some(&feedback_input.workspace_id),
+            false,
+        )?;
+    }
+    require_current_memory_outcome_revision(
+        connection,
+        &feedback_input.target_type,
+        &feedback_input.target_id,
+    )?;
+    Ok(learning_observation)
+}
+
+fn release_feedback_quarantine_audited(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    event_id: &str,
+    feedback_input: &CreateFeedbackEventInput,
+    actor: Option<&str>,
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
+    let audit_id = generate_audit_id();
+    let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
     connection
         .with_transaction(|| {
             // The caller's pending row may predate a competing review. Claim
@@ -3129,6 +3171,19 @@ fn release_feedback_quarantine_audited(
             if !connection.update_feedback_quarantine_status(&row.id, "released", actor, None)? {
                 return already_reviewed_feedback_quarantine_summary(connection, row, "release");
             }
+            // Evidence admission and native target ownership can change while
+            // feedback is held. Recheck authoritative rows after writer
+            // acquisition; failure must also roll back the review claim.
+            let learning_observation = validate_quarantined_feedback_target(
+                connection,
+                feedback_input,
+                event_id,
+            )
+            .map_err(|_| crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Execute,
+                message: "Quarantined feedback target is no longer admitted in its original workspace."
+                    .to_owned(),
+            })?;
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             // Admission releases the original observation; it does not grant
@@ -5175,6 +5230,7 @@ pub fn detect_regime_shift(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::path::Path;
 
     use asupersync::Outcome;
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
@@ -5191,13 +5247,15 @@ mod tests {
         CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED,
         HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
-        OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineSummary,
-        OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, SPRT_QUARANTINE_CODE,
+        OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineReviewOptions,
+        OutcomeQuarantineSummary, OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus,
+        SPRT_QUARANTINE_CODE,
         cancel_kind_from_backend_reason, default_feedback_weight,
         feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
         generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
         outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
-        render_memory_trust_class_promotion_blocked_audit_details, validate_feedback_event_id,
+        render_memory_trust_class_promotion_blocked_audit_details, review_feedback_quarantine,
+        validate_feedback_event_id,
     };
     use crate::models::{AttemptFamilyMultiplicity, DomainError, ProcessExitCode, TrustClass};
     use crate::runtime::determinism::Deterministic;
@@ -9806,6 +9864,358 @@ mod tests {
             &1_usize,
             "only the second source-A event is quarantined",
         )
+    }
+
+    fn seed_quarantine_evidence(connection: &DbConnection) -> Result<String, String> {
+        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(997)).to_string();
+        let body = "The build failed because a required fixture was absent.";
+        connection
+            .insert_evidence_span(
+                &id,
+                &crate::db::CreateEvidenceSpanInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_owned(),
+                    session_id: OUTCOME_TEST_SESSION_ID.to_owned(),
+                    memory_id: None,
+                    producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                    cass_span_id: "quarantine-evidence-source".to_owned(),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: body.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let span = connection
+            .get_evidence_span(&id)
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence fixture")?;
+        let session = connection
+            .get_session(OUTCOME_TEST_SESSION_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence session fixture")?;
+        assert!(span.is_direct_pack_admitted_for_session(OUTCOME_TEST_WORKSPACE_ID, &session));
+        Ok(id)
+    }
+
+    fn queue_native_feedback_quarantine(
+        database: &Path,
+        target_type: &str,
+        target_id: &str,
+        evidence_json: Option<String>,
+    ) -> Result<StoredFeedbackQuarantine, String> {
+        let mut options =
+            native_rule_outcome_options(database, "harmful", "fb_00000000000000000000000620");
+        options.target_type = target_type.to_owned();
+        options.target_id = target_id.to_owned();
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        options.harmful_per_source_per_hour = 1;
+        options.reason = Some("private-feedback-detail".to_owned());
+        options.evidence_json = evidence_json;
+        assert_eq!(
+            record_outcome(&options)
+                .map_err(|error| error.message())?
+                .status,
+            OutcomeRecordStatus::Recorded
+        );
+        options.event_id = Some("fb_00000000000000000000000621".to_owned());
+        let held = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(held.status, OutcomeRecordStatus::Quarantined);
+        let quarantine_id = held
+            .quarantine
+            .and_then(|summary| summary.id)
+            .ok_or("quarantine id")?;
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let row = connection
+            .get_feedback_quarantine(&quarantine_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("pending quarantine")?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(row)
+    }
+
+    #[test]
+    fn quarantine_release_rechecks_evidence_admission_and_provenance() -> TestResult {
+        for invalidation in ["withdrawn", "session_scope", "content_drift"] {
+            let (dir, database) = seed_outcome_database("ee-quarantine-evidence-admission")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let evidence_id = seed_quarantine_evidence(&connection)?;
+            let held = queue_native_feedback_quarantine(
+                &database,
+                "evidence",
+                &evidence_id,
+                Some(r#"{"privateFeedback":"preserved-evidence"}"#.to_owned()),
+            )?;
+            let mut review = OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id: &held.id,
+                reject: false,
+                actor: Some("evidence-reviewer"),
+                dry_run: true,
+            };
+            let before_preview = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                review_feedback_quarantine(&review)
+                    .map_err(|error| error.message())?
+                    .status,
+                "dry_run"
+            );
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before_preview
+            );
+
+            match invalidation {
+                "withdrawn" => {
+                    connection
+                        .with_transaction_error(|| {
+                            connection.withdraw_cass_evidence_in_current_snapshot(
+                                OUTCOME_TEST_WORKSPACE_ID,
+                                &evidence_id,
+                                "Withdraw obsolete transcript evidence.",
+                                Some("evidence-reviewer"),
+                                false,
+                            )
+                        })
+                        .map_err(|error| format!("{error:?}"))?;
+                }
+                "session_scope" => {
+                    connection
+                        .insert_workspace(
+                            OUTCOME_OTHER_WORKSPACE_ID,
+                            &CreateWorkspaceInput {
+                                path: dir.path().join("other").to_string_lossy().into_owned(),
+                                name: None,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE sessions SET workspace_id = '{OUTCOME_OTHER_WORKSPACE_ID}' WHERE id = '{OUTCOME_TEST_SESSION_ID}'"
+                        ))
+                        .map_err(|error| error.to_string())?;
+                }
+                _ => {
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE evidence_spans SET excerpt = 'private-stale-evidence' WHERE id = '{evidence_id}'"
+                        ))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                review.dry_run = dry_run;
+                let error = review_feedback_quarantine(&review)
+                    .err()
+                    .ok_or("historical admission cannot authorize a release")?;
+                assert!(!error.message().contains("private-stale-evidence"));
+                assert!(!error.message().contains("private-feedback-detail"));
+                assert!(!error.message().contains("preserved-evidence"));
+                assert_eq!(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?,
+                    before,
+                    "{invalidation} must retain the pending row and all evidence without learning"
+                );
+            }
+            assert_eq!(
+                connection
+                    .get_feedback_quarantine(&held.id)
+                    .map_err(|error| error.to_string())?,
+                Some(held.clone())
+            );
+            review.reject = true;
+            assert_eq!(
+                review_feedback_quarantine(&review)
+                    .map_err(|error| error.message())?
+                    .status,
+                "rejected",
+                "withheld evidence must remain reviewable for rejection"
+            );
+            assert!(
+                connection
+                    .get_feedback_event(held.proposed_event_id.as_deref().ok_or("held event")?)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn quarantine_release_rechecks_native_ownership_even_with_a_learning_envelope() -> TestResult {
+        for (target_type, target_id, table, learning_envelope) in [
+            ("session", OUTCOME_TEST_SESSION_ID, "sessions", false),
+            ("pack", OUTCOME_OWNERSHIP_PACK_ID, "pack_records", false),
+            (
+                "candidate",
+                OUTCOME_OWNERSHIP_CANDIDATE_ID,
+                "curation_candidates",
+                false,
+            ),
+            (
+                "candidate",
+                OUTCOME_OWNERSHIP_CANDIDATE_ID,
+                "curation_candidates",
+                true,
+            ),
+        ] {
+            let (dir, database) = seed_outcome_database("ee-quarantine-current-ownership")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_persisted_outcome_targets(&connection)?;
+            connection
+                .insert_workspace(
+                    OUTCOME_OTHER_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: dir.path().join("other").to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let evidence = learning_envelope.then(|| {
+                serde_json::json!({
+                    "schema": crate::models::EXPERIMENT_OUTCOME_SCHEMA_V1,
+                    "experimentId": target_id,
+                    "outcomeId": "native-rule-feedback",
+                    "closedAt": "2026-09-20T00:00:00Z",
+                    "status": "unsafe",
+                })
+                .to_string()
+            });
+            let held =
+                queue_native_feedback_quarantine(&database, target_type, target_id, evidence)?;
+            connection
+                .execute_raw(&format!(
+                    "UPDATE {table} SET workspace_id = '{OUTCOME_OTHER_WORKSPACE_ID}' WHERE id = '{target_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let mut review = OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id: &held.id,
+                reject: false,
+                actor: Some("ownership-reviewer"),
+                dry_run: true,
+            };
+            for dry_run in [true, false] {
+                review.dry_run = dry_run;
+                assert!(review_feedback_quarantine(&review).is_err());
+                assert_eq!(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?,
+                    before,
+                    "{target_type} ownership must be checked against the live native row"
+                );
+            }
+            connection
+                .execute_raw(&format!(
+                    "UPDATE {table} SET workspace_id = '{OUTCOME_TEST_WORKSPACE_ID}' WHERE id = '{target_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                review_feedback_quarantine(&review)
+                    .map_err(|error| error.message())?
+                    .status,
+                "released",
+                "current native targets remain releasable"
+            );
+            let accepted = connection
+                .get_feedback_event(held.proposed_event_id.as_deref().ok_or("held event")?)
+                .map_err(|error| error.to_string())?
+                .ok_or("released feedback")?;
+            assert_eq!(accepted.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
+            assert_eq!(accepted.target_id, target_id);
+            assert_eq!(accepted.evidence_json, held.evidence_json);
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn quarantine_release_rechecks_after_claim_and_preserves_completed_receipts() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-quarantine-admission-transaction")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let evidence_id = seed_quarantine_evidence(&connection)?;
+        let held = queue_native_feedback_quarantine(&database, "evidence", &evidence_id, None)?;
+        // Revoke admission at the claim boundary. Only an authoritative read
+        // inside that transaction can see it, and refusal must undo both writes.
+        connection
+            .execute_raw(&format!(
+                "CREATE TRIGGER withdraw_evidence_on_review AFTER UPDATE OF status ON feedback_quarantine WHEN NEW.id = '{}' AND NEW.status = 'released' BEGIN UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = '{evidence_id}'; END",
+                held.id
+            ))
+            .map_err(|error| error.to_string())?;
+        let review = OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &held.id,
+            reject: false,
+            actor: Some("atomic-reviewer"),
+            dry_run: false,
+        };
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        assert!(review_feedback_quarantine(&review).is_err());
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "a failed admission check rolls back the claim, feedback and source change"
+        );
+        connection
+            .execute_raw("DROP TRIGGER withdraw_evidence_on_review")
+            .map_err(|error| error.to_string())?;
+        let released = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(released.status, "released");
+        assert!(released.changed);
+        connection
+            .with_transaction_error(|| {
+                connection.withdraw_cass_evidence_in_current_snapshot(
+                    OUTCOME_TEST_WORKSPACE_ID,
+                    &evidence_id,
+                    "Retain the accepted receipt after later source withdrawal.",
+                    Some("atomic-reviewer"),
+                    false,
+                )
+            })
+            .map_err(|error| format!("{error:?}"))?;
+        let accepted = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let replay = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(replay.status, "already_reviewed");
+        assert!(!replay.changed);
+        assert_eq!(replay.feedback_event_id, released.feedback_event_id);
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            accepted
+        );
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
