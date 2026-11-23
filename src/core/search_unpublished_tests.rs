@@ -106,9 +106,11 @@ impl Fixture {
             },
         )
         .unwrap();
-        let crate::core::memory::RememberOutcome::Created(report) = outcome else {
-            panic!("deferred write must create a memory");
-        };
+        let report = match outcome {
+            crate::core::memory::RememberOutcome::Created(report) => Some(report),
+            _ => None,
+        }
+        .expect("a first write without an idempotency key creates a memory");
         assert!(report.persisted);
         assert_eq!(report.index_status, "queued");
         assert!(report.index_job_id.is_some());

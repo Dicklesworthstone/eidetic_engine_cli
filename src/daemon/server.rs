@@ -9676,7 +9676,7 @@ mod tests {
             assert!(!handoff.has_cached_local_embedder());
             assert_eq!(
                 handoff.report.embed_backend,
-                crate::models::EmbedBackend::HashFallback,
+                crate::models::EmbedBackend::HashFallback
             );
             assert_eq!(
                 handoff.report.source_mode_applied,
