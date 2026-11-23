@@ -930,7 +930,10 @@ mod tests {
         assert_eq!(recency_unix_minute(early), -1);
         assert_eq!(recency_unix_minute(late), -1);
         assert_eq!(recency_unix_minute(instant(179, 999_999_999)), cohort);
-        assert_eq!(recency_age_days(early, cohort), recency_age_days(late, cohort));
+        assert_eq!(
+            recency_age_days(early, cohort),
+            recency_age_days(late, cohort)
+        );
         assert!(recency_age_days(late, cohort + 1) > recency_age_days(late, cohort));
         assert_eq!(recency_age_days(instant(180, 0), cohort), 0.0);
     }
