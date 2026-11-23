@@ -9,7 +9,11 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-11-20 end-to-end reality check (§22, read this first).** Three realities
+> **Current assessment (2026-11-22, §23).** The published `v0.19.0` native
+> memory loop passes its smoke checks. The exact-candidate release and
+> scale-qualified recovery evidence required by §15 remains open.
+>
+> **2026-11-20 end-to-end reality check (§22, historical).** Three realities
 > diverge sharply at `HEAD = 60f756136969e0c6b9c55f52037b448e9afc1705`:
 > - **Code Reality (Substantial):** ~1.32M LOC of Rust across `src/` with `0`
 >   `todo!()`/`unimplemented!()` placeholders, `148/148` documented CLI surfaces
@@ -4217,3 +4221,202 @@ Rust compilation and behavioral execution are not claimed. Run the affected
 `daemon_shutdown_worker_timeout_retains_write_actor_until_retry` through the
 pinned RCH lane before closing the associated Beads. The 10,000-memory daemon
 speedup target remains unmeasured.
+
+## 23. Comprehensive reality check — 2026-11-22
+
+The public `v0.19.0` release is a usable local memory product. It earns that
+assessment on the five-job loop with bounded fixtures, including repeatable
+retrieval and useful CASS evidence. Part III remains open. The release evidence
+does not establish a full-size recovery, the documented performance envelope,
+or the complete same-SHA release gate in §15.
+
+The review started at `657f10728`. Concurrent work advanced `main` to
+`bd869c07c` during the review, 44 commits beyond `v0.19.0` (`7869e47e8`).
+Runtime results below name their binary. The PATH binary on this Mac still
+reports `0.14.2` with no Git commit. The native release was downloaded to a
+scratch directory and verified against the checksum sidecar and the repository's
+`signing/minisign-epoch2.pub`. The published archive reports a clean release
+build at `7869e47e8bf720cc1131e75b025ad5b0fd48b791`.
+
+### 23.1 Executed evidence
+
+| Check | Observed result | Boundary |
+|---|---|---|
+| `scripts/verify.sh --static-only` | 64/64 attempted stages passed and four were gated off in the first run. The previous actionability and open-coded-success reds cleared. The strict root and fuzz lockfile audit passed. A repeat at `bd869c07c` failed its first gate with 39 Rustfmt diff regions in 14 files. | The checkout advanced during the first run. The coverage stage counts 148 documented surfaces with ledger evidence and zero stub/missing surfaces. It does not rerun those 148 runtime contracts. |
+| Pinned RCH library tests at `657f10728` | `cargo test --locked --lib -- --test-threads=2` reached remote compilation, then the wrapper terminated at 1,800 seconds with exit 124 and an absent remote terminal marker. | `capacity_or_timeout`. The captured output never reached the Rust test runner. |
+| Pinned RCH Clippy at `bd869c07c` | The APFS export base and an explicit native release admission binary let the job reach remote Cargo. The worker's SSH command reached its 900-second cap after dependency processing and output `RCH-E104`. | `rch_environment_failure` with `rch_verify_remote_transport_timeout`. There was no source-level Clippy verdict. |
+| `scripts/release_binary_probe.sh` on public `v0.19.0` ARM64 macOS | 14/14 passed with the neural precondition met. Covered init, remember, search, pack, why, native-rule inclusion, unrelated-query abstention, extractive ask, parallel determinism, fallback, journal-to-curation Learn, and concurrent durable writes. | One native release artifact and the probe's small corpus. |
+| Near-tied candidates after the probe's writer phase | Twelve sequential `pack --read-only --speed instant` calls at the same 1,000-token budget produced three hashes (2/7/3) and swapped a selected lexical item. The primary database digest and the reported request, reference-time, scoring, configuration, and store scope digests stayed equal. With a single explicit `--as-of`, all twelve hashes matched. | The two arms exercise live and explicitly time-bounded retrieval. They establish an observable live divergence, while the first scoring or selection divergence needs attribution. The fixed-time responses still differed in optional elapsed timing. |
+| Public backup, verify, side-path restore, and search | 16 memory records, 158 audit records, 109 inventoried tables, zero uncovered required rows in this store, verified archive, completed restore, three restored search hits. The store had already persisted a pack selecting a native rule. | The backup reports coverage against this populated store. Untouched tables and a large corpus with live-admitted CASS evidence need separate recovery proof. |
+| Actual `cass` with `v0.19.0` | The checksum-verified `cass` 0.8.0 pin indexed 308/308 generated conversations and 3,780 messages, with 122 `cargo publish` hits. `ee` imported all 308 sessions and 4,009 spans via the documented explicit binary path. It reported 988 admitted and 3,021 quarantined spans. Index rebuild and a live pack returned 57 typed evidence items. | One pack query on the full corpus. A 0.11.0 portability arm used the version-drift override and imported 12/12 sessions with 154 spans. Full judged-corpus qualification through the real connector still needs the named candidate stage. |
+| Authenticated recovery of the 154-span real-CASS store | The default backup reported `backup_evidence_admission_reduced`, retaining 28 admitted spans and recording the 126 quarantined spans as denied. `--redaction none` preserved both eligibility populations, verified and restored, and selected the same five evidence IDs in the same order with provenance. | Applies to the isolated sample and one query. The coverage inventory explicitly distinguishes row recovery from evidence eligibility. |
+| Authenticated recovery of the full 4,009-span real-CASS store | `--redaction none` preserved all 988 admitted and 3,021 quarantined spans in the coverage inventory. The archive verified and restored. Both live packs selected 57 evidence items, with 55 IDs in common. A matched explicit `--as-of` arm was repeatable within each store and still selected 55 common IDs out of 57. The explanations changed for 48 of those 55 items, including printed relevance changes. | Exact selection parity failed on this query after restore and index rebuilding. The stable admission inventory does not establish identical retrieval behavior. `.88` must trace the first selection divergence and qualify the promised recovery contract. |
+| Advisory preflight, default MCP manifest, explicit Maintain preview, and Ask evaluation | The release emitted `ee.preflight.guard.v1` with exit 0 and three relevant memory matches, `ee.mcp.manifest.v1` with the disabled adapter gap, and one successful `decay_sweep` preview. `ee eval run ask_v1 --json` passed all seven judged cases. | The Ask result covers its committed fixture. The maintenance preview reported no durable mutation. The candidate must separately exercise lifecycle writes and the feature-enabled MCP adapter. |
+| `probe.py --target-records 4000 --queries all --enforce --enforce-latency` on public `v0.19.0` | Exit 1. Imported 308 sessions and 4,009 spans in 55.356 s, with 988 admitted and 3,021 quarantined. Pack p50 0.755 s and search p50 0.409 s. Scenario hit@5 38/40, judged pack-scenario precision 0.6056, learn proposal precision 1.00 and recall 0.8333, 3/3 unrelated asks abstained. Six of seven enforced arms passed. | Uses the CASS emulator by design. The failing pack floor counted four exact labeled core examples against a requirement of 20. Single-scale write p50 of 0.851 s provides no write-cost slope. |
+| Public distribution | GitHub, Homebrew, and crates.io report `0.19.0`. The release lists six archives with checksum and minisign sidecars, two installers, and aggregate checksum and signature files. All four Homebrew checksums match the verified signed aggregate. The registry package matches its registry checksum and declares the same source SHA. | No published `release-probe-{target}.json`, release manifest, SLSA, or Sigstore bundle appears in the 22-asset inventory. Native execution in this review covered Apple Silicon. |
+| Local workflow and DSR configuration | `act -l` enumerated the static, Clippy, and Windows cross-check jobs. Docker could not connect to its local daemon. `dsr quality --tool eidetic_engine_cli --dry-run` reported no configured checks. The installed DSR registry lists three targets against the six archives in the public release. | No local workflow or full DSR qualification verdict. `.7` owns the hermetic release configuration. Its historical wording about enabling a workflow is superseded by the standing DSR-only policy. |
+
+The structural checks include the retained coverage denominator. The invocation
+audit found 37 baselined E2E scripts out of 210, down from 41. The closure audit
+reports 41 premature closures and 43 reopened beads over 4,922 closed records.
+These are signals for `.83` to adjudicate with executions. The code spot checks
+traced actual dispatch through `src/cli/mod.rs`, the write owner in `src/db/mod.rs`,
+Frankensearch in `src/core/search.rs`, live evidence admission in `src/cass/import.rs`
+and `src/core/context.rs`, curation apply in `src/core/curate.rs`, and authenticated
+recovery in `src/core/backup.rs`. A `todo!`/`unimplemented!` scan under `src/`
+returned zero calls, with the known PPR degradation emitter serving as a
+positive control for implemented abstention paths.
+
+`vision-coverage.sh` derives `behavioral_evidence.last_verified_commit` from
+`EE_VERIFICATION_SOURCE_COMMIT` or the checkout's `HEAD`. Its per-surface
+witnesses identify caller files and reachability. The candidate gate needs
+executed same-SHA receipts for those witnesses under `.76` and `.83`.
+
+### 23.2 Vision checklist and ownership
+
+| Goal and source | Current status | Remaining proof and owner |
+|---|---|---|
+| Local-first, single CLI, no daemon in the main loop (AGENTS walking skeleton) | Working on the native release. | Exact current source and cross-platform builds under `.75`, `.76`, `.7`. |
+| Durable manual capture and safe local concurrency (Plan §4.8, §10) | Working on the native smoke population. Current source extends idempotent recovery and shutdown. | Test current write-owner cleanup, retry publication, restart and contention with real persisted rows under `.75`, `.85`, `.76`. |
+| CASS import, typed spans, admission, and evidence recall (README CASS, Plan §4.3 and §15) | The pinned real adapter imported and packed from the 4,009-record corpus. Full-judgment release proof is partial. | Run the judgment suite with the real connector after index repair and evolved restore, then retain exact candidate identity and output. New bridge work below. |
+| Hybrid retrieval, strict relevance, extractive answers and abstention (README Design Philosophy, Plan §13) | Working on the smoke and scenario-family measures. Exact span quality at scale is unproven. | Separate true span correctness from dilution by unlabeled copies, bind judgments to exact provenance, and keep unrelated negative controls. `.11` and `.12` are historical proof, with new scale work below. |
+| Budgeted deterministic packs, provenance, and `why` (README pack, Plan §§4 and 19) | Typed items and several fixed release snapshots worked. Default-time instant packing diverged on a near tie. | Trace the effective decision snapshot and prove both live and explicit-time stability through the public CLI. Re-run exact North Stars and token-budget witnesses under `.76`. |
+| Evidence-gated learning and audited maintenance (Plan §§4.7, 16–18) | Working on journal-to-learn and CASS proposal fixtures. Evolved-corpus maintenance is partial. | Include curation and decay safety, evidence admission, applied consolidation, and retrieval after recovery. `bd-1oep7` retains the historical Maintain proof. `.85` and the candidate gate repeat current execution. |
+| Local-first degradation, privacy, and advisory risk (AGENTS advisory policy, Plan §§4.5–4.6 and 22) | Offline model fallback passed. CASS admission counters and typed provenance passed on bounded inputs. | Repeat source, seal, redaction, and scope tests on the candidate. Carry a fail-open hook control and test public fields without matching echoed query text. `.75`, `.80`, `.85`. |
+| Derived search/graph assets, authenticated recovery (README Backup & Restore, §15 of this bridge) | Row and admission coverage passed on the full CASS sample. Small-sample selection parity passed, while full-corpus selection parity failed on the tested query. | Populate each durable family needed by the five jobs, trace changes in ranking/index and stable identities after restore, and report any dropped admission or unsupported row. `.88`. |
+| Dependency boundaries and governed CLI contracts (AGENTS Rails, README Architecture and JSON) | Static forbidden-dependency checks passed including strict fuzz lock. Published version names `tru` 0.2.4 and the manifest's feature population. | Full runtime contract sweep and matrix parity under `.77`, `.85`, `.76`. Pinned PPR remains explicitly unavailable under `.82`. |
+| Operator usability, graph, hooks, and optional adapters (README integrations and Limitations) | Graph and adapters have real handlers. Unix mesh evidence remains on the accepted two-host boundary. | Current hook migration, staging recovery and doctor reachability remain `.80`, `.81`, `.83`, `.85`. Live independent-operator and vendor IdP exercise retain their stated boundary. |
+| Reproducible performance (Plan §28 and ADR 0052) | Cold sampled latency met the probe's 2 s bound. It did not qualify the 5k-memory budget, 10k paired daemon gain, or multi-scale write trend. | Use the paired 10k proof in `.79`, cold-start owner `bd-xayfm`, and scale verification below. Keep historical README rows labeled as historical. |
+| Releasable, verifiable candidate (README installation and this bridge §15) | Shipped native binary passed the release smoke. Exact candidate, DSR workflow and public proof assets remain incomplete. | `.75`, `.76`, `.7`, `.20`, `.27`, `.21`, `.22` and the release admission work below. |
+
+### 23.3 What completing the pre-audit backlog would miss
+
+The pre-audit tracker showed 16 open, four in progress, 31 deferred, and 4,922
+closed, with ten dependency-blocked issues. Most live gaps already have owners. Four flags in
+the preceding audit were too pessimistic for the current tree. The lexical
+contract tests are active, strict fuzz lock checking is wired, capabilities
+derive TOON metadata from the dependency contract, and populated capsule code
+exists. The latter three still need their own promised execution evidence.
+
+The missing pack-proof work is visible across `scripts/real_shape_corpus/`
+and `tests/fixtures/real_shape_cass/`. `generate.py::vary` strips all exact
+labels before inserting noisy turns. `probe.py::evaluate_enforced_metrics`
+already uses scenario families for search but uses original-only hit counts
+for the pack floor. The previous audit measured the same 0.0375 original-only
+recall@5 at 4,009 records. Current output therefore establishes a failing
+release check and a scale-dependent denominator. It does not establish a new
+ranking regression. Simply accepting any same-scenario span would also pass
+irrelevant chatter. The fix requires record-level judgments projected onto
+copies, with separate counts for exact concept, scenario, and distractor.
+
+The closed `.50` describes a required real-CASS gate with repeatable retention
+and recovery. Current `scripts/verify.sh` only wires the binary-free probe
+self-test, and `scripts/release_binary_probe.sh` only executes the bounded
+release smoke. The authored shapes and emulator remain valuable fast controls.
+Neither demonstrates a complete end-to-end run with the real connector,
+preserved admission on restore, or the cross-scale write cost. Those gaps had
+historical coverage on `.50` but no active implementation or execution owner.
+
+The candidate capsule's `requiredStages` can come from the manifest being
+validated, stage commit is optional, and candidate assembly accepts reported
+counts without deriving them from the retained stage logs. The staged archive
+verifier makes the capsule optional and, when supplied, passes just an expected
+commit to `--verify-capsule`. It does not pass the binary digest or require log
+availability. Its capture predicate checks the aggregate verdict and a minimum
+number of rows, without verifying each required check ID and result. Source
+search covered capsule population, verification, release-directory calls and
+the publish checklist. `.76` owns candidate execution, with no separately
+owned regression test for the independent release policy or archive binding.
+
+The live near-tie case has no active owner in the pre-audit tracker. The
+previous determinism contract and search/pack concurrency beads `.1`–`.3` are
+closed. The normal release smoke measures its parallel determinism before
+adding the later concurrent writer population that exposed this case. The
+remaining work is to reproduce from a fixed fixture, detect the first
+retrieval, clock, or pack-score divergence, and check semantic contract
+stability independently from elapsed-time telemetry. Preserve honest expiry
+behavior and bind any decision-relevant clock input to the replayable identity.
+`hash_pack_reference_time` in `src/core/context.rs` hashes only `wall_clock`
+in the default case, while the search and context scoring paths can sample
+`Utc::now`. This explains why the reported reference-time digest can stay
+equal across runs. Narrowing the cause of the item swap still requires scoring
+and admission traces.
+
+The README comparison also still calls Chroma and Qdrant vector-only. Both
+document hybrid retrieval. Include a source-backed comparison correction in
+the `.78` documentation sweep. [Chroma hybrid search](https://docs.trychroma.com/cloud/search-api/hybrid-search), [Qdrant hybrid search](https://qdrant.tech/documentation/search/hybrid-queries/).
+The same sweep should mark the hosted scratch-run instruction in
+`docs/testing-strategy.md` (Central Verification Runner) as historical and
+point readers at the local workflow path. The standing policy controls.
+
+### 23.4 Bridge and acceptance
+
+1. Preserve concept identity through corpus generation. Keep unique exact
+   locators for every variant, stable concept IDs, explicit noise and distractor
+   labels, and exact source-id/line bindings. Verify seed and order independence
+   with original, transformed equivalent, adjacent noise, and distractor arms.
+2. Make a single composed exact-candidate real-CASS lane. Populate an isolated
+   evolved corpus, pin and verify CASS, exercise the declared onboarding and
+   normal index action, evaluate usefulness and admission, and run before/after
+   restore parity for all five jobs. Measure actual cross-scale write cost and
+   bounded retention, and report when a required operation cannot execute.
+3. Trace the live pack's near-tie divergence under identical reported input
+   digests. Preserve score semantics and validity transitions. Add unit and
+   public-CLI controls for equal score, fixed reference, and genuinely changed
+   decision inputs across processes.
+4. Give release admission an independent policy and evidence sources. Derive
+   mandatory stages, shards, target profiles and allowed exceptions from the
+   candidate's checked-in authority. Bind stage receipts, lockfiles, logs,
+   binary and archive digests, and public probe identities to that commit. Make
+   the strict gate an actual DSR release prerequisite. Keep checksum-only
+   inspections explicitly diagnostic.
+5. Prove the new gates with negative controls, then qualify one immutable
+   candidate with `.75`–`.85` and the existing release blockers. Treat routine
+   cold-start and `.79` warm-latency measurements as separate workloads with
+   their own denominators. Retain deterministic functional parity and timing
+   samples. `.7` can stage only after the required proof. `.20` retains the
+   human publication decision. `.21` reconciles all advertised assets and
+   channels, then `.22` checks §15.
+
+### 23.5 Refinement and tracker wiring
+
+Three design passes changed the bridge. First, judgment identity follows the
+evidence span through corpus expansion, with noise near a positive span as a
+negative control. Second, the real-CASS qualification follows the full state
+transition from ingest and curation through authenticated restore and checks
+that admissible evidence still reaches the consumer. Third, release readiness
+uses an independently fixed stage inventory and ties qualification to each
+artifact's executable bytes. These changes let each proof count toward the
+same candidate while preserving the scope of fixtures, connector health and
+checksum validation.
+
+Five refinement passes covered the bridge and Beads.
+
+1. Traced every remaining checklist goal to a current owner or explicit
+   boundary. Kept the two-host mesh amendment and PPR's explicit upstream gap.
+2. Compared the new work against `.50`, `.76`, and `.85`. Kept the closed
+   evidence historical, reused the candidate rollup, and gave the missing
+   producer and release-admission work separate testable owners.
+3. Audited negative controls and denominators. Added original/variant
+   identity controls, restore admission checks, independent stage receipts,
+   and row-level archive and executable proof.
+4. Checked order and authority. The corpus grader and release-policy work can
+   proceed in parallel. Real-CASS evidence feeds strict admission. DSR-only
+   verification and the publication decision remain explicit in the tracker.
+5. Re-read the exported Beads, checked scope and acceptance criteria against
+   the bridge, and ran bounded graph validation. The dependency graph and
+   acceptance criteria held on this pass.
+
+| Bead | Responsibility | Blocking dependencies |
+|---|---|---|
+| `bd-reality-core-convergence-1azkt.86` | Exact-span judgment identity under corpus expansion and fixture controls | — |
+| `bd-reality-core-convergence-1azkt.87` | Independently fixed release policy and exact receipt, executable and archive evidence | — |
+| `bd-reality-core-convergence-1azkt.88` | Real-CASS, evolved restore, scale and retention execution | `.86` |
+| `bd-reality-core-convergence-1azkt.89` | Strict DSR admission and refusal tests | `.87`, `.88` |
+| `bd-reality-core-convergence-1azkt.90` | Live near-tie determinism and decision-snapshot contract | — |
+| `bd-reality-core-convergence-1azkt.91` | Public-CLI near-tie and temporal control tests | `.90` |
+| `bd-reality-core-convergence-1azkt.76` | Complete candidate qualification and capsule | `.75`, `.77`, `.78`, `.79`, `.85`, `.88`, `.89`, `.91` |
+
+The release staging task `.7` now records the DSR-only requirement directly.
+The new work reaches the existing `.22` Part III closeout through `.76` and
+`.7`. The active blocking graph reports zero cycles.
