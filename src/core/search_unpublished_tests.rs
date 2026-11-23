@@ -81,7 +81,7 @@ impl Fixture {
     #[cfg(unix)]
     fn remember_deferred(&self, content: &str) -> crate::core::memory::RememberMemoryReport {
         let database_path = self.root.join(".ee/ee.db");
-        let report = crate::core::memory::remember_memory_with_controls(
+        let outcome = crate::core::memory::remember_memory_with_controls(
             &crate::core::memory::RememberMemoryOptions {
                 workspace_path: &self.root,
                 database_path: Some(&database_path),
@@ -106,10 +106,13 @@ impl Fixture {
             },
         )
         .unwrap();
+        let crate::core::memory::RememberOutcome::Created(report) = outcome else {
+            panic!("deferred write must create a memory");
+        };
         assert!(report.persisted);
         assert_eq!(report.index_status, "queued");
         assert!(report.index_job_id.is_some());
-        report
+        *report
     }
 
     fn memory_with_kind(&self, number: u128, body: &str, kind: &str) -> String {

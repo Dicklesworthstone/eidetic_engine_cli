@@ -14198,8 +14198,10 @@ pub fn unrelated_context() -> u64 {{
                     .any(|entry| entry.code == "superseded_revision_filtered"),
                 !prior_visible,
             );
-            let diagnostics =
-                serde_json::to_string(&degraded).map_err(|error| error.to_string())?;
+            let diagnostics = serde_json::Value::Array(
+                degraded.iter().map(super::context_degradation_json).collect(),
+            )
+            .to_string();
             assert!(!diagnostics.contains("private-pack-quarantine"));
             assert!(!diagnostics.contains("authorityfallback release procedure"));
         }
