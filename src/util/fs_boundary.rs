@@ -512,8 +512,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bounded_canonicalization_limits_link_cycles_and_preserves_non_utf8_names() {
-        use std::os::unix::ffi::OsStringExt;
+    fn bounded_canonicalization_limits_link_cycles() {
         use std::os::unix::fs::symlink;
         let (temp, boundary) = fixture();
         symlink("cycle-b", temp.path().join("cycle-a")).unwrap();
@@ -523,6 +522,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("too many symbolic links"));
+    }
+
+    // APFS rejects the invalid UTF-8 fixture before canonicalization can run.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn bounded_canonicalization_preserves_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let (temp, boundary) = fixture();
         let file = temp.path().join(OsString::from_vec(vec![b'n', 0xff]));
         std::fs::write(&file, b"inside").unwrap();
         assert_eq!(boundary.canonicalize(&file).unwrap(), file);
