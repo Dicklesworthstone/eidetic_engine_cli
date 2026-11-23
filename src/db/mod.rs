@@ -34746,6 +34746,26 @@ impl DbConnection {
         rows.iter().map(stored_audit_from_row).collect()
     }
 
+    /// Read only reinforcement audits needed to recover one memory's original
+    /// publication obligation. Ordinary access/search/pack history must not be
+    /// decoded while a replay owns the writer fence.
+    pub(crate) fn list_memory_reinforcement_audits(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE workspace_id = ?1 AND target_type = 'memory' AND target_id = ?2 AND action = ?3 ORDER BY timestamp DESC, id DESC",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(memory_id.to_owned()),
+                Value::Text(audit_actions::MEMORY_REINFORCE.to_owned()),
+            ],
+        )?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+
     /// Read only the access clocks needed to revalidate one decay decision.
     /// Do not materialize the workspace's audit bodies while holding a writer.
     pub(crate) fn memory_access_audit_timestamps(
