@@ -4527,8 +4527,18 @@ failures.
 - [ ] Qualify staging diagnostics and reversible repair with a current
   native artifact. The native cache still contains 414 empty staging
   directories.
-- [ ] Qualify `.88` with exact-candidate real CASS, evolved authenticated
-  restore, admission parity, write-cost slope, and generation retention.
+- [x] Compare original and restored packs for 308 authored sessions
+  indexed by pinned CASS 0.8.0 on `3021755c6`. The import exceeded the
+  debug test budget after committing all 4,009 spans. The authenticated
+  archive verified and recovered all 988 admitted and 3,021 quarantined
+  spans. A longer restore completed after the first timed out. After
+  both index rebuilds, fixed-time packs matched on all 47 ordered
+  evidence IDs, scores, explanations, and provenance. A one-byte
+  change in a copied archive caused both verification and restore
+  to exit 5, and the rejected side path contained no database.
+- [ ] Finish `.88` with evolved mixed-family recovery, a bounded
+  import verdict, write-cost slope, generation retention, and the
+  named release stage.
 - [x] Fix `.92` on the direct search surface. At `3021755c6`, the public
   CLI returned the exact requested retired ID from a bounded read of
   the source snapshot after empty and mixed index rebuilds. The mixed
@@ -4537,7 +4547,9 @@ failures.
   published index generation and file hashes before and after search.
   With a verified neural model, strict semantic and strict hybrid
   searches returned the live ID. Best-effort hybrid returned both IDs
-  and marked the retired hit as lexical.
+  and marked the retired hit as lexical. The locked pinned build,
+  all-target check, and all-target Clippy with warnings denied passed
+  at the same source commit.
 - [ ] Complete `.75` with the existing formatting debt and the
   remaining suite at one source revision.
 - [ ] Qualify the embedder upgrade in `bd-xayfm` with measured parity. On
