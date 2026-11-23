@@ -2547,8 +2547,9 @@ pub fn run_context_pack_with_performance(
 /// Optional retrieval adapter; pack policy, budgets, hydration, and all writes
 /// remain in the canonical pipeline. An unavailable adapter returns its actual
 /// degradation and the pipeline performs ordinary in-process retrieval.
-/// The boolean requires an already-loaded local model for a read-only semantic
-/// request; a provider must not initialize or download a model when it is true.
+/// The boolean permits an already-loaded local model or an admitted complete
+/// current lexical fallback for a read-only request. A provider must not
+/// initialize or download a model when it is true.
 pub(crate) type ContextSearchProvider<'a> = dyn Fn(
         &SearchOptions,
         bool,
@@ -3040,9 +3041,9 @@ async fn run_context_pack_attempt(
     search_options
         .validate()
         .map_err(ContextPackError::Search)?;
-    // A read-only semantic handoff is allowed only through an explicit
-    // already-loaded local-model capability. Readiness alone is not proof:
-    // the provider must request it and the returned handoff must attest it.
+    // Read-only workers may reuse an already-loaded local model or execute a
+    // complete current lexical source snapshot. They must never initialize a
+    // model merely because the caller requested hybrid retrieval.
     let read_only_embeddings =
         !options.persist_pack && search_options.execution_source_mode().uses_embeddings();
     let mut remote_search = if let Some(provider) = search_provider {
@@ -3051,14 +3052,14 @@ async fn run_context_pack_attempt(
         trace.record_elapsed("daemonRetrieval", remote_start);
         control.check()?;
         match result {
-            Ok(handoff) if !read_only_embeddings || handoff.has_cached_local_embedder() => {
+            Ok(handoff) if !read_only_embeddings || handoff.supports_read_only_pack() => {
                 Some(handoff)
             }
             Ok(_) => {
                 push_search_degradations(
                     &mut degraded,
                     &[crate::core::search::SearchDegradation::daemon_fallback(
-                        "daemon did not attest an already-loaded local semantic model",
+                        "daemon did not attest an already-loaded local model or complete model-free source retrieval",
                     )],
                 );
                 None

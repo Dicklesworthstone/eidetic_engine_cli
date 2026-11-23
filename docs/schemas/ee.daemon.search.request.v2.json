@@ -19,7 +19,7 @@
     "requireCachedLocalEmbedder": {
       "type": "boolean",
       "default": false,
-      "description": "Pack-retrieval-only capability. Semantic requests must use an already-loaded verified local static model; cold, remote, mismatched or unavailable models are refused without loading or downloading. Ordinary ee.daemon.search rejects true."
+      "description": "Pack-retrieval-only capability forbidding model initialization or downloads. Semantic execution must use an already-loaded verified local static model. A current, non-strict hybrid request may instead use an admitted complete lexical source snapshot without a model, including while the daemon is warming. Incomplete, historical or integrity-rejected sources cannot authorize this exception. Ordinary ee.daemon.search rejects true."
     },
     "includeTombstoned": { "type": "boolean" },
     "asOf": { "type": "string", "format": "date-time" },

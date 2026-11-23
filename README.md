@@ -721,6 +721,15 @@ Dry runs still write nothing, and git capture still requires `--apply` to persis
 The flag conflicts with `--global`, `--reinforce`, `--batch`, and `--stdin`;
 JSONL batches already defer individual jobs and publish once at the end.
 
+Retry a capture with the same `--idempotency-key` and unchanged payload after
+an interruption. The retry returns the original memory ID and can finish the
+original index job without repeating the memory write or creation audit. Its
+`data.indexStatus` reports `indexed` only when the durable jobs are complete
+and the published generation matches the source; an active publisher leaves
+it `queued`, and failed publication reports `failed`. `--dry-run` leaves the
+job untouched and reports `not_applicable`; `--defer-index` continues to defer
+publication. A conflicting payload under the same key is rejected.
+
 ### Optional explanation budgets
 
 Set `runtime.explanation_budget_ms` to bound optional detail in `ee why` and
@@ -2664,10 +2673,16 @@ For repeated read-only packs in one session, start the daemon, wait until
 `ee daemon status --workspace . --json` reports `data.warm.posture` as `ready`,
 then add `--use-daemon` to `ee pack`. On one Linux worker the median pack took
 708 ms with a warm daemon and 3155 ms without, with the same pack hash
-(`bd-5oa5m`). While the daemon's semantic model is warming, embedding-based
-requests fall back to local retrieval and name the fallback in `degraded`
-(`bd-snkcp`). Instant and explicit lexical-only requests can use the daemon
-without waiting for that model.
+(`bd-5oa5m`). Instant and explicit lexical-only requests can use the daemon
+without waiting for its semantic model. Read-only hybrid packs can also use
+the daemon before model readiness when the source fits the bounded complete
+lexical snapshot path, including deferred memories with a missing or stale
+index. This path reports `search_live_snapshot_lexical`, leaves publication
+jobs pending, and does not prepare or download a model. Strict semantic,
+historical, incomplete-source, and integrity-rejected requests retain their
+existing refusal or local fallback behavior. Other embedding-based requests
+fall back while the daemon is warming and name the fallback in `degraded`
+(`bd-snkcp`).
 
 Pack and search JSON also report `data.servingPath`, `data.retrievalPath`, and
 `data.fallbackReason`, so timing is not the test of whether routing succeeded:

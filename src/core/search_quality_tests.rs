@@ -2517,6 +2517,7 @@ fn assert_global_memory_filters_use_the_global_snapshot() {
                 None,
                 true,
                 false,
+                false,
             )
             .await
         })
@@ -2721,6 +2722,7 @@ fn assert_global_filter_collisions_obey_local_authority() {
                 Duration::from_secs(30),
                 None,
                 true,
+                false,
                 false,
             )
             .await

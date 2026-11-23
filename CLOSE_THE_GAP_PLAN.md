@@ -4181,3 +4181,39 @@ are unavailable in this environment, so Rust formatting, compilation, and
 behavioral execution remain unrun. These implementation records do not close
 `.79`, `.81`, `.83`, or `.85`. Run the new search/preload, unpublished-source,
 staging, and audited repair/undo tests through RCH before claiming acceptance.
+
+### 22.11 Retry completion and model-free daemon packs — 2026-11-22
+
+This pass targeted source durability and usable retrieval within the existing
+`.75`, `.79`, `.85`, and `bd-l2271` work rather than adding another release gate.
+
+- **Bounded daemon worker shutdown** (`75e9284`). When active request workers
+  exceed their drain timeout, shutdown retains the write actor, producer, and
+  runtime and returns the timeout before joining a channel those workers still
+  hold open. Accepted work can settle and a later shutdown can retry. A real
+  channel/worker regression covers retention, settlement, and retry; the
+  separate case of an actor wedged after all workers drain remains open.
+- **Single-write replay completion** (`d9d1285`). Keyed local and global
+  `remember` retries finish pending index publication after source ownership is
+  released. Replay status is checked against durable jobs and source/index
+  generations. Regressions preserve memory IDs, creation audits, dry runs,
+  explicit deferral, conflicting-key refusal, and live publisher ownership.
+- **Read-only daemon source retrieval.** Eligible hybrid packs can reuse a
+  complete current lexical source snapshot without an already-loaded model,
+  including during daemon warm-up. Core admission stops model-requiring paths
+  before preparation; server, CLI, and pack assembly share the same handoff
+  acceptance. Strict, historical, oversized, incomplete, and integrity-rejected
+  inputs keep their existing refusal or fallback behavior. Regression coverage
+  includes missing/stale indexes, queued writes, wire round trips, snapshot
+  validation, warm-up, and unchanged source/model/index state.
+
+Independent source review, whitespace checks, commit hygiene, production
+reachability, and degraded-repair actionability checks passed. Rustfmt, Cargo,
+rustc, and RCH are absent; the attempted pinned RCH preflight also timed out
+while reading the Git tree during an execution-environment interruption.
+Rust compilation and behavioral execution are not claimed. Run the affected
+`memory::tests::remember_idempot*`, `search_unpublished_tests`,
+`search_quality_tests`, daemon cached-only/warm-up tests, and
+`daemon_shutdown_worker_timeout_retains_write_actor_until_retry` through the
+pinned RCH lane before closing the associated Beads. The 10,000-memory daemon
+speedup target remains unmeasured.

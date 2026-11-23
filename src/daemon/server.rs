@@ -4491,11 +4491,17 @@ fn dispatch_pack_search_with_runtime(
             "pack filters and agent-specific scope remain local",
         );
     }
-    if fail_if_warming
+    // This is only an admission hint. Retrieval still proves completeness
+    // against a pinned source snapshot before it can bypass model loading.
+    let model_free_candidate =
+        crate::core::search::current_hybrid_source_fallback_allowed(&options)
+            && options.resolve_database_path().exists();
+    let warming = fail_if_warming
         && options.execution_source_mode().uses_embeddings()
         && search_warm_state
-            .is_some_and(|state| state.load(Ordering::Acquire) == warm_posture::WARMING)
-    {
+            .is_some_and(|state| state.load(Ordering::Acquire) == warm_posture::WARMING);
+    let model_free_while_warming = warming && require_cached_local && model_free_candidate;
+    if warming && !model_free_while_warming {
         return DaemonResponse::err(
             request.request_id.clone(),
             request.agent_id.clone(),
@@ -4505,13 +4511,13 @@ fn dispatch_pack_search_with_runtime(
         );
     }
     read_pools.retain(&options.resolve_database_path());
-    let loaded = if options.execution_source_mode().uses_embeddings() {
+    let loaded = if !model_free_while_warming && options.execution_source_mode().uses_embeddings() {
         match crate::core::index::already_loaded_local_embedder_for_workspace(
             &options.workspace_path,
             &options.resolve_database_path(),
         ) {
             Ok(Some(loaded)) => Some(loaded),
-            _ if require_cached_local => {
+            _ if require_cached_local && !model_free_candidate => {
                 return DaemonResponse::err(
                     request.request_id.clone(),
                     request.agent_id.clone(),
@@ -4525,12 +4531,31 @@ fn dispatch_pack_search_with_runtime(
     } else {
         None
     };
+    let model_free_required = require_cached_local
+        && loaded.is_none()
+        && options.execution_source_mode().uses_embeddings();
     // Retrieval captures a complete feedback/calibration witness from its
     // source snapshot. The client verifies that witness before any writes;
     // legitimate feedback history does not require a second, cold retrieval.
-    let retrieval =
-        run_pack_search_with_runtime_and_cached_local_embedder(&options, loaded, request_runtime);
+    // A cold read-only request can use a complete current lexical snapshot,
+    // but the core guard must reject every model-requiring execution before
+    // model preparation, including a changed publication or incomplete scan.
+    let retrieval = run_pack_search_with_runtime_and_cached_local_embedder(
+        &options,
+        loaded,
+        request_runtime,
+        require_cached_local,
+    );
     match retrieval {
+        Ok(handoff) if model_free_required && !handoff.supports_read_only_pack() => {
+            DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CACHED_LOCAL_EMBEDDER_UNAVAILABLE_CODE,
+                "Read-only pack requires an already-loaded local model or a complete current lexical source snapshot.",
+            )
+        }
         Ok(handoff) => {
             let response = DaemonResponse::ok(
                 request.request_id.clone(),
@@ -9444,6 +9469,12 @@ mod tests {
         };
 
         let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir(workspace.path().join(".ee")).expect("workspace config directory");
+        fs::write(
+            workspace.path().join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .expect("workspace-only retrieval");
         let database = workspace.path().join("ee.db");
         let bound_id = "wsp_52000000000000000000000089";
         let memory_id = "mem_52000000000000000000000089";
@@ -9479,6 +9510,18 @@ mod tests {
                 },
             )
             .expect("memory");
+        connection
+            .insert_search_index_job(
+                "sidx_52000000000000000000000089",
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: bound_id.to_owned(),
+                    job_type: crate::db::SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory_id.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .expect("queued source publication");
         let mut request = DaemonRequest::new(
             "feedback-handoff",
             TEST_AGENT_ID,
@@ -9526,6 +9569,8 @@ mod tests {
 
         let packs = connection.count_table_rows("pack_records").unwrap();
         let audits = connection.count_table_rows("audit_log").unwrap();
+        let jobs = connection.list_search_index_jobs(bound_id, None).unwrap();
+        let registry = connection.list_model_registry_entries(bound_id).unwrap();
         let mut previous = None;
         for signal in ["neutral", "harmful", "helpful", "harmful", "neutral"] {
             connection
@@ -9583,6 +9628,84 @@ mod tests {
             retrievals,
             "feedback history must not bypass cached-only model admission"
         );
+        request.params["failIfWarming"] = serde_json::json!(true);
+        let response = dispatch_pack_search_with_runtime(
+            &request,
+            &AtomicBool::new(false),
+            &pools,
+            None,
+            Some(&AtomicU8::new(warm_posture::WARMING)),
+        );
+        assert_eq!(
+            response
+                .error
+                .expect("strict hybrid still waits for semantics")
+                .code,
+            DAEMON_WARMING_CODE
+        );
+        assert_eq!(
+            crate::core::search::pack_search_retrieval_calls_for_test(),
+            retrievals
+        );
+
+        request.params["strictSourceMode"] = serde_json::json!(false);
+        let (hybrid_options, _, _, _) = DaemonSearchParams::from_value(&request.params)
+            .expect("hybrid search params")
+            .into_search_parts(request.workspace_id.as_deref().unwrap())
+            .expect("hybrid search options");
+        // A read-only hybrid pack can use the complete source snapshot while
+        // semantic engines are cold or still warming. Neither path may claim
+        // publication work or initialize a model.
+        for warm_state in [warm_posture::COLD, warm_posture::WARMING] {
+            let response = dispatch_pack_search_with_runtime(
+                &request,
+                &AtomicBool::new(false),
+                &pools,
+                None,
+                Some(&AtomicU8::new(warm_state)),
+            );
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.expect("complete hybrid source retrieval");
+            let handoff =
+                crate::core::search::PackSearchHandoff::from_value(result["handoff"].clone())
+                    .expect("model-free handoff");
+            assert!(handoff.supports_read_only_pack());
+            assert!(handoff.can_reuse_for_pack());
+            assert!(handoff.matches_request(&hybrid_options));
+            assert!(handoff.snapshot_matches(&hybrid_options, &connection));
+            assert!(!handoff.has_cached_local_embedder());
+            assert_eq!(handoff.report.embed_backend, EmbedBackend::HashFallback);
+            assert_eq!(
+                handoff.report.source_mode_applied,
+                SearchSourceMode::LexicalOnly
+            );
+            assert!(handoff.report.source_mode_fallback);
+            assert!(!handoff.report.rerank_runtime_available);
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == memory_id)
+            );
+            assert!(handoff.report.results.iter().all(|hit| {
+                hit.lexical_score.is_some()
+                    && hit.fast_score.is_none()
+                    && hit.quality_score.is_none()
+                    && hit.rerank_score.is_none()
+            }));
+            assert_eq!(connection.count_table_rows("pack_records").unwrap(), packs);
+            assert_eq!(connection.count_table_rows("audit_log").unwrap(), audits);
+            assert_eq!(
+                connection.list_search_index_jobs(bound_id, None).unwrap(),
+                jobs
+            );
+            assert_eq!(
+                connection.list_model_registry_entries(bound_id).unwrap(),
+                registry
+            );
+            assert!(!workspace.path().join(".ee/index").exists());
+        }
 
         request.params["speed"] = serde_json::json!("instant");
         request.params["strictSourceMode"] = serde_json::json!(false);

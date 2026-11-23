@@ -1602,6 +1602,7 @@ fn readonly_hybrid_search_and_pack_skip_model_preparation_for_complete_live_sour
                 None,
                 true,
                 false,
+                false,
             )
             .await
         })
@@ -1657,6 +1658,172 @@ fn readonly_hybrid_search_and_pack_skip_model_preparation_for_complete_live_sour
         if !stale_index {
             assert!(!fixture.root.join(".ee/index").exists());
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_hybrid_pack_reuses_complete_model_free_daemon_handoff() {
+    for stale_index in [false, true] {
+        let fixture = Fixture::new();
+        let index = fixture.root.join(".ee/index");
+        let _embedder = if stale_index {
+            fixture.memory(804, "Previously published deployment guidance.");
+            Some(publish_store_index(
+                &fixture.root,
+                &fixture.root.join(".ee/ee.db"),
+                &index,
+                &fixture.workspace,
+            ))
+        } else {
+            None
+        };
+        let remembered = fixture.remember_deferred(BODY);
+        let source_before = fixture.state();
+        let index_before = index_file_hashes(&index);
+        let registry_before = fixture
+            .db
+            .list_model_registry_entries(&fixture.workspace)
+            .unwrap();
+        let packs_before = fixture.db.count_table_rows("pack_records").unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let provider = |options: &SearchOptions, require_cached_local: bool| {
+            assert!(require_cached_local);
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let handoff = run_pack_search_with_runtime_and_cached_local_embedder(
+                options,
+                None,
+                None,
+                require_cached_local,
+            )
+            .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            complete_lexical(&handoff.report);
+            assert!(!handoff.has_cached_local_embedder());
+            assert!(handoff.supports_read_only_pack());
+            assert!(handoff.matches_request(options));
+            let reader =
+                DbConnection::open_file_read_only(options.resolve_database_path()).unwrap();
+            assert!(handoff.snapshot_matches(options, &reader));
+            // Exercise the same typed wire boundary as the daemon client.
+            Ok(PackSearchHandoff::from_value(serde_json::to_value(handoff).unwrap()).unwrap())
+        };
+
+        for speed in [SpeedMode::Default, SpeedMode::Quality] {
+            let mut options = fixture.pack_options();
+            options.source_mode = SearchSourceMode::Hybrid;
+            options.speed = speed;
+            let packed = crate::core::context::run_context_pack_with_search_provider(
+                &options,
+                crate::pack::PACK_COMMAND,
+                &provider,
+            )
+            .unwrap();
+            assert!(packed.response.success);
+            assert!(
+                packed.response.data.pack.items.iter().any(|item| {
+                    item.memory_id.to_string() == remembered.memory_id.to_string()
+                })
+            );
+            assert!(
+                packed
+                    .response
+                    .data
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_lexical")
+            );
+            assert!(
+                !packed
+                    .response
+                    .data
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "daemon_search_fallback")
+            );
+            let timings = packed.performance["data"]["timings"].as_array().unwrap();
+            assert!(
+                timings
+                    .iter()
+                    .any(|timing| timing["name"] == "daemonRetrieval")
+            );
+            assert!(
+                timings
+                    .iter()
+                    .all(|timing| timing["name"] != "embedderPrepare")
+            );
+            assert_eq!(fixture.state(), source_before);
+            assert_eq!(index_file_hashes(&index), index_before);
+            assert_eq!(
+                fixture
+                    .db
+                    .list_model_registry_entries(&fixture.workspace)
+                    .unwrap(),
+                registry_before
+            );
+            assert_eq!(
+                fixture.db.count_table_rows("pack_records").unwrap(),
+                packs_before
+            );
+            assert!(!fixture.root.join(".ee/pack-slots").exists());
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        if !stale_index {
+            assert!(!index.exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_only_pack_refuses_model_requiring_requests_before_preparation() {
+    let fixture = Fixture::new();
+    fixture.memory(805, BODY);
+    for refusal in ["strict", "semantic", "historical", "tombstoned", "published"] {
+        let mut options = fixture.options();
+        options.source_mode = SearchSourceMode::Hybrid;
+        match refusal {
+            "strict" => options.strict_source_mode = true,
+            "semantic" => options.source_mode = SearchSourceMode::SemanticOnly,
+            "historical" => options.as_of = Some(Utc::now()),
+            "tombstoned" => options.include_tombstoned = true,
+            "published" => {},
+            _ => unreachable!(),
+        }
+        let index = fixture.root.join(".ee/index");
+        let _embedder = (refusal == "published").then(|| {
+            publish_store_index(
+                &fixture.root,
+                &fixture.root.join(".ee/ee.db"),
+                &index,
+                &fixture.workspace,
+            )
+        });
+        let source_before = fixture.state();
+        let index_before = index_file_hashes(&index);
+        let registry_before = fixture
+            .db
+            .list_model_registry_entries(&fixture.workspace)
+            .unwrap();
+        let result = run_pack_search_with_runtime_and_cached_local_embedder(
+            &options,
+            None,
+            None,
+            true,
+        );
+        assert!(
+            matches!(result, Err(SearchError::Index(message))
+                if message.contains("already-loaded local model or a complete current lexical source snapshot")),
+            "{refusal} must stop before preparing any model"
+        );
+        assert_eq!(fixture.state(), source_before);
+        assert_eq!(index_file_hashes(&index), index_before);
+        assert_eq!(
+            fixture
+                .db
+                .list_model_registry_entries(&fixture.workspace)
+                .unwrap(),
+            registry_before
+        );
     }
 }
 
@@ -1920,6 +2087,13 @@ fn complete_source_byte_ceiling_refuses_instead_of_searching_a_truncated_corpus(
         }
     })
     .unwrap();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
+    assert!(matches!(
+        run_pack_search_with_runtime_and_cached_local_embedder(&options, None, None, true),
+        Err(SearchError::Index(message))
+            if message.contains("complete current lexical source snapshot")
+    ));
     assert_eq!(
         fixture
             .db
@@ -2057,13 +2231,16 @@ fn cancellation_before_source_projection_never_becomes_a_successful_empty_result
     assert!(!fixture.root.join(".ee/index").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn complete_unpublished_handoff_is_reusable_but_still_bound_to_its_request_and_snapshot() {
     let fixture = Fixture::new();
     let memory = fixture.memory(280, BODY);
-    let options = fixture.options();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
     let before = fixture.state();
-    let handoff = run_pack_search(&options).unwrap();
+    let handoff =
+        run_pack_search_with_runtime_and_cached_local_embedder(&options, None, None, true).unwrap();
     complete_lexical(&handoff.report);
     assert!(
         handoff
@@ -2073,11 +2250,14 @@ fn complete_unpublished_handoff_is_reusable_but_still_bound_to_its_request_and_s
             .any(|entry| entry.code == "index_missing")
     );
     assert!(handoff.can_reuse_for_pack());
+    assert!(handoff.supports_read_only_pack());
+    assert!(!handoff.has_cached_local_embedder());
     assert!(handoff.matches_request(&options));
     assert!(handoff.snapshot_matches(&options, &fixture.reader()));
     assert_eq!(handoff.report.results[0].doc_id, memory);
     let decoded = PackSearchHandoff::from_value(serde_json::to_value(&handoff).unwrap()).unwrap();
     assert!(decoded.can_reuse_for_pack());
+    assert!(decoded.supports_read_only_pack());
     assert!(decoded.snapshot_matches(&options, &fixture.reader()));
     assert_eq!(
         fixture.state(),
@@ -2098,6 +2278,7 @@ fn source_only_handoff_cannot_hide_integrity_failures_or_invent_complete_executi
     fixture.memory(282, BODY);
     let handoff = run_pack_search(&fixture.options()).unwrap();
     assert!(handoff.can_reuse_for_pack());
+    assert!(handoff.supports_read_only_pack());
     for code in [
         "index_corrupt",
         "index_incompatible",
@@ -2112,6 +2293,7 @@ fn source_only_handoff_cannot_hide_integrity_failures_or_invent_complete_executi
             repair: None,
         });
         assert!(!failed.can_reuse_for_pack(), "{code}");
+        assert!(!failed.supports_read_only_pack(), "{code}");
     }
     let mut incomplete = handoff.clone();
     incomplete
@@ -2132,7 +2314,54 @@ fn source_only_handoff_cannot_hide_integrity_failures_or_invent_complete_executi
     let mut wrong_execution = handoff.clone();
     wrong_execution.report.source_mode_applied = SearchSourceMode::Hybrid;
     assert!(!wrong_execution.can_reuse_for_pack());
+    assert!(!wrong_execution.supports_read_only_pack());
+    for execution in [
+        "fast",
+        "quality",
+        "rerank",
+        "missing_lexical",
+        "backend",
+        "runtime",
+    ] {
+        let mut wrong_execution = handoff.clone();
+        match execution {
+            "fast" => wrong_execution.report.results[0].fast_score = Some(0.5),
+            "quality" => wrong_execution.report.results[0].quality_score = Some(0.5),
+            "rerank" => wrong_execution.report.results[0].rerank_score = Some(0.5),
+            "missing_lexical" => wrong_execution.report.results[0].lexical_score = None,
+            "backend" => wrong_execution.report.embed_backend = EmbedBackend::NeuralLocal,
+            "runtime" => wrong_execution.report.rerank_runtime_available = true,
+            _ => unreachable!(),
+        }
+        assert!(!wrong_execution.supports_read_only_pack(), "{execution}");
+    }
+    let mut incomplete = handoff.clone();
+    incomplete.report.degraded.push(SearchDegradation {
+        code: "search_live_snapshot_unavailable".to_owned(),
+        severity: "warning".to_owned(),
+        message: "The source scan did not cover the complete corpus".to_owned(),
+        repair: None,
+    });
+    assert!(!incomplete.supports_read_only_pack());
+    let mut strict = handoff.clone();
+    strict.report.source_mode_requested = SearchSourceMode::Hybrid;
+    strict.report.source_mode_fallback = true;
+    strict.report.strict_source_mode = true;
+    assert!(!strict.supports_read_only_pack());
+    let mut unreported_fallback = handoff.clone();
+    unreported_fallback.report.source_mode_requested = SearchSourceMode::Hybrid;
+    assert!(!unreported_fallback.supports_read_only_pack());
+    let mut semantic = handoff.clone();
+    semantic.report.source_mode_requested = SearchSourceMode::SemanticOnly;
+    assert!(!semantic.supports_read_only_pack());
+    let mut historical = handoff.clone();
+    historical.quality_reference_time = Some(Utc::now());
+    assert!(!historical.supports_read_only_pack());
+    let mut missing_witness = handoff.clone();
+    missing_witness.snapshot.global_snapshot = None;
+    assert!(!missing_witness.supports_read_only_pack());
     let mut failed_status = handoff;
     failed_status.report.status = SearchStatus::IndexError;
     assert!(!failed_status.can_reuse_for_pack());
+    assert!(!failed_status.supports_read_only_pack());
 }

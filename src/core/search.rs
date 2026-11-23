@@ -1937,6 +1937,44 @@ impl PackSearchHandoff {
         ) && self.report.embed_backend == EmbedBackend::NeuralLocal
     }
 
+    /// A source-only lexical execution needs no resident semantic model. The
+    /// complete-source witness is useful only with the ordinary integrity,
+    /// request and snapshot admission; a lexical fallback label alone is not
+    /// permission to initialize a model on a read-only daemon worker.
+    pub(crate) fn supports_read_only_pack(&self) -> bool {
+        self.has_cached_local_embedder()
+            || (self.quality_reference_time.is_none()
+                && ((self.report.source_mode_requested == SearchSourceMode::LexicalOnly
+                    && !self.report.source_mode_fallback)
+                    || (self.report.source_mode_requested == SearchSourceMode::Hybrid
+                        && !self.report.strict_source_mode
+                        && self.report.source_mode_fallback))
+                && self.has_complete_live_source_retrieval()
+                && self.can_reuse_for_pack())
+    }
+
+    fn has_complete_live_source_retrieval(&self) -> bool {
+        self.report.source_mode_applied == SearchSourceMode::LexicalOnly
+            && self.report.embed_backend == EmbedBackend::HashFallback
+            && !self.report.rerank_runtime_available
+            && self.report.results.iter().all(|hit| {
+                hit.lexical_score.is_some_and(f32::is_finite)
+                    && hit.fast_score.is_none()
+                    && hit.quality_score.is_none()
+                    && hit.rerank_score.is_none()
+            })
+            && self
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_lexical")
+            && !self
+                .report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_live_snapshot_unavailable")
+    }
+
     #[cfg(test)]
     pub(crate) fn snapshot_matches(
         &self,
@@ -2199,13 +2237,7 @@ impl PackSearchHandoff {
     /// Retrieval-only workers never repair derived indexes. Let the caller run
     /// canonical read repair whenever this result cannot establish freshness.
     pub(crate) fn can_reuse_for_pack(&self) -> bool {
-        let complete_live_snapshot = self.report.source_mode_applied
-            == SearchSourceMode::LexicalOnly
-            && self
-                .report
-                .degraded
-                .iter()
-                .any(|entry| entry.code == "search_live_snapshot_lexical");
+        let complete_live_snapshot = self.has_complete_live_source_retrieval();
         self.snapshot.global_snapshot.is_some() && matches!(
             self.report.status,
             SearchStatus::Success | SearchStatus::NoResults
@@ -8672,6 +8704,7 @@ pub(crate) fn run_search_with_embedder(
             // Evaluation replays fixtures; those retrievals are not a user
             // reading memory, so they must not count toward ADR 0071.
             false,
+            false,
         )
         .await
         .map(|run| run.report)
@@ -8710,6 +8743,7 @@ pub(crate) fn run_search_unaudited_with_runtime(
                     None,
                     false,
                     false,
+                    false,
                 )
                 .await
             })
@@ -8723,6 +8757,7 @@ pub(crate) fn run_search_unaudited_with_runtime(
                 reconcile_timeout,
                 request_timeout,
                 None,
+                false,
                 false,
                 false,
             )
@@ -8770,17 +8805,21 @@ pub(crate) fn run_pack_search_with_cached_local_embedder(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
 ) -> Result<PackSearchHandoff, SearchError> {
-    run_pack_search_with_runtime_and_cached_local_embedder(options, loaded, None)
+    run_pack_search_with_runtime_and_cached_local_embedder(options, loaded, None, false)
 }
 
 pub(crate) fn run_pack_search_with_runtime_and_cached_local_embedder(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
     runtime: Option<&asupersync::runtime::Runtime>,
+    require_cached_local_embedder: bool,
 ) -> Result<PackSearchHandoff, SearchError> {
     #[cfg(test)]
     PACK_SEARCH_RETRIEVAL_CALLS.set(PACK_SEARCH_RETRIEVAL_CALLS.get().saturating_add(1));
     let attestation = loaded.as_ref().map(|loaded| loaded.attestation.clone());
+    let require_model_free_generation = require_cached_local_embedder
+        && loaded.is_none()
+        && options.execution_source_mode().uses_embeddings();
     let embedder = loaded.map(|loaded| loaded.embedder);
     let timeout = search_request_timeout();
     let run = match runtime {
@@ -8797,6 +8836,7 @@ pub(crate) fn run_pack_search_with_runtime_and_cached_local_embedder(
                 // Pack path: the context writer records these facts against its own
                 // write connection (context.rs), so recording here would double-count.
                 false,
+                require_model_free_generation,
             )
             .await
         }),
@@ -8813,6 +8853,7 @@ pub(crate) fn run_pack_search_with_runtime_and_cached_local_embedder(
                 // Pack path: the context writer records these facts against its own
                 // write connection (context.rs), so recording here would double-count.
                 false,
+                require_model_free_generation,
             )
             .await
         })
@@ -8885,6 +8926,7 @@ pub(crate) fn run_search_for_daemon_with_runtime(
                     embedder,
                     false,
                     true,
+                    false,
                 )
                 .await
             })
@@ -8900,6 +8942,7 @@ pub(crate) fn run_search_for_daemon_with_runtime(
                 embedder,
                 false,
                 true,
+                false,
             )
             .await
         })
@@ -8929,6 +8972,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
         None,
         false,
         true,
+        false,
     )
     .await
 }
@@ -8948,6 +8992,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     // linked against is not a memory anyone retrieved. Recording it inflates
     // retrieval and suppresses the very debt this audit trail exists to detect.
     record_retrieval_audit: bool,
+    require_model_free_generation: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
     let mut request_trace = SearchPerformanceTrace::default();
@@ -8963,7 +9008,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     request_trace.record_elapsed("search::requestValidate", total_start);
     // A retrieval-only daemon worker may outlive its socket client. It must
     // never claim/requeue index jobs or open the source store for repair.
-    if !retrieval_only {
+    if !retrieval_only && !require_model_free_generation {
         let reconcile_start = Instant::now();
         reconcile_search_index_before_read_with_cx_and_timeout(
             cx,
@@ -9020,6 +9065,20 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         }
     }
     request_trace.record_elapsed("search::emptyGenerationProbe", empty_probe_start);
+    // The cached-only daemon contract forbids even read-only model loading.
+    // Admission above must have selected a complete live source execution;
+    // an optimization miss, oversized source, historical mode or changed
+    // publication returns to the client without entering model preparation.
+    if require_model_free_generation
+        && !matches!(
+            prepared_generation.as_ref(),
+            Some(PreparedSearchGeneration::Live(_))
+        )
+    {
+        return Err(SearchError::Index(
+            "Read-only daemon retrieval needs an already-loaded local model or a complete current lexical source snapshot".to_owned(),
+        ));
+    }
     let embedder_admission_start = Instant::now();
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && prepared_generation.is_none()
@@ -9313,7 +9372,7 @@ pub(crate) fn model_free_search_generation_possible(
     empty_search_generation_hint(index_dir) || current_hybrid_source_fallback_allowed(options)
 }
 
-fn current_hybrid_source_fallback_allowed(options: &SearchOptions) -> bool {
+pub(crate) fn current_hybrid_source_fallback_allowed(options: &SearchOptions) -> bool {
     cfg!(all(unix, feature = "lexical-bm25"))
         && options.execution_source_mode() == SearchSourceMode::Hybrid
         && !options.strict_source_mode
@@ -9689,6 +9748,7 @@ pub(crate) fn run_inspection_search_with_filters(
             timeout,
             None,
             true,
+            false,
             false,
         )
         .await
@@ -18881,6 +18941,7 @@ mod tests {
                             Some(Arc::new(HashEmbedder::default_256())),
                             true,
                             false,
+                            false,
                         )
                         .await;
                     let mut relaxed = options.clone();
@@ -18896,6 +18957,7 @@ mod tests {
                             Duration::from_secs(30),
                             Some(Arc::new(HashEmbedder::default_256())),
                             true,
+                            false,
                             false,
                         )
                         .await;

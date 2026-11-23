@@ -51533,6 +51533,7 @@ fn pack_search_via_daemon(
     if require_cached_local
         && crate::core::remote_embed::configured_embed_backend()
             == crate::core::remote_embed::EmbedBackendSelection::Remote
+        && !crate::core::search::current_hybrid_source_fallback_allowed(options)
     {
         return Err(DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable);
     }
@@ -51581,7 +51582,7 @@ fn pack_search_via_daemon(
             if !handoff.matches_request(&options) {
                 return Err(DaemonSearchFallbackReason::SearchResponseDrift);
             }
-            if require_cached_local && !handoff.has_cached_local_embedder() {
+            if require_cached_local && !handoff.supports_read_only_pack() {
                 return Err(DaemonSearchFallbackReason::CachedLocalEmbedderUnavailable);
             }
             if !handoff.can_reuse_for_pack() {
