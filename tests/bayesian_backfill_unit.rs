@@ -100,7 +100,7 @@ fn feedback_replay_normalizes_legacy_signal_spellings() {
 #[test]
 fn feedback_replay_falls_back_for_invalid_harmful_weight() {
     let posterior = BetaPosterior::from_feedback_events([
-        (FeedbackSignal::Harmful, 0.0),
+        (FeedbackSignal::Harmful, -1.0),
         (FeedbackSignal::Harmful, f64::NAN),
     ]);
 
@@ -109,6 +109,19 @@ fn feedback_replay_falls_back_for_invalid_harmful_weight() {
         posterior.beta(),
         DEFAULT_PRIOR_BETA + (DEFAULT_HARMFUL_WEIGHT * 2.0)
     ));
+}
+
+#[test]
+fn zero_weight_feedback_stays_inert_during_replay() {
+    let posterior = BetaPosterior::from_feedback_events([
+        (FeedbackSignal::Helpful, 0.0),
+        (FeedbackSignal::Harmful, 0.0),
+        (FeedbackSignal::Helpful, -0.0),
+        (FeedbackSignal::Harmful, -0.0),
+        (FeedbackSignal::Neutral, 10.0),
+    ]);
+
+    assert_eq!(posterior, BetaPosterior::jeffreys());
 }
 
 #[test]

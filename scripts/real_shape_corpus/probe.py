@@ -10,7 +10,7 @@ malformed JSON).
     probe.py --ee target/debug/ee [--target-records N] [--out DIR] [--queries all|evaluation]
     probe.py --self-test [--ee target/debug/ee]
 
-Writes ``ee.real_corpus_probe.v1`` JSON to stdout (and DIR/summary.json), plus
+Writes ``ee.real_corpus_probe.v2`` JSON to stdout (and DIR/summary.json), plus
 one ``ee.test_event.v1`` line per step on stderr. A metric whose surface is
 missing reports {"status": "unavailable", "reason": ...}; never zero.
 
@@ -41,6 +41,7 @@ harness error (zero_guard) carrying the degraded codes that caused it, and
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import re
@@ -421,36 +422,174 @@ def find_key(value, key):
     return None
 
 
-LINE_RE = re.compile(r"#L(\d+)(?:-(\d+))?")
+CASS_LOCATOR_RE = re.compile(
+    r"cass-session://(sess_[0-7][0-9A-HJKMNP-TV-Z]{25})#L([1-9][0-9]*)-([1-9][0-9]*)"
+)
+IDENTITY_ERROR = "real_corpus_identity_invalid"
 
 
-def locate(node, path_by_session):
-    """Map a hit/item to (corpus-relative path, start, end) when it is evidence."""
-    text = json.dumps(node)
-    session = None
-    for sid, path in path_by_session.items():
-        if sid and sid in text:
-            session = path
-            break
-    if session is None:
+def identity_error(message):
+    raise Harness(message, code=IDENTITY_ERROR)
+
+
+def inspection_rows(payload, table, count):
+    """Read the public inspection contract, rejecting truncated or failed reads."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        identity_error(f"missing {table} inspection response")
+    report = payload["data"].get("report", {})
+    if not isinstance(report, dict):
+        identity_error(f"invalid {table} inspection report")
+    rows = report.get("rows")
+    if (payload.get("success") is not True or report.get("table") != table
+            or report.get("exists") is not True or report.get("error") is not None
+            or not isinstance(rows, list) or len(rows) != count
+            or type(report.get("tableRowCount")) is not int
+            or type(report.get("returnedRowCount")) is not int
+            or report["tableRowCount"] != count or report["returnedRowCount"] != count
+            or any(not isinstance(row, dict) or not isinstance(row.get("values"), dict)
+                   for row in rows)):
+        identity_error(f"incomplete or invalid {table} inspection; expected exactly {count} rows")
+    return [row["values"] for row in rows]
+
+
+def join_imported_sessions(manifest, corpus, imported, inspected, workspace_id):
+    """Join exact persisted source identities, never response/discovery order.
+
+    The import report deliberately redacts sourcePath. Read-only db inspection
+    supplies the stored cass_session_id and source_path; both must name the same
+    generated file. The report's session ID set is then cross-checked.
+    """
+    expected = {}
+    for source in manifest["sessions"]:
+        path = os.path.join(os.path.realpath(corpus), source["path"])
+        if path in expected:
+            identity_error("duplicate source path in corpus manifest")
+        expected[path] = source
+    rows = inspection_rows(inspected, "sessions", len(expected))
+    path_by_session = {}
+    mapped_paths = set()
+    for row in rows:
+        sid = row.get("id")
+        source_path = row.get("cass_session_id")
+        source = expected.get(source_path) if isinstance(source_path, str) else None
+        if (not isinstance(sid, str) or not sid.startswith("sess_")
+                or sid in path_by_session or source is None or source_path in mapped_paths
+                or row.get("source_path") != source_path
+                or row.get("workspace_id") != workspace_id
+                or type(row.get("message_count")) is not int
+                or row["message_count"] != source["message_count"]):
+            identity_error("missing, duplicate or conflicting persisted CASS session identity")
+        path_by_session[sid] = source["path"]
+        mapped_paths.add(source_path)
+    sessions_out = (imported or {}).get("data", {}).get("sessions")
+    if not isinstance(sessions_out, list) or len(sessions_out) != len(expected):
+        identity_error("import response does not cover every corpus session")
+    seen = set()
+    counts = {s["path"]: s["message_count"] for s in manifest["sessions"]}
+    for row in sessions_out:
+        if not isinstance(row, dict):
+            identity_error("import session result is not an object")
+        sid = row.get("sessionId")
+        if (not isinstance(sid, str) or sid not in path_by_session or sid in seen
+                or row.get("status") not in ("imported", "skipped")
+                or type(row.get("messageCount")) is not int
+                or row["messageCount"] != counts[path_by_session[sid]]):
+            identity_error("import response conflicts with persisted session identities")
+        seen.add(sid)
+    if seen != set(path_by_session):
+        identity_error("import response omitted a persisted session identity")
+    return path_by_session
+
+
+def locate(node, path_by_session, record_counts):
+    """Resolve evidence using only typed session/line fields and canonical URIs.
+
+    Query text, excerpts, notes and search-document URIs are not identity evidence.
+    Ask's span.byteStart/byteEnd are content offsets, not transcript line numbers.
+    All supplied witnesses must agree, including when one is incomplete.
+    """
+    if not isinstance(node, dict):
+        identity_error("retrieval item is not an object")
+    metadata = node.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        identity_error("retrieval metadata is not an object")
+    evidence = (node.get("entityKind") == "evidence_span"
+                or metadata.get("entity_kind") == "evidence_span"
+                or str(node.get("docId", "")).startswith("ev_")
+                or node.get("evidenceSpanId") is not None
+                or node.get("evidenceId") is not None)
+    if not evidence:
         return None
-    start = find_key(node, "start_line") or find_key(node, "startLine")
-    end = find_key(node, "end_line") or find_key(node, "endLine")
-    if start is None:
-        match = LINE_RE.search(text)
-        if not match:
-            return None
-        start = int(match.group(1))
-        end = int(match.group(2) or match.group(1))
-    return session, int(start), int(end if end is not None else start)
+    witnesses = {"session": set(), "start": set(), "end": set()}
+    for fields in (node, metadata):
+        for kind, names in (("session", ("sessionId", "session_id")),
+                            ("start", ("startLine", "start_line")),
+                            ("end", ("endLine", "end_line"))):
+            for name in names:
+                value = fields.get(name)
+                if value is None:
+                    continue
+                if kind == "session":
+                    if not isinstance(value, str) or not value:
+                        identity_error("invalid typed evidence session ID")
+                else:
+                    if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
+                        value = int(value)
+                    if type(value) is not int or value < 1:
+                        identity_error("invalid typed evidence line number")
+                witnesses[kind].add(value)
+    uris = [node.get("provenanceUri"), metadata.get("provenance_uri")]
+    provenance = node.get("provenance") or []
+    if not isinstance(provenance, list) or any(not isinstance(p, dict) for p in provenance):
+        identity_error("invalid evidence provenance list")
+    uris.extend(p.get("uri") for p in provenance)
+    for uri in uris:
+        if uri is None:
+            continue
+        if not isinstance(uri, str):
+            identity_error("invalid evidence provenance URI")
+        if not uri.startswith("cass-session:"):
+            continue
+        match = CASS_LOCATOR_RE.fullmatch(uri)
+        if match is None:
+            identity_error("malformed canonical CASS evidence URI")
+        sid, start, end = match.groups()
+        witnesses["session"].add(sid)
+        witnesses["start"].add(int(start))
+        witnesses["end"].add(int(end))
+    if any(len(values) != 1 for values in witnesses.values()):
+        identity_error("missing or conflicting evidence session/line provenance")
+    sid = next(iter(witnesses["session"]))
+    start = next(iter(witnesses["start"]))
+    end = next(iter(witnesses["end"]))
+    path = path_by_session.get(sid)
+    if path is None or path not in record_counts or not 1 <= start <= end <= record_counts[path]:
+        identity_error("evidence locator names an unknown session or invalid transcript range")
+    return path, start, end
 
 
-def labels_hit(loc, locators):
+def label_index(label_instances):
+    """Index exact concept locations once; range lookups need no corpus scan."""
+    by_path = {}
+    for label, instances in label_instances.items():
+        for where in instances:
+            by_path.setdefault(where["path"], []).append((where["line"], label))
+    return {path: sorted(rows) for path, rows in by_path.items()}
+
+
+def labels_hit(loc, indexed):
     if loc is None:
         return set()
     path, start, end = loc
-    return {label for label, where in locators.items()
-            if where["path"] == path and start <= where["line"] <= end}
+    rows = indexed.get(path, [])
+    first = bisect.bisect_left(rows, (start, ""))
+    labels = set()
+    for index in range(first, len(rows)):
+        line, label = rows[index]
+        if line > end:
+            break
+        labels.add(label)
+    return labels
 
 
 def scaffold_ratio(text):
@@ -499,7 +638,7 @@ def apply_plausible_irrelevant_control(metrics):
 
     UTR stays high (>= 0.99, zero JSON scaffolding) and named-distractor FAR
     stays low (<= 0.05, because the injected prose is not one of the explicitly
-    labelled distractors), yet pack_scenario_precision and relevant_items collapse.
+    labelled distractors), yet exact relevance and query coverage collapse.
     The relevance gate in evaluate_enforced_metrics must reject this.
     """
     mutated = json.loads(json.dumps(metrics))
@@ -513,6 +652,10 @@ def apply_plausible_irrelevant_control(metrics):
     utr["value"] = max(0.995, utr.get("value") or 0.995)
     mutated["UTR"] = utr
     mutated["pack_scenario_precision"] = {"value": 0.0}
+    mutated["pack_exact_precision"] = {"value": 0.0}
+    coverage = mutated.get("pack_query_coverage") or {}
+    mutated["pack_query_coverage"] = {"value": 0.0, "relevant_queries": 0,
+                                      "queries": coverage.get("queries", 40)}
     mutated["pack_precision"] = {
         "value": 0.0,
         "definition": "packed items from a session holding a judged-relevant record / packed items",
@@ -551,7 +694,7 @@ def evaluate_enforced_metrics(metrics, total_records, query_count, enforce_laten
     record("real_corpus_admission_far", "enforce", far_val, "<= 0.05",
            isinstance(far_val, (int, float)) and far_val <= 0.05)
 
-    distractors_top5 = (metrics.get("recall_at_5") or {}).get("distractors_in_top5")
+    distractors_top5 = (metrics.get("equivalent_recall_at_5") or {}).get("distractors_in_top5")
     record("real_corpus_top5_no_distractors", "enforce", distractors_top5, "== 0",
            distractors_top5 == 0)
 
@@ -559,18 +702,24 @@ def evaluate_enforced_metrics(metrics, total_records, query_count, enforce_laten
     record("real_corpus_scenario_hit_at_5", "enforce", scen_hit, ">= 0.85",
            isinstance(scen_hit, (int, float)) and scen_hit >= 0.85)
 
-    scen_prec = (metrics.get("pack_scenario_precision") or {}).get("value")
-    rel_items = far_obj.get("relevant_items")
-    min_rel_items = max(1, query_count // 2) if query_count else 1
+    exact_prec = (metrics.get("pack_exact_precision") or {}).get("value")
+    coverage = metrics.get("pack_query_coverage") or {}
+    relevant_queries = coverage.get("relevant_queries")
+    # Preserve the half-query acceptance floor, counting each task only once.
+    # Many copies of a correct answer to one task cannot compensate for misses.
+    min_relevant_queries = max(1, (query_count + 1) // 2)
     record(
         "real_corpus_pack_relevance_survival",
         "enforce",
-        {"pack_scenario_precision": scen_prec, "relevant_items": rel_items},
-        f"pack_scenario_precision >= 0.05 and relevant_items >= {min_rel_items}",
-        isinstance(scen_prec, (int, float))
-        and scen_prec >= 0.05
-        and isinstance(rel_items, int)
-        and rel_items >= min_rel_items,
+        {"pack_exact_precision": exact_prec, "relevant_queries": relevant_queries,
+         "queries": coverage.get("queries")},
+        f"pack_exact_precision >= 0.05 and relevant_queries >= {min_relevant_queries}/{query_count}",
+        type(exact_prec) in (int, float)
+        and 0.05 <= exact_prec <= 1.0
+        and type(relevant_queries) is int
+        and min_relevant_queries <= relevant_queries <= query_count
+        and type(coverage.get("queries")) is int
+        and coverage["queries"] == query_count,
     )
 
     pap = metrics.get("PAP") or {}
@@ -636,7 +785,7 @@ def main():
     args = parser.parse_args()
 
     if args.self_test:
-        return self_test(os.path.abspath(args.ee) if args.ee else None)
+        return self_test(os.path.abspath(args.ee) if args.ee else None, keep=args.keep)
     if not args.ee:
         parser.error("--ee is required unless --self-test is given")
 
@@ -648,8 +797,9 @@ def main():
     workspace = os.path.join(root, "ws")
     corpus = os.path.join(root, "corpus")
     os.makedirs(workspace)
-    summary = {"schema": "ee.real_corpus_probe.v1", "mode": mode, "ee": ee,
+    summary = {"schema": "ee.real_corpus_probe.v2", "mode": mode, "ee": ee,
                "cass": "stub:scripts/real_shape_corpus/cass_fixture.py",
+               "cass_mode": "emulator",
                # Recorded so a failed run is inspectable: with --out or --keep the
                # root survives, and the workspace under it is the store whose
                # readiness surfaces can then be queried by hand.
@@ -661,6 +811,23 @@ def main():
             raise Harness("corpus shape precheck failed: " + "; ".join(problems[:5]))
         judgments = json.load(open(os.path.join(corpus, "judgments.json")))
         locators = manifest["labels"]
+        originals = label_index({label: [where] for label, where in locators.items()})
+        equivalents = label_index(manifest["label_instances"])
+        record_counts = {s["path"]: s["message_count"] for s in manifest["sessions"]}
+        summary["corpus"] = {
+            "manifest_schema": manifest["schema"], "judgments_schema": judgments["schema"],
+            "seed": args.seed, "total_records": manifest["total_records"],
+            "digest": generate.tree_digest(corpus), "digest_algorithm": "blake2b-256",
+        }
+        summary["grading"] = {
+            "schema": "ee.real_shape_cass.grading.v2", "label_scope": "exact_equivalent_records",
+            "identity_join": "stored_session_source_path",
+            "concepts": len(manifest["label_instances"]),
+            "record_locations": sum(len(rows) for rows in manifest["label_instances"].values()),
+            "note": "Original-only recall remains diagnostic. Seeded exact equivalents are graded; "
+                    "adjacent unlabeled turns receive no exact credit. Pack survival requires "
+                    "exact precision >= 0.05 and at least one relevant record for half the queries.",
+        }
         event("corpus", sessions=len(manifest["sessions"]), records=manifest["total_records"])
 
         env = {k: v for k, v in os.environ.items() if not k.startswith("EE_")}
@@ -683,11 +850,12 @@ def main():
         v_code, v_payload, _, _ = run_ee(ee, ["version", "--json"], env, workspace)
         if v_code == 0 and isinstance(v_payload, dict):
             v_data = v_payload.get("data") or {}
+            build = v_data.get("build") or {}
             summary["candidate_identity"] = {
                 "version": v_data.get("version"),
-                "targetTriple": v_data.get("targetTriple"),
+                "targetTriple": build.get("targetTriple"),
                 "source": v_data.get("source"),
-                "frankenStack": v_data.get("frankenStack"),
+                "frankenStack": build.get("frankenStack"),
             }
 
         code, payload, elapsed, err = run_ee(ee, ["init", "--workspace", workspace, "--json"], env, workspace)
@@ -711,83 +879,116 @@ def main():
             event("import", exit=code, seconds=round(elapsed, 3))
             if code != 0 or payload is None:
                 raise Harness(f"ee import cass failed ({code}): {describe_envelope(payload, err)}")
-            sessions_out = find_key(payload, "sessions") or []
-            # Output redaction masks sourcePath, so sessions are matched by
-            # discovery order (the emulator lists newest first) and checked
-            # against their record counts.
-            discovered = sorted(manifest["sessions"], key=lambda s: s["started_at"], reverse=True)
-            path_by_session = {}
-            if len(sessions_out) == len(discovered):
-                for row, source in zip(sessions_out, discovered):
-                    sid = row.get("session_id") or row.get("sessionId")
-                    count = row.get("messageCount") or row.get("message_count")
-                    if sid and count in (None, source["message_count"]):
-                        path_by_session[sid] = source["path"]
-            if len(path_by_session) != len(discovered):
-                raise Harness(f"could not map imported sessions to corpus files ({len(path_by_session)}/{len(discovered)})")
+            inspected = {}
+            for table, count in (("workspaces", 1), ("sessions", len(manifest["sessions"]))):
+                inspect_code, inspected[table], _, inspect_err = run_ee(
+                    ee, ["db", "inspect", table, "--workspace", workspace,
+                         "--limit", str(count + 1), "--json"], env, workspace)
+                if inspect_code != 0 or inspected[table] is None:
+                    raise Harness(f"session identity inspection failed: "
+                                  f"{describe_envelope(inspected[table], inspect_err)}",
+                                  code=IDENTITY_ERROR)
+            stored_workspace = inspection_rows(inspected["workspaces"], "workspaces", 1)[0]
+            if (stored_workspace.get("path") != workspace
+                    or not isinstance(stored_workspace.get("id"), str)):
+                identity_error("stored workspace identity does not match the isolated corpus workspace")
+            path_by_session = join_imported_sessions(
+                manifest, corpus, payload, inspected["sessions"], stored_workspace["id"])
+            summary["grading"]["session_sources"] = path_by_session
             spans = surface_or_unavailable(payload, "spans_imported", "spansImported",
                                            surface="imported-span count")
-            summary["import"] = {"seconds": round(elapsed, 3), "sessions": len(sessions_out),
-                                 "spans": spans, "per_session_seconds": round(elapsed / max(1, len(sessions_out)), 3),
+            summary["import"] = {"seconds": round(elapsed, 3), "sessions": len(path_by_session),
+                                 "spans": spans, "per_session_seconds": round(elapsed / max(1, len(path_by_session)), 3),
                                  "admission": surface_or_unavailable(
                                      payload, "evidence_admission", "evidenceAdmission",
                                      surface="evidence admission")}
 
         queries = [q for q in judgments["retrieval"] if args.queries == "all" or q["split"] == "evaluation"]
         recall5, distractor_hits, search_times = [], 0, []
+        equivalent_recall5, equivalent_hit5, equivalent_distractors = [], [], 0
         scenario_hit5, on_scenario_items = [], 0
-        scenario_of = {sess["path"]: sess["slug"].rsplit("-g", 1)[0] if not sess["core"] else sess["slug"]
-                       for sess in manifest["sessions"]}
+        scenario_of = {sess["path"]: sess["scenario"] for sess in manifest["sessions"]}
         pack_times, useful_chars, total_chars = [], 0, 0
         packed_items, packed_distractors, packed_relevant, on_topic_items = 0, 0, 0, 0
+        pack_relevant_queries = 0
         per_query = []
         for q in queries:
             code, sp, elapsed, err = run_ee(ee, ["search", q["query"], "--workspace", workspace, "--limit", "10", "--json"], env, workspace)
             search_times.append(elapsed)
-            if sp is None:
-                raise Harness(f"search returned no JSON ({code}): {describe_envelope(sp, err)}")
+            if code != 0 or sp is None or sp.get("success") is not True:
+                raise Harness(f"search failed ({code}): {describe_envelope(sp, err)}")
             hits = result_nodes(sp)
-            hit_locs = [locate(h, path_by_session) for h in hits]
-            hit_labels = [labels_hit(loc, locators) for loc in hit_locs]
+            hit_locs = [locate(h, path_by_session, record_counts) for h in hits]
+            original_hit_labels = [labels_hit(loc, originals) for loc in hit_locs]
+            hit_labels = [labels_hit(loc, equivalents) for loc in hit_locs]
+            original_top5 = set().union(*original_hit_labels[:5]) if original_hit_labels else set()
             top5 = set().union(*hit_labels[:5]) if hit_labels else set()
             relevant = set(q["relevant"])
-            recall5.append(len(top5 & relevant) / len(relevant))
-            # At scale, seeded copies of a judged scenario are equally right.
+            distractors = set(q["distractors"]) | {"distract_espresso", "distract_lunch"}
+            recall5.append(len(original_top5 & relevant) / len(relevant))
+            equivalent_recall5.append(len(top5 & relevant) / len(relevant))
+            equivalent_hit5.append(bool(top5 & relevant))
+            # Scenario membership remains a separate, deliberately broad metric.
             relevant_scenarios = {locators[label]["slug"] for label in relevant}
             scenario_hit5.append(any(loc is not None and scenario_of.get(loc[0]) in relevant_scenarios
                                      for loc in hit_locs[:5]))
-            distractor_hits += len(top5 & set(q["distractors"]))
+            distractor_hits += len(original_top5 & set(q["distractors"]))
+            equivalent_distractors += len(top5 & distractors)
 
             code, pk, elapsed, err = run_ee(ee, ["pack", q["query"], "--workspace", workspace,
                                                  "--max-tokens", str(args.pack_tokens), "--json"], env, workspace)
             pack_times.append(elapsed)
-            if pk is None:
-                raise Harness(f"pack returned no JSON ({code}): {describe_envelope(pk, err)}")
+            if code != 0 or pk is None or pk.get("success") is not True:
+                raise Harness(f"pack failed ({code}): {describe_envelope(pk, err)}")
             items = pack_items(pk)
             relevant_paths = {locators[label]["path"] for label in relevant}
             q_items = []
+            q_relevant = set()
+            seen_locations = set()
             for item in items:
                 content = item.get("content") or ""
                 ratio = scaffold_ratio(content)
                 total_chars += len(content)
                 useful_chars += len(content) * (1 - ratio)
-                loc = locate(item, path_by_session)
-                lab = labels_hit(loc, locators)
+                loc = locate(item, path_by_session, record_counts)
+                if loc is not None:
+                    if loc in seen_locations:
+                        identity_error("pack repeated the same exact evidence location")
+                    seen_locations.add(loc)
+                lab = labels_hit(loc, equivalents)
+                relevant_labels = lab & relevant
+                distractor_labels = lab & distractors
                 packed_items += 1
                 if loc is not None and loc[0] in relevant_paths:
                     on_topic_items += 1
                 if loc is not None and scenario_of.get(loc[0]) in relevant_scenarios:
                     on_scenario_items += 1
-                if lab & set(q["distractors"]) or lab & {"distract_espresso", "distract_lunch"}:
+                if distractor_labels:
                     packed_distractors += 1
-                if lab & relevant:
+                if relevant_labels:
                     packed_relevant += 1
-                q_items.append({"labels": sorted(lab), "scaffold": round(ratio, 3), "chars": len(content),
+                    q_relevant.update(relevant_labels)
+                q_items.append({"labels": sorted(lab), "original_labels": sorted(labels_hit(loc, originals)),
+                                "relevant_labels": sorted(relevant_labels), "locator": loc,
+                                "classification": "distractor" if distractor_labels else "relevant" if relevant_labels
+                                                  else "other_labeled" if lab else "unlabeled",
+                                "scaffold": round(ratio, 3), "chars": len(content),
                                 "preview": content[:120]})
+            pack_relevant_queries += bool(q_relevant)
             per_query.append({"id": q["id"], "query": q["query"], "recall_at_5": recall5[-1],
+                              "equivalent_recall_at_5": equivalent_recall5[-1],
+                              "relevant_labels": sorted(relevant), "distractor_labels": sorted(distractors),
+                              "relevant_label_count": len(relevant),
+                              "retrieved_relevant_label_count": len(top5 & relevant),
+                              "pack_relevant_labels": sorted(q_relevant),
+                              "search_top_original_labels": [sorted(l) for l in original_hit_labels[:5]],
                               "search_top_labels": [sorted(l) for l in hit_labels[:5]],
+                              "search_top_locators": hit_locs[:5],
                               "pack_items": q_items, "pack_degraded": sorted(degraded_codes(pk.get("degraded", [])))})
-            event("query", id=q["id"], recall_at_5=recall5[-1], pack_items=len(items))
+            event("query", id=q["id"], original_recall_at_5=recall5[-1],
+                  equivalent_recall_at_5=equivalent_recall5[-1],
+                  retrieved_relevant_labels=len(top5 & relevant), relevant_labels=len(relevant),
+                  pack_relevant=bool(q_relevant), pack_items=len(items))
 
         # ask: answered with a citation from a judged scenario, or abstained.
         ask_answered, ask_cited_relevant, ask_negative_abstained = 0, 0, 0
@@ -796,10 +997,9 @@ def main():
             data = (ap or {}).get("data", {})
             if data and not data.get("abstained", True):
                 ask_answered += 1
-                relevant_scenarios = {locators[label]["slug"] for label in q["relevant"]}
                 for citation in data.get("citations") or []:
-                    loc = locate(citation, path_by_session)
-                    if loc is not None and scenario_of.get(loc[0]) in relevant_scenarios:
+                    loc = locate(citation, path_by_session, record_counts)
+                    if labels_hit(loc, equivalents) & set(q["relevant"]):
                         ask_cited_relevant += 1
                         break
         for query in judgments["negative_queries"]:
@@ -839,7 +1039,17 @@ def main():
                       "target": "<= 2 s cold"}
         m["search_latency"] = {"p50_seconds": med(search_times)}
         m["recall_at_5"] = {"mean": round(sum(recall5) / len(recall5), 4) if recall5 else None,
-                            "queries": len(recall5), "distractors_in_top5": distractor_hits}
+                            "queries": len(recall5), "distractors_in_top5": distractor_hits,
+                            "label_scope": "original_records_only", "status": "diagnostic"}
+        m["equivalent_recall_at_5"] = {
+            "mean": round(sum(equivalent_recall5) / len(equivalent_recall5), 4) if equivalent_recall5 else None,
+            "queries": len(queries), "distractors_in_top5": equivalent_distractors,
+            "definition": "mean fraction of distinct relevant concepts found in top five exact source spans",
+        }
+        m["equivalent_hit_at_5"] = {
+            "value": round(sum(equivalent_hit5) / len(queries), 4) if queries else None,
+            "definition": "queries with an exact original or seeded-equivalent relevant top-five span / queries",
+        }
         m["FAR"] = {"value": round(packed_distractors / packed_items, 4) if packed_items else None,
                     "packed_items": packed_items, "distractor_items": packed_distractors,
                     "relevant_items": packed_relevant, "target": "<= 0.05"}
@@ -849,6 +1059,14 @@ def main():
         m["scenario_hit_at_5"] = {"value": round(sum(scenario_hit5) / len(scenario_hit5), 4) if scenario_hit5 else None,
                                   "definition": "queries whose top 5 include a span from a judged scenario (or a seeded copy)"}
         m["pack_scenario_precision"] = {"value": round(on_scenario_items / packed_items, 4) if packed_items else None}
+        m["pack_exact_precision"] = {
+            "value": round(packed_relevant / packed_items, 4) if packed_items else None,
+            "definition": "packed items containing exact judged original or seeded-equivalent records / packed items",
+        }
+        m["pack_query_coverage"] = {
+            "value": round(pack_relevant_queries / len(queries), 4) if queries else None,
+            "relevant_queries": pack_relevant_queries, "queries": len(queries),
+        }
         m["negative_query_flag_rate"] = {"value": neg_flagged / len(judgments["negative_queries"])}
         m["ask"] = {"answered_rate": round(ask_answered / len(queries), 4) if queries else None,
                     "cited_relevant_rate": round(ask_cited_relevant / len(queries), 4) if queries else None,
@@ -876,6 +1094,7 @@ def main():
         if error.code:
             summary["harness_error_code"] = error.code
         event("harness_error", error=str(error), code=error.code)
+        sys.stderr.write("EE_REAL_CORPUS_RC=2\n")
         print(json.dumps(summary, indent=2))
         return 2
     finally:
@@ -892,7 +1111,9 @@ def main():
                 f"observed={json.dumps(row['observed'])} "
                 f"threshold={row['threshold']!r} artifact={summary_path}\n"
             )
+        sys.stderr.write("EE_REAL_CORPUS_RC=1\n")
         return 1
+    sys.stderr.write("EE_REAL_CORPUS_RC=0\n")
     return 0
 
 
@@ -959,7 +1180,163 @@ def _write_stub(directory, name, body):
     return path
 
 
-def self_test(ee=None):
+
+def exact_record_self_test(scratch, arm, healthy_metrics):
+    """Exercise the production identity and grading helpers with adversarial twins."""
+    import copy
+
+    corpus = os.path.join(scratch, "exact-records")
+    repeated = os.path.join(scratch, "exact-records-repeat")
+    manifest = generate.generate(corpus, "/work/ledger", 43, 4000)
+    generate.generate(repeated, "/work/ledger", 43, 4000)
+    arm("seeded metadata and transcripts are reproducible",
+        generate.tree_digest(corpus) == generate.tree_digest(repeated))
+    arm("4,009-record scale corpus retains all 1,485 exact locations",
+        manifest["total_records"] == 4009
+        and sum(map(len, manifest["label_instances"].values())) == 1485)
+    arm("scaled corpus passes strict shape and identity validation", generate.validate(corpus) == [])
+    judgments = json.load(open(os.path.join(corpus, "judgments.json")))
+    query = judgments["retrieval"][0]
+    relevant = set(query["relevant"])
+    label = sorted(relevant)[0]
+    original = manifest["labels"][label]
+    variant = next(loc for loc in manifest["label_instances"][label] if not loc["core"])
+    originals = label_index({name: [loc] for name, loc in manifest["labels"].items()})
+    equivalents = label_index(manifest["label_instances"])
+    counts = {s["path"]: s["message_count"] for s in manifest["sessions"]}
+    workspace_id = "wsp_00000000000000000000000001"
+    session_paths = {f"sess_{index:026d}": s["path"]
+                     for index, s in enumerate(manifest["sessions"], 1)}
+    ids_by_path = {path: sid for sid, path in session_paths.items()}
+
+    def inspection(rows):
+        return {"success": True, "data": {"report": {
+            "table": "sessions", "exists": True, "error": None,
+            "tableRowCount": len(rows), "returnedRowCount": len(rows),
+            "rows": [{"values": row} for row in rows],
+        }}}
+
+    rows = [{"id": sid, "workspace_id": workspace_id,
+             "cass_session_id": os.path.join(corpus, path),
+             "source_path": os.path.join(corpus, path), "message_count": counts[path]}
+            for sid, path in session_paths.items()]
+    imported = {"success": True, "data": {"sessions": [
+        {"sessionId": sid, "sourcePath": "[REDACTED_PATH]", "status": "imported",
+         "messageCount": counts[path]} for sid, path in reversed(list(session_paths.items()))
+    ]}}
+    inspected = inspection(list(reversed(rows)))
+    arm("reordered import and stored rows join by exact source identity",
+        join_imported_sessions(manifest, corpus, imported, inspected, workspace_id) == session_paths)
+
+    def refuses(name, operation):
+        try:
+            operation()
+        except Harness as error:
+            arm(name, error.code == IDENTITY_ERROR)
+        else:
+            arm(name, False)
+
+    for name, mutate in (
+            ("duplicate imported ID", lambda p: p["data"]["sessions"].__setitem__(0, p["data"]["sessions"][1])),
+            ("unknown imported ID", lambda p: p["data"]["sessions"][0].__setitem__("sessionId", "sess_unknown")),
+            ("missing imported session", lambda p: p["data"]["sessions"].pop()),
+            ("refused imported session", lambda p: p["data"]["sessions"][0].__setitem__("status", "refused")),
+    ):
+        bad = copy.deepcopy(imported)
+        mutate(bad)
+        refuses(name + " is rejected", lambda: join_imported_sessions(
+            manifest, corpus, bad, inspected, workspace_id))
+    for name, key, value in (
+            ("conflicting source path", "source_path", rows[1]["source_path"]),
+            ("unknown corpus source", "cass_session_id", "/elsewhere/session.jsonl"),
+            ("wrong workspace", "workspace_id", "other-workspace"),
+            ("wrong source length", "message_count", 0),
+            ("duplicate persisted ID", "id", rows[1]["id"]),
+    ):
+        bad_rows = copy.deepcopy(rows)
+        bad_rows[0][key] = value
+        refuses(name + " is rejected", lambda: join_imported_sessions(
+            manifest, corpus, imported, inspection(bad_rows), workspace_id))
+
+    def item(where):
+        sid = ids_by_path[where["path"]]
+        line = where["line"]
+        return {"entityKind": "evidence_span", "evidenceSpanId": "ev_example",
+                "sessionId": sid, "startLine": line, "endLine": line,
+                "provenance": [{"uri": f"cass-session://{sid}#L{line}-{line}"}]}
+
+    original_item = item(original)
+    variant_item = item(variant)
+    original_loc = locate(original_item, session_paths, counts)
+    variant_loc = locate(variant_item, session_paths, counts)
+    arm("original exact record retains original and equivalent credit",
+        label in labels_hit(original_loc, originals) and label in labels_hit(original_loc, equivalents))
+    arm("seeded exact equivalent receives credit without changing original-only recall",
+        label in labels_hit(variant_loc, equivalents) and not labels_hit(variant_loc, originals))
+    occupied = {line for line, _ in equivalents[variant["path"]]}
+    noise_line = next(line for line in range(1, counts[variant["path"]] + 1) if line not in occupied)
+    noise = item(dict(variant, line=noise_line))
+    noise["content"] = json.dumps(original_item)
+    noise_loc = locate(noise, session_paths, counts)
+    arm("adjacent unlabeled same-scenario noise earns no exact credit, even with a quoted source ID",
+        noise_loc[0] == variant_loc[0] and labels_hit(noise_loc, equivalents) == set())
+    distractor = manifest["label_instances"]["distract_espresso"][-1]
+    distractor_labels = labels_hit(locate(item(distractor), session_paths, counts), equivalents)
+    arm("seeded distractors remain graded negatives",
+        "distract_espresso" in distractor_labels and not distractor_labels & relevant)
+    arm("memory content cannot impersonate a typed evidence source",
+        locate({"entityKind": "memory", "content": json.dumps(original_item)}, session_paths, counts) is None)
+
+    sid = variant_item["sessionId"]
+    line = variant["line"]
+    search_item = {"docId": "ev_example", "metadata": {
+        "session_id": sid, "start_line": str(line), "end_line": str(line),
+        "provenance_uri": f"cass-session://{sid}#L{line}-{line}",
+    }}
+    arm("search string metadata resolves the same source as typed pack fields",
+        locate(search_item, session_paths, counts) == variant_loc)
+    citation = {"entityKind": "evidence_span", "evidenceId": "ev_example",
+                "provenanceUri": f"cass-session://{sid}#L{line}-{line}",
+                "span": {"byteStart": 0, "byteEnd": 700}}
+    arm("ask citation byte offsets are never treated as transcript lines",
+        locate(citation, session_paths, counts) == variant_loc)
+    for name, bad in (
+            ("conflicting URI and typed line", dict(variant_item, startLine=line + 1)),
+            ("conflicting URI and session", dict(variant_item, sessionId=original_item["sessionId"])),
+            ("missing provenance", {"entityKind": "evidence_span", "content": json.dumps(variant_item)}),
+            ("boolean line number", dict(variant_item, startLine=True)),
+            ("malformed canonical URI", dict(variant_item, provenance=[{"uri": f"cass-session://{sid}#L0-2"}])),
+            ("unknown typed session", {"entityKind": "evidence_span", "sessionId": "sess_unknown",
+                                       "startLine": 1, "endLine": 1}),
+            ("range outside the transcript", {"entityKind": "evidence_span", "sessionId": sid,
+                                               "startLine": 1, "endLine": counts[variant["path"]] + 1}),
+            ("reversed transcript range", {"entityKind": "evidence_span", "sessionId": sid,
+                                           "startLine": 2, "endLine": 1}),
+    ):
+        refuses(name + " is rejected", lambda: locate(bad, session_paths, counts))
+
+    duplicated = copy.deepcopy(healthy_metrics)
+    duplicated["FAR"]["relevant_items"] = 2000
+    duplicated["pack_exact_precision"] = {"value": 1.0}
+    duplicated["pack_query_coverage"] = {"value": 0.025, "relevant_queries": 1, "queries": 40}
+    result = evaluate_enforced_metrics(duplicated, 4009, 40)
+    arm("2,000 relevant copies from one task cannot compensate for 39 missed tasks",
+        any(f["check"] == "real_corpus_pack_relevance_survival" for f in result["failures"]))
+    adjacent = copy.deepcopy(healthy_metrics)
+    adjacent["pack_scenario_precision"] = {"value": 1.0}
+    adjacent["pack_exact_precision"] = {"value": 0.0}
+    adjacent["pack_query_coverage"] = {"value": 0.0, "relevant_queries": 0, "queries": 40}
+    result = evaluate_enforced_metrics(adjacent, 4009, 40)
+    arm("perfect scenario membership cannot conceal exact-record retrieval misses",
+        any(f["check"] == "real_corpus_pack_relevance_survival" for f in result["failures"]))
+    bad_distractors = copy.deepcopy(healthy_metrics)
+    bad_distractors["equivalent_recall_at_5"]["distractors_in_top5"] = 1
+    result = evaluate_enforced_metrics(bad_distractors, 4009, 40)
+    arm("a seeded distractor fails even when original-only top-five distractors are zero",
+        any(f["check"] == "real_corpus_top5_no_distractors" for f in result["failures"]))
+
+
+def self_test(ee=None, keep=False):
     """Validate the probe against the three defects it shipped with, both ways.
 
     Every arm has a twin that must FAIL, because a control nobody saw fail is
@@ -1155,9 +1532,12 @@ def self_test(ee=None):
             "UTR": {"value": 0.9997, "packed_chars": 222753, "target": ">= 0.95"},
             "TTFUC": {"pack_p50_seconds": 1.637, "pack_max_seconds": 2.469, "target": "<= 2 s cold"},
             "recall_at_5": {"mean": 0.7583, "queries": 40, "distractors_in_top5": 0},
-            "FAR": {"value": 0.0431, "packed_items": 1670, "distractor_items": 72, "relevant_items": 52, "target": "<= 0.05"},
+            "equivalent_recall_at_5": {"mean": 0.7583, "queries": 40, "distractors_in_top5": 0},
+            "FAR": {"value": 0.0431, "packed_items": 1670, "distractor_items": 72, "relevant_items": 102, "target": "<= 0.05"},
             "scenario_hit_at_5": {"value": 0.975},
             "pack_scenario_precision": {"value": 0.0784},
+            "pack_exact_precision": {"value": 0.0611},
+            "pack_query_coverage": {"value": 0.5, "relevant_queries": 20, "queries": 40},
             "PAP": {"precision": 1.0, "recall": 0.8333, "proposals": 5, "polluted": 0},
             "WCS": {"remember_p50_seconds": 1.503, "corpus_records": 123},
         }
@@ -1186,6 +1566,9 @@ def self_test(ee=None):
             and plausible_irrelevant["FAR"]["value"] <= 0.05)
         arm("PLAUSIBLE-IRRELEVANT CONTROL: enforce gate rejects the run on relevance survival",
             any(f["check"] == "real_corpus_pack_relevance_survival" for f in pi_eval["failures"]))
+
+        print("EXACT-RECORD arms -- variants, provenance, and query-level grading:")
+        exact_record_self_test(scratch, arm, sample_metrics)
 
         if ee:
             print(f"END-TO-END controls against {ee}:")
@@ -1232,14 +1615,19 @@ def self_test(ee=None):
         else:
             print("END-TO-END controls SKIPPED (no --ee); arms above are binary-free.")
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        if keep:
+            print(f"Self-test artifacts retained: {scratch}")
+        else:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     print(f"\n{checked - len(failures)}/{checked} arms ok")
     if failures:
         print("FAILED arms:")
         for label in failures:
             print(f"  - {label}")
+        print("EE_REAL_CORPUS_SELF_TEST_RC=1")
         return 1
+    print("EE_REAL_CORPUS_SELF_TEST_RC=0")
     return 0
 
 

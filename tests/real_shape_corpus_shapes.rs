@@ -323,24 +323,19 @@ fn the_envelope_check_fires_on_each_arm_separately() {
 /// Generator determinism, which the bead's TESTS list names and which was
 /// previously only a measurement (bd-reality-core-convergence-1azkt.43).
 ///
-/// Regenerates the corpus into a TEMP directory with the committed parameters
-/// and compares the generator's own tree digest to the digest recorded in
-/// tests/fixtures/real_shape_cass/SHAPES.md. Two things fail here that nothing
-/// else catches: a renderer change that alters bytes while still satisfying the
-/// envelope table, and a regeneration committed with a different seed or
-/// target-records than the manifest claims.
+/// Regenerates twice with the historical fixture's parameters. Every transcript
+/// path and byte must still match that fixture, while the two fresh v2 trees
+/// must have identical digests. Metadata now records exact variant identities;
+/// its deliberate schema change must not be confused with transcript drift.
 ///
-/// It never touches the committed fixture -- the output goes to a tempdir, and
-/// only the printed digest is compared.
+/// Neither run touches the committed v1 fixture. Its envelope and judgment
+/// checks below continue to validate the historical evidence unchanged.
 ///
 /// SKIPS RATHER THAN FAILS when python3 or the generator is absent, because a
 /// tarball without scripts/ cannot answer this and a gate that assumes the
 /// generator is present fails for a reason unrelated to determinism.
 #[test]
 fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
-    const RECORDED_DIGEST: &str =
-        "c846e3c4378814797a8e6af85377b3f08f43a0962f90b28575a7290fb3e2a5a6";
-
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let generator = repo
         .join("scripts")
@@ -384,10 +379,9 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
     // nothing to do with determinism. A pid-stamped name alone does not get
     // there: pids are reused and nothing here removes the directory afterward.
     //
-    // For the same reason the recorded digest CANNOT be reproduced by hashing
-    // tests/fixtures/real_shape_cass/ in place: that directory also carries
-    // SHAPES.md, which generate.py does not write. The digest is a property of
-    // a freshly generated tree, which is what this test builds.
+    // Both full-tree digests therefore come from fresh output directories.
+    // Transcript compatibility is checked separately against the v1 fixture,
+    // whose historical metadata and accompanying SHAPES.md are unchanged.
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -396,12 +390,15 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         "ee-real-shape-determinism-{}-{unique}",
         std::process::id()
     ));
-    if out.exists() {
-        return Err(format!(
-            "{} already exists; this test needs a tree it alone wrote, because \
-             tree_digest hashes every file present",
-            out.display()
-        ));
+    let repeat_out = out.with_extension("repeat");
+    for candidate in [&out, &repeat_out] {
+        if candidate.exists() {
+            return Err(format!(
+                "{} already exists; this test needs a tree it alone wrote, because \
+                 tree_digest hashes every file present",
+                candidate.display()
+            ));
+        }
     }
     let output = std::process::Command::new("python3")
         .arg(&generator)
@@ -464,19 +461,49 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         )
     })?;
     let digest = summary.get("digest").and_then(Value::as_str).unwrap_or("");
-    if digest != RECORDED_DIGEST {
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
-            "regenerating with seed={seed} target_records={target} produced digest\n  \
-             {digest}\nbut tests/fixtures/real_shape_cass/SHAPES.md records\n  \
-             {RECORDED_DIGEST}\nEither the generator is no longer deterministic, or the \
-             committed corpus was produced with different parameters than the manifest \
-             claims. Regenerate deliberately and update SHAPES.md in the same commit."
+            "generate.py returned an invalid tree digest: {digest:?}"
+        ));
+    }
+    let repeat_output = std::process::Command::new("python3")
+        .arg(&generator)
+        .arg("--out")
+        .arg(&repeat_out)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--seed")
+        .arg(seed.to_string())
+        .arg("--target-records")
+        .arg(target.to_string())
+        .arg("--digest")
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| format!("could not repeat generator determinism run: {error}"))?;
+    if !repeat_output.status.success() {
+        return Err(format!(
+            "repeated generate.py exited {:?}\nstdout: {}\nstderr: {}",
+            repeat_output.status.code(),
+            String::from_utf8_lossy(&repeat_output.stdout),
+            String::from_utf8_lossy(&repeat_output.stderr)
+        ));
+    }
+    let repeated: Value = serde_json::from_slice(&repeat_output.stdout).map_err(|error| {
+        format!(
+            "repeated generate.py --digest must print a JSON summary: {error}; stdout: {}",
+            String::from_utf8_lossy(&repeat_output.stdout)
+        )
+    })?;
+    if repeated.get("digest").and_then(Value::as_str) != Some(digest) {
+        return Err(format!(
+            "fresh v2 corpus digests differ for seed={seed} target_records={target}: \
+             {digest} versus {:?}",
+            repeated.get("digest")
         ));
     }
 
-    // And the regenerated tree must agree with the committed one on the counts
-    // the manifest publishes, so a digest match cannot come from both sides
-    // being equally wrong.
+    // The new metadata must preserve the historical generation parameters and
+    // every exact transcript, while declaring its richer identity contract.
     let regenerated_manifest = fs::read_to_string(out.join("manifest.json"))
         .map_err(|error| format!("read regenerated manifest: {error}"))?;
     let regenerated: Value = serde_json::from_str(&regenerated_manifest)
@@ -489,6 +516,123 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
                 manifest.get(key)
             ));
         }
+    }
+    if regenerated.get("schema").and_then(Value::as_str) != Some("ee.real_shape_cass.manifest.v2") {
+        return Err("regenerated manifest must declare the v2 exact-identity schema".to_owned());
+    }
+    let original_sessions = manifest
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "historical manifest has no sessions array".to_owned())?;
+    let regenerated_sessions = regenerated
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "regenerated manifest has no sessions array".to_owned())?;
+    let mut by_path = BTreeMap::new();
+    for session in regenerated_sessions {
+        let path = session
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "regenerated session has no path".to_owned())?;
+        if by_path.insert(path, session).is_some() {
+            return Err(format!("duplicate regenerated transcript path {path}"));
+        }
+    }
+    if by_path.len() != original_sessions.len() {
+        return Err(format!(
+            "regenerated session count {} differs from historical count {}",
+            by_path.len(),
+            original_sessions.len()
+        ));
+    }
+    for original in original_sessions {
+        let rel = original
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "historical session has no path".to_owned())?;
+        let session = by_path
+            .get(rel)
+            .ok_or_else(|| format!("regenerated corpus is missing historical transcript {rel}"))?;
+        for key in [
+            "agent",
+            "slug",
+            "session_id",
+            "message_count",
+            "core",
+            "started_at",
+            "ended_at",
+        ] {
+            if session.get(key) != original.get(key) {
+                return Err(format!(
+                    "{rel}: regenerated session changed historical {key}"
+                ));
+            }
+        }
+        if session
+            .get("scenario")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(format!("{rel}: regenerated session has no scenario"));
+        }
+        let count = session.get("message_count").and_then(Value::as_u64);
+        let labeled = session.get("labeled_record_count").and_then(Value::as_u64);
+        let unlabeled = session.get("unlabeled_record_count").and_then(Value::as_u64);
+        let (Some(count), Some(labeled), Some(unlabeled)) = (count, labeled, unlabeled) else {
+            return Err(format!(
+                "{rel}: regenerated record counts must be nonnegative integers"
+            ));
+        };
+        if labeled.checked_add(unlabeled) != Some(count) {
+            return Err(format!(
+                "{rel}: labeled and unlabeled counts do not cover all records"
+            ));
+        }
+        let historical_bytes = fs::read(corpus_root().join(rel))
+            .map_err(|error| format!("read historical transcript {rel}: {error}"))?;
+        let regenerated_bytes = fs::read(out.join(rel))
+            .map_err(|error| format!("read regenerated transcript {rel}: {error}"))?;
+        if regenerated_bytes != historical_bytes {
+            return Err(format!(
+                "{rel}: v2 generation changed historical transcript bytes"
+            ));
+        }
+    }
+    let originals = regenerated
+        .get("labels")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "regenerated manifest has no original labels".to_owned())?;
+    let instances = regenerated
+        .get("label_instances")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "regenerated manifest has no exact label instances".to_owned())?;
+    if originals.is_empty() || originals.len() != instances.len() {
+        return Err(
+            "regenerated original and instance concept sets are empty or differ".to_owned(),
+        );
+    }
+    for (label, original) in originals {
+        let locators = instances
+            .get(label)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("concept {label} has no exact instance list"))?;
+        if locators
+            .iter()
+            .filter(|locator| *locator == original)
+            .count()
+            != 1
+        {
+            return Err(format!(
+                "concept {label} must include its original locator exactly once"
+            ));
+        }
+    }
+    let judgments_raw = fs::read_to_string(out.join("judgments.json"))
+        .map_err(|error| format!("read regenerated judgments: {error}"))?;
+    let judgments: Value = serde_json::from_str(&judgments_raw)
+        .map_err(|error| format!("parse regenerated judgments: {error}"))?;
+    if judgments.get("schema").and_then(Value::as_str) != Some("ee.real_shape_cass.judgments.v2") {
+        return Err("regenerated judgments must declare the v2 concept schema".to_owned());
     }
     Ok(())
 }

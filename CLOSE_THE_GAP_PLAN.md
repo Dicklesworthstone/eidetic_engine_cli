@@ -4420,3 +4420,45 @@ Five refinement passes covered the bridge and Beads.
 The release staging task `.7` now records the DSR-only requirement directly.
 The new work reaches the existing `.22` Part III closeout through `.76` and
 `.7`. The active blocking graph reports zero cycles.
+
+### 23.6 Retrieval and shutdown follow-through — 2026-11-23
+
+This pass read the comprehensive plan and active Beads before selecting two
+remaining defects in the core retrieval and durable-write paths.
+
+- **Accepted writes after daemon destruction** (`0bc147ca`). A worker-drain
+  timeout previously left the actor and runtime on the server handle, whose
+  destructor could then discard the runtime needed to drive accepted work.
+  Destruction now transfers that ownership to the existing drain thread with
+  no additional wait. The regression uses a real queued actor operation and
+  checks bounded destruction, successful settlement, runtime retirement, and
+  retention of the endpoint lease until the write finishes. Concurrent endpoint
+  ownership changes on `main` were retained.
+- **Order-independent component-score ties.** The old in-place pairwise maximum
+  was sensitive to candidate order when approximate component ties formed a
+  non-transitive chain. Canonicalization now sorts immutable component tuples
+  and forms contiguous groups bounded in every component, reducing its cost
+  from quadratic to `O(n log n)`. Raw components, provenance, and caller order
+  remain intact. Regression cases cover permutations, idempotence, full-range
+  bounds, incompatible intervening tuples, source and missing-value boundaries,
+  nonfinite values, and signed zero. This does not establish full restored-index
+  parity or close the `.90`/`.91` public-CLI acceptance criteria.
+
+Whitespace, commit hygiene, production reachability, and degraded-repair
+actionability checks passed. Independent source reviews were completed. Rust
+formatting, compilation, and behavioral execution remain unrun: the environment
+has no Rust toolchain, RCH, or DSR, and the attempted remote verification wrapper
+refused its source preflight with missing sibling repositories. The affected
+Beads remain open pending their required executable evidence.
+
+**Recovery follow-up for `.88`: preserve provenance verification history.**
+Source inspection found that `ExportMemoryRecord` omits the memory provenance
+chain hash, version, verification status, verification timestamp, and note.
+Restore currently regenerates a chain and sets `unverified`, so source
+`mismatch`, `missing`, or `skipped` warnings disappear and a later verification
+can certify the regenerated commitment. This is an integrity-history loss;
+no hard admission or ranking bypass was demonstrated. Recovery needs an
+authenticated typed carrier, verification against the actual restored
+projection, and explicit handling of redaction and legacy archives. Preserve
+negative source evidence and test create/verify/restore/reverify before claiming
+the gap closed. No partial recovery-format change was made in this pass.
