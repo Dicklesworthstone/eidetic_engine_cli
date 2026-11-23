@@ -1716,3 +1716,26 @@ native = [
 
 [release_artifacts.compile_only]
 x86_64-pc-windows-msvc = "The native release probe runs POSIX executables. Windows requires a completed DSR build and exact archive and ee.exe bindings."
+
+[release_aux]
+schema = "ee.release_aux_policy.v1"
+static_stages = [
+    "Rustfmt Conformance (bd-g3obb)",
+    "Forbidden Dependencies",
+    "Closure Linter",
+    "Verification Drift Guard",
+    "Shard Coverage Contract",
+    "Package Artifact Leak Check (bd-2ifvx)",
+    "Vision Coverage",
+]
+corpus_min_spans = 4009
+corpus_min_queries = 40
+corpus_checks = [
+    "real_corpus_pack_usefulness_utr",
+    "real_corpus_admission_far",
+    "real_corpus_top5_no_distractors",
+    "real_corpus_scenario_hit_at_5",
+    "real_corpus_pack_relevance_survival",
+    "real_corpus_learn_quality",
+    "real_corpus_latency",
+]

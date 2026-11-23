@@ -235,6 +235,13 @@ for arg in "$@"; do
     esac
 done
 
+static_source=""
+if [ "$STATIC_ONLY" = "true" ] &&
+   static_dirty=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null) &&
+   [ -z "$static_dirty" ]; then
+    static_source=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || static_source=""
+fi
+
 if [ "$CI_SMOKE" = "true" ] && [ "$SWARM_HEAVY" = "true" ]; then
     echo "error: --ci-smoke and --swarm-heavy are mutually exclusive" >&2
     echo "       --ci-smoke trims to the fast minimal gate set;" >&2
@@ -2405,7 +2412,19 @@ run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.
 if [ "$STATIC_ONLY" = "true" ]; then
     verification_summary_banner
     printf "%b" "$STAGE_RESULTS"
-    exit "$(verification_exit_status)"
+    static_exit=$(verification_exit_status)
+    if [ "$static_exit" -eq 0 ] && [ -n "$static_source" ] &&
+       static_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) &&
+       [ "$static_head" = "$static_source" ] &&
+       static_dirty=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null) &&
+       [ -z "$static_dirty" ]; then
+        static_receipt=$(jq -cn --arg commit "$static_source" \
+            --arg stages "$(printf '%b' "$STAGE_RESULTS")" \
+            --argjson passed "$STAGE_PASSED" \
+            '{schema:"ee.static_qualification.v1",commit:$commit,passed:$passed,stages:($stages|split("\n"))}')
+        printf 'EE_STATIC_QUALIFICATION=%s\n' "$static_receipt"
+    fi
+    exit "$static_exit"
 fi
 
 # Gate 4.5: Mechanized proof artifacts. Missing Lean4/TLA+ tools degrade

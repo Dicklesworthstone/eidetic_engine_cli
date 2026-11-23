@@ -16,6 +16,15 @@ and actual test results are recorded in
    `receiptPath` in the capsule manifest stage entry along with the stage log
    and full candidate commit. Verify the Rust inventory from the candidate tree.
 
+   Keep the static log as the `static` stage and the generated `summary.json`
+   as the `real-corpus` stage. The committed policy sets the required checks.
+
+   ```bash
+   ./scripts/verify.sh --static-only > "$static_log" 2>&1
+   python3 scripts/real_shape_corpus/probe.py --ee "$candidate_binary" \
+     --target-records 4009 --enforce --enforce-latency --out "$corpus_output"
+   ```
+
    ```bash
    python3 scripts/lib/emit_proof_capsule.py --verify-capsule "$capsule" \
      --expected-sha "$release_commit" --verify-logs --verify-rch-policy

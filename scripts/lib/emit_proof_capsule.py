@@ -1632,6 +1632,90 @@ def verify_dsr_staging(
         return [f"could not verify DSR staging: {exc}"]
 
 
+def verify_auxiliary_stages(capsule: dict[str, Any], repo_root: pathlib.Path) -> list[str]:
+    import tomllib
+
+    commit = capsule["source"]["commit"]
+    rows = {row["stage"]: row for row in capsule["results"]}
+    for stage in ("static", "real-corpus"):
+        if stage not in rows:
+            return [f"DSR staging requires the {stage} verification stage"]
+    try:
+        budget = tomllib.loads(_committed_blob(repo_root, commit, "scripts/verify-budget.toml").decode())
+        policy = budget.get("release_aux", {})
+        if policy.get("schema") != "ee.release_aux_policy.v1":
+            return ["candidate is missing its auxiliary release qualification policy"]
+        static_log = (repo_root / rows["static"]["logPath"]).read_text(encoding="utf-8")
+        verify_static_receipt(static_log, commit, policy["static_stages"])
+
+        corpus_file = repo_root / rows["real-corpus"]["logPath"]
+        corpus = json.loads(
+            corpus_file.read_bytes(), parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+        verify_corpus_receipt(corpus, capsule, policy, repo_root)
+    except (AttributeError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+        return [f"auxiliary release qualification refused: {exc}"]
+    return []
+
+
+def verify_static_receipt(log: str, commit: str, required: list[str]) -> None:
+    prefix = "EE_STATIC_QUALIFICATION="
+    receipts = [line[len(prefix):] for line in log.splitlines() if line.startswith(prefix)]
+    if len(receipts) != 1 or not required or len(required) != len(set(required)):
+        raise ValueError("expected one completed static receipt and distinct required checks")
+    receipt = json.loads(receipts[0], parse_constant=_reject_json_constant, object_pairs_hook=_unique_json_object)
+    if receipt.get("schema") != "ee.static_qualification.v1" or receipt.get("commit") != commit:
+        raise ValueError("static receipt did not identify the candidate commit")
+    rows = receipt["stages"]
+    incomplete = ("FAIL ", "TRACKED_RED ", "INFRA_ERROR ", "TIMEOUT ", "CANCELLED ", "ENV_UNRUNNABLE ", "SKIP ")
+    if any(row.startswith(incomplete) for row in rows):
+        raise ValueError("static receipt includes an unsuccessful stage")
+    passed = [row for row in rows if row.startswith("PASS ")]
+    if not _is_strict_int(receipt.get("passed")) or len(passed) != receipt["passed"]:
+        raise ValueError("static receipt pass total differs from its stage rows")
+    for stage in required:
+        if sum(row.startswith(f"PASS {stage} (") for row in passed) != 1:
+            raise ValueError(f"static receipt lacks one completed pass for {stage}")
+
+
+def verify_corpus_receipt(
+    report: dict[str, Any], capsule: dict[str, Any], policy: dict[str, Any], repo_root: pathlib.Path,
+) -> None:
+    source = report.get("candidate_identity", {}).get("source", {})
+    if (
+        report.get("schema") != "ee.real_corpus_probe.v1"
+        or report.get("mode") != "enforce"
+        or report.get("harness_error")
+        or report.get("plausible_irrelevant_control")
+        or source.get("gitCommit") != capsule["source"]["commit"]
+        or source.get("gitDirty") is not False
+    ):
+        raise ValueError("corpus receipt lacks an enforced run on the clean candidate")
+    binary_sha = _sha256_file(repo_root / report["ee"])
+    if not any(binary["sha256"] == binary_sha for binary in capsule["binaries"]):
+        raise ValueError("corpus executable digest differs from the candidate binaries")
+    import_summary = report["import"]
+    spans = import_summary["spans"]
+    query_ids = [row["id"] for row in report["per_query"]]
+    if (
+        not _is_strict_int(spans) or spans < policy["corpus_min_spans"]
+        or len(set(query_ids)) != len(query_ids) or len(query_ids) < policy["corpus_min_queries"]
+    ):
+        raise ValueError("corpus receipt has incomplete span or query coverage")
+    enforced = report["enforced_checks"]
+    checks = [row for row in enforced["checks"] if row.get("state") == "enforce"]
+    ids = {row["check"] for row in checks}
+    if (
+        not _is_strict_int(enforced.get("failed_count")) or enforced["failed_count"] != 0
+        or enforced.get("failures") != []
+        or len(ids) != len(checks) or len(checks) != enforced.get("enforced_count")
+        or not set(policy["corpus_checks"]).issubset(ids)
+        or any(row.get("passed") is not True for row in checks)
+    ):
+        raise ValueError("corpus receipt did not pass every required enforce check")
+
+
 GREEN_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 4 tests
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
@@ -1823,6 +1907,37 @@ def self_test() -> int:
         log_path.write_text(ZERO_LOG, encoding="utf-8")
         check("native verification rejects zero-result log", bool(verify_retained_test_counts(populated, cand_repo)))
         log_path.write_text(GREEN_LOG, encoding="utf-8")
+
+        static = {
+            "schema": "ee.static_qualification.v1", "commit": sha_a, "passed": 2,
+            "stages": ["PASS Formatting (1s; budget OK)", "PASS Vision (1s; budget OK)"],
+        }
+        corpus = {
+            "schema": "ee.real_corpus_probe.v1", "mode": "enforce", "ee": str(bin_path),
+            "candidate_identity": {"source": {"gitCommit": sha_a, "gitDirty": False}},
+            "import": {"spans": 4}, "per_query": [{"id": "one"}, {"id": "two"}],
+            "enforced_checks": {
+                "enforced_count": 1, "failed_count": 0, "failures": [],
+                "checks": [{"check": "test-corpus", "state": "enforce", "passed": True}],
+            },
+        }
+        auxiliary = {"corpus_min_spans": 4, "corpus_min_queries": 2, "corpus_checks": ["test-corpus"]}
+        verify_static_receipt("EE_STATIC_QUALIFICATION=" + json.dumps(static), sha_a, ["Formatting", "Vision"])
+        verify_corpus_receipt(corpus, populated, auxiliary, cand_repo)
+        check("static and enforce-mode corpus receipts bind the candidate", True)
+        log = "printf 'EE_STATIC_QUALIFICATION=" + json.dumps(static) + "'"
+        try:
+            verify_static_receipt(log, sha_a, ["Formatting", "Vision"])
+        except ValueError:
+            check("static receipt rejects an echoed producer command", True)
+        else:
+            check("static receipt rejects an echoed producer command", False)
+        try:
+            verify_corpus_receipt(dict(corpus, mode="report"), populated, auxiliary, cand_repo)
+        except ValueError:
+            check("corpus qualification rejects report mode", True)
+        else:
+            check("corpus qualification rejects report mode", False)
 
         policy = {"schema": "ee.release_rch_policy.v1", "targets": ["contracts"], "mcp_targets": ["mcp_parity"]}
         config = {"test": [{"name": target, "path": f"tests/{target}.rs"}
@@ -2236,6 +2351,8 @@ def main() -> int:
                 problems = verify_release_artifact(capsule, *artifact_args)
         if not problems and (args.verify_rch_policy or dsr_check):
             problems = verify_release_rch_policy(capsule, repo_root)
+        if not problems and dsr_check:
+            problems = verify_auxiliary_stages(capsule, repo_root)
         if not problems and dsr_check:
             problems = verify_dsr_staging(capsule, *dsr_args, repo_root)
         if problems:
