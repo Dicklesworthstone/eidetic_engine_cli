@@ -250,6 +250,7 @@ const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_WRITE_OWNER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
+const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
 
 #[derive(Clone)]
@@ -270,6 +271,9 @@ impl std::fmt::Debug for DaemonRequestRuntime {
 // `write_router` (an asupersync runtime + write handle) is not comparable.
 #[derive(Clone, Debug, Default)]
 pub struct DaemonDispatchPolicy {
+    /// Keep the endpoint lease until accepted workers have settled, even if
+    /// their owning server handle is dropped after a drain timeout.
+    _socket_publish_lock: Option<Arc<DaemonSocketPublishLock>>,
     bound_workspace_id: Option<String>,
     /// Owned by one server instance, including its detached startup worker.
     /// Model caches may be shared, but readiness for another workspace is not.
@@ -760,6 +764,8 @@ fn daemon_echo_env_value_truthy(value: &str) -> bool {
 /// the socket file is unlinked deterministically).
 pub struct DaemonServerHandle {
     socket_path: PathBuf,
+    socket_identity: Option<DaemonSocketIdentity>,
+    socket_publish_lock: Option<Arc<DaemonSocketPublishLock>>,
     shutdown: Arc<AtomicBool>,
     search_warm_state: Arc<AtomicU8>,
     read_pools: Arc<DaemonReadPools>,
@@ -870,6 +876,7 @@ impl DaemonServerHandle {
             && self.write_runtime.is_none()
             && self.write_owner_drain.is_none()
         {
+            self.socket_publish_lock.take();
             return Ok(());
         }
 
@@ -903,7 +910,9 @@ impl DaemonServerHandle {
             // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
             // `NotFound`, but do not let shutdown delete an arbitrary
             // regular file if the socket path was swapped underneath us.
-            SocketBroker::new(self.socket_path.clone()).remove_owned_socket_file()
+            self.socket_identity.map_or(Ok(()), |identity| {
+                SocketBroker::new(self.socket_path.clone()).remove_owned_socket_file(identity)
+            })
         } else {
             Ok(())
         };
@@ -936,7 +945,9 @@ impl DaemonServerHandle {
 
         unlink_result?;
         scheduler_result?;
-        write_owner_result
+        write_owner_result?;
+        self.socket_publish_lock.take();
+        Ok(())
     }
 
     fn drain_write_owner_with_timeout(&mut self, timeout: Duration) -> io::Result<()> {
@@ -948,10 +959,12 @@ impl DaemonServerHandle {
             // for another explicit shutdown attempt.
             let resources = Arc::new(Mutex::new(Some((runtime, self.write_owner_task.take()))));
             let thread_resources = Arc::clone(&resources);
+            let socket_publish_lock = self.socket_publish_lock.clone();
             let (done_tx, done_rx) = mpsc::channel();
             let spawn_result = thread::Builder::new()
                 .name("ee-daemon-write-drain".to_owned())
                 .spawn(move || {
+                    let _socket_publish_lock = socket_publish_lock;
                     let resources = thread_resources
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1044,6 +1057,21 @@ struct SocketBroker {
     socket_path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DaemonSocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl DaemonSocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
 impl SocketBroker {
     fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -1057,12 +1085,13 @@ impl SocketBroker {
 
     fn publish_listener(
         &self,
-    ) -> Result<(UnixListener, DaemonSocketPublishLock), DaemonStartError> {
+    ) -> Result<(UnixListener, DaemonSocketIdentity, DaemonSocketPublishLock), DaemonStartError>
+    {
         self.ensure_private_parent()?;
         let publish_lock = self.acquire_publish_lock()?;
         self.refuse_non_socket_or_live_existing()?;
-        let listener = self.bind_secured_temp_listener()?;
-        Ok((listener, publish_lock))
+        let (listener, identity) = self.bind_secured_temp_listener()?;
+        Ok((listener, identity, publish_lock))
     }
 
     fn ensure_private_parent(&self) -> Result<(), DaemonStartError> {
@@ -1096,10 +1125,17 @@ impl SocketBroker {
                 source,
             }
         })?;
-        flock(&file, FlockOperation::LockExclusive).map_err(|source| DaemonStartError::Bind {
-            path: self.socket_path.clone(),
-            source: io::Error::from(source),
-        })?;
+        if let Err(source) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            if source == rustix::io::Errno::WOULDBLOCK || source == rustix::io::Errno::AGAIN {
+                return Err(DaemonStartError::AlreadyRunning {
+                    path: self.socket_path.clone(),
+                });
+            }
+            return Err(DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source: io::Error::from(source),
+            });
+        }
         Ok(DaemonSocketPublishLock { _file: file })
     }
 
@@ -1124,11 +1160,7 @@ impl SocketBroker {
                         path: self.socket_path.clone(),
                     });
                 }
-                if self.existing_socket_accepts_connection() {
-                    return Err(DaemonStartError::AlreadyRunning {
-                        path: self.socket_path.clone(),
-                    });
-                }
+                self.refuse_live_existing_socket()?;
                 // A dead socket from a prior daemon: the `rename` below
                 // atomically replaces it, so there is nothing to unlink.
             }
@@ -1143,7 +1175,9 @@ impl SocketBroker {
         Ok(())
     }
 
-    fn bind_secured_temp_listener(&self) -> Result<UnixListener, DaemonStartError> {
+    fn bind_secured_temp_listener(
+        &self,
+    ) -> Result<(UnixListener, DaemonSocketIdentity), DaemonStartError> {
         // Bind a per-attempt temporary path inside the same (per-UID
         // 0o700) parent directory, tighten its mode to 0o600 BEFORE it is
         // ever visible at the canonical name, then `rename(2)` it into
@@ -1160,7 +1194,7 @@ impl SocketBroker {
     fn bind_secured_temp_listener_at(
         &self,
         tmp_path: &Path,
-    ) -> Result<UnixListener, DaemonStartError> {
+    ) -> Result<(UnixListener, DaemonSocketIdentity), DaemonStartError> {
         // Never unlink an unexpected pre-existing temp path. The randomized
         // UUID makes a collision vanishingly unlikely, while bind(2)'s
         // create-only behavior turns either a crash remnant or a planted
@@ -1171,6 +1205,15 @@ impl SocketBroker {
             path: self.socket_path.clone(),
             source,
         })?;
+        // A socket descriptor's inode can differ from its filesystem inode.
+        // Capture the freshly bound pathname before publication instead of
+        // learning ownership from the replaceable public name at shutdown.
+        let identity = fs::symlink_metadata(tmp_path)
+            .map(|metadata| DaemonSocketIdentity::from_metadata(&metadata))
+            .map_err(|source| DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source,
+            })?;
 
         // Tighten the temp socket to mode 0o600 before it is published.
         // `UnixListener::bind` honours the process umask (typically 0o022
@@ -1184,7 +1227,7 @@ impl SocketBroker {
             // The temp socket is bound but world-open at this instant;
             // remove it before returning so a half-secured artifact does
             // not linger under the temp name.
-            let _ = Self::remove_owned_socket_path(tmp_path);
+            let _ = Self::remove_owned_socket_path(tmp_path, identity);
             return Err(DaemonStartError::Bind {
                 path: self.socket_path.clone(),
                 source,
@@ -1198,21 +1241,21 @@ impl SocketBroker {
             // Publish failed (e.g. cross-device move, or the parent dir
             // was removed underneath us). Drop the temp socket so it does
             // not linger, then surface the failure.
-            let _ = Self::remove_owned_socket_path(tmp_path);
+            let _ = Self::remove_owned_socket_path(tmp_path, identity);
             return Err(DaemonStartError::Bind {
                 path: self.socket_path.clone(),
                 source,
             });
         }
 
-        Ok(listener)
+        Ok((listener, identity))
     }
 
-    fn remove_owned_socket_file(&self) -> io::Result<()> {
-        Self::remove_owned_socket_path(&self.socket_path)
+    fn remove_owned_socket_file(&self, identity: DaemonSocketIdentity) -> io::Result<()> {
+        Self::remove_owned_socket_path(&self.socket_path, identity)
     }
 
-    fn remove_owned_socket_path(path: &Path) -> io::Result<()> {
+    fn remove_owned_socket_path(path: &Path, identity: DaemonSocketIdentity) -> io::Result<()> {
         match fs::symlink_metadata(path) {
             Ok(metadata) => {
                 if !metadata.file_type().is_socket() {
@@ -1232,6 +1275,15 @@ impl SocketBroker {
                             "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
                             path.display(),
                             metadata.uid()
+                        ),
+                    ));
+                }
+                if DaemonSocketIdentity::from_metadata(&metadata) != identity {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "refusing to remove replacement daemon socket {}",
+                            path.display()
                         ),
                     ));
                 }
@@ -1381,8 +1433,37 @@ impl SocketBroker {
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
 
-    fn existing_socket_accepts_connection(&self) -> bool {
-        UnixStream::connect(&self.socket_path).is_ok()
+    fn refuse_live_existing_socket(&self) -> Result<(), DaemonStartError> {
+        match connect_client_before(
+            &self.socket_path,
+            Instant::now() + DAEMON_SOCKET_PROBE_TIMEOUT,
+        ) {
+            Ok(_) => Err(DaemonStartError::AlreadyRunning {
+                path: self.socket_path.clone(),
+            }),
+            Err(ClientError::Connect(source))
+                if source.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                Ok(())
+            }
+            Err(ClientError::DeadlineExceeded) => Err(DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "existing daemon socket did not accept a bounded probe; refusing to replace it",
+                ),
+            }),
+            Err(ClientError::Connect(source) | ClientError::Io(source)) => {
+                Err(DaemonStartError::Bind {
+                    path: self.socket_path.clone(),
+                    source,
+                })
+            }
+            Err(error) => Err(DaemonStartError::Bind {
+                path: self.socket_path.clone(),
+                source: io::Error::other(error),
+            }),
+        }
     }
 }
 
@@ -1440,7 +1521,9 @@ fn start_server_with_dispatch_policy(
             .retain(&Path::new(workspace).join(".ee/ee.db"));
     }
     let broker = SocketBroker::new(socket_path);
-    let (listener, _publish_lock) = broker.publish_listener()?;
+    let (listener, socket_identity, publish_lock) = broker.publish_listener()?;
+    let socket_publish_lock = Arc::new(publish_lock);
+    dispatch_policy._socket_publish_lock = Some(Arc::clone(&socket_publish_lock));
     let socket_path = broker.socket_path().to_path_buf();
     let (listener, accept_wakeup) =
         DaemonListener::new(listener).map_err(|source| DaemonStartError::Bind {
@@ -1499,9 +1582,11 @@ fn start_server_with_dispatch_policy(
             let (owner, write_handle) = crate::core::write_owner::WriteOwner::new(
                 crate::core::write_owner::DEFAULT_CHANNEL_CAPACITY,
             );
+            let actor_socket_publish_lock = Arc::clone(&socket_publish_lock);
             let owner_task = runtime
                 .handle()
                 .try_spawn(async move {
+                    let _socket_publish_lock = actor_socket_publish_lock;
                     let Some(cx) = asupersync::Cx::current() else {
                         return;
                     };
@@ -1581,11 +1666,13 @@ fn start_server_with_dispatch_policy(
         .as_deref()
         .and_then(|workspace| {
             let scheduler_shutdown = Arc::clone(&shutdown);
+            let scheduler_socket_publish_lock = Arc::clone(&socket_publish_lock);
             let workspace = workspace.to_owned();
             let (done_tx, done_rx) = mpsc::channel();
             let join = thread::Builder::new()
                 .name("ee-daemon-steward".to_owned())
                 .spawn(move || {
+                    let _socket_publish_lock = scheduler_socket_publish_lock;
                     let exit = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         crate::steward::run_daemon_background_scheduler(
                             &workspace,
@@ -1622,6 +1709,8 @@ fn start_server_with_dispatch_policy(
 
     Ok(DaemonServerHandle {
         socket_path,
+        socket_identity: Some(socket_identity),
+        socket_publish_lock: Some(socket_publish_lock),
         shutdown,
         search_warm_state: Arc::clone(&dispatch_policy.search_warm_state),
         read_pools: Arc::clone(&dispatch_policy.read_pools),
@@ -14033,6 +14122,8 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::now_v7()
             )),
+            socket_identity: None,
+            socket_publish_lock: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             read_pools: Arc::new(DaemonReadPools::default()),
@@ -14110,6 +14201,8 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::now_v7()
             )),
+            socket_identity: None,
+            socket_publish_lock: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             read_pools: Arc::new(DaemonReadPools::default()),
@@ -14230,6 +14323,8 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::now_v7()
             )),
+            socket_identity: None,
+            socket_publish_lock: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             read_pools: Arc::new(DaemonReadPools::default()),
@@ -14364,6 +14459,16 @@ mod tests {
             release_tx,
             runtime_liveness,
         } = blocked_write_owner_drain_fixture();
+        let socket_root = private_tempdir();
+        let broker = SocketBroker::new(socket_root.path().join("draining-owner.sock"));
+        let endpoint_lease = Arc::new(
+            broker
+                .acquire_publish_lock()
+                .expect("acquire endpoint lease"),
+        );
+        let lease_liveness = Arc::downgrade(&endpoint_lease);
+        handle.socket_path = broker.socket_path().to_owned();
+        handle.socket_publish_lock = Some(endpoint_lease);
         let (result_tx, result_rx) = mpsc::channel();
         let shutdown_thread = thread::spawn(move || {
             let result = handle
@@ -14394,6 +14499,10 @@ mod tests {
             drop_rx.recv_timeout(DAEMON_WRITE_OWNER_DRAIN_TIMEOUT + Duration::from_secs(1));
         let dropped_before_release = dropped.is_ok();
         let runtime_owned_after_drop = runtime_liveness.strong_count() > 0;
+        let lease_owned_after_drop = matches!(
+            broker.acquire_publish_lock(),
+            Err(DaemonStartError::AlreadyRunning { .. })
+        );
         let _ = release_tx.send(());
         dropped
             .or_else(|_| drop_rx.recv_timeout(Duration::from_secs(5)))
@@ -14403,7 +14512,8 @@ mod tests {
         // The handle is gone, so the detached drain itself must dispose of the
         // runtime. A Weak observer cannot accidentally keep that runtime alive.
         let wait_started = Instant::now();
-        while runtime_liveness.strong_count() > 0 && wait_started.elapsed() < Duration::from_secs(5)
+        while (runtime_liveness.strong_count() > 0 || lease_liveness.strong_count() > 0)
+            && wait_started.elapsed() < Duration::from_secs(5)
         {
             thread::sleep(Duration::from_millis(1));
         }
@@ -14428,11 +14538,19 @@ mod tests {
             runtime_owned_after_drop,
             "the detached drain must retain accepted work"
         );
+        assert!(
+            lease_owned_after_drop,
+            "accepted writes must retain the endpoint lease after their handle is dropped"
+        );
         assert_eq!(
             runtime_liveness.strong_count(),
             0,
             "the runtime must retire after settlement"
         );
+        assert_eq!(lease_liveness.strong_count(), 0);
+        let _restarted_owner = broker
+            .acquire_publish_lock()
+            .expect("endpoint lease releases after accepted work and runtime settle");
         assert!(
             matches!(outcome, Ok(WriteResult::Success { entity_id }) if entity_id.as_deref() == Some("drained")),
             "destroying the daemon handle must not cancel the accepted operation"
@@ -14470,6 +14588,8 @@ mod tests {
             .expect("scheduler thread must reach its idle wait");
         let mut handle = DaemonServerHandle {
             socket_path: workspace.path().join("scheduler.sock"),
+            socket_identity: None,
+            socket_publish_lock: None,
             shutdown,
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             read_pools: Arc::new(DaemonReadPools::default()),
@@ -14521,6 +14641,8 @@ mod tests {
                 std::process::id(),
                 uuid::Uuid::now_v7()
             )),
+            socket_identity: None,
+            socket_publish_lock: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             read_pools: Arc::new(DaemonReadPools::default()),
@@ -14668,6 +14790,12 @@ mod tests {
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("make tempdir private");
         temp
+    }
+
+    fn socket_fixture_identity(path: &Path) -> DaemonSocketIdentity {
+        DaemonSocketIdentity::from_metadata(
+            &fs::symlink_metadata(path).expect("fixture pathname metadata"),
+        )
     }
 
     #[test]
@@ -14928,10 +15056,9 @@ mod tests {
 
     /// bd-3ik2d + bd-14dmn: two concurrent `start_server` calls on the
     /// same path must never leave the canonical path in a corrupt state
-    /// or split-brain two live daemons. The publish lock serializes the
-    /// inspect → bind-temp → chmod → rename window, then the follower
-    /// probes the now-live canonical socket and refuses with
-    /// `AlreadyRunning`.
+    /// or split-brain two live daemons. The endpoint lease covers publication
+    /// and the complete server lifetime, so the follower refuses immediately
+    /// with `AlreadyRunning`, even before the first server begins accepting.
     #[test]
     fn start_server_concurrent_binds_no_toctou() {
         use std::os::unix::fs::FileTypeExt;
@@ -15150,6 +15277,185 @@ mod tests {
         }
     }
 
+    #[test]
+    fn daemon_shutdown_preserves_replacement_live_socket() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("public.sock");
+        let retained_path = temp.path().join("retained.sock");
+        let mut handle = start_server(&socket_path).expect("original server starts");
+        let original_identity = socket_fixture_identity(&socket_path);
+        fs::rename(&socket_path, &retained_path).expect("retain original socket");
+        let replacement = UnixListener::bind(&socket_path).expect("bind replacement listener");
+        let replacement_identity = socket_fixture_identity(&socket_path);
+        assert_ne!(original_identity, replacement_identity);
+
+        let error = handle
+            .shutdown()
+            .expect_err("shutdown must refuse a replacement socket, even for the same UID");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        drop(handle);
+        assert_eq!(socket_fixture_identity(&socket_path), replacement_identity);
+        assert_eq!(socket_fixture_identity(&retained_path), original_identity);
+        let _client = UnixStream::connect(&socket_path).expect("replacement still accepts");
+        let _accepted = accept_pending_connection(&replacement);
+    }
+
+    #[test]
+    fn daemon_endpoint_lease_survives_missing_path_until_shutdown() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("leased.sock");
+        let retained_path = temp.path().join("retained.sock");
+        let mut handle = start_server(&socket_path).expect("original server starts");
+        fs::rename(&socket_path, &retained_path).expect("retain original socket");
+        assert!(matches!(
+            start_server(&socket_path),
+            Err(DaemonStartError::AlreadyRunning { .. })
+        ));
+        assert!(!socket_path.exists(), "a second daemon must not publish");
+
+        handle
+            .shutdown()
+            .expect("drained server releases endpoint lease");
+        let mut replacement = start_server(&socket_path).expect("restart after complete shutdown");
+        let request = DaemonRequest::new(
+            "after-endpoint-lease",
+            TEST_AGENT_ID,
+            METHOD_CAPABILITIES,
+            serde_json::json!({}),
+        );
+        assert!(
+            client_round_trip(&socket_path, &request)
+                .expect("restarted daemon responds")
+                .error
+                .is_none()
+        );
+        replacement.shutdown().expect("replacement shutdown");
+    }
+
+    #[test]
+    fn daemon_endpoint_lease_is_retained_across_worker_drain_timeout() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("draining.sock");
+        let mut handle = start_server(&socket_path).expect("server starts");
+        let permit = handle.pool.try_acquire().expect("hold a worker obligation");
+        let error = handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(10))
+            .expect_err("unfinished worker prevents a completed shutdown");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(!socket_path.exists());
+        assert!(matches!(
+            start_server(&socket_path),
+            Err(DaemonStartError::AlreadyRunning { .. })
+        ));
+
+        drop(permit);
+        handle
+            .shutdown()
+            .expect("retry drains worker and releases lease");
+        let mut replacement = start_server(&socket_path).expect("restart only after drain");
+        replacement.shutdown().expect("replacement shutdown");
+    }
+
+    #[test]
+    fn socket_broker_held_startup_lock_refuses_without_waiting() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("starting.sock");
+        let broker = SocketBroker::new(socket_path.clone());
+        let held_lock = broker.acquire_publish_lock().expect("hold startup lease");
+        let path = socket_path.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let attempt = thread::spawn(move || {
+            let _ = done_tx.send(start_server(&path));
+        });
+        let observed = done_rx.recv_timeout(Duration::from_secs(1));
+        // Rescue the former blocking flock before asserting, so regression
+        // failure cannot leave a permanently blocked test thread.
+        drop(held_lock);
+        attempt.join().expect("startup attempt exits");
+        assert!(matches!(
+            observed.expect("a held lease must produce a bounded refusal"),
+            Err(DaemonStartError::AlreadyRunning { .. })
+        ));
+        assert!(!socket_path.exists(), "refused startup creates no socket");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_broker_full_unmanaged_backlog_times_out_without_replacement() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("backlogged.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unmanaged listener");
+        rustix::net::listen(&listener, 1).expect("set bounded accept backlog");
+        let identity = socket_fixture_identity(&socket_path);
+        let address = rustix::net::SocketAddrUnix::new(&socket_path).expect("socket address");
+        let mut queued = Vec::new();
+        let mut full = false;
+        for _ in 0..16 {
+            let stream = nonblocking_client_socket().expect("nonblocking connection");
+            match rustix::net::connect(&stream, &address) {
+                Ok(()) => queued.push(stream),
+                Err(rustix::io::Errno::AGAIN) => {
+                    full = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected backlog admission: {error}"),
+            }
+        }
+        assert!(full && !queued.is_empty(), "real accept queue must be full");
+        let (release_tx, release_rx) = mpsc::channel();
+        let rescue = thread::spawn(move || {
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            listener.set_nonblocking(true).expect("nonblocking accept");
+            while let Ok((connection, _)) = listener.accept() {
+                drop(connection);
+            }
+        });
+        let started = Instant::now();
+        let result = SocketBroker::new(socket_path.clone()).publish_listener();
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        rescue.join().expect("backlog rescue exits");
+        assert!(
+            matches!(result, Err(DaemonStartError::Bind { source, .. }) if source.kind() == io::ErrorKind::TimedOut),
+            "a full unmanaged queue is not proof of a stale daemon"
+        );
+        assert!(elapsed < Duration::from_secs(1), "probe took {elapsed:?}");
+        assert_eq!(socket_fixture_identity(&socket_path), identity);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_broker_permission_denied_probe_preserves_existing_socket() {
+        if current_euid() == 0 {
+            eprintln!("permission-denied socket probe requires an unprivileged test process");
+            return;
+        }
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("inaccessible.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("bind inaccessible listener");
+        let identity = socket_fixture_identity(&socket_path);
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000))
+            .expect("deny socket connections");
+        let result = SocketBroker::new(socket_path.clone()).publish_listener();
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("restore fixture permissions");
+        assert!(
+            matches!(result, Err(DaemonStartError::Bind { source, .. }) if source.kind() == io::ErrorKind::PermissionDenied),
+            "permission failure must not authorize replacing a socket"
+        );
+        assert_eq!(socket_fixture_identity(&socket_path), identity);
+    }
+
+    #[test]
+    fn socket_broker_missing_probe_is_not_proof_of_staleness() {
+        let temp = private_tempdir();
+        let broker = SocketBroker::new(temp.path().join("disappeared.sock"));
+        assert!(matches!(
+            broker.refuse_live_existing_socket(),
+            Err(DaemonStartError::Bind { source, .. }) if source.kind() == io::ErrorKind::NotFound
+        ));
+    }
+
     /// bd-2z3e8: shutdown cleanup must never turn a swapped daemon
     /// socket path into an arbitrary-file unlink.
     #[test]
@@ -15159,7 +15465,7 @@ mod tests {
         fs::write(&path, b"operator data").expect("write regular file");
 
         let error = SocketBroker::new(path.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(socket_fixture_identity(&path))
             .expect_err("regular file must be refused");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -15174,10 +15480,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("owned.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind test socket");
+        let identity = socket_fixture_identity(&socket_path);
         drop(listener);
 
         SocketBroker::new(socket_path.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(identity)
             .expect("owned socket cleanup must succeed");
         assert!(
             !socket_path.exists(),
@@ -15185,7 +15492,7 @@ mod tests {
         );
 
         SocketBroker::new(socket_path.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(identity)
             .expect("absent path is already clean");
     }
 
@@ -15518,7 +15825,7 @@ mod tests {
         wait_for_canonical_path_watcher_sample(&observed_samples, 0);
 
         let broker = SocketBroker::new(socket_path.clone());
-        let (listener, _publish_lock) = broker.publish_listener().expect(
+        let (listener, _identity, _publish_lock) = broker.publish_listener().expect(
             "publish over a dead stale socket must succeed via temp-bind + atomic rename \
              (ADR 0090 stale replacement)",
         );
@@ -15594,7 +15901,7 @@ mod tests {
         wait_for_canonical_path_watcher_sample(&observed_samples, 0);
 
         let broker = SocketBroker::new(socket_path.clone());
-        let (listener, _publish_lock) = broker
+        let (listener, _identity, _publish_lock) = broker
             .publish_listener()
             .expect("fresh publish in a private parent must succeed");
         let after_publish = observed_samples.load(Ordering::Acquire);
@@ -15727,7 +16034,7 @@ mod tests {
             "publish lock name must be '<socket file name>.start.lock'",
         );
 
-        let (_listener, publish_lock) = broker
+        let (_listener, _identity, publish_lock) = broker
             .publish_listener()
             .expect("publish in a private parent must succeed");
         let metadata = fs::symlink_metadata(&lock_path)
@@ -15797,7 +16104,7 @@ mod tests {
         fs::create_dir(&path).expect("create directory at socket path");
 
         let error = SocketBroker::new(path.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(socket_fixture_identity(&path))
             .expect_err(
                 "cleanup must refuse a directory at the socket path (ADR 0090: never delete a \
                  non-socket during cleanup)",
@@ -15830,7 +16137,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_socket, &link).expect("plant symlink to socket");
 
         let error = SocketBroker::new(link.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(socket_fixture_identity(&real_socket))
             .expect_err(
                 "cleanup must refuse a symlink even when it points at a real socket (ADR 0090: \
                  never delete a non-socket during cleanup)",
@@ -15881,7 +16188,7 @@ mod tests {
             .expect("chown fixture socket to a foreign uid");
 
         let error = SocketBroker::new(socket_path.clone())
-            .remove_owned_socket_file()
+            .remove_owned_socket_file(socket_fixture_identity(&socket_path))
             .expect_err(
                 "cleanup must refuse a socket owned by another uid (ADR 0090: never delete an \
                  other-owned file during cleanup)",
