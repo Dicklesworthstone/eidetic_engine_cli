@@ -24,6 +24,8 @@ Supports three modes:
    With --release-archive PATH --release-probe PATH --expected-version VERSION,
    it checks stage log evidence, the candidate's committed lockfiles, and the
    native archive, executable and probe bytes for that target.
+   With --verify-rch-policy it requires the committed Rust stage inventory,
+   with matching pinned RCH receipts and their retained terminal streams.
 
 4. Self-test mode:
    emit_proof_capsule.py --self-test
@@ -76,6 +78,13 @@ RELEASE_PROBE_CHECKS = {
 
 def _reject_json_constant(const: str) -> Any:
     raise ValueError(f"invalid non-standard JSON constant {const!r}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("JSON object has duplicate fields")
+    return result
 
 
 def _is_strict_int(value: Any) -> bool:
@@ -207,7 +216,9 @@ def native_release_artifact_bindings(
     if archive.name != f"ee-{target}.tar.xz":
         raise ValueError(f"archive filename does not match target {target}")
     probe_bytes = probe_path.read_bytes()
-    probe = json.loads(probe_bytes, parse_constant=_reject_json_constant)
+    probe = json.loads(
+        probe_bytes, parse_constant=_reject_json_constant, object_pairs_hook=_unique_json_object,
+    )
     if not isinstance(probe, dict) or probe.get("schema") != RELEASE_PROBE_SCHEMA:
         raise ValueError("invalid release probe schema")
     if probe.get("verdict") != "pass" or probe.get("failed") != []:
@@ -908,6 +919,16 @@ def populate_candidate_capsule(
         }
         if isinstance(stage_commit, str) and HEX40_RE.fullmatch(stage_commit):
             row["commit"] = stage_commit
+        receipt_path = st.get("receiptPath")
+        if receipt_path is not None:
+            receipt = repo_root / receipt_path if isinstance(receipt_path, str) else None
+            if not receipt or not receipt.is_file():
+                unestablished.append(_unestablished(
+                    f"results[{stage_name}].receiptPath", "native receipt could not be read",
+                ))
+            else:
+                row["receiptPath"] = receipt_path
+                row["receiptSha256"] = _sha256_file(receipt)
         results.append(row)
 
     if not results:
@@ -1353,6 +1374,151 @@ def verify_retained_test_counts(
     return problems
 
 
+def required_rch_commands(
+    policy: dict[str, Any], cargo_manifest: dict[str, Any],
+) -> dict[str, tuple[list[str], str | None, bool]]:
+    if policy.get("schema") != "ee.release_rch_policy.v1":
+        raise ValueError("candidate is missing its supported RCH qualification policy")
+    commands = {
+        "all-targets-check": (["cargo", "check", "--locked", "--all-targets"], None, False),
+        "clippy": (["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"], None, False),
+        "lib": (["cargo", "test", "--locked", "--lib"], "src/lib.rs", False),
+        "mcp-lib": (["cargo", "test", "--locked", "--features", "mcp", "--lib", "mcp::"], "src/lib.rs", True),
+    }
+    target_paths = {test["name"]: test.get("path") for test in cargo_manifest.get("test", [])}
+    for profile, flags in (("targets", []), ("mcp_targets", ["--features", "mcp"])):
+        targets = policy.get(profile)
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(f"candidate RCH policy has no {profile}")
+        for target in targets:
+            if not isinstance(target, str) or target in commands or not target_paths.get(target):
+                raise ValueError(f"candidate RCH policy contains an unknown or duplicate test target: {target!r}")
+            command = ["cargo", "test", "--locked", *flags, "--test", target]
+            commands[target] = (command, target_paths[target], False)
+    return commands
+
+
+def verify_rch_stage(
+    row: dict[str, Any], command: list[str], test_target: str | None, selective: bool,
+    source: dict[str, str], repo_root: pathlib.Path,
+) -> None:
+    from grade_test_log import RUNNING_TARGET, parse, strip_ansi
+
+    def checked_bytes(path: str, digest: str) -> bytes:
+        content = (repo_root / path).read_bytes()
+        if _sha256_bytes(content) != digest:
+            raise ValueError("retained evidence SHA-256 mismatch")
+        return content
+
+    receipt = json.loads(
+        checked_bytes(row["receiptPath"], row["receiptSha256"]),
+        parse_constant=_reject_json_constant, object_pairs_hook=_unique_json_object,
+    )
+    if row.get("commit") != source["commit"] or receipt.get("resolved_commit") != source["commit"]:
+        raise ValueError("RCH receipt was not bound to the candidate commit")
+    if receipt.get("git_tree") != source["tree"] or receipt.get("verification_attribution") != "pinned_franken_stack":
+        raise ValueError("RCH receipt did not use the candidate's pinned source tree")
+    if receipt.get("command") != command:
+        raise ValueError("RCH command differs from committed qualification policy")
+    if (
+        receipt.get("schema") != "ee.rch.verify.v1"
+        or receipt.get("success") is not True
+        or not _is_strict_int(receipt.get("exit_code"))
+        or receipt["exit_code"] != 0
+        or receipt.get("verdict") != "passed"
+        or receipt.get("timed_out") is not False
+        or receipt.get("remote_required") is not True
+        or receipt.get("remote_source_materialized") is not True
+        or receipt.get("would_offload") is not True
+        or not receipt.get("worker_id")
+    ):
+        raise ValueError("RCH receipt lacks a completed remote pass")
+    stack = receipt["franken_stack"]
+    if (
+        stack.get("status") != "pinned"
+        or stack.get("remote_source_verified") is not True
+        or stack.get("cargo_lock_unchanged") is not True
+        or stack.get("cargo_lock_hash") != f"sha256:{source['cargo_lock']}"
+        or stack.get("lock_hash") != f"sha256:{source['franken_lock']}"
+    ):
+        raise ValueError("RCH receipt did not verify the candidate lockfiles")
+    artifacts = receipt["artifacts"]
+    attempt = "retry" if any(artifact["attempt"] == "retry" for artifact in artifacts) else "primary"
+    outputs = {}
+    for artifact in artifacts:
+        if artifact["attempt"] != attempt:
+            continue
+        kind = artifact["kind"]
+        if kind not in ("stdout", "stderr") or kind in outputs:
+            raise ValueError("RCH receipt contains ambiguous terminal output")
+        output = checked_bytes(artifact["path"], artifact["sha256"])
+        if not _is_strict_int(artifact["bytes"]) or len(output) != artifact["bytes"]:
+            raise ValueError("RCH terminal output size differs from its receipt")
+        outputs[kind] = output
+    if outputs.keys() != {"stdout", "stderr"} or not any(outputs.values()):
+        raise ValueError("RCH receipt did not retain both terminal streams")
+
+    if test_target is None:
+        if row.get("announced") is not None or row.get("executed") is not None:
+            raise ValueError("non-test RCH stage declared test counts")
+        return
+
+    lines = b"\n".join((outputs["stderr"], outputs["stdout"])).decode("utf-8", "replace").splitlines()
+    pairs, problems, targets = parse(lines)
+    running = [match["what"] for line in lines if (match := RUNNING_TARGET.match(strip_ansi(line)))]
+    if problems or len(pairs) != 1 or len(targets) != 1 or running != [test_target]:
+        raise ValueError("RCH receipt lacks one complete result for the required libtest target")
+    actual = pairs[0]
+    if (
+        actual["announced"] <= 0
+        or actual["verdict"] != "ok"
+        or actual["failed"] != 0
+        or actual["ignored"] != 0
+        or actual["passed"] != actual["announced"]
+        or actual["passed"] != row.get("executed")
+        or actual["announced"] != row.get("announced")
+        or actual["filtered"] != row.get("filteredOut")
+        or (actual["filtered"] > 0) != selective
+    ):
+        raise ValueError("RCH test coverage differs from the declared counts or selection policy")
+
+
+def verify_release_rch_policy(capsule: dict[str, Any], repo_root: pathlib.Path) -> list[str]:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return ["RCH policy verification requires Python 3.11 or later"]
+
+    commit = capsule["source"]["commit"]
+    try:
+        tree = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+            cwd=repo_root, capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+        source = {
+            "commit": commit, "tree": tree,
+            "cargo_lock": _sha256_bytes(_committed_blob(repo_root, commit, "Cargo.lock")),
+            "franken_lock": _sha256_bytes(_committed_blob(repo_root, commit, "franken-stack.lock")),
+        }
+        policy = tomllib.loads(_committed_blob(repo_root, commit, "scripts/verify-budget.toml").decode())
+        cargo_manifest = tomllib.loads(_committed_blob(repo_root, commit, "Cargo.toml").decode())
+        required = required_rch_commands(policy.get("release_rch", {}), cargo_manifest)
+    except (AttributeError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        return [f"could not load release RCH policy: {exc}"]
+
+    results = {row["stage"]: row for row in capsule["results"]}
+    problems = []
+    for stage, (command, target, selective) in required.items():
+        if stage not in results:
+            problems.append(f"RCH qualification requires missing stage {stage}")
+            continue
+        try:
+            verify_rch_stage(results[stage], command, target, selective, source, repo_root)
+        except (AttributeError, OSError, KeyError, TypeError, ValueError) as exc:
+            problems.append(f"RCH stage {stage} refused: {exc}")
+    return problems
+
+
 GREEN_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 4 tests
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
@@ -1544,6 +1710,55 @@ def self_test() -> int:
         log_path.write_text(ZERO_LOG, encoding="utf-8")
         check("native verification rejects zero-result log", bool(verify_retained_test_counts(populated, cand_repo)))
         log_path.write_text(GREEN_LOG, encoding="utf-8")
+
+        policy = {"schema": "ee.release_rch_policy.v1", "targets": ["contracts"], "mcp_targets": ["mcp_parity"]}
+        config = {"test": [{"name": target, "path": f"tests/{target}.rs"}
+                           for target in ("contracts", "mcp_parity")]}
+        commands = required_rch_commands(policy, config)
+        check("RCH inventory requires policy integration and feature stages", set(commands) == {
+            "all-targets-check", "clippy", "lib", "mcp-lib", "contracts", "mcp_parity",
+        })
+        command, test_target, selective = commands["lib"]
+        split_log = GREEN_LOG.replace("10 filtered out", "0 filtered out").splitlines(keepends=True)
+        streams = []
+        for kind, content in (("stderr", split_log[0]), ("stdout", "".join(split_log[1:]))):
+            path = root / f"stage-{kind}.log"
+            data = content.encode()
+            path.write_bytes(data)
+            streams.append({"kind": kind, "path": str(path), "attempt": "primary",
+                            "sha256": _sha256_bytes(data), "bytes": len(data)})
+        source = {"commit": sha_a, "tree": sha_b, "cargo_lock": "c" * 64, "franken_lock": "d" * 64}
+        receipt = {
+            "schema": "ee.rch.verify.v1", "command": command, "resolved_commit": sha_a,
+            "git_tree": sha_b, "verification_attribution": "pinned_franken_stack", "success": True,
+            "exit_code": 0, "verdict": "passed", "timed_out": False, "remote_required": True,
+            "would_offload": True, "remote_source_materialized": True, "worker_id": "worker-01",
+            "artifacts": streams,
+            "franken_stack": {
+                "status": "pinned", "remote_source_verified": True, "cargo_lock_unchanged": True,
+                "cargo_lock_hash": f"sha256:{source['cargo_lock']}", "lock_hash": f"sha256:{source['franken_lock']}",
+            },
+        }
+        receipt_path = root / "rch-receipt.json"
+        row = copy.deepcopy(populated["results"][0])
+        row.update(receiptPath=str(receipt_path), filteredOut=0)
+
+        def rch_problem(candidate_receipt):
+            receipt_path.write_text(json.dumps(candidate_receipt), encoding="utf-8")
+            row["receiptSha256"] = _sha256_file(receipt_path)
+            try:
+                verify_rch_stage(row, command, test_target, selective, source, cand_repo)
+            except (KeyError, ValueError) as exc:
+                return str(exc)
+            return None
+
+        check("retained RCH receipt reconciles source and test output", rch_problem(receipt) is None)
+        bad_command = dict(receipt, command=[*command, "--no-run"])
+        check("RCH policy rejects a compile-only test invocation", "command differs" in (rch_problem(bad_command) or ""))
+        timed_out = dict(receipt, timed_out=True)
+        check("RCH policy rejects timeout despite pass fields", "remote pass" in (rch_problem(timed_out) or ""))
+        pathlib.Path(streams[1]["path"]).write_text("forged output\n", encoding="utf-8")
+        check("RCH policy rejects replaced terminal output", "SHA-256 mismatch" in (rch_problem(receipt) or ""))
 
         # Native release receipts bind the archive member bytes and every
         # named check in the retained receipt.
@@ -1803,6 +2018,7 @@ def main() -> int:
     parser.add_argument("--release-probe", type=pathlib.Path)
     parser.add_argument("--expected-version")
     parser.add_argument("--verify-logs", action="store_true")
+    parser.add_argument("--verify-rch-policy", action="store_true")
     parser.add_argument("--repo-root")
     parser.add_argument("--log")
     parser.add_argument("--base", default="unknown")
@@ -1817,6 +2033,8 @@ def main() -> int:
     artifact_args = (args.release_archive, args.release_probe, args.expected_version)
     if any(artifact_args) and (not args.verify_capsule or not all(artifact_args)):
         parser.error("--release-archive, --release-probe and --expected-version require one another and --verify-capsule")
+    if args.verify_rch_policy and not args.verify_capsule:
+        parser.error("--verify-rch-policy requires --verify-capsule")
 
     if args.self_test:
         return self_test()
@@ -1835,6 +2053,7 @@ def main() -> int:
             capsule = json.loads(
                 cap_path.read_text(encoding="utf-8"),
                 parse_constant=_reject_json_constant,
+                object_pairs_hook=_unique_json_object,
             )
         except Exception as exc:
             print(f"[emit-proof-capsule] invalid capsule JSON: {exc}", file=sys.stderr)
@@ -1858,6 +2077,8 @@ def main() -> int:
                 problems = verify_retained_test_counts(capsule, repo_root)
             if not problems:
                 problems = verify_release_artifact(capsule, *artifact_args)
+        if not problems and args.verify_rch_policy:
+            problems = verify_release_rch_policy(capsule, repo_root)
         if problems:
             for prob in problems:
                 print(f"[emit-proof-capsule] VERIFY FAILED: {prob}", file=sys.stderr)

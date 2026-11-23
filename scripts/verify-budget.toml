@@ -1,4 +1,5 @@
 # Per-stage budgets for scripts/verify.sh.
+
 #
 # expected_seconds_p50 is the expected median on a mid-tier dev machine.
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
@@ -1686,3 +1687,19 @@ name = "Proof Capsule Emitter (1azkt.5 B9)"
 # one to make room is the retune-to-fit this file calls fiction.
 expected_seconds_p50 = 1
 regression_factor = 1.5
+
+# Mandatory pinned-RCH receipts for candidate qualification. The verifier
+# reads this inventory and target paths from the candidate Git tree.
+[release_rch]
+schema = "ee.release_rch_policy.v1"
+targets = [
+    "contracts",
+    "integration_a_d",
+    "integration_e_f",
+    "integration_g_m",
+    "integration_n_r",
+    "integration_s_z",
+    "integration_property",
+    "integration_north_star",
+]
+mcp_targets = ["mcp_parity"]

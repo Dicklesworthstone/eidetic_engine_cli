@@ -176,6 +176,8 @@
         "properties": {
           "stage": { "type": "string" },
           "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "receiptPath": { "type": "string" },
+          "receiptSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "status": {
             "type": "string",
             "enum": [

@@ -564,8 +564,10 @@ record_attempt_artifacts() {
 
 attempt_artifacts_json() {
     python3 - "$@" <<'PY'
+import hashlib
 import json
 import sys
+from pathlib import Path
 
 items = []
 args = sys.argv[1:]
@@ -575,7 +577,18 @@ for index in range(0, len(args), 3):
     except ValueError:
         continue
     if path:
-        items.append({"kind": kind, "path": path, "attempt": attempt})
+        artifact = {"kind": kind, "path": path, "attempt": attempt}
+        try:
+            with Path(path).open("rb") as stream:
+                digest = hashlib.sha256()
+                size = 0
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                artifact.update(sha256=digest.hexdigest(), bytes=size)
+        except OSError:
+            pass
+        items.append(artifact)
 print(json.dumps(items, sort_keys=True, separators=(",", ":")))
 PY
 }

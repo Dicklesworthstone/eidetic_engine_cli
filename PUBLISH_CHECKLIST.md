@@ -11,7 +11,15 @@ and actual test results are recorded in
 2. Run formatting, forbidden-dependency inspection, all-target check and Clippy,
    relevant tests, and real memory/search/pack workflows. Use DSR or the repository
    RCH tooling for compilation, with one pinned nightly toolchain. Retain and
-   disclose failures, ignored cases and advisory findings.
+   disclose failures, ignored cases and advisory findings. Keep each pinned
+   RCH verification JSON receipt and both of its terminal streams. Supply its
+   `receiptPath` in the capsule manifest stage entry along with the stage log
+   and full candidate commit. Verify the Rust inventory from the candidate tree.
+
+   ```bash
+   python3 scripts/lib/emit_proof_capsule.py --verify-capsule "$capsule" \
+     --expected-sha "$release_commit" --verify-logs --verify-rch-policy
+   ```
 3. Commit on `main` and inspect `cargo package --list`. Package from that exact
    source and run `cargo publish --dry-run --no-verify`. This validates packaging
    only: separately compile the packaged registry-only graph on a DSR worker.
