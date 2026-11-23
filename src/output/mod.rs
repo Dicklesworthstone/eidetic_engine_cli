@@ -12067,9 +12067,9 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: hooks_git_readiness_schema_definition,
         },
         SchemaEntry {
-            id: "ee.hook.harness_install.v1",
-            version: "1",
-            description: "Agent-harness hook generation/install plan for memory recall, orientation, journaling, and capture.",
+            id: crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V2,
+            version: "2",
+            description: "Agent-harness hook generation/install plan with structured managed, legacy, and duplicate command counts.",
             category: "ops",
             definition: hook_harness_install_schema_definition,
         },
@@ -13892,7 +13892,7 @@ fn hooks_git_readiness_schema_definition() -> String {
 }
 
 fn hook_harness_install_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.hook.harness_install.v1.json").to_string()
+    include_str!("../../docs/schemas/ee.hook.harness_install.v2.json").to_string()
 }
 
 fn ambient_context_schema_definition() -> String {

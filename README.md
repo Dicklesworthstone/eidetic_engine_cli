@@ -764,8 +764,13 @@ change together. Leave the cap disabled when identical optional detail matters.
 
 | Command | Purpose |
 |---|---|
-| `ee hook claude-code --print\|--install\|--undo --json` | Preview, install, or undo managed Claude Code recall hooks; report schema `ee.hook.harness_install.v1` |
+| `ee hook claude-code --print\|--install\|--undo --json` | Preview, install, or undo managed Claude Code recall hooks; report schema `ee.hook.harness_install.v2` |
 | `ee hook codex --print\|--install\|--undo --json` | Preview, install, or undo managed Codex recall hooks; unsupported targets report capability gaps instead of mutating settings |
+
+`ee hook status --json` reports per-event managed, legacy unmanaged, total,
+and extra EE command counts in `data.installAudit.findings[].hookCounts`.
+`duplicateEventCount` counts affected events; `duplicateHookCount` counts
+extra commands. Counts are `null` when settings cannot be inspected.
 
 ### JSON output and exit codes
 

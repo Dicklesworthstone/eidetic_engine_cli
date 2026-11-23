@@ -5,7 +5,7 @@ use crate::core::decide::{
 };
 use crate::core::docs_bootstrap::{DOCS_BOOTSTRAP_APPLY_SCHEMA_V1, DOCS_BOOTSTRAP_RUN_SCHEMA_V1};
 use crate::core::recall::RECALL_SCHEMA_V1;
-use crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V1;
+use crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V2;
 use crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2;
 use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
@@ -572,7 +572,7 @@ pub const CONTRACTS: &[ContractEntry] = &[
     },
     ContractEntry {
         name: "hook_harness_install",
-        schema: HARNESS_HOOK_INSTALL_SCHEMA_V1,
+        schema: HARNESS_HOOK_INSTALL_SCHEMA_V2,
         description: "Agent-harness hook generation, install, and undo report for Claude Code, Codex, and capability-gap targets",
         stability: "stable",
     },
@@ -1504,8 +1504,8 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         description: "Preview, install, or undo managed recall hook snippets for Claude Code or Codex while preserving the harness settings file.",
         category: "hooks",
         command: "ee hook claude-code --print --workspace . --json",
-        jq: r#"{harness: .data.harness, mode: .data.mode, supported: .data.supported, writtenPaths: .data.writtenPaths, capabilityGaps: .data.capabilityGaps}"#,
-        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.hook.harness_install.v1""#,
+        jq: r#".data.harnessInstall | {harness, mode, supported, writtenPaths, capabilityGaps, installAudit}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.harnessInstall.schema == "ee.hook.harness_install.v2""#,
         failure_branches: HOOK_HARNESS_RECIPE_FAILURES,
     },
 ];

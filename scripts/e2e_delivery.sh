@@ -220,7 +220,7 @@ run_ee "hook_codex_ambient_plan" hook codex \
   --json > "$ROOT/hook_plan.json"
 
 assert_jq "ambient_hook_plan_schema" "$ROOT/hook_plan.json" \
-  '.schema == "ee.response.v2" and .success == true and .data.harnessInstall.schema == "ee.hook.harness_install.v1"' \
+  '.schema == "ee.response.v2" and .success == true and .data.harnessInstall.schema == "ee.hook.harness_install.v2"' \
   "$AMBIENT_BEAD"
 assert_jq "ambient_profile_is_on_by_default_and_read_only" "$ROOT/hook_plan.json" \
   '.data.harnessInstall.ambientContext.schema == "ee.ambient_context.v1" and .data.harnessInstall.ambientContext.enabledByDefault == true and .data.harnessInstall.ambientContext.readOnly == true and .data.harnessInstall.ambientContext.provenanceTag == "ee:ee.ambient_context.v1"' \

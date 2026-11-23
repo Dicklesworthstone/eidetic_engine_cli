@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.hook.harness_install.v2.json",
+  "title": "ee.hook.harness_install.v2",
+  "description": "Agent-harness hook generation/install report with structured per-event EE hook ownership and duplicate counts.",
+  "type": "object",
+  "required": [
+    "schema",
+    "harness",
+    "harnessDisplayName",
+    "mode",
+    "supported",
+    "readOnly",
+    "workspace",
+    "settingsPath",
+    "backupPath",
+    "writtenPaths",
+    "markers",
+    "ambientContext",
+    "snippets",
+    "plan",
+    "capabilityGaps",
+    "installAudit",
+    "generatedAt"
+  ],
+  "properties": {
+    "schema": { "const": "ee.hook.harness_install.v2" },
+    "harness": { "enum": ["claude-code", "codex", "gemini"] },
+    "harnessDisplayName": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["print", "install", "undo"] },
+    "supported": { "type": "boolean" },
+    "readOnly": { "type": "boolean" },
+    "workspace": { "type": "string", "minLength": 1 },
+    "settingsPath": { "type": ["string", "null"] },
+    "backupPath": { "type": ["string", "null"] },
+    "writtenPaths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "markers": {
+      "type": "object",
+      "required": ["entryMarker", "managedBy"],
+      "properties": {
+        "entryMarker": { "type": "string", "minLength": 1 },
+        "managedBy": { "const": "ee" }
+      },
+      "additionalProperties": false
+    },
+    "ambientContext": { "$ref": "ee.ambient_context.v1.json" },
+    "lastInvocations": {
+      "description": "Observed runtime outcomes for this workspace, separate from installation freshness. Empty means no recorded invocation, not a successful hook.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "surface",
+          "outcome",
+          "updatedAt",
+          "durationMs",
+          "emittedBytes",
+          "degradedCodes",
+          "degradedMessages"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "surface": { "enum": ["session_start_orient", "pre_edit_recall"] },
+          "outcome": {
+            "enum": [
+              "emitted",
+              "duplicate",
+              "empty",
+              "timeout",
+              "command_error",
+              "invalid_response"
+            ]
+          },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "emittedBytes": { "type": "integer", "minimum": 0 },
+          "degradedCodes": {
+            "type": "array",
+            "items": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_]*$" }
+          },
+          "degradedMessages": {
+            "type": "array",
+            "maxItems": 8,
+            "items": { "type": "string", "maxLength": 2048 }
+          }
+        }
+      }
+    },
+    "snippets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "matcher",
+          "command",
+          "timeoutSeconds",
+          "async",
+          "installable",
+          "purpose"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "event": {
+            "enum": ["PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd"]
+          },
+          "matcher": { "type": ["string", "null"] },
+          "command": { "type": "string", "minLength": 1 },
+          "timeoutSeconds": { "type": "integer", "minimum": 0 },
+          "async": { "type": "boolean" },
+          "installable": { "type": "boolean" },
+          "purpose": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action", "event", "matcher", "targetPath", "reason"],
+        "properties": {
+          "action": {
+            "enum": [
+              "print",
+              "install",
+              "undo",
+              "print_only",
+              "no_change",
+              "backup_available",
+              "restore_backup",
+              "capability_gap"
+            ]
+          },
+          "event": { "type": ["string", "null"] },
+          "matcher": { "type": ["string", "null"] },
+          "targetPath": { "type": ["string", "null"] },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capabilityGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message", "repair"],
+        "properties": {
+          "code": {
+            "enum": [
+              "harness_hooks_unsupported",
+              "harness_config_path_unavailable",
+              "harness_backup_missing"
+            ]
+          },
+          "message": { "type": "string", "minLength": 1 },
+          "repair": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "installAudit": {
+      "type": "object",
+      "required": [
+        "status",
+        "readOnly",
+        "configPresent",
+        "configWritable",
+        "hookPresentCount",
+        "hookFreshCount",
+        "hookStaleCount",
+        "hookMissingCount",
+        "duplicateEventCount",
+        "duplicateHookCount",
+        "findings",
+        "repairPlan",
+        "docs"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "missing_hook",
+            "stale_hook",
+            "unsupported_harness_version",
+            "config_not_writable",
+            "fresh"
+          ]
+        },
+        "readOnly": { "const": true },
+        "configPresent": { "type": "boolean" },
+        "configWritable": { "type": "boolean" },
+        "hookPresentCount": { "type": "integer", "minimum": 0 },
+        "hookFreshCount": { "type": "integer", "minimum": 0 },
+        "hookStaleCount": { "type": "integer", "minimum": 0 },
+        "hookMissingCount": { "type": "integer", "minimum": 0 },
+        "duplicateEventCount": {
+          "description": "Number of expected events containing more than one EE-owned command. Null when settings inspection is unavailable or unsupported.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "duplicateHookCount": {
+          "description": "Sum of extra EE-owned commands beyond one per expected event. Null when settings inspection is unavailable or unsupported.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "status", "event", "matcher", "targetPath", "hookCounts", "message", "repair"],
+            "properties": {
+              "code": {
+                "enum": [
+                  "missing_hook",
+                  "stale_hook",
+                  "duplicate_hook",
+                  "hook_present_fresh",
+                  "unsupported_harness_version",
+                  "config_not_writable",
+                  "harness_config_path_unavailable",
+                  "harness_config_unreadable",
+                  "harness_config_invalid",
+                  "hook_invocation_failed",
+                  "hook_invocation_unreadable"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "missing_hook",
+                  "stale_hook",
+                  "unsupported_harness_version",
+                  "config_not_writable",
+                  "fresh",
+                  "invocation_failed",
+                  "unknown"
+                ]
+              },
+              "event": { "type": ["string", "null"] },
+              "matcher": { "type": ["string", "null"] },
+              "targetPath": { "type": ["string", "null"] },
+              "hookCounts": {
+                "description": "Counts from the installer's ownership classifier for this event. Null for non-event findings or unavailable inspection; custom hooks never contribute.",
+                "type": ["object", "null"],
+                "required": ["managedCount", "legacyUnmanagedCount", "eeHookCount", "duplicateCount"],
+                "properties": {
+                  "managedCount": { "type": "integer", "minimum": 0 },
+                  "legacyUnmanagedCount": { "type": "integer", "minimum": 0 },
+                  "eeHookCount": {
+                    "description": "managedCount plus legacyUnmanagedCount.",
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "duplicateCount": {
+                    "description": "eeHookCount minus one, floored at zero.",
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              "message": { "type": "string", "minLength": 1 },
+              "repair": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "repairPlan": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action", "commandDisplay", "argv", "mutatesState", "reason"],
+            "properties": {
+              "action": {
+                "enum": ["install_or_refresh_hooks", "make_config_writable"]
+              },
+              "commandDisplay": { "type": ["string", "null"] },
+              "argv": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "mutatesState": { "type": "boolean" },
+              "reason": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "docs": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "path", "hookSurface"],
+            "properties": {
+              "id": {
+                "enum": ["recall_hooks", "primer_hooks", "journal_hooks"]
+              },
+              "title": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "hookSurface": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

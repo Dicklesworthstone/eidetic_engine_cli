@@ -465,7 +465,7 @@ pub const HOOKS_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("hook_status", "ee.hooks.status.v1", SchemaCategory::Hooks),
     SchemaEntry::new(
         "hook_harness_install",
-        "ee.hook.harness_install.v1",
+        "ee.hook.harness_install.v2",
         SchemaCategory::Hooks,
     ),
     SchemaEntry::new(
@@ -3639,7 +3639,7 @@ mod tests {
             "hooks schemas must include status (EE-321)",
         )?;
         ensure(
-            versions.contains(&"ee.hook.harness_install.v1"),
+            versions.contains(&"ee.hook.harness_install.v2"),
             "hooks schemas must include harness install (bd-u875s.4)",
         )?;
         ensure(

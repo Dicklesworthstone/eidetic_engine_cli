@@ -36,7 +36,7 @@ pub const GIT_HOOK_READINESS_SCHEMA_V1: &str = "ee.hooks.git_readiness.v1";
 pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_risk.v1";
 
 /// Schema for agent-harness hook generation/install reports.
-pub const HARNESS_HOOK_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
+pub const HARNESS_HOOK_INSTALL_SCHEMA_V2: &str = "ee.hook.harness_install.v2";
 
 /// Schema for proactive ambient context hook injection (bd-2vq2z.10).
 pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = crate::models::AMBIENT_CONTEXT_SCHEMA_V1;
@@ -1362,8 +1362,21 @@ pub struct HarnessHookInstallAuditFinding {
     pub event: Option<String>,
     pub matcher: Option<String>,
     pub target_path: Option<String>,
+    pub hook_counts: Option<HarnessHookCounts>,
     pub message: String,
     pub repair: String,
+}
+
+/// Counts of EE-owned commands for one expected harness event. Managed and
+/// legacy commands are disjoint; custom hooks never contribute to these counts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookCounts {
+    pub managed_count: u64,
+    pub legacy_unmanaged_count: u64,
+    pub ee_hook_count: u64,
+    /// Commands beyond the single canonical EE hook for this event.
+    pub duplicate_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1387,6 +1400,9 @@ pub struct HarnessHookInstallAuditReport {
     pub hook_fresh_count: u64,
     pub hook_stale_count: u64,
     pub hook_missing_count: u64,
+    /// None means the settings could not be inspected, not zero duplicates.
+    pub duplicate_event_count: Option<u64>,
+    pub duplicate_hook_count: Option<u64>,
     pub findings: Vec<HarnessHookInstallAuditFinding>,
     pub repair_plan: Vec<HarnessHookInstallAuditRepair>,
     pub docs: Vec<HarnessHookInstallAuditDocLink>,
@@ -1749,7 +1765,7 @@ pub fn generate_harness_hook_install(
     let last_invocations = read_harness_hook_invocations(&options.workspace, &mut install_audit);
 
     Ok(HarnessHookInstallReport {
-        schema: HARNESS_HOOK_INSTALL_SCHEMA_V1.to_owned(),
+        schema: HARNESS_HOOK_INSTALL_SCHEMA_V2.to_owned(),
         harness: options.target.as_str().to_owned(),
         harness_display_name: options.target.display_name().to_owned(),
         mode: mode.to_owned(),
@@ -1843,6 +1859,7 @@ fn read_harness_hook_invocations(
                     event: Some(surface.to_owned()),
                     matcher: None,
                     target_path: Some(path.display().to_string()),
+                    hook_counts: None,
                     message: format!("Last {surface} invocation at {}: {} after {} ms; emitted {} bytes.", item.updated_at, item.outcome, item.duration_ms, item.emitted_bytes),
                     repair: "Run the underlying recall/orient command in this workspace; inspect its JSON response and refresh stale hooks.".to_owned(),
                 });
@@ -1855,6 +1872,7 @@ fn read_harness_hook_invocations(
                 event: Some(surface.to_owned()),
                 matcher: None,
                 target_path: Some(path.display().to_string()),
+                hook_counts: None,
                 message: format!("Last {surface} invocation state is unreadable; installation freshness does not establish runtime health."),
                 repair: "Retry hook status after the current invocation finishes; inspect hook-state permissions if this persists.".to_owned(),
             });
@@ -1891,8 +1909,13 @@ fn audit_harness_hook_install(
     let mut findings = Vec::new();
     let config_present = settings_path.is_some_and(Path::exists);
     let config_writable = settings_path.is_some_and(harness_settings_path_can_be_written);
-    let document =
-        settings_path.and_then(|path| read_harness_settings_for_audit(path, &mut findings));
+    let (document, counts_available) = match settings_path {
+        Some(path) => match read_harness_settings_for_audit(path, snippets, &mut findings) {
+            Ok(document) => (document, target.supported()),
+            Err(()) => (None, false),
+        },
+        None => (None, false),
+    };
 
     if !target.supported() {
         findings.push(HarnessHookInstallAuditFinding {
@@ -1901,6 +1924,7 @@ fn audit_harness_hook_install(
             event: None,
             matcher: None,
             target_path: settings_path.map(|path| path.display().to_string()),
+            hook_counts: None,
             message: format!(
                 "{} hook installation is not supported by this ee build.",
                 target.display_name()
@@ -1915,6 +1939,7 @@ fn audit_harness_hook_install(
             event: None,
             matcher: None,
             target_path: None,
+            hook_counts: None,
             message: "Could not resolve a harness settings path.".to_owned(),
             repair: "Set HOME or pass --settings-path explicitly.".to_owned(),
         });
@@ -1925,6 +1950,7 @@ fn audit_harness_hook_install(
             event: None,
             matcher: None,
             target_path: settings_path.map(|path| path.display().to_string()),
+            hook_counts: None,
             message: "Harness settings path is not writable by the current process.".to_owned(),
             repair: "Fix permissions on the settings file or its parent directory, then re-run the install command.".to_owned(),
         });
@@ -1934,11 +1960,24 @@ fn audit_harness_hook_install(
     let mut hook_fresh_count = 0u64;
     let mut hook_stale_count = 0u64;
     let mut hook_missing_count = 0u64;
+    let mut duplicate_event_count = 0u64;
+    let mut duplicate_hook_count = 0u64;
 
     if target.supported() {
         for snippet in snippets.iter().filter(|snippet| snippet.installable) {
-            let finding =
-                audit_harness_hook_snippet(target, settings_path, document.as_ref(), snippet);
+            let finding = audit_harness_hook_snippet(
+                target,
+                settings_path,
+                document.as_ref(),
+                snippet,
+                counts_available,
+            );
+            if let Some(counts) = finding.hook_counts
+                && counts.duplicate_count > 0
+            {
+                duplicate_event_count = duplicate_event_count.saturating_add(1);
+                duplicate_hook_count = duplicate_hook_count.saturating_add(counts.duplicate_count);
+            }
             match finding.status.as_str() {
                 "fresh" => {
                     hook_present_count = hook_present_count.saturating_add(1);
@@ -1985,6 +2024,8 @@ fn audit_harness_hook_install(
         hook_fresh_count,
         hook_stale_count,
         hook_missing_count,
+        duplicate_event_count: counts_available.then_some(duplicate_event_count),
+        duplicate_hook_count: counts_available.then_some(duplicate_hook_count),
         findings,
         repair_plan: harness_install_audit_repair_plan(target, settings_path, status),
         docs: harness_install_audit_docs(),
@@ -1993,11 +2034,12 @@ fn audit_harness_hook_install(
 
 fn read_harness_settings_for_audit(
     settings_path: &Path,
+    snippets: &[HarnessHookSnippet],
     findings: &mut Vec<HarnessHookInstallAuditFinding>,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, ()> {
     let text = match fs::read_to_string(settings_path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             findings.push(HarnessHookInstallAuditFinding {
                 code: "harness_config_unreadable".to_owned(),
@@ -2005,16 +2047,32 @@ fn read_harness_settings_for_audit(
                 event: None,
                 matcher: None,
                 target_path: Some(settings_path.display().to_string()),
+                hook_counts: None,
                 message: format!("Failed to read harness settings: {error}"),
                 repair: "Fix settings file permissions before auditing or installing hooks."
                     .to_owned(),
             });
-            return None;
+            return Err(());
         }
     };
 
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(value) if value.is_object() => Some(value),
+        Ok(value)
+            if value.is_object()
+                && value.get("hooks").is_none_or(|hooks| {
+                    hooks.is_object()
+                        && snippets
+                            .iter()
+                            .filter(|snippet| snippet.installable)
+                            .all(|snippet| {
+                                hooks
+                                    .get(&snippet.event)
+                                    .is_none_or(harness_hook_event_has_auditable_shape)
+                            })
+                }) =>
+        {
+            Ok(Some(value))
+        }
         Ok(_) => {
             findings.push(HarnessHookInstallAuditFinding {
                 code: "harness_config_invalid".to_owned(),
@@ -2022,11 +2080,12 @@ fn read_harness_settings_for_audit(
                 event: None,
                 matcher: None,
                 target_path: Some(settings_path.display().to_string()),
-                message: "Harness settings root is not a JSON object.".to_owned(),
-                repair: "Replace the settings file with a JSON object before installing hooks."
+                hook_counts: None,
+                message: "Harness settings must have an object root and hooks map, event arrays of groups with hook arrays, and typed hook objects with string commands for command hooks.".to_owned(),
+                repair: "Fix the harness hooks JSON shape before auditing or installing hooks."
                     .to_owned(),
             });
-            None
+            Err(())
         }
         Err(error) => {
             findings.push(HarnessHookInstallAuditFinding {
@@ -2035,12 +2094,36 @@ fn read_harness_settings_for_audit(
                 event: None,
                 matcher: None,
                 target_path: Some(settings_path.display().to_string()),
+                hook_counts: None,
                 message: format!("Harness settings are not valid JSON: {error}"),
                 repair: "Fix JSON syntax before installing ee-managed hooks.".to_owned(),
             });
-            None
+            Err(())
         }
     }
+}
+
+// Count only a structurally inspectable event. Unknown custom hook types may
+// remain present, but malformed groups or commands must not look like zero EE
+// hooks. Auditing never rewrites these user-owned settings.
+fn harness_hook_event_has_auditable_shape(entries: &serde_json::Value) -> bool {
+    let Some(entries) = entries.as_array() else {
+        return false;
+    };
+    entries.iter().all(|entry| {
+        entry
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|hooks| {
+                hooks.iter().all(|hook| {
+                    let Some(kind) = hook.get("type").and_then(serde_json::Value::as_str) else {
+                        return false;
+                    };
+                    kind != "command"
+                        || hook.get("command").is_some_and(serde_json::Value::is_string)
+                })
+            })
+    })
 }
 
 fn harness_settings_path_can_be_written(settings_path: &Path) -> bool {
@@ -2232,8 +2315,10 @@ fn audit_harness_hook_snippet(
     settings_path: Option<&Path>,
     document: Option<&serde_json::Value>,
     snippet: &HarnessHookSnippet,
+    counts_available: bool,
 ) -> HarnessHookInstallAuditFinding {
     let target_path = settings_path.map(|path| path.display().to_string());
+    let empty_counts = counts_available.then(HarnessHookCounts::default);
     let Some(document) = document else {
         return HarnessHookInstallAuditFinding {
             code: "missing_hook".to_owned(),
@@ -2241,6 +2326,7 @@ fn audit_harness_hook_snippet(
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: empty_counts,
             message: format!(
                 "{} {} hook is not installed.",
                 target.display_name(),
@@ -2260,6 +2346,7 @@ fn audit_harness_hook_snippet(
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: empty_counts,
             message: format!("No {} hook entries are configured.", snippet.event),
             repair: format!(
                 "Run `ee hook {} --install` to add ee-managed hooks.",
@@ -2268,8 +2355,7 @@ fn audit_harness_hook_snippet(
         };
     };
 
-    let mut managed_hook_count = 0usize;
-    let mut legacy_unmanaged_count = 0usize;
+    let mut counts = HarnessHookCounts::default();
     for entry in entries {
         let Some(hooks) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
             continue;
@@ -2285,23 +2371,26 @@ fn audit_harness_hook_snippet(
                 snippet,
             ) {
                 HarnessHookOwnership::Managed => {
-                    managed_hook_count += 1;
+                    counts.managed_count = counts.managed_count.saturating_add(1);
                 }
                 HarnessHookOwnership::LegacyUnmanagedEe => {
-                    managed_hook_count += 1;
-                    legacy_unmanaged_count += 1;
+                    counts.legacy_unmanaged_count =
+                        counts.legacy_unmanaged_count.saturating_add(1);
                 }
                 HarnessHookOwnership::UserCustom => {}
             }
         }
     }
-    if managed_hook_count == 0 {
+    counts.ee_hook_count = counts.managed_count.saturating_add(counts.legacy_unmanaged_count);
+    counts.duplicate_count = counts.ee_hook_count.saturating_sub(1);
+    if counts.ee_hook_count == 0 {
         return HarnessHookInstallAuditFinding {
             code: "missing_hook".to_owned(),
             status: "missing_hook".to_owned(),
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: Some(counts),
             message: format!("No ee-managed {} hook entry is present.", snippet.event),
             repair: format!(
                 "Run `ee hook {} --install` to add ee-managed hooks.",
@@ -2310,9 +2399,9 @@ fn audit_harness_hook_snippet(
         };
     }
 
-    if managed_hook_count > 1 {
-        let legacy_note = if legacy_unmanaged_count > 0 {
-            format!(" ({legacy_unmanaged_count} legacy unmanaged)")
+    if counts.duplicate_count > 0 {
+        let legacy_note = if counts.legacy_unmanaged_count > 0 {
+            format!(" ({} legacy unmanaged)", counts.legacy_unmanaged_count)
         } else {
             String::new()
         };
@@ -2322,8 +2411,10 @@ fn audit_harness_hook_snippet(
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: Some(counts),
             message: format!(
-                "{managed_hook_count} ee-managed {} hooks are configured{legacy_note}; duplicate hooks can run more than once per event.",
+                "{} ee-managed {} hooks are configured{legacy_note}; duplicate hooks can run more than once per event.",
+                counts.ee_hook_count,
                 snippet.event
             ),
             repair: format!(
@@ -2334,18 +2425,19 @@ fn audit_harness_hook_snippet(
     }
 
     let expected = harness_hook_entry(target, snippet);
-    if legacy_unmanaged_count == 0 && entries.iter().any(|entry| entry == &expected) {
+    if counts.legacy_unmanaged_count == 0 && entries.iter().any(|entry| entry == &expected) {
         HarnessHookInstallAuditFinding {
             code: "hook_present_fresh".to_owned(),
             status: "fresh".to_owned(),
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: Some(counts),
             message: format!("ee-managed {} hook is present and fresh.", snippet.event),
             repair: "No repair needed.".to_owned(),
         }
     } else {
-        let message = if legacy_unmanaged_count > 0 {
+        let message = if counts.legacy_unmanaged_count > 0 {
             format!(
                 "Legacy unmanaged ee {} hook is present without eeManaged metadata.",
                 snippet.event
@@ -2359,6 +2451,7 @@ fn audit_harness_hook_snippet(
             event: Some(snippet.event.clone()),
             matcher: snippet.matcher.clone(),
             target_path,
+            hook_counts: Some(counts),
             message,
             repair: format!(
                 "Run `ee hook {} --install --workspace . --json` to refresh it.",
@@ -3616,7 +3709,6 @@ fn classify_harness_hook(
         return HarnessHookOwnership::UserCustom;
     }
     if has_harness_hook_marker(hook)
-        || hook.get("command").and_then(serde_json::Value::as_str) == Some(snippet.command.as_str())
         // Older installs mark the group, not its single command. A mixed
         // group is not blanket ownership of unrelated user commands.
         || (group_managed && group_hook_count == 1)
@@ -3626,9 +3718,16 @@ fn classify_harness_hook(
     if hook
         .get("command")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|command| is_legacy_unmanaged_ee_hook_command(command, snippet))
+        .is_some_and(|command| {
+            command == snippet.command.as_str()
+                || is_legacy_unmanaged_ee_hook_command(command, snippet)
+        })
     {
-        return HarnessHookOwnership::LegacyUnmanagedEe;
+        return if group_managed {
+            HarnessHookOwnership::Managed
+        } else {
+            HarnessHookOwnership::LegacyUnmanagedEe
+        };
     }
     HarnessHookOwnership::UserCustom
 }

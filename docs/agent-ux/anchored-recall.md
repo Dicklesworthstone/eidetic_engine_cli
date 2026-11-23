@@ -214,8 +214,35 @@ ee hook codex --install --workspace . --json
 ee hook codex --undo --workspace . --json
 ```
 
-The install report uses `ee.hook.harness_install.v1`. It includes the harness,
-mode, written paths, backup path, snippets, plan entries, and capability gaps.
+The install report uses `ee.hook.harness_install.v2` under
+`data.harnessInstall`. It includes the harness, mode, written paths, backup
+path, snippets, plan entries, capability gaps, and installation audit.
+
+### Harness report migration from v1 to v2
+
+Version 2 adds `installAudit.findings[].hookCounts` for each expected event:
+
+- `managedCount`: commands owned by explicit EE hook or group metadata.
+- `legacyUnmanagedCount`: recognized EE commands without ownership metadata,
+  including exact current commands copied without their marker.
+- `eeHookCount`: the sum of the managed and legacy counts.
+- `duplicateCount`: the number of extra EE commands beyond one for the event.
+
+Custom ownership markers take precedence over copied EE command text. Custom
+hooks are excluded from these counts and preserved during installation.
+`installAudit.duplicateEventCount` counts events with duplicates;
+`duplicateHookCount` sums their extra commands. The counts come from the same
+ownership classification used for migration and deduplication.
+
+A confirmed missing configuration or absent expected event has zero counts.
+Unreadable, malformed, unsupported, or unresolved settings produce `null`
+counts; non-event findings also have `hookCounts: null`. Consumers should
+retain that distinction when deciding whether a reinstall is needed.
+`ee hook status --json` exposes the same audit under `data.installAudit`
+and includes per-event counts in duplicate/stale degradation details.
+Update report schema checks to v2 and read these fields directly instead of
+extracting numbers from diagnostic prose.
+
 The managed snippets inject a small recall block before edits and capture
 failure context after commands when the harness supports those events. Unsupported
 targets return capability gaps; keep recall as an explicit pre-edit command for
@@ -280,7 +307,7 @@ is under `data.recall` and declares `schema: "ee.recall.v1"`.
 ee schema export ee.recall.v1 --json
 ee schema export ee.memory.anchors.v1 --json
 ee schema export ee.index.backfill_anchors.v1 --json
-ee schema export ee.hook.harness_install.v1 --json
+ee schema export ee.hook.harness_install.v2 --json
 ```
 
 Budget truncation uses the shared governor code `output_truncated_budget`, not

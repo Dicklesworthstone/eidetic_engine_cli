@@ -16254,6 +16254,7 @@ fn hook_status_degraded_json(report: &crate::hooks::HarnessHookInstallReport) ->
                     serde_json::json!({
                         "event": event,
                         "harness": &report.harness,
+                        "hookCounts": &finding.hook_counts,
                     }),
                 );
             }
@@ -16360,6 +16361,15 @@ fn render_hook_status_human(report: &crate::hooks::HarnessHookInstallReport) -> 
         report.install_audit.hook_stale_count,
         report.install_audit.hook_missing_count
     ));
+    match (
+        report.install_audit.duplicate_event_count,
+        report.install_audit.duplicate_hook_count,
+    ) {
+        (Some(events), Some(hooks)) => {
+            out.push_str(&format!("  duplicates: events={events} extraHooks={hooks}\n"));
+        }
+        _ => out.push_str("  duplicates: unavailable (settings were not inspected)\n"),
+    }
     out.push_str(&render_ambient_context_summary(report));
     for invocation in &report.last_invocations {
         out.push_str(&format!(
@@ -93389,6 +93399,31 @@ mod tests {
             &degraded[0]["repairCommand"],
             &serde_json::json!("ee hook claude-code --install --workspace . --json"),
             "degraded repairCommand",
+        )?;
+        ensure_equal(
+            &degraded[0]["details"]["event"],
+            &serde_json::json!("PreToolUse"),
+            "duplicate event",
+        )?;
+        ensure_equal(
+            &degraded[0]["details"]["hookCounts"],
+            &serde_json::json!({
+                "managedCount": 1,
+                "legacyUnmanagedCount": 1,
+                "eeHookCount": 2,
+                "duplicateCount": 1,
+            }),
+            "structured duplicate command counts",
+        )?;
+        ensure_equal(
+            &response["data"]["installAudit"]["duplicateEventCount"],
+            &serde_json::json!(1),
+            "duplicate event count",
+        )?;
+        ensure_equal(
+            &response["data"]["installAudit"]["duplicateHookCount"],
+            &serde_json::json!(1),
+            "extra duplicate command count",
         )
     }
 

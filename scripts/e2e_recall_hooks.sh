@@ -106,7 +106,7 @@ HOOK_SETTINGS="$WS/.claude/settings.json"
 printf '%s\n' '{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"echo external"}]}]}}' >"$HOOK_SETTINGS"
 install_out="$(ee_json hook claude-code --settings-path "$HOOK_SETTINGS" --ee-binary "$EE_BIN" --install --workspace "$WS" --json)"
 assert_jq "$install_out" '.success == true' "hook install succeeds"
-assert_jq "$install_out" '.data.harnessInstall.schema == "ee.hook.harness_install.v1"' \
+assert_jq "$install_out" '.data.harnessInstall.schema == "ee.hook.harness_install.v2"' \
     "hook install report schema"
 assert_jq "$install_out" '.data.harnessInstall.mode == "install"' "hook install mode"
 assert_jq "$install_out" '.data.harnessInstall.writtenPaths | length == 1' \

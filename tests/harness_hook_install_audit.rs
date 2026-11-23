@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Command, Output, Stdio};
 
-use ee::hooks::{HarnessHookInstallOptions, HarnessHookTarget, generate_harness_hook_install};
+use ee::hooks::{
+    HARNESS_HOOK_INSTALL_SCHEMA_V2, HarnessHookCounts, HarnessHookInstallOptions, HarnessHookTarget,
+    generate_harness_hook_install,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -793,6 +796,17 @@ fn install_audit_reports_missing_fresh_and_docs() -> TestResult {
     if missing.install_audit.hook_missing_count == 0 {
         return Err("missing audit should count missing installable hooks".to_owned());
     }
+    assert_eq!(missing.schema, HARNESS_HOOK_INSTALL_SCHEMA_V2);
+    assert_eq!(missing.install_audit.duplicate_event_count, Some(0));
+    assert_eq!(missing.install_audit.duplicate_hook_count, Some(0));
+    assert!(
+        missing
+            .install_audit
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "missing_hook")
+            .all(|finding| finding.hook_counts == Some(HarnessHookCounts::default()))
+    );
     if !missing.written_paths.is_empty() || settings_path.exists() {
         return Err("read-only audit must not write a missing settings file".to_owned());
     }
@@ -840,6 +854,21 @@ fn install_audit_reports_missing_fresh_and_docs() -> TestResult {
     }
     if !fresh.install_audit.repair_plan.is_empty() {
         return Err("fresh audit should not emit repair actions".to_owned());
+    }
+    assert_eq!(fresh.install_audit.duplicate_event_count, Some(0));
+    assert_eq!(fresh.install_audit.duplicate_hook_count, Some(0));
+    for finding in &fresh.install_audit.findings {
+        if finding.code == "hook_present_fresh" {
+            assert_eq!(
+                finding.hook_counts,
+                Some(HarnessHookCounts {
+                    managed_count: 1,
+                    legacy_unmanaged_count: 0,
+                    ee_hook_count: 1,
+                    duplicate_count: 0,
+                })
+            );
+        }
     }
 
     Ok(())
@@ -895,12 +924,12 @@ fn install_audit_reclaims_exact_commands_without_metadata() -> TestResult {
 #[test]
 fn install_audit_detects_and_repairs_duplicate_commands_per_event() -> TestResult {
     for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
-        for (same_group, strip_first_marker, strip_duplicate_marker) in [
-            (false, false, false),
-            (false, false, true),
-            (false, true, true),
-            (true, false, false),
-            (true, true, true),
+        for (same_group, strip_first_marker, strip_duplicate_marker, managed_count) in [
+            (false, false, false, 2),
+            (false, false, true, 1),
+            (false, true, true, 0),
+            (true, false, false, 2),
+            (true, true, true, 0),
         ] {
             let temp = TempDir::new().map_err(|error| error.to_string())?;
             let settings_path = temp.path().join("settings.json");
@@ -944,16 +973,46 @@ fn install_audit_detects_and_repairs_duplicate_commands_per_event() -> TestResul
                 .filter(|finding| finding.code == "duplicate_hook")
                 .collect();
             assert_eq!(duplicates.len(), 4, "each duplicate event needs a finding");
-            assert!(
-                duplicates
-                    .iter()
-                    .all(|finding| finding.message.starts_with("2 ee-managed"))
-            );
+            assert_eq!(audit.install_audit.duplicate_event_count, Some(4));
+            assert_eq!(audit.install_audit.duplicate_hook_count, Some(4));
+            for finding in &duplicates {
+                assert_eq!(
+                    finding.hook_counts,
+                    Some(HarnessHookCounts {
+                        managed_count,
+                        legacy_unmanaged_count: 2 - managed_count,
+                        ee_hook_count: 2,
+                        duplicate_count: 1,
+                    })
+                );
+            }
+            let serialized = serde_json::to_value(&audit).map_err(|error| error.to_string())?;
+            assert_eq!(serialized["schema"], HARNESS_HOOK_INSTALL_SCHEMA_V2);
+            assert_eq!(serialized["installAudit"]["duplicateEventCount"], 4);
+            assert_eq!(serialized["installAudit"]["duplicateHookCount"], 4);
+            for finding in serialized["installAudit"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|finding| finding["code"] == "duplicate_hook")
+            {
+                assert_eq!(
+                    finding["hookCounts"],
+                    json!({
+                        "managedCount": managed_count,
+                        "legacyUnmanagedCount": 2 - managed_count,
+                        "eeHookCount": 2,
+                        "duplicateCount": 1
+                    })
+                );
+            }
             assert!(!audit.install_audit.repair_plan.is_empty());
 
             let repaired =
                 generate_harness_hook_install(&install).map_err(|error| error.message())?;
             assert_eq!(repaired.install_audit.status, "fresh");
+            assert_eq!(repaired.install_audit.duplicate_event_count, Some(0));
+            assert_eq!(repaired.install_audit.duplicate_hook_count, Some(0));
             let repaired_bytes = fs::read(&settings_path).unwrap();
             let repaired_document: Value = serde_json::from_slice(&repaired_bytes).unwrap();
             for snippet in &repaired.snippets {
@@ -968,6 +1027,12 @@ fn install_audit_detects_and_repairs_duplicate_commands_per_event() -> TestResul
                 generate_harness_hook_install(&install).map_err(|error| error.message())?;
             assert!(repeated.written_paths.is_empty());
             assert_eq!(fs::read(&settings_path).unwrap(), repaired_bytes);
+            let undone =
+                generate_harness_hook_install(&options(target, &settings_path, false, true))
+                    .map_err(|error| error.message())?;
+            assert_eq!(fs::read(&settings_path).unwrap(), duplicated_bytes);
+            assert_eq!(undone.install_audit.duplicate_event_count, Some(4));
+            assert_eq!(undone.install_audit.duplicate_hook_count, Some(4));
         }
     }
     Ok(())
@@ -1103,6 +1168,24 @@ fn install_audit_preserves_explicit_user_ownership_of_copied_ee_commands() -> Te
                 .all(|finding| finding.code != "duplicate_hook"),
             "user-owned copies must not be counted as managed duplicates"
         );
+        let counts = before
+            .install_audit
+            .findings
+            .iter()
+            .find(|finding| finding.event.as_deref() == Some("SessionStart"))
+            .and_then(|finding| finding.hook_counts)
+            .ok_or("SessionStart counts missing")?;
+        assert_eq!(
+            counts,
+            HarnessHookCounts {
+                managed_count: 1,
+                legacy_unmanaged_count: 0,
+                ee_hook_count: 1,
+                duplicate_count: 0,
+            }
+        );
+        assert_eq!(before.install_audit.duplicate_event_count, Some(0));
+        assert_eq!(before.install_audit.duplicate_hook_count, Some(0));
 
         let install = options(target, &settings_path, true, false);
         let installed = generate_harness_hook_install(&install).map_err(|error| error.message())?;
@@ -1132,6 +1215,94 @@ fn install_audit_preserves_explicit_user_ownership_of_copied_ee_commands() -> Te
         let restored = fs::read(&settings_path).map_err(|error| error.to_string())?;
         assert_eq!(sha256_hex(&restored), sha256_hex(&original));
         assert_eq!(restored, original);
+    }
+    Ok(())
+}
+
+#[test]
+fn install_audit_distinguishes_empty_counts_from_unavailable_settings() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        for contents in [
+            b"{invalid".as_slice(),
+            b"[]".as_slice(),
+            br#"{"hooks":[]}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":{}}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[null]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{}]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{"hooks":null}]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{"hooks":"bad"}]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{"hooks":[42]}]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{"hooks":[{}]}]}}"#.as_slice(),
+            br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}"#.as_slice(),
+            b"\xff".as_slice(),
+        ] {
+            fs::write(&settings_path, contents).map_err(|error| error.to_string())?;
+            let report =
+                generate_harness_hook_install(&options(target, &settings_path, false, false))
+                    .map_err(|error| error.message())?;
+            assert_eq!(report.install_audit.duplicate_event_count, None);
+            assert_eq!(report.install_audit.duplicate_hook_count, None);
+            assert!(
+                report
+                    .install_audit
+                    .findings
+                    .iter()
+                    .all(|finding| finding.hook_counts.is_none())
+            );
+            let json = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+            assert!(json["installAudit"]["duplicateEventCount"].is_null());
+            assert!(json["installAudit"]["duplicateHookCount"].is_null());
+            assert_eq!(fs::read(&settings_path).unwrap(), contents);
+        }
+
+        for contents in [
+            r#"{}"#,
+            r#"{"hooks":{}}"#,
+            r#"{"hooks":{"PreToolUse":[]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"prompt","prompt":"Preserve custom review hook"}]}]}}"#,
+        ] {
+            fs::write(&settings_path, contents).map_err(|error| error.to_string())?;
+            let report =
+                generate_harness_hook_install(&options(target, &settings_path, false, false))
+                    .map_err(|error| error.message())?;
+            assert_eq!(report.install_audit.duplicate_event_count, Some(0));
+            assert_eq!(report.install_audit.duplicate_hook_count, Some(0));
+            let events: Vec<_> = report
+                .install_audit
+                .findings
+                .iter()
+                .filter(|finding| finding.code == "missing_hook")
+                .collect();
+            assert_eq!(events.len(), 4);
+            assert!(
+                events
+                    .iter()
+                    .all(|finding| finding.hook_counts == Some(HarnessHookCounts::default()))
+            );
+            assert_eq!(fs::read_to_string(&settings_path).unwrap(), contents);
+        }
+
+        let directory = temp.path().join("settings-directory");
+        fs::create_dir(&directory).map_err(|error| error.to_string())?;
+        let unreadable =
+            generate_harness_hook_install(&options(target, &directory, false, false))
+                .map_err(|error| error.message())?;
+        assert_eq!(unreadable.install_audit.duplicate_event_count, None);
+        assert_eq!(unreadable.install_audit.duplicate_hook_count, None);
+        assert!(directory.is_dir());
+
+        let unsupported = generate_harness_hook_install(&options(
+            HarnessHookTarget::Gemini,
+            &settings_path,
+            false,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        assert_eq!(unsupported.install_audit.duplicate_event_count, None);
+        assert_eq!(unsupported.install_audit.duplicate_hook_count, None);
     }
     Ok(())
 }
@@ -1502,7 +1673,7 @@ fn install_audit_deduplicates_pre_015_legacy_unmanaged_ee_hooks_across_targets()
         // PreToolUse has 2 legacy unmanaged EE hooks (duplicate_hook),
         // PostToolUse has 1 legacy unmanaged EE hook (stale_hook),
         // SessionStart has 1 legacy unmanaged EE hook mixed with user hooks (stale_hook),
-        // Stop/SessionEnd has 2 legacy unmanaged EE hooks in the same group (duplicate_hook).
+        // Stop/SessionEnd has 3 legacy unmanaged EE hooks in the same group (duplicate_hook).
         let legacy_document = serde_json::json!({
             "userSettings": {"theme": "user-choice"},
             "hooks": {
@@ -1533,6 +1704,7 @@ fn install_audit_deduplicates_pre_015_legacy_unmanaged_ee_hooks_across_targets()
                     {
                         "hooks": [
                             {"type": "command", "command": legacy_capture.clone(), "timeout": 10},
+                            {"type": "command", "command": legacy_capture.clone(), "timeout": 10},
                             {"type": "command", "command": legacy_capture, "timeout": 10}
                         ]
                     }
@@ -1559,6 +1731,30 @@ fn install_audit_deduplicates_pre_015_legacy_unmanaged_ee_hooks_across_targets()
             .filter_map(|finding| finding.event.as_deref())
             .collect();
         assert_eq!(duplicate_events, vec!["PreToolUse", capture_event]);
+        assert_eq!(audit.install_audit.duplicate_event_count, Some(2));
+        assert_eq!(audit.install_audit.duplicate_hook_count, Some(3));
+        for (event, ee_hook_count) in [
+            ("PreToolUse", 2),
+            ("PostToolUse", 1),
+            ("SessionStart", 1),
+            (capture_event, 3),
+        ] {
+            let finding = audit
+                .install_audit
+                .findings
+                .iter()
+                .find(|finding| finding.event.as_deref() == Some(event))
+                .ok_or("expected legacy event finding")?;
+            assert_eq!(
+                finding.hook_counts,
+                Some(HarnessHookCounts {
+                    managed_count: 0,
+                    legacy_unmanaged_count: ee_hook_count,
+                    ee_hook_count,
+                    duplicate_count: ee_hook_count - 1,
+                })
+            );
+        }
         let stale_events: Vec<&str> = audit
             .install_audit
             .findings
