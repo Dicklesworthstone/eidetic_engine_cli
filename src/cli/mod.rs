@@ -3886,6 +3886,10 @@ pub struct PackArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
 
+    /// Include tombstoned memories in the pack with lifecycle metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
@@ -4109,6 +4113,10 @@ pub struct PackBuildArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
 
+    /// Include tombstoned memories in the pack with lifecycle metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
@@ -4174,6 +4182,7 @@ impl PackArgs {
             include_expired: self.include_expired,
             include_future: self.include_future,
             include_stale: self.include_stale,
+            include_tombstoned: self.include_tombstoned,
             mesh_mode: self.mesh_mode,
             coordination_snapshot: self.coordination_snapshot.clone(),
             coordination_stale_after_ms: self.coordination_stale_after_ms,
@@ -48010,7 +48019,7 @@ where
             no_lod: args.no_lod,
             redaction: task_lens_redaction(resolved_lens.as_ref()),
             include_non_affecting_degradations: args.include_non_affecting_degradations,
-            include_tombstoned: false,
+            include_tombstoned: args.include_tombstoned,
             as_of: args.as_of,
             include_expired: args.include_expired,
             include_future: args.include_future,
@@ -48264,7 +48273,7 @@ where
         max_results: request
             .max_results
             .or_else(|| lens_overlay.and_then(|overlay| overlay.max_results)),
-        include_tombstoned: false,
+        include_tombstoned: args.include_tombstoned,
         as_of: args.as_of,
         include_expired: args.include_expired,
         include_future: args.include_future,

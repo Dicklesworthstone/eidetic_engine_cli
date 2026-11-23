@@ -29761,6 +29761,27 @@ impl DbConnection {
         level: Option<&str>,
         include_tombstoned: bool,
     ) -> Result<Vec<StoredMemory>> {
+        self.list_retrieval_memories_with_global(
+            workspace_id,
+            level,
+            (!include_tombstoned).then_some(false),
+        )
+    }
+
+    /// Load retired workspace and tag-backed rows omitted by live indexes.
+    pub(crate) fn list_tombstoned_memories_for_retrieval_with_global(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMemory>> {
+        self.list_retrieval_memories_with_global(workspace_id, None, Some(true))
+    }
+
+    fn list_retrieval_memories_with_global(
+        &self,
+        workspace_id: &str,
+        level: Option<&str>,
+        tombstoned: Option<bool>,
+    ) -> Result<Vec<StoredMemory>> {
         let mut sql = String::from(
             "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3)))",
         );
@@ -29775,8 +29796,10 @@ impl DbConnection {
             params.push(Value::Text(lvl.to_string()));
         }
 
-        if !include_tombstoned {
-            sql.push_str(" AND m.tombstoned_at IS NULL");
+        match tombstoned {
+            Some(true) => sql.push_str(" AND m.tombstoned_at IS NOT NULL"),
+            Some(false) => sql.push_str(" AND m.tombstoned_at IS NULL"),
+            None => {}
         }
 
         sql.push_str(" ORDER BY m.id ASC");

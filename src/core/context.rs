@@ -3407,50 +3407,110 @@ async fn run_context_pack_attempt(
         }
         _ => None,
     };
-    if matches!(
+    let needs_index_fallback = matches!(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
-    ) {
-        // The user-global lane is a separate store with its own index; a
-        // workspace index that cannot serve this request must not hide it.
+    );
+    let can_add_tombstones = options.include_tombstoned
+        && match search_options.execution_source_mode() {
+            SearchSourceMode::LexicalOnly => true,
+            SearchSourceMode::Hybrid => !options.strict_source_mode,
+            SearchSourceMode::SemanticOnly => false,
+        };
+    if needs_index_fallback || can_add_tombstones {
         let fallback_options = SearchOptions {
             as_of: Some(decision_time),
             ..search_options.clone()
         };
-        let (global_memories, global_feedback) = global_store_fallback_memories(
-            &fallback_options,
-            &mut degraded,
-            &mut search_preloaded_memories,
-        )?;
+        let existing_ids;
+        let (selection, global_memories, global_feedback) = if needs_index_fallback {
+            // A failed workspace index must not hide the separate global store.
+            let (memories, feedback) = global_store_fallback_memories(
+                &fallback_options,
+                &mut degraded,
+                &mut search_preloaded_memories,
+            )?;
+            (
+                if options.include_tombstoned {
+                    FallbackMemorySelection::All
+                } else {
+                    FallbackMemorySelection::NotTombstoned
+                },
+                memories,
+                feedback,
+            )
+        } else {
+            // Rebuilding a live generation removes tombstones. For an explicit
+            // historical request, retrieve the omitted rows from this pack's
+            // source snapshot and keep the live index matches.
+            existing_ids = search_report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect();
+            (
+                FallbackMemorySelection::TombstonedExcept(&existing_ids),
+                Vec::new(),
+                None,
+            )
+        };
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        // This fallback does not carry the complete calibration/feedback proof.
-        search_calibration_identity = None;
-        search_fusion_weights = None;
         let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
             &fallback_options,
+            selection,
             global_memories,
             global_feedback.as_ref(),
             &mut degraded,
         )?;
-        request.quality_scoring_policy = Some(quality_policy);
         let fallback_count = fallback_hits.len();
-        push_degradation(
-            &mut degraded,
-            "context_lexical_fallback",
-            ContextResponseSeverity::Medium,
-            format!(
-                "Search index could not satisfy the context request; assembled context from {fallback_count} deterministic lexical memory match{}.",
-                plural_suffix(fallback_count)
-            ),
-            Some("ee index rebuild --workspace .".to_string()),
-        );
-        search_report.results = fallback_hits;
-        search_report.status = if search_report.results.is_empty() {
-            SearchStatus::NoResults
-        } else {
-            SearchStatus::Success
-        };
+        if needs_index_fallback || fallback_count > 0 {
+            // Source fallback hits do not carry the complete calibration proof.
+            search_calibration_identity = None;
+            request.quality_scoring_policy = Some(quality_policy);
+            if needs_index_fallback {
+                search_fusion_weights = None;
+                push_degradation(
+                    &mut degraded,
+                    "context_lexical_fallback",
+                    ContextResponseSeverity::Medium,
+                    format!(
+                        "Search index could not satisfy the context request; assembled context from {fallback_count} deterministic lexical memory match{}.",
+                        plural_suffix(fallback_count)
+                    ),
+                    Some("ee index rebuild --workspace .".to_string()),
+                );
+                search_report.results = fallback_hits;
+            } else {
+                push_degradation(
+                    &mut degraded,
+                    "context_lexical_fallback",
+                    ContextResponseSeverity::Medium,
+                    format!(
+                        "Retrieved {fallback_count} tombstoned memory match{} from the source snapshot using lexical scoring.",
+                        plural_suffix(fallback_count)
+                    ),
+                    None,
+                );
+                if search_report.results.is_empty() {
+                    search_report.source_mode_applied = SearchSourceMode::LexicalOnly;
+                    search_report.source_mode_fallback =
+                        search_options.execution_source_mode() != SearchSourceMode::LexicalOnly;
+                    search_report.embed_backend = EmbedBackend::HashFallback;
+                    search_fusion_weights = None;
+                }
+                search_report.results.extend(fallback_hits);
+                crate::core::search::sort_search_hits_by_score_order(&mut search_report.results);
+                search_report
+                    .results
+                    .truncate(usize::try_from(search_options.limit).unwrap_or(usize::MAX));
+            }
+            search_report.status = if search_report.results.is_empty() {
+                SearchStatus::NoResults
+            } else {
+                SearchStatus::Success
+            };
+        }
         control.check()?;
     }
 
@@ -5586,6 +5646,7 @@ fn context_severity_for_memory_drift_hint(
 fn quality_scored_lexical_memory_fallback_hits(
     connection: &DbConnection,
     options: &SearchOptions,
+    selection: FallbackMemorySelection<'_>,
     global_memories: Vec<StoredMemory>,
     global_feedback: Option<&crate::core::search::GlobalMemoryFeedbackSnapshot>,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -5608,7 +5669,7 @@ fn quality_scored_lexical_memory_fallback_hits(
         &options.workspace_path,
         &options.query,
         crate::core::search::quality_scoring_candidate_limit(options.limit, options.speed),
-        options.include_tombstoned,
+        selection,
         Some(reference_time),
         options.include_expired,
         options.include_future,
@@ -5640,7 +5701,7 @@ fn lexical_memory_fallback_hits(
     workspace_path: &Path,
     query: &str,
     limit: u32,
-    include_tombstoned: bool,
+    selection: FallbackMemorySelection<'_>,
     as_of: Option<DateTime<Utc>>,
     include_expired: bool,
     include_future: bool,
@@ -5657,7 +5718,7 @@ fn lexical_memory_fallback_hits(
     let (memories, global_ids) = fallback_memories_for_workspace(
         connection,
         workspace_path,
-        include_tombstoned,
+        selection,
         as_of,
         include_expired,
         include_future,
@@ -5790,11 +5851,17 @@ fn sort_scored_memory_score_tie_by_workspace_then_memory_id(scored: &mut [(Store
     }
 }
 
+enum FallbackMemorySelection<'a> {
+    All,
+    NotTombstoned,
+    TombstonedExcept(&'a BTreeSet<&'a str>),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fallback_memories_for_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
-    include_tombstoned: bool,
+    selection: FallbackMemorySelection<'_>,
     as_of: Option<DateTime<Utc>>,
     include_expired: bool,
     include_future: bool,
@@ -5811,11 +5878,18 @@ fn fallback_memories_for_workspace(
     let mut total_seen = 0usize;
     let mut rows_by_lane = Vec::new();
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
-        match connection.list_memories_for_retrieval_with_global(
-            &workspace_id,
-            None,
-            include_tombstoned,
-        ) {
+        let rows = match selection {
+            FallbackMemorySelection::TombstonedExcept(_) => {
+                connection.list_tombstoned_memories_for_retrieval_with_global(&workspace_id)
+            }
+            FallbackMemorySelection::All | FallbackMemorySelection::NotTombstoned => connection
+                .list_memories_for_retrieval_with_global(
+                    &workspace_id,
+                    None,
+                    matches!(selection, FallbackMemorySelection::All),
+                ),
+        };
+        match rows {
             Ok(rows) => rows_by_lane.push((false, rows)),
             Err(error) => push_degradation(
                 degraded,
@@ -5831,6 +5905,11 @@ fn fallback_memories_for_workspace(
     rows_by_lane.push((true, global_memories));
     for (global_lane, rows) in rows_by_lane {
         for memory in rows {
+            if let FallbackMemorySelection::TombstonedExcept(existing_ids) = selection
+                && existing_ids.contains(memory.id.as_str())
+            {
+                continue;
+            }
             if global_lane && memories.contains_key(&memory.id) {
                 continue;
             }

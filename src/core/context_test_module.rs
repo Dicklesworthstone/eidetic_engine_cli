@@ -3287,7 +3287,7 @@ mod tests {
             &workspace,
             "How should I hedge exposures?",
             10,
-            false,
+            super::FallbackMemorySelection::NotTombstoned,
             None,
             false,
             false,
@@ -3344,6 +3344,7 @@ mod tests {
         let (quality_hits, _policy_hash) = super::quality_scored_lexical_memory_fallback_hits(
             &connection,
             &search_options,
+            super::FallbackMemorySelection::NotTombstoned,
             Vec::new(),
             None,
             &mut degraded,
@@ -11418,7 +11419,7 @@ pub fn unrelated_context() -> u64 {{
             &workspace,
             "snapshot provenance release original",
             10,
-            false,
+            super::FallbackMemorySelection::NotTombstoned,
             None,
             false,
             false,
@@ -11556,7 +11557,7 @@ pub fn unrelated_context() -> u64 {{
             &workspace,
             "fallback provenance redaction",
             10,
-            false,
+            super::FallbackMemorySelection::NotTombstoned,
             None,
             false,
             false,
@@ -11615,26 +11616,24 @@ pub fn unrelated_context() -> u64 {{
             )
             .map_err(|error| error.to_string())?;
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(43)).to_string();
+        let memory = CreateMemoryInput {
+            workspace_id: workspace_id.clone(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Run cargo clippy before release candidate signoff.".to_owned(),
+            workflow_id: None,
+            confidence: 0.95,
+            utility: 0.80,
+            importance: 0.70,
+            provenance_uri: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: Some("test".to_owned()),
+            tags: vec!["release".to_owned()],
+            valid_from: None,
+            valid_to: None,
+        };
         connection
-            .insert_memory(
-                &memory_id,
-                &CreateMemoryInput {
-                    workspace_id,
-                    level: "procedural".to_owned(),
-                    kind: "rule".to_owned(),
-                    content: "Run cargo clippy before release candidate signoff.".to_owned(),
-                    workflow_id: None,
-                    confidence: 0.95,
-                    utility: 0.80,
-                    importance: 0.70,
-                    provenance_uri: None,
-                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
-                    trust_subclass: Some("test".to_owned()),
-                    tags: vec!["release".to_owned()],
-                    valid_from: None,
-                    valid_to: None,
-                },
-            )
+            .insert_memory(&memory_id, &memory)
             .map_err(|error| error.to_string())?;
         connection
             .tombstone_memory(&memory_id)
@@ -11643,10 +11642,10 @@ pub fn unrelated_context() -> u64 {{
 
         let base_options = super::ContextPackOptions {
             task_paths: Vec::new(),
-            workspace_path: workspace,
-            database_path: Some(db_path),
+            workspace_path: workspace.clone(),
+            database_path: Some(db_path.clone()),
             bead_id: None,
-            index_dir: Some(empty_index_dir),
+            index_dir: Some(empty_index_dir.clone()),
             query: "clippy release candidate".to_owned(),
             speed: crate::search::SpeedMode::Default,
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
@@ -11679,6 +11678,30 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
 
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let mut include_options = base_options.clone();
+        include_options.include_tombstoned = true;
+        include_options.persist_pack = false;
+        let unpublished = super::run_context_pack(&include_options)
+            .map_err(|error| format!("unpublished opt-in context pack failed: {error:?}"))?;
+        assert!(unpublished.data.pack.items.iter().any(|item| {
+            item.memory_id.to_string() == memory_id && item.tombstoned_at.is_some()
+        }));
+
+        let rebuild_options = crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path.clone()),
+            index_dir: Some(empty_index_dir.clone()),
+            dry_run: false,
+        };
+        let rebuilt = crate::core::index::rebuild_index(&rebuild_options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        assert_eq!(rebuilt.documents_total, 0);
+
         let default_response = super::run_context_pack(&base_options)
             .map_err(|error| format!("default context pack failed: {error:?}"))?;
         assert!(
@@ -11691,8 +11714,7 @@ pub fn unrelated_context() -> u64 {{
             "default context pack should exclude tombstoned memories"
         );
 
-        let mut include_options = base_options.clone();
-        include_options.include_tombstoned = true;
+        include_options.persist_pack = true;
         let included_response = super::run_context_pack(&include_options)
             .map_err(|error| format!("include tombstoned context pack failed: {error:?}"))?;
         let included_item = included_response
@@ -11701,7 +11723,7 @@ pub fn unrelated_context() -> u64 {{
             .items
             .iter()
             .find(|item| item.memory_id.to_string() == memory_id)
-            .ok_or_else(|| "opt-in context pack should include tombstoned memory".to_owned())?;
+            .ok_or_else(|| "missing tombstone after rebuilding an empty live index".to_owned())?;
         let tombstoned_at = included_item.tombstoned_at.as_deref().ok_or_else(|| {
             "included tombstoned item should carry lifecycle timestamp".to_owned()
         })?;
@@ -11717,6 +11739,97 @@ pub fn unrelated_context() -> u64 {{
             json["data"]["pack"]["items"][0]["lifecycle"]["tombstonedAt"],
             tombstoned_at
         );
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        let live_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string();
+        connection
+            .insert_memory(
+                &live_id,
+                &CreateMemoryInput {
+                    content: "Investigate clipping of clippy output in release candidate reports."
+                        .to_owned(),
+                    ..memory
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+        let rebuilt = crate::core::index::rebuild_index(&rebuild_options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        assert_eq!(rebuilt.documents_total, 1);
+
+        include_options.persist_pack = false;
+        let mixed = super::run_context_pack(&include_options).map_err(|error| error.to_string())?;
+        let by_id: BTreeMap<_, _> = mixed
+            .data
+            .pack
+            .items
+            .iter()
+            .map(|item| (item.memory_id.to_string(), item))
+            .collect();
+        assert_eq!(by_id.len(), 2);
+        assert!(by_id[&memory_id].tombstoned_at.is_some());
+        assert!(!by_id[&memory_id].provenance.is_empty());
+        assert!(by_id[&live_id].tombstoned_at.is_none());
+
+        let query_file = tempdir.path().join("historical.eeq.json");
+        std::fs::write(
+            &query_file,
+            serde_json::json!({
+                "version": "ee.query.v1",
+                "query": {"text": base_options.query.as_str()},
+            })
+            .to_string(),
+        )
+        .map_err(|error| error.to_string())?;
+        let query_file = query_file.to_str().ok_or("non-UTF-8 query path")?;
+        let index_dir = empty_index_dir.to_str().ok_or("non-UTF-8 index path")?;
+        let workspace = rebuild_options
+            .workspace_path
+            .to_str()
+            .ok_or("non-UTF-8 workspace path")?;
+        for command in [
+            vec!["pack", base_options.query.as_str()],
+            vec!["pack", "build", "--query-file", query_file],
+            vec!["pack", "--query-file", query_file],
+        ] {
+            let argv = ["ee", "--json", "--workspace", workspace]
+                .into_iter()
+                .chain(command)
+                .chain([
+                    "--index-dir",
+                    index_dir,
+                    "--speed",
+                    "instant",
+                    "--read-only",
+                    "--no-lens",
+                    "--include-tombstoned",
+                ])
+                .map(std::ffi::OsString::from);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = crate::cli::run(argv, &mut stdout, &mut stderr);
+            assert_eq!(
+                exit,
+                crate::models::ProcessExitCode::Success,
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+            let response: serde_json::Value =
+                serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
+            assert!(
+                response["data"]["pack"]["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| {
+                        item["memoryId"] == memory_id && item["lifecycle"]["status"] == "tombstoned"
+                    })),
+                "CLI pack output should include the requested tombstone: {response}"
+            );
+        }
         Ok(())
     }
 
@@ -14261,7 +14374,7 @@ pub fn unrelated_context() -> u64 {{
                 &options.workspace_path,
                 &options.query,
                 1,
-                true,
+                super::FallbackMemorySelection::All,
                 Some(reference),
                 true,
                 true,
@@ -14304,7 +14417,7 @@ pub fn unrelated_context() -> u64 {{
             &options.workspace_path,
             &options.query,
             10,
-            true,
+            super::FallbackMemorySelection::All,
             Some(reference),
             true,
             true,
@@ -14460,6 +14573,7 @@ pub fn unrelated_context() -> u64 {{
             super::quality_scored_lexical_memory_fallback_hits(
                 &connection,
                 options,
+                super::FallbackMemorySelection::NotTombstoned,
                 Vec::new(),
                 None,
                 &mut Vec::new(),
@@ -14710,6 +14824,7 @@ pub fn unrelated_context() -> u64 {{
         let (hits, _) = super::quality_scored_lexical_memory_fallback_hits(
             &local,
             &options,
+            super::FallbackMemorySelection::NotTombstoned,
             memories.clone(),
             feedback.as_ref(),
             &mut degraded,
@@ -14736,6 +14851,7 @@ pub fn unrelated_context() -> u64 {{
         let (limited, _) = super::quality_scored_lexical_memory_fallback_hits(
             &local,
             &options,
+            super::FallbackMemorySelection::NotTombstoned,
             memories,
             feedback.as_ref(),
             &mut degraded,
