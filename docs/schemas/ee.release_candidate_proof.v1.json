@@ -137,6 +137,8 @@
         "properties": {
           "path": { "type": "string" },
           "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "archiveSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "probeSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "version": { "type": "string" },
           "target": { "type": "string" },
           "features": { "type": "array", "items": { "type": "string" } }
@@ -173,6 +175,7 @@
         "required": ["stage", "status"],
         "properties": {
           "stage": { "type": "string" },
+          "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
           "status": {
             "type": "string",
             "enum": [

@@ -22,11 +22,24 @@ and actual test results are recorded in
    files and manifest. Run a fresh `cargo +nightly install eidetic-engine --locked`
    through DSR, then exercise init, remember, search, pack and why against a new
    workspace using that installed binary.
-6. Build the six supported binaries through DSR, run their platform workflows,
-   generate `release-probe-{target}.json` captures via `scripts/release_binary_probe.sh`
-   and gate the staging directory with `scripts/release_binary_probe.sh --verify-release-dir <dir>`,
-   publish the GitHub release without Actions/dispatch, and verify every public
-   asset before updating the four Homebrew archive URLs and hashes.
+6. Build the six supported binaries through DSR and run their platform workflows.
+   Generate a `release-probe-{target}.json` receipt for each native run using
+   `scripts/release_binary_probe.sh`. In the capsule manifest, give each native
+   binary entry its executable `path`, `archivePath`, and `probePath`. Check the
+   directory of natively tested archives against the candidate source and version.
+
+   ```bash
+   scripts/release_binary_probe.sh --verify-release-dir "$native_stage_dir" \
+     --proof-capsule "$capsule" --candidate-sha "$release_commit" \
+     --candidate-version "$release_version"
+   ```
+
+   This verifies archive, executable and native receipt digests for the supplied
+   targets. Keep the full six-target inventory and any approved compile-only
+   dispositions with the DSR verification records. `--verify-release-dir` on
+   its own is a capture inspection command. Publish the GitHub release without
+   Actions and verify every public asset before updating the four Homebrew
+   archive URLs and hashes.
 
 The current manual releases carry SHA-256 checksums and minisign `.minisig`
 signatures (without a release `manifest.json` build manifest; see `AGENTS.md`). They

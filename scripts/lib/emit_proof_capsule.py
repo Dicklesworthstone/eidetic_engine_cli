@@ -10,12 +10,9 @@ Supports three modes:
 
 2. Candidate population mode (bd-reality-core-convergence-1azkt.76):
    emit_proof_capsule.py --populate-candidate --candidate-manifest M [--out PATH]
-   Ingests retained stage results, hashes Cargo.lock, franken-stack.lock,
-   scripts/verify-budget.toml, candidate binaries, evidence files, and stage
-   logs, and sets `completeness.populated = true` ONLY when every mandatory
-   stage passed against one clean single commit SHA with zero failures,
-   zero infra refusals, zero timeouts/signals, reconciled test counts, and
-   matching log/binary SHA-256 digests.
+   Ingests a manifest and hashes the supplied stage logs, candidate binaries,
+   and evidence. Native entries can bind their staged archive and probe too.
+   `completeness.populated` describes the evidence declared in that manifest.
 
 3. Cryptographic verification mode (bd-reality-core-convergence-1azkt.76):
    emit_proof_capsule.py --verify-capsule PATH --expected-sha SHA
@@ -24,6 +21,9 @@ Supports three modes:
    `generatedAt`, validates recursively against the committed schema, and fails
    closed (`EE_CAPSULE_RC=1`, exit 1) on tamper, SHA mismatch, missing stages,
    or `completeness.populated != true`.
+   With --release-archive PATH --release-probe PATH --expected-version VERSION,
+   it checks stage log evidence, the candidate's committed lockfiles, and the
+   native archive, executable and probe bytes for that target.
 
 4. Self-test mode:
    emit_proof_capsule.py --self-test
@@ -42,6 +42,7 @@ import platform
 import re
 import subprocess
 import sys
+import tarfile
 from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -54,6 +55,23 @@ RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
 )
 ZERO_SHA40 = "0" * 40
+RELEASE_PROBE_SCHEMA = "ee.release_probe.v1"
+RELEASE_PROBE_CHECKS = {
+    "neural_backend_active": "precondition",
+    "walking_skeleton": "check",
+    "search_deterministic_parallel": "check",
+    "pack_deterministic_parallel": "check",
+    "ask_direct_hit": "check",
+    "rule_searchable": "check",
+    "rule_packs_beside_source": "check",
+    "unrelated_query_abstains": "check",
+    "status_doctor_agree": "check",
+    "model_missing_fallback": "check",
+    "model_receipt_fresh": "check",
+    "learn_loop_applies": "check",
+    "concurrent_writes_intact": "check",
+    "target_triple_matches": "check",
+}
 
 
 def _reject_json_constant(const: str) -> Any:
@@ -112,6 +130,124 @@ def _sha256_file(path: pathlib.Path) -> str:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _committed_blob(repo_root: pathlib.Path, commit: str, path: str) -> bytes:
+    if not HEX40_RE.fullmatch(commit) or commit == ZERO_SHA40:
+        raise ValueError("expected a full candidate commit SHA")
+    command = ["git", "show", "--no-textconv", f"{commit}^{{commit}}:{path}"]
+    result = subprocess.run(command, cwd=repo_root, capture_output=True, timeout=10)
+    if result.returncode != 0:
+        raise ValueError(f"could not read {path} from the candidate tree")
+    return result.stdout
+
+
+def verify_candidate_tree(
+    capsule: dict[str, Any], repo_root: pathlib.Path, expected_version: str
+) -> list[str]:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return ["candidate tree verification requires Python 3.11 or later"]
+
+    commit = capsule["source"]["commit"]
+    try:
+        cargo_manifest = tomllib.loads(_committed_blob(repo_root, commit, "Cargo.toml").decode())
+        cargo_lock = _sha256_bytes(_committed_blob(repo_root, commit, "Cargo.lock"))
+        franken_lock = _sha256_bytes(_committed_blob(repo_root, commit, "franken-stack.lock"))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return [str(exc)]
+    if cargo_manifest.get("package", {}).get("version") != expected_version:
+        return ["expected release version differs from candidate Cargo.toml"]
+    dependencies = capsule["effectiveDependencies"]
+    expected = {
+        "cargoLockSha256": cargo_lock,
+        "frankenStackLockSha256": franken_lock,
+        "lockfileHash": franken_lock,
+    }
+    return [
+        f"candidate tree {field} differs from capsule"
+        for field, digest in expected.items()
+        if dependencies.get(field) != digest
+    ]
+
+
+def _archive_executable_sha256(archive: pathlib.Path, executable_name: str) -> str:
+    executable_sha = None
+    with tarfile.open(archive, mode="r|xz") as contents:
+        for member in contents:
+            name = pathlib.PurePosixPath(member.name)
+            if name.name != executable_name:
+                continue
+            if (
+                executable_sha is not None
+                or not member.isfile()
+                or name.is_absolute()
+                or ".." in name.parts
+            ):
+                raise ValueError(f"expected exactly one regular {executable_name} member")
+            handle = contents.extractfile(member)
+            if handle is None:
+                raise ValueError(f"could not read {executable_name} member")
+            with handle:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+                executable_sha = digest.hexdigest()
+    if executable_sha is None:
+        raise ValueError(f"archive contains no {executable_name} member")
+    return executable_sha
+
+
+def native_release_artifact_bindings(
+    binary: dict[str, Any], archive: pathlib.Path, probe_path: pathlib.Path, commit: str
+) -> dict[str, str]:
+    """Validate the full native probe and return digests over the staged bytes."""
+    target = binary["target"]
+    if archive.name != f"ee-{target}.tar.xz":
+        raise ValueError(f"archive filename does not match target {target}")
+    probe_bytes = probe_path.read_bytes()
+    probe = json.loads(probe_bytes, parse_constant=_reject_json_constant)
+    if not isinstance(probe, dict) or probe.get("schema") != RELEASE_PROBE_SCHEMA:
+        raise ValueError("invalid release probe schema")
+    if probe.get("verdict") != "pass" or probe.get("failed") != []:
+        raise ValueError("release probe did not report a complete pass")
+    checks = probe.get("checks")
+    if not isinstance(checks, list):
+        raise ValueError("release probe lacks its check inventory")
+    seen = set()
+    for row in checks:
+        if not isinstance(row, dict):
+            raise ValueError("invalid release probe check")
+        check_id = row.get("id")
+        if not isinstance(check_id, str) or check_id not in RELEASE_PROBE_CHECKS or check_id in seen:
+            raise ValueError("release probe contains an unknown or duplicate check")
+        seen.add(check_id)
+        if row.get("kind") != RELEASE_PROBE_CHECKS[check_id] or row.get("pass") is not True:
+            raise ValueError(f"release probe check {check_id} did not pass")
+        observed = row.get("observed")
+        if not isinstance(observed, str) or not observed.strip():
+            raise ValueError(f"release probe check {check_id} did not retain an observation")
+        if check_id == "neural_backend_active" and observed != "embed_backend=neural_local":
+            raise ValueError("release probe did not observe the neural backend")
+    if seen != RELEASE_PROBE_CHECKS.keys():
+        raise ValueError("release probe omitted mandatory checks")
+
+    identity = probe.get("binary")
+    if not isinstance(identity, dict) or identity.get("gitDirty") is not False:
+        raise ValueError("release probe must report a clean executable")
+    expected = {"gitCommit": commit, "version": binary["version"], "targetTriple": target}
+    if any(identity.get(field) != value for field, value in expected.items()):
+        raise ValueError("release probe executable source, version or target differs from candidate")
+
+    archive_sha = _sha256_file(archive)
+    archive_receipt = probe.get("archive")
+    if not isinstance(archive_receipt, dict) or archive_receipt.get("sha256") != archive_sha:
+        raise ValueError("staged archive SHA-256 differs from release probe")
+    executable_sha = _archive_executable_sha256(archive, "ee")
+    if executable_sha != identity.get("sha256") or executable_sha != binary["sha256"]:
+        raise ValueError("archived executable SHA-256 differs from probe or candidate binary")
+    return {"archiveSha256": archive_sha, "probeSha256": _sha256_bytes(probe_bytes)}
 
 
 def compute_capsule_hash(capsule: dict[str, Any]) -> str:
@@ -380,10 +516,15 @@ def populate_candidate_capsule(
             )
         )
 
-    cargo_lock = repo_root / "Cargo.lock"
-    franken_lock = repo_root / "franken-stack.lock"
-    cargo_lock_hash = _sha256_file(cargo_lock) if cargo_lock.is_file() else None
-    franken_lock_hash = _sha256_file(franken_lock) if franken_lock.is_file() else None
+    def lock_hash_for(path: str) -> str | None:
+        try:
+            return _sha256_bytes(_committed_blob(repo_root, commit_sha, path))
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            lock_path = repo_root / path
+            return _sha256_file(lock_path) if lock_path.is_file() else None
+
+    cargo_lock_hash = lock_hash_for("Cargo.lock")
+    franken_lock_hash = lock_hash_for("franken-stack.lock")
     lock_hash = franken_lock_hash or cargo_lock_hash
     if lock_hash is None:
         unestablished.append(
@@ -503,6 +644,17 @@ def populate_candidate_capsule(
         }
         if isinstance(entry.get("features"), list):
             bin_obj["features"] = [str(f) for f in entry["features"]]
+        archive_path, probe_path = entry.get("archivePath"), entry.get("probePath")
+        if archive_path is not None or probe_path is not None:
+            try:
+                if not all(isinstance(path, str) and path for path in (archive_path, probe_path)):
+                    raise ValueError("archivePath and probePath are both required for native bindings")
+                bindings = native_release_artifact_bindings(
+                    bin_obj, repo_root / archive_path, repo_root / probe_path, commit_sha,
+                )
+                bin_obj.update(bindings)
+            except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
+                unestablished.append(_unestablished(f"binaries[{idx}].archive", str(exc)))
         binaries.append(bin_obj)
     if not binaries:
         unestablished.append(
@@ -754,6 +906,8 @@ def populate_candidate_capsule(
             "noVerdictCause": no_verdict_cause,
             "terminatorClass": terminator_class,
         }
+        if isinstance(stage_commit, str) and HEX40_RE.fullmatch(stage_commit):
+            row["commit"] = stage_commit
         results.append(row)
 
     if not results:
@@ -1134,6 +1288,71 @@ def verify_capsule(
     return problems
 
 
+def verify_release_artifact(
+    capsule: dict[str, Any], archive: pathlib.Path, probe: pathlib.Path, expected_version: str
+) -> list[str]:
+    """Additional checks for the exact bytes addressed by a staging directory."""
+    matching = [
+        binary for binary in capsule["binaries"]
+        if archive.name == f"ee-{binary['target']}.tar.xz"
+    ]
+    if len(matching) != 1:
+        return ["staged archive must have exactly one matching target in the proof capsule"]
+    binary = matching[0]
+    if binary["version"] != expected_version:
+        return ["staged binary version differs from the expected release version"]
+    try:
+        bindings = native_release_artifact_bindings(binary, archive, probe, capsule["source"]["commit"])
+    except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
+        return [str(exc)]
+    return [
+        f"candidate capsule {field} does not bind the staged evidence"
+        for field, digest in bindings.items()
+        if binary.get(field) != digest
+    ]
+
+
+def verify_retained_test_counts(
+    capsule: dict[str, Any], repo_root: pathlib.Path,
+) -> list[str]:
+    from grade_test_log import RUNNING_TARGET, parse, strip_ansi
+
+    problems = []
+    commit = capsule["source"]["commit"]
+    for row in capsule["results"]:
+        stage = row["stage"]
+        if row.get("commit") != commit:
+            problems.append(f"stage {stage} did not name the full candidate commit")
+        if row.get("announced") is None:
+            continue
+        log_path = repo_root / row["logPath"]
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            problems.append(f"stage {stage} log could not be read: {exc.strerror}")
+            continue
+        pairs, parse_errors, targets = parse(lines)
+        if parse_errors or len(pairs) != 1 or len(targets) != 1:
+            problems.append(f"stage {stage} needs one complete, attributable libtest result")
+            continue
+        running = [match for line in lines if (match := RUNNING_TARGET.match(strip_ansi(line)))]
+        target = row.get("target")
+        if len(running) != 1 or target not in (running[0]["what"], running[0]["bin"]):
+            problems.append(f"stage {stage} did not execute its declared test target")
+        actual = pairs[0]
+        if (
+            actual["verdict"] != "ok"
+            or actual["passed"] != row.get("announced")
+            or actual["passed"] != row.get("executed")
+            or actual["announced"] != actual["passed"]
+            or actual["failed"] != 0
+            or actual["ignored"] != 0
+            or row.get("filteredOut") not in (None, actual["filtered"])
+        ):
+            problems.append(f"stage {stage} reported counts differ from its retained libtest result")
+    return problems
+
+
 GREEN_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 4 tests
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
@@ -1316,6 +1535,73 @@ def self_test() -> int:
             "verify_capsule passes valid populated candidate",
             not verify_capsule(populated, sha_a, expected_binary=bin_path, verify_logs=True, repo_root=cand_repo),
         )
+        check("native verification parses retained libtest", not verify_retained_test_counts(populated, cand_repo))
+        for field, value in (("commit", sha_b), ("announced", 12), ("target", "tests/contracts.rs")):
+            forged = copy.deepcopy(populated)
+            forged["results"][0][field] = value
+            check(f"native verification rejects stage {field} mismatch",
+                  bool(verify_retained_test_counts(forged, cand_repo)))
+        log_path.write_text(ZERO_LOG, encoding="utf-8")
+        check("native verification rejects zero-result log", bool(verify_retained_test_counts(populated, cand_repo)))
+        log_path.write_text(GREEN_LOG, encoding="utf-8")
+
+        # Native release receipts bind the archive member bytes and every
+        # named check in the retained receipt.
+        archive = root / "ee-x86_64-unknown-linux-gnu.tar.xz"
+        probe_path = root / "release-probe-x86_64-unknown-linux-gnu.json"
+        with tarfile.open(archive, mode="w:xz") as output:
+            output.add(bin_path, arcname="ee")
+        probe = {
+            "schema": RELEASE_PROBE_SCHEMA,
+            "verdict": "pass",
+            "failed": [],
+            "archive": {"sha256": _sha256_file(archive)},
+            "binary": {
+                "gitCommit": sha_a,
+                "gitDirty": False,
+                "version": "0.19.0",
+                "targetTriple": "x86_64-unknown-linux-gnu",
+                "sha256": _sha256_file(bin_path),
+            },
+            "checks": [
+                {
+                    "id": check_id, "kind": kind, "pass": True,
+                    "observed": "embed_backend=neural_local" if kind == "precondition" else "ok",
+                }
+                for check_id, kind in RELEASE_PROBE_CHECKS.items()
+            ],
+        }
+        probe_path.write_text(json.dumps(probe), encoding="utf-8")
+        bound_manifest = copy.deepcopy(manifest)
+        bound_manifest["binaries"][0].update(archivePath=str(archive), probePath=str(probe_path))
+        bound = populate_candidate_capsule(bound_manifest, repo_root=cand_repo)
+        check("native archive and receipt bind during population", not verify_capsule(bound, sha_a))
+        check("native staging validates exact bytes", not verify_release_artifact(bound, archive, probe_path, "0.19.0"))
+        check("staging refuses an unbound capsule", bool(verify_release_artifact(populated, archive, probe_path, "0.19.0")))
+        check("staging refuses wrong operator version", bool(verify_release_artifact(bound, archive, probe_path, "0.19.1")))
+        for name, change in (
+            ("failed check", lambda receipt: receipt["checks"][0].update({"pass": False})),
+            ("unobserved backend", lambda receipt: receipt["checks"][0].update(observed="embed_backend=hash_fallback")),
+            ("duplicate check", lambda receipt: receipt["checks"].append(receipt["checks"][0])),
+            ("absent check", lambda receipt: receipt["checks"].pop()),
+            ("null dirty bit", lambda receipt: receipt["binary"].update(gitDirty=None)),
+            ("wrong executable digest", lambda receipt: receipt["binary"].update(sha256="0" * 64)),
+        ):
+            broken = copy.deepcopy(probe)
+            change(broken)
+            probe_path.write_text(json.dumps(broken), encoding="utf-8")
+            check(f"native staging refuses {name}", bool(verify_release_artifact(bound, archive, probe_path, "0.19.0")))
+        probe_path.write_text(json.dumps(probe, indent=2), encoding="utf-8")
+        check("native staging detects changed probe bytes", verify_release_artifact(bound, archive, probe_path, "0.19.0") == [
+            "candidate capsule probeSha256 does not bind the staged evidence"
+        ])
+        with tarfile.open(archive, mode="w:xz") as output:
+            output.add(probe_path, arcname="ee")
+        probe["archive"]["sha256"] = _sha256_file(archive)
+        probe_path.write_text(json.dumps(probe), encoding="utf-8")
+        check("staging rehashes the archive member", verify_release_artifact(bound, archive, probe_path, "0.19.0") == [
+            "archived executable SHA-256 differs from probe or candidate binary"
+        ])
 
         # Negative verification controls:
         check(
@@ -1513,6 +1799,9 @@ def main() -> int:
     parser.add_argument("--verify-capsule")
     parser.add_argument("--expected-sha")
     parser.add_argument("--expected-binary")
+    parser.add_argument("--release-archive", type=pathlib.Path)
+    parser.add_argument("--release-probe", type=pathlib.Path)
+    parser.add_argument("--expected-version")
     parser.add_argument("--verify-logs", action="store_true")
     parser.add_argument("--repo-root")
     parser.add_argument("--log")
@@ -1525,6 +1814,9 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = pathlib.Path(args.repo_root).resolve() if args.repo_root else REPO
+    artifact_args = (args.release_archive, args.release_probe, args.expected_version)
+    if any(artifact_args) and (not args.verify_capsule or not all(artifact_args)):
+        parser.error("--release-archive, --release-probe and --expected-version require one another and --verify-capsule")
 
     if args.self_test:
         return self_test()
@@ -1557,9 +1849,15 @@ def main() -> int:
             capsule,
             args.expected_sha,
             expected_binary=exp_bin,
-            verify_logs=args.verify_logs,
+            verify_logs=args.verify_logs or args.release_archive is not None,
             repo_root=repo_root,
         )
+        if not problems and args.release_archive:
+            problems = verify_candidate_tree(capsule, repo_root, args.expected_version)
+            if not problems:
+                problems = verify_retained_test_counts(capsule, repo_root)
+            if not problems:
+                problems = verify_release_artifact(capsule, *artifact_args)
         if problems:
             for prob in problems:
                 print(f"[emit-proof-capsule] VERIFY FAILED: {prob}", file=sys.stderr)

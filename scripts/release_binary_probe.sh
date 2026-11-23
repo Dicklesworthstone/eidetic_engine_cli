@@ -35,6 +35,7 @@
 #       [--expected-target <triple>] [--output <file>] [--json]
 #   scripts/release_binary_probe.sh --verify-release-dir <dir>
 #       [--allow-compile-only <triple>]... [--proof-capsule <file>]
+#       [--candidate-sha <commit> --candidate-version <version>]
 #   scripts/release_binary_probe.sh --self-test
 #
 # Output (--json): one `ee.release_probe.v1` object on stdout, keyed by the
@@ -684,9 +685,13 @@ grade() {
 
 # Assemble the verdict object from ROWS. Precondition false -> incomplete.
 verdict_json() {
-    local archive_src="$1" archive_sha="$2"
+    local archive_src="$1" archive_sha="$2" binary_sha=""
+    if [ -f "$CAP/binary.sha256" ]; then
+        IFS= read -r binary_sha <"$CAP/binary.sha256" || true
+    fi
     printf '%s' "$ROWS" | jq -cs \
         --arg schema "$SCHEMA" --arg src "$archive_src" --arg sha "$archive_sha" \
+        --arg binary_sha "$binary_sha" \
         --slurpfile version <(cat "$CAP/version.json" 2>/dev/null || echo '{}') '
         ($version[0].data // {}) as $v
         | (map(select(.kind == "precondition" and .pass == false)) | length) as $pre
@@ -698,7 +703,8 @@ verdict_json() {
               version: ($v.version // null),
               gitCommit: ($v.source.gitCommit // null),
               gitTag: ($v.source.gitTag // null),
-              gitDirty: ($v.source.gitDirty // null),
+              gitDirty: $v.source.gitDirty,
+              sha256: (if $binary_sha == "" then null else $binary_sha end),
               targetTriple: ($v.build.targetTriple // null)
             },
             verdict: (if $pre > 0 then "incomplete"
@@ -1247,6 +1253,17 @@ verify_release_dir() {
             failures=$((failures + 1))
             continue
         fi
+        if [ -n "$CANDIDATE_SHA" ]; then
+            if python3 "$ROOT/scripts/lib/emit_proof_capsule.py" \
+                --verify-capsule "$PROOF_CAPSULE" --expected-sha "$CANDIDATE_SHA" --verify-logs \
+                --release-archive "$archive" --release-probe "$probe_file" \
+                --expected-version "$CANDIDATE_VERSION" >&2; then
+                capsule_verified=$((capsule_verified + 1))
+            else
+                failures=$((failures + 1))
+            fi
+            continue
+        fi
         sha="$(sha256_of "$archive")"
         got_schema="$(jq -r '.schema // empty' "$probe_file" 2>/dev/null)"
         got_sha="$(jq -r '.archive.sha256 // empty' "$probe_file" 2>/dev/null)"
@@ -1323,6 +1340,7 @@ verify_release_dir() {
 # Main
 # --------------------------------------------------------------------------
 ARCHIVE="" SHA="" EXPECTED_TARGET="" OUTPUT_FILE="" VERIFY_RELEASE_DIR="" PROOF_CAPSULE=""
+CANDIDATE_SHA="" CANDIDATE_VERSION=""
 ALLOW_COMPILE_ONLY=() MODEL_CACHE="" WORKDIR="" REPLAY="" JSON=0 SELF_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1356,6 +1374,16 @@ while [ $# -gt 0 ]; do
             PROOF_CAPSULE="$2"
             shift 2
             ;;
+        --candidate-sha)
+            [ $# -ge 2 ] && [[ "$2" =~ ^[0-9a-f]{40}$ ]] || die_env "--candidate-sha requires a full lowercase commit SHA"
+            CANDIDATE_SHA="$2"
+            shift 2
+            ;;
+        --candidate-version)
+            [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--candidate-version requires the release version"
+            CANDIDATE_VERSION="$2"
+            shift 2
+            ;;
         --allow-compile-only)
             [ $# -ge 2 ] && [ -n "${2:-}" ] || die_env "--allow-compile-only requires a target triple"
             ALLOW_COMPILE_ONLY+=("$2")
@@ -1386,6 +1414,12 @@ done
 [ "$SELF_TEST" = 1 ] && self_test
 
 need jq
+if [ -n "$CANDIDATE_SHA" ] || [ -n "$CANDIDATE_VERSION" ]; then
+    [ -n "$VERIFY_RELEASE_DIR" ] && [ -n "$PROOF_CAPSULE" ] &&
+        [ -n "$CANDIDATE_SHA" ] && [ -n "$CANDIDATE_VERSION" ] ||
+        die_env "candidate verification requires --verify-release-dir, --proof-capsule, --candidate-sha and --candidate-version"
+    [ -z "${ALLOW_COMPILE_ONLY[*]:-}" ] || die_env "candidate artifact verification requires a native probe for every included archive"
+fi
 if [ -n "$VERIFY_RELEASE_DIR" ]; then
     verify_release_dir "$VERIFY_RELEASE_DIR" "${ALLOW_COMPILE_ONLY[@]+"${ALLOW_COMPILE_ONLY[@]}"}"
 fi
@@ -1443,6 +1477,8 @@ tar -xf "$archive_file" -C "$WORK/unpacked" || die_env "could not unpack $archiv
 EE_BIN="$(command find "$WORK/unpacked" -type f -name ee | head -n 1)"
 [ -n "$EE_BIN" ] || die_env "no 'ee' executable inside $archive_file (Windows archives are not supported)"
 chmod +x "$EE_BIN"
+binary_sha="$(sha256_of "$EE_BIN")" || die_env "cannot hash unpacked executable"
+printf '%s\n' "$binary_sha" >"$CAP/binary.sha256" || die_env "cannot record unpacked executable digest"
 
 export HOME="$WORK/home"
 export XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" XDG_CACHE_HOME="$WORK/cache"
