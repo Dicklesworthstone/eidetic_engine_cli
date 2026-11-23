@@ -5,12 +5,13 @@
 //! state in the unpublished store's existing read snapshot, without running
 //! new verification or treating recovery as evidence of increased authority.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Rows, recovery_error, storage_error};
 use crate::core::backup::{
-    BackupRestoredDerivedAssetReport, BackupTrustHistory, TRUST_HISTORY_SCHEMA,
-    WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json,
+    BackupMemoryProvenance, BackupRestoredDerivedAssetReport, BackupTrustHistory,
+    WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json, restored_memory_provenance,
+    valid_trust_history_schema, validate_memory_provenance,
 };
 use crate::db::DbConnection;
 use crate::models::DomainError;
@@ -20,6 +21,7 @@ const TRUST_TABLES: &[&str] = &["memory_seals", "trust_quarantine", "certificate
 pub(super) struct TrustExpectation {
     workspace_id: String,
     rows: Rows,
+    memory_provenance: Option<BTreeMap<String, BackupMemoryProvenance>>,
 }
 
 impl TrustExpectation {
@@ -31,12 +33,14 @@ impl TrustExpectation {
         let count = assets.iter().filter(|a| a.kind == "trust_history").count();
         let mut slots = BTreeSet::new();
         let mut source_workspace: Option<String> = None;
+        let mut source_schema: Option<String> = None;
         let mut rows = Rows::default();
+        let mut memory_provenance = None;
         for asset in assets.iter().filter(|a| a.kind == "trust_history") {
             let chunk: BackupTrustHistory =
                 serde_json::from_value(read_restored_derived_json(asset)?)
                     .map_err(|_| recovery_error("Invalid recovered trust-history rows"))?;
-            if chunk.schema != TRUST_HISTORY_SCHEMA
+            if !valid_trust_history_schema(&chunk)
                 || chunk.backup_id != backup_id
                 || chunk.chunk_count != count
                 || chunk.chunk_index >= count
@@ -44,11 +48,15 @@ impl TrustExpectation {
                 || source_workspace
                     .as_deref()
                     .is_some_and(|id| id != chunk.workspace_id)
+                || source_schema
+                    .as_deref()
+                    .is_some_and(|schema| schema != chunk.schema)
                 || [
                     chunk.seals.len(),
                     chunk.quarantines.len(),
                     chunk.certificates.len(),
                     chunk.agents.len(),
+                    chunk.memory_provenance.as_ref().map_or(0, Vec::len),
                 ]
                 .into_iter()
                 .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
@@ -58,6 +66,18 @@ impl TrustExpectation {
                 ));
             }
             source_workspace = Some(chunk.workspace_id.clone());
+            source_schema = Some(chunk.schema.clone());
+            if let Some(provenance) = chunk.memory_provenance {
+                let captured = memory_provenance.get_or_insert_with(BTreeMap::new);
+                for row in provenance {
+                    validate_memory_provenance(&row)?;
+                    if captured.insert(row.memory_id.clone(), row).is_some() {
+                        return Err(recovery_error(
+                            "Recovered history repeats an identity in memory provenance",
+                        ));
+                    }
+                }
+            }
             for row in chunk.seals {
                 rows.insert("memory_seals", &row.memory_id, &row)?;
             }
@@ -84,10 +104,16 @@ impl TrustExpectation {
         Ok(Self {
             workspace_id: workspace_id.to_owned(),
             rows,
+            memory_provenance,
         })
     }
 
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
+        self.verify_trust_rows(db)?;
+        self.verify_memory_provenance(db)
+    }
+
+    fn verify_trust_rows(&self, db: &DbConnection) -> Result<(), DomainError> {
         let mut actual = Rows::default();
         for row in db
             .list_memory_seals_for_recovery(&self.workspace_id)
@@ -124,6 +150,48 @@ impl TrustExpectation {
         // Recheck all four populations in the same snapshot, including after
         // derived-state rebuilding, without releasing or re-verifying a row.
         self.rows.verify_complete(&actual, db, TRUST_TABLES)
+    }
+
+    fn verify_memory_provenance(&self, db: &DbConnection) -> Result<(), DomainError> {
+        let memories = db
+            .list_memories(&self.workspace_id, None, true)
+            .map_err(storage_error)?;
+        if self.memory_provenance.as_ref().is_some_and(|archived| {
+            archived.len() != memories.len()
+                || memories
+                    .iter()
+                    .any(|memory| !archived.contains_key(&memory.id))
+        }) {
+            return Err(recovery_error(
+                "Restored memory provenance identities differ from the authenticated history",
+            ));
+        }
+        let mut expected = Rows::default();
+        let mut actual = Rows::default();
+        for memory in memories {
+            // The carrier was captured before any recovery writes. Only the
+            // primary fields participate in the permitted projection downgrade;
+            // the independent JSONL fence checks those fields against the archive.
+            // Never derive the expectation from the newly written trust columns.
+            let archived = self
+                .memory_provenance
+                .as_ref()
+                .and_then(|rows| rows.get(&memory.id));
+            let projection = restored_memory_provenance(&memory, archived);
+            expected.insert("memories", &memory.id, &projection)?;
+            let persisted = BackupMemoryProvenance {
+                memory_id: memory.id.clone(),
+                provenance_chain_hash: memory.provenance_chain_hash,
+                provenance_chain_hash_version: memory.provenance_chain_hash_version,
+                provenance_verification_status: memory.provenance_verification_status,
+                provenance_verified_at: memory.provenance_verified_at,
+                provenance_verification_note: memory.provenance_verification_note,
+            };
+            actual.insert("memories", &memory.id, &persisted)?;
+        }
+        // Include tombstones and old revisions, and reject memories hidden by
+        // workspace filtering just as the trust-table checks reject hidden rows.
+        expected.verify_complete(&actual, db, &["memories"])
     }
 }
 
@@ -261,14 +329,15 @@ mod population_tests {
             let empty = TrustExpectation::from_assets(&[], "empty-backup", &target)
                 .map_err(|error| error.message())?;
             empty
-                .verify_connection(&db)
+                .verify_trust_rows(&db)
                 .map_err(|error| error.message())?;
             let exact = TrustExpectation {
                 rows: seed(&db, &source, table)?,
                 workspace_id: source.clone(),
+                memory_provenance: None,
             };
             exact
-                .verify_connection(&db)
+                .verify_trust_rows(&db)
                 .map_err(|error| error.message())?;
             assert!(
                 db.list_memory_seals_for_recovery(&target)
@@ -296,7 +365,7 @@ mod population_tests {
                 1
             );
             let error = empty
-                .verify_connection(&db)
+                .verify_trust_rows(&db)
                 .expect_err("hidden trust rows must prevent publication");
             let message = error.message();
             assert!(message.contains(&format!("Restored durable population differs for {table}")));
@@ -305,7 +374,7 @@ mod population_tests {
             // Refusal is read-only: it must not release quarantines, reveal
             // sealed results, verify certificates or rewrite agent identity.
             exact
-                .verify_connection(&db)
+                .verify_trust_rows(&db)
                 .map_err(|error| error.message())?;
             db.close().map_err(|error| error.to_string())?;
         }

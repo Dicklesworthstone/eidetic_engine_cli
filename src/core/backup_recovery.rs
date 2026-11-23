@@ -867,8 +867,37 @@ mod tests {
             restore_path: captured.to_string_lossy().into_owned(),
             lab_episode_path: None,
         };
+        // Capture the original provenance columns as well. Without a v2
+        // carrier, real recovery must clear insertion-generated commitments
+        // instead of presenting them as the unavailable source history.
+        let trust = crate::core::backup::BackupTrustHistory {
+            schema: crate::core::backup::TRUST_HISTORY_SCHEMA.to_owned(),
+            backup_id: "backup-empty".to_owned(),
+            workspace_id: workspace.clone(),
+            chunk_index: 0,
+            chunk_count: 1,
+            seals: Vec::new(),
+            quarantines: Vec::new(),
+            certificates: Vec::new(),
+            agents: Vec::new(),
+            memory_provenance: Some(
+                before
+                    .iter()
+                    .map(crate::core::backup::BackupMemoryProvenance::from)
+                    .collect(),
+            ),
+            authentication: None,
+        };
+        let captured_trust = root.path().join("trust-history.json");
+        std::fs::write(&captured_trust, serde_json::to_vec(&trust).unwrap()).unwrap();
+        let trust_asset = crate::core::backup::BackupRestoredDerivedAssetReport {
+            path: "trust-history.json".to_owned(),
+            kind: "trust_history".to_owned(),
+            restore_path: captured_trust.to_string_lossy().into_owned(),
+            lab_episode_path: None,
+        };
         let history = HistoryExpectation::from_assets(
-            &[asset],
+            &[asset, trust_asset],
             "backup-empty",
             &db.get_workspace(&workspace).unwrap().unwrap(),
         )

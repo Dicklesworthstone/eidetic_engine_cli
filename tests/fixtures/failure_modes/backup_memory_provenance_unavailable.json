@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "backup_memory_provenance_unavailable",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.88",
+    "epic_letter": "C"
+  },
+  "surfaces": ["backup restore"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Restore or preview an authenticated legacy backup containing memories whose trust-history carrier is absent or uses v1 without memory provenance. Recovery imports the memories with missing commitments and does not create or verify replacement provenance hashes.",
+    "setup_commands": [
+      "# Select the original source workspace and an authenticated legacy backup created without a v2 memory-provenance carrier."
+    ],
+    "invocation": "ee backup restore <legacy-backup-path> --workspace <source-workspace> --side-path <new-recovery-path> --json"
+  },
+  "expected_emission": {
+    "code": "backup_memory_provenance_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "no authenticated memory provenance history",
+      "missing commitments",
+      "not reverified"
+    ],
+    "repair_contains": "original workspace",
+    "repair_string": "Recreate a private backup from the original workspace with a current binary to preserve provenance history; review source provenance before treating recovered memories as verified."
+  }
+}

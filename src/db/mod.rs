@@ -26309,6 +26309,18 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+/// Authenticated recovery state, including negative or absent provenance.
+/// This is distinct from verifying a live row: restoration must not repair a
+/// source mismatch or replace an absent chain with a freshly computed hash.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RestoreMemoryProvenanceInput<'a> {
+    pub provenance_chain_hash: Option<&'a str>,
+    pub provenance_chain_hash_version: &'a str,
+    pub provenance_verification_status: &'a str,
+    pub provenance_verified_at: Option<&'a str>,
+    pub provenance_verification_note: Option<&'a str>,
+}
+
 /// Applicability bounds for a non-tombstoned current memory revision.
 /// This projection deliberately omits bodies and sidecars so cached read
 /// surfaces can revalidate temporal admission without hydrating every memory.
@@ -31832,6 +31844,39 @@ impl DbConnection {
                 Value::Text(verified_at.to_string()),
                 Value::Text(note.to_string()),
                 Value::Text(memory_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Restore all provenance fields on an existing imported row, including
+    /// tombstoned and superseded revisions. `None` clears the stored value.
+    ///
+    /// The authenticated recovery caller owns identity validation, duplicate
+    /// detection, and any redaction/remapping policy. Call inside its restore
+    /// transaction; this helper neither regenerates the chain nor changes
+    /// bookkeeping timestamps or emits a fresh verification/audit event.
+    pub(crate) fn restore_memory_provenance(
+        &self,
+        memory_id: &str,
+        input: &RestoreMemoryProvenanceInput<'_>,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET provenance_chain_hash = ?1, provenance_chain_hash_version = ?2, provenance_verification_status = ?3, provenance_verified_at = ?4, provenance_verification_note = ?5 WHERE id = ?6",
+            &[
+                input
+                    .provenance_chain_hash
+                    .map_or(Value::Null, |value| Value::Text(value.to_owned())),
+                Value::Text(input.provenance_chain_hash_version.to_owned()),
+                Value::Text(input.provenance_verification_status.to_owned()),
+                input
+                    .provenance_verified_at
+                    .map_or(Value::Null, |value| Value::Text(value.to_owned())),
+                input
+                    .provenance_verification_note
+                    .map_or(Value::Null, |value| Value::Text(value.to_owned())),
+                Value::Text(memory_id.to_owned()),
             ],
         )?;
         Ok(affected > 0)
@@ -64572,6 +64617,225 @@ UPDATE memories
             after.provenance_verification_note.is_none(),
             "trust update clears stale provenance verification note",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_memory_provenance_preserves_all_revision_states() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+
+        for (memory_id, tombstoned, superseded, status, hash_override) in [
+            (
+                "mem_01234567890123456789012345",
+                false,
+                false,
+                super::PROVENANCE_STATUS_VERIFIED,
+                None,
+            ),
+            (
+                "mem_01234567890123456789012346",
+                true,
+                false,
+                super::PROVENANCE_STATUS_MISMATCH,
+                Some("blake3:source-mismatch"),
+            ),
+            (
+                "mem_01234567890123456789012347",
+                false,
+                true,
+                super::PROVENANCE_STATUS_SKIPPED,
+                Some("blake3:source-skipped"),
+            ),
+            (
+                "mem_01234567890123456789012348",
+                true,
+                true,
+                super::PROVENANCE_STATUS_MISSING,
+                None,
+            ),
+        ] {
+            connection.insert_memory(
+                memory_id,
+                &simhash_test_memory_input(workspace_id, "Preserve recovered source integrity."),
+            )?;
+            if tombstoned {
+                ensure(
+                    connection.restore_imported_memory_tombstone(
+                        memory_id,
+                        "2030-01-02T00:00:00Z",
+                    )?,
+                    "fixture tombstone is present",
+                )?;
+            }
+            if superseded {
+                ensure(
+                    connection.restore_imported_memory_supersession(
+                        memory_id,
+                        "2030-01-01T00:00:00Z",
+                    )?,
+                    "fixture supersession is present",
+                )?;
+            }
+            let before = connection
+                .get_memory(memory_id)?
+                .ok_or_else(|| TestFailure::new("recovery fixture missing"))?;
+            let source_hash = if status == super::PROVENANCE_STATUS_MISSING {
+                None
+            } else {
+                hash_override.or(before.provenance_chain_hash.as_deref())
+            };
+            let input = super::RestoreMemoryProvenanceInput {
+                provenance_chain_hash: source_hash,
+                provenance_chain_hash_version: super::PROVENANCE_CHAIN_HASH_VERSION,
+                provenance_verification_status: status,
+                provenance_verified_at: Some("2026-11-01T12:34:56+02:00"),
+                provenance_verification_note: Some("Retained source inspection outcome."),
+            };
+            let mut expected = before.clone();
+            expected.provenance_chain_hash = source_hash.map(str::to_owned);
+            expected.provenance_verification_status = status.to_owned();
+            expected.provenance_verified_at = input.provenance_verified_at.map(str::to_owned);
+            expected.provenance_verification_note =
+                input.provenance_verification_note.map(str::to_owned);
+            for _ in 0..2 {
+                ensure(
+                    connection.restore_memory_provenance(memory_id, &input)?,
+                    "recovery updates existing rows, including historical revisions",
+                )?;
+                ensure_equal(
+                    &connection.get_memory(memory_id)?,
+                    &Some(expected.clone()),
+                    "recovery preserves exact provenance and unrelated memory fields",
+                )?;
+                ensure_equal(
+                    &connection.get_memory_superseded_at(memory_id)?,
+                    &superseded.then(|| "2030-01-01T00:00:00Z".to_owned()),
+                    "recovery leaves revision visibility unchanged",
+                )?;
+            }
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_memory_provenance_clears_optional_fields_without_reverification() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let memory_id = "mem_01234567890123456789012345";
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection.insert_memory(
+            memory_id,
+            &simhash_test_memory_input(workspace_id, "Restore an explicitly absent chain."),
+        )?;
+        connection.verify_sampled_memory_provenance(workspace_id, 1)?;
+        let mut expected = connection
+            .get_memory(memory_id)?
+            .ok_or_else(|| TestFailure::new("verified fixture missing"))?;
+        ensure(
+            expected.provenance_chain_hash.is_some()
+                && expected.provenance_verified_at.is_some()
+                && expected.provenance_verification_note.is_some(),
+            "fixture starts with populated optional provenance fields",
+        )?;
+        let input = super::RestoreMemoryProvenanceInput {
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: super::PROVENANCE_CHAIN_HASH_VERSION,
+            provenance_verification_status: super::PROVENANCE_STATUS_UNVERIFIED,
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+        };
+        ensure(
+            connection.restore_memory_provenance(memory_id, &input)?,
+            "explicit null recovery updates the memory",
+        )?;
+        expected.provenance_chain_hash = None;
+        expected.provenance_verification_status = super::PROVENANCE_STATUS_UNVERIFIED.to_owned();
+        expected.provenance_verified_at = None;
+        expected.provenance_verification_note = None;
+        ensure_equal(
+            &connection.get_memory(memory_id)?,
+            &Some(expected),
+            "all optional fields clear without regenerating the chain or advancing updated_at",
+        )?;
+        let report = connection.inspect_sampled_memory_provenance(workspace_id, 1)?;
+        ensure_equal(&report.missing_count, &1, "missing chain remains observable")?;
+        ensure_equal(
+            &report.verified_count,
+            &0,
+            "restore does not reverify missing provenance",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_memory_provenance_rejects_invalid_fields_without_partial_update() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let memory_id = "mem_01234567890123456789012345";
+        connection.insert_memory(
+            memory_id,
+            &simhash_test_memory_input(
+                "wsp_01234567890123456789012345",
+                "Reject invalid provenance recovery atomically.",
+            ),
+        )?;
+        let before = connection.get_memory(memory_id)?;
+        let valid = super::RestoreMemoryProvenanceInput {
+            provenance_chain_hash: Some("blake3:retained-source-chain"),
+            provenance_chain_hash_version: super::PROVENANCE_CHAIN_HASH_VERSION,
+            provenance_verification_status: super::PROVENANCE_STATUS_MISMATCH,
+            provenance_verified_at: Some("2026-11-01T00:00:00Z"),
+            provenance_verification_note: Some("Retained source mismatch."),
+        };
+        ensure(
+            !connection.restore_memory_provenance("mem_nonexistent0000000000000", &valid)?,
+            "recovery does not create orphan memories",
+        )?;
+        for invalid in [
+            super::RestoreMemoryProvenanceInput {
+                provenance_chain_hash: Some("wrong-prefix"),
+                ..valid
+            },
+            super::RestoreMemoryProvenanceInput {
+                provenance_chain_hash_version: "ee.memory.provenance_chain.v2",
+                ..valid
+            },
+            super::RestoreMemoryProvenanceInput {
+                provenance_verification_status: "unknown",
+                ..valid
+            },
+            super::RestoreMemoryProvenanceInput {
+                provenance_verified_at: Some(" "),
+                ..valid
+            },
+            super::RestoreMemoryProvenanceInput {
+                provenance_verification_note: Some(""),
+                ..valid
+            },
+        ] {
+            ensure(
+                connection
+                    .restore_memory_provenance(memory_id, &invalid)
+                    .is_err(),
+                "schema constraints reject invalid recovery values",
+            )?;
+            ensure_equal(
+                &connection.get_memory(memory_id)?,
+                &before,
+                "rejected recovery leaves all memory fields unchanged",
+            )?;
+        }
 
         connection.close()?;
         Ok(())

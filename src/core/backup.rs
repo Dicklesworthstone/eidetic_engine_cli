@@ -97,7 +97,9 @@ const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
 const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
 const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
-const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v1";
+const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v2";
+const TRUST_HISTORY_SCHEMA_V1: &str = "ee.backup.trust_history.v1";
+pub const BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE: &str = "backup_memory_provenance_unavailable";
 const MAINTENANCE_HISTORY_SCHEMA: &str = "ee.backup.maintenance_history.v1";
 const AUDIT_HISTORY_SCHEMA: &str = "ee.backup.audit_history.v1";
 const WORKSPACE_METADATA_SCHEMA: &str = "ee.backup.workspace.v1";
@@ -1804,7 +1806,35 @@ struct BackupTrustHistory {
     quarantines: Vec<StoredTrustQuarantine>,
     certificates: Vec<StoredCertificateRecord>,
     agents: Vec<StoredAgent>,
+    // The absent v1 field must stay absent when reconstructing its MAC input.
+    // A v2 chunk always carries Some, including chunks with no memory rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_provenance: Option<Vec<BackupMemoryProvenance>>,
     authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupMemoryProvenance {
+    memory_id: String,
+    provenance_chain_hash: Option<String>,
+    provenance_chain_hash_version: String,
+    provenance_verification_status: String,
+    provenance_verified_at: Option<String>,
+    provenance_verification_note: Option<String>,
+}
+
+impl From<&StoredMemory> for BackupMemoryProvenance {
+    fn from(memory: &StoredMemory) -> Self {
+        Self {
+            memory_id: memory.id.clone(),
+            provenance_chain_hash: memory.provenance_chain_hash.clone(),
+            provenance_chain_hash_version: memory.provenance_chain_hash_version.clone(),
+            provenance_verification_status: memory.provenance_verification_status.clone(),
+            provenance_verified_at: memory.provenance_verified_at.clone(),
+            provenance_verification_note: memory.provenance_verification_note.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -2533,7 +2563,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             )?;
             collect_trust_history_payloads(
                 &connection,
-                workspace_id,
+                &export_data,
                 &backup_id,
                 &created_at,
                 options.redaction_level,
@@ -2599,6 +2629,24 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     // A dry-run must not initialize the key store merely to preview an
     // artifact, so it only opens an already-existing root.
     let store_auth = load_store_auth_for_backup(&workspace_path, options.dry_run, &mut degraded);
+    if !options.dry_run && store_auth.is_none() {
+        // Preserve the emergency memory-only export when keys are damaged.
+        // Never publish an unauthenticated provenance carrier: it could make
+        // an ordinary import appear to have retained source-store authority.
+        // The existing auth-unavailable degradation marks this export partial.
+        // Actual trust decisions still require keys and are refused below.
+        derived_payloads.retain(|payload| {
+            payload.report.kind != "trust_history"
+                || !serde_json::from_slice::<BackupTrustHistory>(&payload.bytes).is_ok_and(
+                    |chunk| {
+                        chunk.seals.is_empty()
+                            && chunk.quarantines.is_empty()
+                            && chunk.certificates.is_empty()
+                            && chunk.agents.is_empty()
+                    },
+                )
+        });
+    }
     if !options.dry_run
         && store_auth.is_none()
         && derived_payloads.iter().any(|p| {
@@ -3724,6 +3772,15 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // inventory checks above establish which artifact is being restored; a
     // dry run must not erase its evidence-loss or peer-repair requirements.
     let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    if inspect.counts.memory_count > 0
+        && !backup_has_memory_provenance(&backup_path, &inspect)?
+    {
+        restore_degraded.push(BackupDegradation::warning(
+            BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE,
+            "Backup has no authenticated memory provenance history; recovered memories retain missing commitments and are not reverified.",
+            "Recreate a private backup from the original workspace with a current binary to preserve provenance history; review source provenance before treating recovered memories as verified.",
+        ));
+    }
 
     // Preview the same destination constraints that a real restore enforces.
     ensure_side_path_is_isolated(&side_path)?;
@@ -10268,13 +10325,21 @@ fn restore_maintenance_history(
 
 fn collect_trust_history_payloads(
     connection: &DbConnection,
-    workspace_id: &str,
+    export_data: &BackupExportData,
     backup_id: &str,
     captured_at: &str,
     redaction: RedactionLevel,
     memory_ids: &BTreeMap<String, String>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) -> Result<(), DomainError> {
+    let workspace_id = &export_data.workspace.workspace_id;
+    let mut memory_provenance = Vec::with_capacity(export_data.memories.len());
+    for memory in &export_data.memories {
+        let restored_id = memory_ids.get(&memory.id).ok_or_else(|| {
+            work_history_error("provenance memory is missing from the backup projection")
+        })?;
+        memory_provenance.push(backup_memory_provenance(memory, restored_id, redaction)?);
+    }
     let mut seals = connection
         .list_memory_seals_for_recovery(workspace_id)
         .map_err(work_history_error)?;
@@ -10292,6 +10357,7 @@ fn collect_trust_history_payloads(
         .max(quarantines.len())
         .max(certificates.len())
         .max(agents.len())
+        .max(memory_provenance.len())
         .div_ceil(WORK_HISTORY_CHUNK_ROWS);
     if count == 0 {
         return Ok(());
@@ -10375,6 +10441,11 @@ fn collect_trust_history_payloads(
             certificates: certificates[start.min(certificates.len())..end.min(certificates.len())]
                 .to_vec(),
             agents: agents[start.min(agents.len())..end.min(agents.len())].to_vec(),
+            memory_provenance: Some(
+                memory_provenance
+                    [start.min(memory_provenance.len())..end.min(memory_provenance.len())]
+                    .to_vec(),
+            ),
             authentication: None,
         };
         payloads.push(derived_payload(
@@ -10388,9 +10459,226 @@ fn collect_trust_history_payloads(
     Ok(())
 }
 
-fn trust_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+fn backup_memory_provenance(
+    memory: &StoredMemory,
+    restored_id: &str,
+    redaction: RedactionLevel,
+) -> Result<BackupMemoryProvenance, DomainError> {
+    let mut row = BackupMemoryProvenance::from(memory);
+    row.memory_id = restored_id.to_owned();
+    row.provenance_verification_note = row
+        .provenance_verification_note
+        .as_deref()
+        .map(|note| redact_content(note, redaction));
+    // Valid historical times are structural metadata, as in the other backup
+    // families. The DB also accepts arbitrary nonempty text, which must not
+    // create a new secret-bearing bypass around export redaction.
+    if let Some(time) = row.provenance_verified_at.as_deref()
+        && chrono::DateTime::parse_from_rfc3339(time).is_err()
+    {
+        row.provenance_verified_at = Some(redact_content(time, redaction));
+    }
+    if redaction != RedactionLevel::None {
+        let record = redact_memory_record(
+            memory_record(memory, None, None, None)
+                .map_err(export_build_error("build backup provenance projection"))?,
+            redaction,
+        );
+        // A digest of withheld fields lets recipients test guesses about them.
+        // Preserve only a commitment entirely derivable from disclosed fields;
+        // an old/malformed digest could describe already-withheld content too.
+        // The other v1 chain inputs are unchanged by redact_memory_record.
+        let disclosed = row.provenance_chain_hash.as_deref()
+            == Some(crate::db::compute_memory_provenance_chain_hash(memory).as_str())
+            && restored_id == memory.id
+            && record.memory_id == memory.id
+            && record.workspace_id == memory.workspace_id
+            && record.content == memory.content
+            && record.provenance_uri == memory.provenance_uri;
+        if !disclosed {
+            row.provenance_chain_hash = None;
+            if matches!(
+                row.provenance_verification_status.as_str(),
+                crate::db::PROVENANCE_STATUS_VERIFIED | crate::db::PROVENANCE_STATUS_UNVERIFIED
+            ) {
+                row.provenance_verification_status = crate::db::PROVENANCE_STATUS_MISSING.to_owned();
+                row.provenance_verified_at = None;
+                row.provenance_verification_note = Some(
+                    "Backup redaction withheld the original provenance commitment; recovery must not generate a replacement commitment."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    validate_memory_provenance(&row)?;
+    Ok(row)
+}
+
+/// Preview legacy provenance loss against the same manifest-bound asset bytes
+/// that real recovery will copy and authenticate. Do not silently report a v2
+/// carrier when an asset has changed since the general verification pass.
+fn backup_has_memory_provenance(
+    backup_path: &Path,
+    inspect: &BackupInspectReport,
+) -> Result<bool, DomainError> {
+    let assets = inspect
+        .derived
+        .iter()
+        .filter(|asset| asset.kind == "trust_history")
+        .collect::<Vec<_>>();
+    let mut schema: Option<String> = None;
+    let mut slots = BTreeSet::new();
+    for asset in &assets {
+        let path = safe_artifact_path(backup_path, &asset.path, &mut Vec::new())
+            .ok_or_else(|| work_history_error("invalid trust-history asset path"))?;
+        let file = open_backup_artifact_for_read(&path).map_err(work_history_error)?;
+        let metadata = file.metadata().map_err(work_history_error)?;
+        if !metadata.is_file() || metadata.len() > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error("invalid trust-history asset size"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_DERIVED_ASSET_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(work_history_error)?;
+        if bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES
+            || asset.byte_size != Some(bytes.len() as u64)
+            || asset.hash.as_deref() != Some(hash_bytes(&bytes).as_str())
+        {
+            return Err(work_history_error(
+                "trust-history asset differs from the authenticated manifest",
+            ));
+        }
+        let chunk: BackupTrustHistory =
+            serde_json::from_slice(&bytes).map_err(work_history_error)?;
+        if !valid_trust_history_schema(&chunk)
+            || schema.as_ref().is_some_and(|expected| *expected != chunk.schema)
+            || chunk.backup_id != inspect.backup_id
+            || Some(chunk.workspace_id.as_str()) != inspect.workspace_id.as_deref()
+            || chunk.chunk_count != assets.len()
+            || chunk.chunk_index >= assets.len()
+            || !slots.insert(chunk.chunk_index)
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted trust-history chunks",
+            ));
+        }
+        schema = Some(chunk.schema);
+    }
+    Ok(schema.as_deref() == Some(TRUST_HISTORY_SCHEMA))
+}
+
+fn valid_trust_history_schema(chunk: &BackupTrustHistory) -> bool {
+    match chunk.schema.as_str() {
+        TRUST_HISTORY_SCHEMA => chunk.memory_provenance.is_some(),
+        TRUST_HISTORY_SCHEMA_V1 => chunk.memory_provenance.is_none(),
+        _ => false,
+    }
+}
+
+fn validate_memory_provenance(row: &BackupMemoryProvenance) -> Result<(), DomainError> {
+    if row.memory_id.trim().is_empty()
+        || row.provenance_chain_hash_version != crate::db::PROVENANCE_CHAIN_HASH_VERSION
+        || !matches!(
+            row.provenance_verification_status.as_str(),
+            crate::db::PROVENANCE_STATUS_UNVERIFIED
+                | crate::db::PROVENANCE_STATUS_VERIFIED
+                | crate::db::PROVENANCE_STATUS_MISSING
+                | crate::db::PROVENANCE_STATUS_MISMATCH
+                | crate::db::PROVENANCE_STATUS_SKIPPED
+        )
+        // Match the durable column's constraint, not a new digest validator.
+        // A damaged original commitment must remain recoverable as evidence.
+        || row
+            .provenance_chain_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.starts_with("blake3:"))
+        || [
+            row.provenance_verified_at.as_deref(),
+            row.provenance_verification_note.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(work_history_error("invalid recovered memory provenance"));
+    }
+    Ok(())
+}
+
+/// Project authenticated history onto the independently admitted primary row.
+/// Recovery can retain or lower verification, but never creates a commitment
+/// or upgrades a source's negative/unverified posture. Both publication fences
+/// recompute this from their frozen carrier, not the recovery writer's output.
+fn restored_memory_provenance(
+    memory: &StoredMemory,
+    archived: Option<&BackupMemoryProvenance>,
+) -> BackupMemoryProvenance {
+    let Some(archived) = archived else {
+        return BackupMemoryProvenance {
+            memory_id: memory.id.clone(),
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: crate::db::PROVENANCE_CHAIN_HASH_VERSION.to_owned(),
+            provenance_verification_status: crate::db::PROVENANCE_STATUS_MISSING.to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: Some(
+                "Backup has no authenticated memory provenance history; recovery did not generate a replacement commitment."
+                    .to_owned(),
+            ),
+        };
+    };
+    let mut recovered = archived.clone();
+    if matches!(
+        archived.provenance_verification_status.as_str(),
+        crate::db::PROVENANCE_STATUS_VERIFIED | crate::db::PROVENANCE_STATUS_UNVERIFIED
+    ) {
+        let downgrade = match archived.provenance_chain_hash.as_deref() {
+            None => Some((
+                crate::db::PROVENANCE_STATUS_MISSING,
+                "Archived memory has no provenance commitment; recovery did not generate a replacement commitment.",
+            )),
+            Some(hash) if hash != crate::db::compute_memory_provenance_chain_hash(memory) => {
+                Some((
+                    crate::db::PROVENANCE_STATUS_MISMATCH,
+                    "Restored memory differs from its archived provenance commitment; recovery did not rebind or verify it.",
+                ))
+            }
+            Some(_) => None,
+        };
+        if let Some((status, note)) = downgrade {
+            recovered.provenance_verification_status = status.to_owned();
+            recovered.provenance_verified_at = None;
+            recovered.provenance_verification_note = Some(note.to_owned());
+        }
+    }
+    recovered
+}
+
+fn write_restored_memory_provenance(
+    db: &DbConnection,
+    row: &BackupMemoryProvenance,
+) -> crate::db::Result<()> {
+    let written = db.restore_memory_provenance(
+        &row.memory_id,
+        &crate::db::RestoreMemoryProvenanceInput {
+            provenance_chain_hash: row.provenance_chain_hash.as_deref(),
+            provenance_chain_hash_version: &row.provenance_chain_hash_version,
+            provenance_verification_status: &row.provenance_verification_status,
+            provenance_verified_at: row.provenance_verified_at.as_deref(),
+            provenance_verification_note: row.provenance_verification_note.as_deref(),
+        },
+    )?;
+    if !written {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Execute,
+            message: "recovered provenance memory disappeared before writing".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn trust_history_auth_context<'a>(schema: &'a str, workspace_id: &'a str) -> ArtifactContext<'a> {
     ArtifactContext {
-        artifact_family: TRUST_HISTORY_SCHEMA,
+        artifact_family: schema,
         record_encoding_version: "json.v1",
         source_key_namespace: STORE_KEY_NAMESPACE_V1,
         workspace_scope: workspace_id,
@@ -10407,6 +10695,9 @@ fn authenticate_trust_history_payloads(
     {
         let mut chunk: BackupTrustHistory =
             serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        if !valid_trust_history_schema(&chunk) {
+            return Err(work_history_error("unsupported trust-history schema"));
+        }
         chunk.authentication = None;
         if let Some(root) = root {
             let hash =
@@ -10415,7 +10706,7 @@ fn authenticate_trust_history_payloads(
                 authenticate_artifact(
                     root,
                     MacDomain::NativeImportRecordsRoot,
-                    &trust_history_auth_context(&chunk.workspace_id),
+                    &trust_history_auth_context(&chunk.schema, &chunk.workspace_id),
                     &hash,
                     1,
                 )
@@ -10449,15 +10740,35 @@ fn restore_trust_history(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if chunks.is_empty() {
+        // Older memory-only archives have no trust-history asset. Undo the
+        // ordinary importer's freshly generated chain rather than certifying
+        // it as if it were evidence recovered from the original store.
+        let db = DbConnection::open_file(database).map_err(work_history_error)?;
+        let workspaces = db.list_workspaces().map_err(work_history_error)?;
+        db.with_transaction(|| {
+            for workspace in &workspaces {
+                for memory in db.list_memories(&workspace.id, None, true)? {
+                    write_restored_memory_provenance(
+                        &db,
+                        &restored_memory_provenance(&memory, None),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
         return Ok(BackupTrustHistoryCounts::default());
     }
     let root =
         StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
     chunks.sort_by_key(|c| c.chunk_index);
     let source_id = chunks[0].workspace_id.clone();
+    let schema = chunks[0].schema.clone();
+    let has_memory_provenance = schema == TRUST_HISTORY_SCHEMA;
     let count = chunks.len();
     for (index, chunk) in chunks.iter_mut().enumerate() {
-        if chunk.schema != TRUST_HISTORY_SCHEMA
+        if !valid_trust_history_schema(chunk)
+            || chunk.schema != schema
             || chunk.backup_id != backup_id
             || chunk.workspace_id != source_id
             || chunk.chunk_index != index
@@ -10467,6 +10778,7 @@ fn restore_trust_history(
                 chunk.quarantines.len(),
                 chunk.certificates.len(),
                 chunk.agents.len(),
+                chunk.memory_provenance.as_ref().map_or(0, Vec::len),
             ]
             .into_iter()
             .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
@@ -10482,7 +10794,7 @@ fn restore_trust_history(
         if !verify_artifact(
             &root,
             MacDomain::NativeImportRecordsRoot,
-            &trust_history_auth_context(&source_id),
+            &trust_history_auth_context(&chunk.schema, &source_id),
             &header,
             &hash,
             1,
@@ -10508,11 +10820,29 @@ fn restore_trust_history(
         .collect::<BTreeMap<_, _>>();
     let (mut seals, mut quarantines, mut certificates, mut agents) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut memory_provenance = BTreeMap::new();
     for chunk in chunks {
         seals.extend(chunk.seals);
         quarantines.extend(chunk.quarantines);
         certificates.extend(chunk.certificates);
         agents.extend(chunk.agents);
+        for row in chunk.memory_provenance.into_iter().flatten() {
+            validate_memory_provenance(&row)?;
+            if !memories.contains_key(&row.memory_id)
+                || memory_provenance
+                    .insert(row.memory_id.clone(), row)
+                    .is_some()
+            {
+                return Err(work_history_error(
+                    "orphan or duplicate recovered memory provenance",
+                ));
+            }
+        }
+    }
+    if has_memory_provenance && memory_provenance.len() != memories.len() {
+        return Err(work_history_error(
+            "incomplete recovered memory provenance",
+        ));
     }
     let mut ids = BTreeSet::new();
     for seal in &seals {
@@ -10565,12 +10895,19 @@ fn restore_trust_history(
         for row in &quarantines { db.insert_trust_quarantine_for_recovery(row)?; }
         for row in &certificates { db.insert_certificate_for_recovery(row)?; }
         for row in &agents { db.insert_agent_for_recovery(row)?; }
+        for memory in memories.values() {
+            write_restored_memory_provenance(
+                &db,
+                &restored_memory_provenance(memory, memory_provenance.get(&memory.id)),
+            )?;
+        }
         db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
             workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
             action: "backup.trust_history_restored".to_owned(), target_type: Some("backup".to_owned()),
             target_id: Some(backup_id.to_owned()), details: Some(json!({"sourceWorkspaceId": source_id,
                 "seals": seals.len(), "quarantines": quarantines.len(), "certificates": certificates.len(), "agents": agents.len(),
-                "reason": "Recovered historical seal, quarantine, certificate, and agent records. Recovery neither reveals memory content nor verifies certificate payloads or signatures."}).to_string()),
+                "memoryProvenance": memory_provenance.len(), "memoryProvenanceAvailable": has_memory_provenance,
+                "reason": "Recovered historical seal, quarantine, certificate, agent, and memory provenance records. Recovery neither reveals memory content, generates provenance commitments, nor verifies certificate payloads or signatures."}).to_string()),
         })?;
         Ok(())
     }).map_err(work_history_error)?;
@@ -16192,6 +16529,12 @@ mod tests {
     #[test]
     fn backup_create_degrades_when_the_key_store_is_symlinked() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let source = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let original_memories = source
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        source.close().map_err(|error| error.to_string())?;
         let keys_target = workspace.join("keys-elsewhere");
         fs::create_dir_all(&keys_target).map_err(|error| error.to_string())?;
         std::os::unix::fs::symlink(&keys_target, workspace_keys_dir(&workspace))
@@ -16200,7 +16543,7 @@ mod tests {
         let out = workspace.join("degraded-backups");
         let report = create_backup(&BackupCreateOptions {
             workspace_path: workspace.clone(),
-            database_path: Some(database),
+            database_path: Some(database.clone()),
             output_dir: Some(out),
             label: None,
             redaction_level: RedactionLevel::Standard,
@@ -16219,6 +16562,11 @@ mod tests {
             .ok_or_else(|| "symlinked key store must degrade the backup".to_owned())?;
         ensure_equal(entry.severity.as_str(), "high", "degraded severity")?;
         ensure_equal(report.status.as_str(), "partial", "unsigned backup status")?;
+        ensure(
+            report.memory_count > 0
+                && report.derived.iter().all(|asset| asset.kind != "trust_history"),
+            "emergency memory export omits unauthenticated provenance-only trust carriers",
+        )?;
         ensure_equal(
             report.verification_status.as_str(),
             "unauthenticated",
@@ -16249,6 +16597,44 @@ mod tests {
         ensure(
             footer.authentication.is_none(),
             "an unauthenticated backup must not carry an authentication block",
+        )?;
+        let source = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure_equal(
+            source
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?,
+            original_memories,
+            "emergency export leaves source provenance untouched",
+        )?;
+
+        // Omitting the new provenance-only carrier must not silently discard
+        // existing durable trust records when the key store is unavailable.
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let history = recovery_trust_history(&workspace_id, &memory_id);
+        source
+            .insert_agent_for_recovery(&history.agents[0])
+            .map_err(|error| error.to_string())?;
+        source.close().map_err(|error| error.to_string())?;
+        let refused_output = workspace.join("unsigned-trust-backups");
+        let error = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(refused_output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .err()
+        .ok_or_else(|| "published unauthenticated agent history".to_owned())?;
+        ensure(
+            error.message().contains("require source-store authentication"),
+            "durable trust history still requires keys",
+        )?;
+        ensure(
+            !refused_output.exists(),
+            "rejected unsigned trust history leaves no published backup",
         )
     }
 
@@ -25777,7 +26163,7 @@ mod tests {
     fn recovery_trust_history(workspace_id: &str, memory_id: &str) -> BackupTrustHistory {
         let timestamp = "2026-09-01T00:00:00Z";
         BackupTrustHistory {
-            schema: TRUST_HISTORY_SCHEMA.to_owned(),
+            schema: TRUST_HISTORY_SCHEMA_V1.to_owned(),
             backup_id: "backup-trust".to_owned(),
             workspace_id: workspace_id.to_owned(),
             chunk_index: 0,
@@ -25831,8 +26217,262 @@ mod tests {
                 created_at: timestamp.to_owned(),
                 last_seen_at: "2026-09-04T00:00:00Z".to_owned(),
             }],
+            memory_provenance: None,
             authentication: None,
         }
+    }
+
+    #[test]
+    fn legacy_v1_trust_history_keeps_its_authenticated_wire_shape() -> TestResult {
+        // This is the shipped v1 wire contract, deliberately independent of
+        // BackupTrustHistory so added optional fields cannot change its MAC.
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyTrustHistoryV1 {
+            schema: String,
+            backup_id: String,
+            workspace_id: String,
+            chunk_index: usize,
+            chunk_count: usize,
+            seals: Vec<MemorySeal>,
+            quarantines: Vec<StoredTrustQuarantine>,
+            certificates: Vec<StoredCertificateRecord>,
+            agents: Vec<StoredAgent>,
+            authentication: Option<AuthenticatedHeader>,
+        }
+
+        let (tempdir, workspace, database) =
+            fixture_with_memory_content(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+                .map_err(|error| error.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let history = recovery_trust_history(&workspace_id, &memory_id);
+        let mut legacy = LegacyTrustHistoryV1 {
+            schema: "ee.backup.trust_history.v1".to_owned(),
+            backup_id: "backup-trust".to_owned(),
+            workspace_id: workspace_id.clone(),
+            chunk_index: 0,
+            chunk_count: 1,
+            seals: history.seals,
+            quarantines: history.quarantines,
+            certificates: history.certificates,
+            agents: history.agents,
+            authentication: None,
+        };
+        let unsigned = serde_json::to_vec(&legacy).map_err(|error| error.to_string())?;
+        let decoded: BackupTrustHistory =
+            serde_json::from_slice(&unsigned).map_err(|error| error.to_string())?;
+        ensure_equal(
+            serde_json::to_vec(&decoded).map_err(|error| error.to_string())?,
+            unsigned.clone(),
+            "legacy v1 MAC input is byte-identical after current decoding",
+        )?;
+        let root = StoreAuthRoot::create(workspace_keys_dir(&workspace))
+            .map_err(|error| error.to_string())?;
+        legacy.authentication = Some(
+            authenticate_artifact(
+                &root,
+                MacDomain::NativeImportRecordsRoot,
+                &ArtifactContext {
+                    artifact_family: "ee.backup.trust_history.v1",
+                    record_encoding_version: "json.v1",
+                    source_key_namespace: STORE_KEY_NAMESPACE_V1,
+                    workspace_scope: &workspace_id,
+                },
+                &canonical_record_hash(&unsigned),
+                1,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        let signed = serde_json::to_vec(&legacy).map_err(|error| error.to_string())?;
+        let wire: JsonValue =
+            serde_json::from_slice(&signed).map_err(|error| error.to_string())?;
+        ensure(
+            wire.get("memoryProvenance").is_none(),
+            "legacy fixture carries no v2 memory provenance field",
+        )?;
+        let path = tempdir.path().join("legacy-trust-history.json");
+        fs::write(&path, signed).map_err(|error| error.to_string())?;
+        let counts = restore_trust_history(
+            &database,
+            &workspace,
+            "backup-trust",
+            &[restored_cass_asset(&path, "trust_history")],
+        )
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            (counts.seals, counts.quarantines, counts.certificates, counts.agents),
+            (1, 1, 1, 1),
+            "legacy authenticated trust rows remain recoverable",
+        )?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure_equal(
+            db.list_memory_seals_for_recovery(&workspace_id)
+                .map_err(|error| error.to_string())?,
+            legacy.seals,
+            "legacy seal history",
+        )?;
+        ensure_equal(
+            db.list_trust_quarantine(&workspace_id, false)
+                .map_err(|error| error.to_string())?,
+            legacy.quarantines,
+            "legacy quarantine history",
+        )?;
+        ensure_equal(
+            db.list_certificates_for_recovery(&workspace_id)
+                .map_err(|error| error.to_string())?,
+            legacy.certificates,
+            "legacy certificate history",
+        )?;
+        ensure_equal(
+            db.list_agents_for_recovery(&workspace_id)
+                .map_err(|error| error.to_string())?,
+            legacy.agents,
+            "legacy agent history",
+        )?;
+        let memory = db
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "legacy restore lost its memory".to_owned())?;
+        ensure(
+            memory.provenance_chain_hash.is_none()
+                && memory.provenance_verification_status == "missing"
+                && memory.provenance_verified_at.is_none()
+                && memory.provenance_verification_note.is_some(),
+            "legacy recovery does not manufacture a verified provenance commitment",
+        )?;
+        let reverified = db
+            .verify_sampled_memory_provenance(&workspace_id, 100)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            (reverified.checked_count, reverified.missing_count, reverified.verified_count),
+            (1, 1, 0),
+            "explicit reverification cannot certify a missing legacy commitment",
+        )
+    }
+
+    #[test]
+    fn legacy_backup_restore_reports_missing_memory_provenance() -> TestResult {
+        for legacy_kind in ["absent", "v1"] {
+            let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let source = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let original = source
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            source.close().map_err(|error| error.to_string())?;
+            let created = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: RedactionLevel::None,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let mut manifest: JsonValue = serde_json::from_slice(
+                &fs::read(&created.manifest_path).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let root = StoreAuthRoot::open(workspace_keys_dir(&workspace))
+                .map_err(|error| error.to_string())?;
+            let assets = manifest["derived"]
+                .as_array_mut()
+                .ok_or_else(|| "backup has no derived inventory".to_owned())?;
+            if legacy_kind == "absent" {
+                assets.retain(|asset| {
+                    asset.get("kind").and_then(JsonValue::as_str) != Some("trust_history")
+                });
+            } else {
+                for asset in assets.iter_mut().filter(|asset| {
+                    asset.get("kind").and_then(JsonValue::as_str) == Some("trust_history")
+                }) {
+                    let relative = asset["path"]
+                        .as_str()
+                        .ok_or_else(|| "trust-history asset has no path".to_owned())?
+                        .to_owned();
+                    let path = Path::new(&created.backup_path).join(&relative);
+                    let mut chunk: BackupTrustHistory = serde_json::from_slice(
+                        &fs::read(&path).map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    chunk.schema = "ee.backup.trust_history.v1".to_owned();
+                    chunk.memory_provenance = None;
+                    let mut payloads = vec![derived_payload(
+                        relative,
+                        "trust_history",
+                        "2026-09-01T00:00:00Z",
+                        None,
+                        serialized_payload_bytes(&chunk).map_err(|error| error.to_string())?,
+                    )];
+                    authenticate_trust_history_payloads(&mut payloads, Some(&root))
+                        .map_err(|error| error.message())?;
+                    fs::write(&path, &payloads[0].bytes).map_err(|error| error.to_string())?;
+                    asset["hash"] = json!(hash_bytes(&payloads[0].bytes));
+                    asset["byte_size"] = json!(payloads[0].bytes.len());
+                }
+            }
+            authenticate_backup_manifest(&mut manifest, &root)
+                .map_err(|error| error.message())?;
+            fs::write(
+                &created.manifest_path,
+                serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let side_path = tempdir.path().join(format!("legacy-{legacy_kind}"));
+            let mut options = BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: true,
+            };
+            for dry_run in [true, false] {
+                options.dry_run = dry_run;
+                let restored = restore_backup_to_side_path(&options)
+                    .map_err(|error| error.message())?;
+                let warning = restored
+                    .degraded
+                    .iter()
+                    .find(|entry| entry.code == BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE)
+                    .ok_or_else(|| format!("{legacy_kind} recovery omitted provenance warning"))?;
+                ensure_equal(warning.severity.as_str(), "warning", "legacy provenance severity")?;
+                ensure(
+                    warning.message.contains("missing commitments")
+                        && warning.message.contains("not reverified")
+                        && warning.next_action.contains("original workspace"),
+                    "legacy recovery explains missing authority and its repair",
+                )?;
+                if dry_run {
+                    ensure(!side_path.exists(), "legacy preview is read-only")?;
+                } else {
+                    ensure_equal(restored.imported_memory_count, 1, "legacy memory count")?;
+                    let db = DbConnection::open_file(Path::new(&restored.restored_database_path))
+                        .map_err(|error| error.to_string())?;
+                    let memories = db
+                        .list_memories(&workspace_id, None, true)
+                        .map_err(|error| error.to_string())?;
+                    ensure(
+                        memories.len() == 1
+                            && memories[0].provenance_chain_hash.is_none()
+                            && memories[0].provenance_verification_status == "missing"
+                            && memories[0].provenance_verified_at.is_none(),
+                        "legacy backup restores content without inventing provenance evidence",
+                    )?;
+                }
+            }
+            let source = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                source
+                    .list_memories(&workspace_id, None, true)
+                    .map_err(|error| error.to_string())?,
+                original,
+                "legacy restoration leaves source provenance unchanged",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -26266,7 +26906,6 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             db.close().map_err(|e| e.to_string())?;
             match defect {
-                "schema" => chunk.schema = "ee.backup.trust_history.v999".to_owned(),
                 "backup" => chunk.backup_id = "other-backup".to_owned(),
                 "missing_chunk" => chunk.chunk_count = 2,
                 "oversize" => chunk.agents.resize(129, chunk.agents[0].clone()),
@@ -26300,6 +26939,9 @@ mod tests {
             }
             if defect == "unsigned" {
                 signed.authentication = None;
+            }
+            if defect == "schema" {
+                signed.schema = "ee.backup.trust_history.v999".to_owned();
             }
             let path = tempdir.path().join("trust-history.json");
             fs::write(

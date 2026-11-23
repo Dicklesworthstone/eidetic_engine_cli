@@ -4561,3 +4561,34 @@ failures.
   with multilingual token parity and bit-identical vectors.
 - [ ] Run `.89` and the full `.76` candidate capsule under DSR after their
   remaining prerequisites earn execution verdicts.
+
+### 23.8 Authenticated memory provenance recovery — 2026-11-23
+
+Implemented the provenance-history gap identified in §23.6 for `.88`.
+Trust-history v2 now carries the original chain, version, verification status,
+timestamp, and note for every exported memory, including tombstones and old
+revisions. Recovery restores all five columns atomically and compares them
+against an immutable authenticated expectation at both publication fences.
+Missing, duplicate, foreign, and substituted carrier rows are rejected. A
+positive verification state cannot survive changes to the committed fields,
+and recovery never generates a replacement commitment.
+
+Redacted exports omit commitments to withheld fields and sanitize verification
+notes and malformed timestamp text. This prevents the original digest from
+becoming a guessing oracle for private content. Historical negative states
+remain visible. Existing signed v1 archives retain their exact authentication
+encoding; legacy archives without provenance restore null commitments with an
+explicit warning in previews and real restores. Emergency unsigned memory
+exports still work when keys are unavailable, without publishing an authority
+carrier; durable trust decisions still require source keys.
+
+Added regression coverage for repeated backup/restore and actual reverification,
+all five source states, tombstoned and superseded rows, redaction, legacy MAC
+compatibility, missing legacy history, and count-preserving corruption at both
+publication fences. These Rust tests remain unexecuted in this environment.
+Whitespace, migration registry, degraded-code classification, repair-actionability,
+and generated-fixture documentation checks passed. The remote verification
+wrapper refused source admission before Cargo ran because all seven dependency
+repositories were unavailable; no Rust compiler, formatter, or RCH worker was
+available locally. This implementation does not close `.88` or establish its
+remaining evolved-recovery, scale, and release-stage acceptance.
