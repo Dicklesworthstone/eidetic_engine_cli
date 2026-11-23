@@ -207,6 +207,15 @@ fn ordinary_jsonl_import_retains_origin_markers_for_missing_provenance() -> Test
                 .ok_or("imported memory")?;
             assert_eq!(memory.provenance_uri.as_deref(), Some(expected.as_str()));
         }
+        // ee must read back the origin marker it wrote: a pack holding this
+        // memory parses its provenance and reports
+        // `context_invalid_provenance` for any URI that does not parse.
+        let marker = format!("jsonl-import://{}", source_agent.unwrap_or("unknown"));
+        let parsed = marker
+            .parse::<crate::models::ProvenanceUri>()
+            .map_err(|error| format!("origin marker `{marker}` does not parse: {error}"))?;
+        assert_eq!(parsed.scheme(), "jsonl-import");
+        assert_eq!(parsed.to_string(), marker);
         db.close().map_err(|error| error.to_string())?;
     }
     Ok(())

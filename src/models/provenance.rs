@@ -54,6 +54,11 @@ const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
     // Native ee entity references without a dedicated variant, such as a
     // procedural rule packed under its own identity: `ee://rule/<rule-id>`.
     "ee",
+    // Origin marker `ee import jsonl` writes for a record that carries no
+    // provenance: `jsonl-import://<source agent or "unknown">`. ee must be
+    // able to read back what it writes, or every pack holding such a memory
+    // reports `context_invalid_provenance`.
+    "jsonl-import",
     "manual",
     "bench-run",
     "git-sha",
@@ -873,6 +878,28 @@ mod tests {
                 }
                 other => panic!("wrong variant for `{input}`: {other:?}"),
             }
+            assert_eq!(parsed.to_string(), input);
+        }
+    }
+
+    /// `ee import jsonl` writes `jsonl-import://<source agent>` for a record
+    /// with no provenance (`core::jsonl_import`). Before the scheme was
+    /// registered, every such memory failed to parse here, so each pack that
+    /// held one reported `context_invalid_provenance`.
+    #[test]
+    fn import_origin_markers_ee_writes_round_trip() {
+        for (input, agent) in [
+            ("jsonl-import://unknown", "unknown"),
+            ("jsonl-import://ExternalAgent", "ExternalAgent"),
+        ] {
+            let parsed = must_parse(input);
+            assert_eq!(
+                parsed,
+                ProvenanceUri::External {
+                    scheme: "jsonl-import".to_owned(),
+                    body: agent.to_owned(),
+                }
+            );
             assert_eq!(parsed.to_string(), input);
         }
     }
