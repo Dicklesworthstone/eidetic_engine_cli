@@ -248,6 +248,7 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 /// huge memory body) cannot blow out the journal.
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_WRITE_OWNER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 const SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
 
@@ -680,6 +681,51 @@ impl SchedulerThreadHandle {
     }
 }
 
+#[derive(Debug)]
+enum WriteOwnerDrainExit {
+    Returned,
+    Panicked,
+}
+
+#[derive(Debug)]
+struct WriteOwnerDrainHandle {
+    join: JoinHandle<()>,
+    done_rx: mpsc::Receiver<WriteOwnerDrainExit>,
+}
+
+enum WriteOwnerDrainOutcome {
+    Joined(io::Result<()>),
+    StillRunning(WriteOwnerDrainHandle),
+}
+
+impl WriteOwnerDrainHandle {
+    fn join_with_timeout(self, timeout: Duration) -> WriteOwnerDrainOutcome {
+        match self.done_rx.recv_timeout(timeout) {
+            Ok(WriteOwnerDrainExit::Returned) => WriteOwnerDrainOutcome::Joined(
+                self.join
+                    .join()
+                    .map_err(|_| io::Error::other("daemon write-owner drain thread panicked")),
+            ),
+            Ok(WriteOwnerDrainExit::Panicked) => {
+                let _ = self.join.join();
+                WriteOwnerDrainOutcome::Joined(Err(io::Error::other(
+                    "daemon write-owner drain thread panicked",
+                )))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => WriteOwnerDrainOutcome::StillRunning(self),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if !self.join.is_finished() {
+                    return WriteOwnerDrainOutcome::StillRunning(self);
+                }
+                let _ = self.join.join();
+                WriteOwnerDrainOutcome::Joined(Err(io::Error::other(
+                    "daemon write-owner drain thread did not report completion",
+                )))
+            }
+        }
+    }
+}
+
 /// Resolve the configured per-daemon worker cap. Reads
 /// `EE_DAEMON_MAX_INFLIGHT` through the central env registry so the
 /// override is reflected in `ee capabilities` alongside other tuning
@@ -747,14 +793,16 @@ pub struct DaemonServerHandle {
     /// breaks) only after the accept loop and connection workers have drained.
     /// `None` when the daemon was started without a bound workspace.
     write_handle: Option<crate::core::write_owner::WriteHandle>,
-    /// Join handle for the long-lived write-owner actor task. Joined during
-    /// shutdown after the write handle drops, so the final batch commits before
-    /// the runtime is torn down.
+    /// Transferred to the drain thread after connection workers release their
+    /// producers, so accepted writes settle before runtime teardown.
     write_owner_task: Option<asupersync::runtime::JoinHandle<()>>,
     /// The asupersync runtime that drives the actor task and connection-thread
-    /// `block_on` submits. Dropped last (joins its worker threads). Shared as
-    /// `Arc` with the dispatch policy's `DaemonWriteRouter`.
+    /// `block_on` submits. The drain thread owns its final drop, which can join
+    /// runtime workers. Shared with the dispatch policy's `DaemonWriteRouter`.
     write_runtime: Option<Arc<asupersync::runtime::Runtime>>,
+    /// Retained across shutdown timeouts. Dropping this handle detaches the
+    /// drain thread, which still owns the runtime and accepted writes.
+    write_owner_drain: Option<WriteOwnerDrainHandle>,
 }
 
 impl std::fmt::Debug for DaemonServerHandle {
@@ -767,6 +815,7 @@ impl std::fmt::Debug for DaemonServerHandle {
             .field("scheduler_thread", &self.scheduler_thread.is_some())
             .field("warm_thread", &self.warm_thread.is_some())
             .field("write_actor_hosted", &self.write_handle.is_some())
+            .field("write_actor_draining", &self.write_owner_drain.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -806,7 +855,21 @@ impl DaemonServerHandle {
         &mut self,
         worker_drain_timeout: Duration,
     ) -> io::Result<()> {
-        if self.workers_drained.load(Ordering::Acquire) && self.scheduler_thread.is_none() {
+        self.shutdown_with_drain_timeouts(worker_drain_timeout, DAEMON_WRITE_OWNER_DRAIN_TIMEOUT)
+    }
+
+    fn shutdown_with_drain_timeouts(
+        &mut self,
+        worker_drain_timeout: Duration,
+        write_owner_drain_timeout: Duration,
+    ) -> io::Result<()> {
+        if self.workers_drained.load(Ordering::Acquire)
+            && self.scheduler_thread.is_none()
+            && self.write_handle.is_none()
+            && self.write_owner_task.is_none()
+            && self.write_runtime.is_none()
+            && self.write_owner_drain.is_none()
+        {
             return Ok(());
         }
 
@@ -864,30 +927,84 @@ impl DaemonServerHandle {
         }
         self.workers_drained.store(true, Ordering::Release);
 
-        // Tear down the write-owner actor (Inc 2, bd-wx6ou.3) AFTER the accept
-        // loop joined and connection workers drained: by now the dispatch
-        // policy's router (a WriteHandle clone) is dropped, so dropping the
-        // retained handle closes the actor's mpsc, its `recv` returns
-        // Disconnected, and `run_group_commit` returns. Joining the actor task
-        // ensures the final write commits before the runtime is dropped (which
-        // joins its worker threads). The `is_finished` guard plus `catch_unwind`
-        // keep a force-cancelled/panicked actor from hanging or unwinding
-        // shutdown. (TODO Inc 7: bound `block_on` with a timeout so a write
-        // wedged inside `remember_memory` cannot stall shutdown.)
+        // Close the last producer only after connection workers have drained.
+        // A synchronous write can block this current-thread runtime, so an
+        // async timeout around block_on cannot bound either the actor join or
+        // Runtime::drop. Keep both on an owned thread across timeout/retry.
         self.write_handle.take();
-        if let (Some(runtime), Some(task)) =
-            (self.write_runtime.as_ref(), self.write_owner_task.take())
-            && !task.is_finished()
-        {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runtime.block_on(task);
-            }));
-        }
-        self.write_runtime.take();
+        let write_owner_result = self.drain_write_owner_with_timeout(write_owner_drain_timeout);
 
         unlink_result?;
         scheduler_result?;
-        Ok(())
+        write_owner_result
+    }
+
+    fn drain_write_owner_with_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        if self.write_owner_drain.is_none() {
+            let Some(runtime) = self.write_runtime.take() else {
+                return Ok(());
+            };
+            // A failed thread spawn must leave the actor and runtime available
+            // for another explicit shutdown attempt.
+            let resources = Arc::new(Mutex::new(Some((runtime, self.write_owner_task.take()))));
+            let thread_resources = Arc::clone(&resources);
+            let (done_tx, done_rx) = mpsc::channel();
+            let spawn_result = thread::Builder::new()
+                .name("ee-daemon-write-drain".to_owned())
+                .spawn(move || {
+                    let resources = thread_resources
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    let Some((runtime, task)) = resources else {
+                        return;
+                    };
+                    let exit = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(task) = task {
+                            runtime.block_on(task);
+                        }
+                        // Include runtime teardown in the timed boundary.
+                        // Do not notify the caller while this drop can wait.
+                        drop(runtime);
+                    })) {
+                        Ok(()) => WriteOwnerDrainExit::Returned,
+                        Err(_) => WriteOwnerDrainExit::Panicked,
+                    };
+                    let _ = done_tx.send(exit);
+                });
+            match spawn_result {
+                Ok(join) => {
+                    self.write_owner_drain = Some(WriteOwnerDrainHandle { join, done_rx });
+                }
+                Err(error) => {
+                    if let Some((runtime, task)) = resources
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        self.write_runtime = Some(runtime);
+                        self.write_owner_task = task;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let Some(drain) = self.write_owner_drain.take() else {
+            return Ok(());
+        };
+        match drain.join_with_timeout(timeout) {
+            WriteOwnerDrainOutcome::Joined(result) => result,
+            WriteOwnerDrainOutcome::StillRunning(drain) => {
+                self.write_owner_drain = Some(drain);
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "daemon write-owner did not drain within {}ms",
+                        timeout.as_millis()
+                    ),
+                ))
+            }
+        }
     }
 
     fn join_scheduler_with_timeout(&mut self) -> io::Result<()> {
@@ -1518,6 +1635,7 @@ fn start_server_with_dispatch_policy(
         write_handle,
         write_owner_task,
         write_runtime,
+        write_owner_drain: None,
     })
 }
 
@@ -11420,7 +11538,12 @@ mod tests {
                 .execute(
                     "UPDATE workspaces SET path = ?1 WHERE id = ?2",
                     &[
-                        Value::Text(workspace_path.join("previous-binding").display().to_string()),
+                        Value::Text(
+                            workspace_path
+                                .join("previous-binding")
+                                .display()
+                                .to_string()
+                        ),
                         Value::Text(ADDRESSED_ID.to_owned()),
                     ],
                 )
@@ -11439,7 +11562,10 @@ mod tests {
         drop(writer);
         options.database_path = Some(addressed_database);
         let rebound_id = daemon_search_advisory_workspace_id(&options);
-        assert_eq!(rebound_id, REBOUND_ID, "resident reads observe a new binding");
+        assert_eq!(
+            rebound_id, REBOUND_ID,
+            "resident reads observe a new binding"
+        );
         deliver(&rebound_id, true);
         deliver(&daemon_search_advisory_workspace_id(&options), false);
         assert_eq!(pool.stats().active_pins, 0);
@@ -13920,6 +14046,7 @@ mod tests {
             write_handle: None,
             write_owner_task: None,
             write_runtime: None,
+            write_owner_drain: None,
         };
 
         let error = handle
@@ -13996,6 +14123,7 @@ mod tests {
             write_handle: Some(write_handle),
             write_owner_task: Some(task),
             write_runtime: Some(runtime),
+            write_owner_drain: None,
         };
 
         let (result_tx, result_rx) = mpsc::channel();
@@ -14052,6 +14180,265 @@ mod tests {
         assert!(handle.write_runtime.is_none());
     }
 
+    struct BlockedWriteOwnerDrainFixture {
+        handle: DaemonServerHandle,
+        receipt: asupersync::channel::oneshot::Receiver<crate::core::write_owner::WriteResult>,
+        entered_rx: mpsc::Receiver<()>,
+        release_tx: mpsc::Sender<()>,
+        runtime_liveness: std::sync::Weak<asupersync::runtime::Runtime>,
+    }
+
+    fn blocked_write_owner_drain_fixture() -> BlockedWriteOwnerDrainFixture {
+        use crate::core::write_owner::{
+            DEFAULT_CHANNEL_CAPACITY, WriteHotPathConfig, WriteOperation, WriteOwner, WriteResult,
+        };
+
+        let runtime = Arc::new(crate::core::build_cli_runtime().expect("build write runtime"));
+        let runtime_liveness = Arc::downgrade(&runtime);
+        let (owner, write_handle) = WriteOwner::new(DEFAULT_CHANNEL_CAPACITY);
+        let receipt = write_handle
+            .try_submit(WriteOperation::Custom {
+                operation_type: "ee.daemon.shutdown-drain-test".to_owned(),
+                payload: serde_json::json!({}),
+            })
+            .expect("accept a write before closing its producer");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let task = runtime
+            .handle()
+            .try_spawn(async move {
+                let cx = asupersync::Cx::current().expect("actor task has a request context");
+                let _ = owner
+                    .run_group_commit(&cx, WriteHotPathConfig::default(), move |operations| {
+                        entered_tx
+                            .send(())
+                            .expect("report accepted write execution");
+                        release_rx.recv().expect("wait for blocked write release");
+                        Ok(operations
+                            .iter()
+                            .map(|_| WriteResult::Success {
+                                entity_id: Some("drained".to_owned()),
+                            })
+                            .collect())
+                    })
+                    .await;
+            })
+            .expect("spawn write actor");
+        let handle = DaemonServerHandle {
+            socket_path: std::env::temp_dir().join(format!(
+                "ee-daemon-blocked-write-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            )),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            read_pools: Arc::new(DaemonReadPools::default()),
+            pool: InflightPool::new(1),
+            accept_thread: None,
+            accept_wakeup: None,
+            scheduler_thread: None,
+            warm_thread: None,
+            shutdown_done: AtomicBool::new(false),
+            workers_drained: AtomicBool::new(false),
+            write_handle: Some(write_handle),
+            write_owner_task: Some(task),
+            write_runtime: Some(runtime),
+            write_owner_drain: None,
+        };
+        BlockedWriteOwnerDrainFixture {
+            handle,
+            receipt,
+            entered_rx,
+            release_tx,
+            runtime_liveness,
+        }
+    }
+
+    #[test]
+    fn daemon_shutdown_write_owner_timeout_retains_accepted_work_until_retry() {
+        use crate::core::write_owner::WriteResult;
+
+        let BlockedWriteOwnerDrainFixture {
+            mut handle,
+            mut receipt,
+            entered_rx,
+            release_tx,
+            runtime_liveness,
+        } = blocked_write_owner_drain_fixture();
+        let (result_tx, result_rx) = mpsc::channel();
+        let shutdown_thread = thread::spawn(move || {
+            let first_result = handle
+                .shutdown_with_drain_timeouts(Duration::from_millis(10), Duration::from_millis(10));
+            let first_retained = handle.write_owner_drain.is_some()
+                && handle.write_handle.is_none()
+                && handle.write_owner_task.is_none()
+                && handle.write_runtime.is_none()
+                && handle.workers_drained.load(Ordering::Acquire);
+            let retry_result = handle
+                .shutdown_with_drain_timeouts(Duration::from_millis(10), Duration::from_millis(10));
+            let retry_retained = handle.write_owner_drain.is_some();
+            result_tx
+                .send((
+                    handle,
+                    first_result,
+                    retry_result,
+                    first_retained,
+                    retry_retained,
+                ))
+                .expect("return both shutdown attempts and actor ownership");
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        let returned_before_release = result.is_ok();
+        let runtime_owned_before_release = runtime_liveness.strong_count() > 0;
+
+        // Release before assertions, including on the old unbounded path, so a
+        // regression fails a bounded assertion instead of stranding the suite.
+        let _ = release_tx.send(());
+        let (mut handle, first_result, retry_result, first_retained, retry_retained) = result
+            .or_else(|_| result_rx.recv_timeout(Duration::from_secs(5)))
+            .expect("shutdown caller must return after the write is released");
+        shutdown_thread.join().expect("join shutdown caller");
+        let final_result =
+            handle.shutdown_with_drain_timeouts(Duration::from_millis(50), Duration::from_secs(5));
+        let outcome = receipt.try_recv();
+
+        assert!(
+            entered,
+            "the real write actor must enter the blocking callback"
+        );
+        assert!(
+            returned_before_release,
+            "shutdown and its retry must return while an accepted write remains blocked"
+        );
+        assert_eq!(
+            first_result
+                .expect_err("first actor drain must time out")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            retry_result
+                .expect_err("retry must not falsely report success")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(
+            first_retained,
+            "handoff must retain the actor and its runtime together"
+        );
+        assert!(
+            retry_retained,
+            "a second timeout must retain the same pending drain"
+        );
+        assert!(
+            runtime_owned_before_release,
+            "accepted work must retain its runtime"
+        );
+        final_result.expect("released write must drain successfully on retry");
+        assert!(
+            matches!(outcome, Ok(WriteResult::Success { entity_id }) if entity_id.as_deref() == Some("drained")),
+            "accepted work must settle successfully rather than being cancelled"
+        );
+        assert!(handle.write_owner_drain.is_none());
+        assert!(handle.write_owner_task.is_none());
+        assert!(handle.write_runtime.is_none());
+        assert_eq!(
+            runtime_liveness.strong_count(),
+            0,
+            "completion must include runtime teardown"
+        );
+        handle
+            .shutdown_with_drain_timeouts(Duration::ZERO, Duration::ZERO)
+            .expect("completed shutdown remains idempotent");
+    }
+
+    #[test]
+    fn daemon_drop_after_write_timeout_preserves_runtime_until_accepted_work_finishes() {
+        use crate::core::write_owner::WriteResult;
+
+        let BlockedWriteOwnerDrainFixture {
+            mut handle,
+            mut receipt,
+            entered_rx,
+            release_tx,
+            runtime_liveness,
+        } = blocked_write_owner_drain_fixture();
+        let (result_tx, result_rx) = mpsc::channel();
+        let shutdown_thread = thread::spawn(move || {
+            let result = handle
+                .shutdown_with_drain_timeouts(Duration::from_millis(10), Duration::from_millis(10));
+            result_tx
+                .send((handle, result))
+                .expect("return initial shutdown result");
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        let first_result = result_rx.recv_timeout(Duration::from_secs(1));
+        let first_returned_before_release = first_result.is_ok();
+        if !first_returned_before_release {
+            let _ = release_tx.send(());
+        }
+        let (handle, first_result) = first_result
+            .or_else(|_| result_rx.recv_timeout(Duration::from_secs(5)))
+            .expect("initial shutdown must return after releasing a stuck write");
+        shutdown_thread
+            .join()
+            .expect("join initial shutdown caller");
+
+        let (drop_tx, drop_rx) = mpsc::channel();
+        let drop_thread = thread::spawn(move || {
+            drop(handle);
+            drop_tx.send(()).expect("report handle destruction");
+        });
+        let dropped =
+            drop_rx.recv_timeout(DAEMON_WRITE_OWNER_DRAIN_TIMEOUT + Duration::from_secs(1));
+        let dropped_before_release = dropped.is_ok();
+        let runtime_owned_after_drop = runtime_liveness.strong_count() > 0;
+        let _ = release_tx.send(());
+        dropped
+            .or_else(|_| drop_rx.recv_timeout(Duration::from_secs(5)))
+            .expect("Drop must finish after the write is released");
+        drop_thread.join().expect("join handle destructor");
+
+        // The handle is gone, so the detached drain itself must dispose of the
+        // runtime. A Weak observer cannot accidentally keep that runtime alive.
+        let wait_started = Instant::now();
+        while runtime_liveness.strong_count() > 0 && wait_started.elapsed() < Duration::from_secs(5)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let outcome = receipt.try_recv();
+
+        assert!(entered, "the actor must execute the accepted write");
+        assert!(
+            first_returned_before_release,
+            "explicit shutdown must be bounded"
+        );
+        assert_eq!(
+            first_result
+                .expect_err("blocked actor must time out")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(
+            dropped_before_release,
+            "dropping a timed-out handle must not synchronously join the blocked runtime"
+        );
+        assert!(
+            runtime_owned_after_drop,
+            "the detached drain must retain accepted work"
+        );
+        assert_eq!(
+            runtime_liveness.strong_count(),
+            0,
+            "the runtime must retire after settlement"
+        );
+        assert!(
+            matches!(outcome, Ok(WriteResult::Success { entity_id }) if entity_id.as_deref() == Some("drained")),
+            "destroying the daemon handle must not cancel the accepted operation"
+        );
+    }
+
     #[test]
     fn daemon_shutdown_unparks_idle_scheduler_before_join() {
         let workspace = tempfile::tempdir().expect("scheduler workspace");
@@ -14096,6 +14483,7 @@ mod tests {
             write_handle: None,
             write_owner_task: None,
             write_runtime: None,
+            write_owner_drain: None,
         };
 
         let result = handle.shutdown();
@@ -14146,6 +14534,7 @@ mod tests {
             write_handle: None,
             write_owner_task: None,
             write_runtime: None,
+            write_owner_drain: None,
         };
 
         let started = Instant::now();
