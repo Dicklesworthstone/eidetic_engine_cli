@@ -14150,8 +14150,11 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
         let ee_dir = workspace.join(".ee");
         std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
-        std::fs::write(ee_dir.join("config.toml"), "[memory]\ninclude_global = false\n")
-            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
         let database = ee_dir.join("ee.db");
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -14333,10 +14336,7 @@ pub fn unrelated_context() -> u64 {{
         }
         assert!(
             connection
-                .mark_memory_seal_revealed(
-                    &pack_source_authority_id(2),
-                    "2026-07-01T00:00:00Z",
-                )
+                .mark_memory_seal_revealed(&pack_source_authority_id(2), "2026-07-01T00:00:00Z",)
                 .map_err(|error| error.to_string())?
         );
         connection

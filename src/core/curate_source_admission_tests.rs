@@ -714,7 +714,11 @@ fn procedural_apply_rechecks_withdrawn_sources_without_creating_outputs() -> Tes
             )
             .expect_err("source withdrawal after planning must block the writer");
             assert_private_refusal(&error.message(), &target.content, posture_code(posture));
-            assert_eq!(fixture.counts()?, counts, "{kind}, recipe={as_recipe}, {posture}");
+            assert_eq!(
+                fixture.counts()?,
+                counts,
+                "{kind}, recipe={as_recipe}, {posture}"
+            );
             assert_eq!(
                 fixture
                     .connection
@@ -763,12 +767,18 @@ fn procedural_apply_checks_cluster_sources_beyond_the_target() -> TestResult {
             .map_err(|error| error.to_string())?;
         bind_procedural_source_audit(&fixture, &second_id)?;
         assert_eq!(
-            fixture.apply(true).map_err(|error| error.message())?.application.status,
+            fixture
+                .apply(true)
+                .map_err(|error| error.message())?
+                .application
+                .status,
             "would_apply"
         );
         fixture.withdraw(&second_id, posture)?;
         let counts = fixture.counts()?;
-        let error = fixture.apply(false).expect_err("a cluster source was withdrawn");
+        let error = fixture
+            .apply(false)
+            .expect_err("a cluster source was withdrawn");
         assert_private_refusal(
             &error.message(),
             "Corroborating release evidence kept out of source errors.",
