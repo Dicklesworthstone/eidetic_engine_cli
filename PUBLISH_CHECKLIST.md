@@ -32,22 +32,24 @@ and actual test results are recorded in
    workspace using that installed binary.
 6. Build the six supported binaries through DSR and run their platform workflows.
    Generate a `release-probe-{target}.json` receipt for each native run using
-   `scripts/release_binary_probe.sh`. In the capsule manifest, give each native
-   binary entry its executable `path`, `archivePath`, and `probePath`. Check the
-   directory of natively tested archives against the candidate source and version.
+   `scripts/release_binary_probe.sh`. In the capsule manifest, include the
+   DSR `dsrManifestPath` and each binary's executable `path` and `archivePath`.
+   Add `probePath` for native runs. Verify staging against the committed target
+   inventory and the same candidate used for Rust qualification.
 
    ```bash
-   scripts/release_binary_probe.sh --verify-release-dir "$native_stage_dir" \
-     --proof-capsule "$capsule" --candidate-sha "$release_commit" \
-     --candidate-version "$release_version"
+   python3 scripts/lib/emit_proof_capsule.py --verify-capsule "$capsule" \
+     --expected-sha "$release_commit" --expected-version "$release_version" \
+     --dsr-manifest "$dsr_manifest" --staging-dir "$stage_dir"
    ```
 
-   This verifies archive, executable and native receipt digests for the supplied
-   targets. Keep the full six-target inventory and any approved compile-only
-   dispositions with the DSR verification records. `--verify-release-dir` on
-   its own is a capture inspection command. Publish the GitHub release without
-   Actions and verify every public asset before updating the four Homebrew
-   archive URLs and hashes.
+   `scripts/release_binary_probe.sh --verify-release-dir` on its own inspects
+   captures. The staging check also requires archive, executable and receipt
+   digests and the candidate's committed target dispositions. The capsule's
+   self-hash detects changes relative to the retained evidence. Release signing
+   separately authenticates the published assets. Publish the GitHub release
+   without Actions and verify every public asset before updating the four
+   Homebrew archive URLs and hashes.
 
 The current manual releases carry SHA-256 checksums and minisign `.minisig`
 signatures (without a release `manifest.json` build manifest; see `AGENTS.md`). They

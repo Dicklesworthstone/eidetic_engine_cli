@@ -269,6 +269,7 @@
       "description": "Run ids on both admission lanes. `hostedCi` is nullable and MUST be null rather than fabricated while the hosted workflows are disabled_manually (bd-o7wh0) — a capsule claiming a hosted run that did not happen is the failure this whole record exists to prevent.",
       "properties": {
         "rch": { "type": ["string", "null"] },
+        "dsrManifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "hostedCi": { "type": ["string", "null"] }
       }
     },

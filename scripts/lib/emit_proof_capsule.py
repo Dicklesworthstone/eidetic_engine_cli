@@ -26,6 +26,8 @@ Supports three modes:
    native archive, executable and probe bytes for that target.
    With --verify-rch-policy it requires the committed Rust stage inventory,
    with matching pinned RCH receipts and their retained terminal streams.
+   With --dsr-manifest PATH --staging-dir PATH --expected-version VERSION, it
+   applies the Rust and archive target policies at DSR staging.
 
 4. Self-test mode:
    emit_proof_capsule.py --self-test
@@ -658,12 +660,20 @@ def populate_candidate_capsule(
         archive_path, probe_path = entry.get("archivePath"), entry.get("probePath")
         if archive_path is not None or probe_path is not None:
             try:
-                if not all(isinstance(path, str) and path for path in (archive_path, probe_path)):
-                    raise ValueError("archivePath and probePath are both required for native bindings")
-                bindings = native_release_artifact_bindings(
-                    bin_obj, repo_root / archive_path, repo_root / probe_path, commit_sha,
-                )
-                bin_obj.update(bindings)
+                if not isinstance(archive_path, str) or not archive_path:
+                    raise ValueError("archivePath is required for artifact bindings")
+                archive = repo_root / archive_path
+                if probe_path is None:
+                    executable = "ee.exe" if bin_obj["target"].endswith("-windows-msvc") else "ee"
+                    if _archive_executable_sha256(archive, executable) != computed_sha:
+                        raise ValueError("archive executable differs from the candidate binary")
+                    bin_obj["archiveSha256"] = _sha256_file(archive)
+                else:
+                    if not isinstance(probe_path, str) or not probe_path:
+                        raise ValueError("probePath must name the native probe receipt")
+                    bin_obj.update(native_release_artifact_bindings(
+                        bin_obj, archive, repo_root / probe_path, commit_sha,
+                    ))
             except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
                 unestablished.append(_unestablished(f"binaries[{idx}].archive", str(exc)))
         binaries.append(bin_obj)
@@ -987,6 +997,13 @@ def populate_candidate_capsule(
         "rch": run_ids_in.get("rch"),
         "hostedCi": None,
     }
+    dsr_path = candidate_manifest.get("dsrManifestPath")
+    if dsr_path is not None:
+        path = repo_root / dsr_path if isinstance(dsr_path, str) else None
+        if not path or not path.is_file():
+            unestablished.append(_unestablished("runIdentifiers.dsrManifestSha256", "DSR manifest could not be read"))
+        else:
+            run_identifiers["dsrManifestSha256"] = _sha256_file(path)
     raw_perf_samples = candidate_manifest.get("performanceSamples", [])
     perf_samples = (
         [sample for sample in raw_perf_samples if isinstance(sample, dict)]
@@ -1519,6 +1536,102 @@ def verify_release_rch_policy(capsule: dict[str, Any], repo_root: pathlib.Path) 
     return problems
 
 
+def verify_dsr_artifacts(
+    capsule: dict[str, Any], manifest: dict[str, Any], policy: dict[str, Any],
+    staging_dir: pathlib.Path, version: str,
+) -> list[str]:
+    if policy.get("schema") != "ee.release_artifact_policy.v1":
+        return ["candidate does not declare the required release target policy"]
+    native = policy["native"]
+    compile_only = policy["compile_only"]
+    all_targets = set(native) | set(compile_only)
+    if not native or len(all_targets) != len(native) + len(compile_only) or not all(compile_only.values()):
+        return ["candidate has an ambiguous or incomplete release target policy"]
+    if (
+        manifest.get("schema_version") != "1.0.0"
+        or manifest.get("tool") != "ee"
+        or manifest.get("version") != f"v{version}"
+        or manifest.get("source", {}).get("git_sha") != capsule["source"]["commit"]
+        or manifest.get("status") != "success"
+        or manifest.get("publishable") is not True
+        or manifest.get("build_purpose") != "release"
+        or capsule["runIdentifiers"].get("hostedCi") is not None
+    ):
+        return ["DSR manifest did not report a completed release build for the candidate source and version"]
+
+    expected_archives = {f"ee-{target}.tar.xz": target for target in all_targets}
+    staged = {
+        path.name for path in staging_dir.glob("ee-*")
+        if path.is_file() and path.name.endswith((".tar.xz", ".tar.gz", ".zip"))
+    }
+    if staged != expected_archives.keys():
+        missing = sorted(expected_archives.keys() - staged)
+        unexpected = sorted(staged - expected_archives.keys())
+        return [f"staged archive coverage differs from candidate policy (missing={missing}, extra={unexpected})"]
+    binaries = {binary["target"]: binary for binary in capsule["binaries"]}
+    if set(binaries) != all_targets or len(binaries) != len(capsule["binaries"]):
+        return ["capsule must bind exactly one binary for every committed release target"]
+
+    manifest_by_name = {}
+    for record in manifest["artifacts"]:
+        name = record["name"]
+        if name in expected_archives:
+            if name in manifest_by_name:
+                return [f"DSR manifest has duplicate records for {name}"]
+            manifest_by_name[name] = record
+
+    problems = []
+    for name, target in sorted(expected_archives.items()):
+        archive = staging_dir / name
+        record = manifest_by_name.get(name, {})
+        binary = binaries[target]
+        reported_target = record.get("target_triple")
+        # Native receipts independently report the triple. The Windows
+        # compile-only disposition needs that observation from DSR itself.
+        target_matches = reported_target == target or (reported_target is None and target in native)
+        if (
+            archive.is_symlink()
+            or binary["version"] != version
+            or not target_matches
+            or record.get("archive_format") != "tar.xz"
+            or not _is_strict_int(record.get("size_bytes"))
+            or record["size_bytes"] != archive.stat().st_size
+            or record.get("sha256") != binary.get("archiveSha256")
+        ):
+            problems.append(f"DSR manifest lacks exact candidate archive binding for {target}")
+            continue
+        if target in native:
+            probe = staging_dir / f"release-probe-{target}.json"
+            problems.extend(f"{target}: {problem}" for problem in verify_release_artifact(capsule, archive, probe, version))
+            continue
+        try:
+            if _sha256_file(archive) != binary["archiveSha256"]:
+                raise ValueError("compiled archive SHA-256 differs from DSR and capsule")
+            if _archive_executable_sha256(archive, "ee.exe") != binary["sha256"]:
+                raise ValueError("compiled executable SHA-256 differs from capsule")
+        except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
+            problems.append(f"{target}: {exc}")
+    return problems
+
+
+def verify_dsr_staging(
+    capsule: dict[str, Any], manifest_path: pathlib.Path, staging_dir: pathlib.Path,
+    version: str, repo_root: pathlib.Path,
+) -> list[str]:
+    import tomllib
+
+    try:
+        commit = capsule["source"]["commit"]
+        budget = tomllib.loads(_committed_blob(repo_root, commit, "scripts/verify-budget.toml").decode())
+        raw = manifest_path.read_bytes()
+        if _sha256_bytes(raw) != capsule["runIdentifiers"].get("dsrManifestSha256"):
+            return ["DSR build manifest bytes differ from the candidate capsule"]
+        manifest = json.loads(raw, parse_constant=_reject_json_constant, object_pairs_hook=_unique_json_object)
+        return verify_dsr_artifacts(capsule, manifest, budget.get("release_artifacts", {}), staging_dir, version)
+    except (AttributeError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+        return [f"could not verify DSR staging: {exc}"]
+
+
 GREEN_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 4 tests
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
@@ -1794,6 +1907,41 @@ def self_test() -> int:
         check("native staging validates exact bytes", not verify_release_artifact(bound, archive, probe_path, "0.19.0"))
         check("staging refuses an unbound capsule", bool(verify_release_artifact(populated, archive, probe_path, "0.19.0")))
         check("staging refuses wrong operator version", bool(verify_release_artifact(bound, archive, probe_path, "0.19.1")))
+        win_bin = root / "ee.exe"
+        win_bin.write_bytes(b"compile-only control bytes")
+        win_target = "x86_64-pc-windows-msvc"
+        win_archive = root / f"ee-{win_target}.tar.xz"
+        with tarfile.open(win_archive, mode="w:xz") as output:
+            output.add(win_bin, arcname="ee.exe")
+        bound_manifest["binaries"].append({
+            "path": str(win_bin), "archivePath": str(win_archive), "target": win_target, "version": "0.19.0",
+        })
+        release = populate_candidate_capsule(bound_manifest, repo_root=cand_repo)
+        artifact_policy = {
+            "schema": "ee.release_artifact_policy.v1", "native": ["x86_64-unknown-linux-gnu"],
+            "compile_only": {win_target: "native probe unavailable"},
+        }
+        dsr_manifest = {
+            "schema_version": "1.0.0", "tool": "ee", "version": "v0.19.0",
+            "source": {"git_sha": sha_a}, "status": "success", "publishable": True,
+            "build_purpose": "release", "artifacts": [],
+        }
+        for path, target in ((archive, "x86_64-unknown-linux-gnu"), (win_archive, win_target)):
+            dsr_manifest["artifacts"].append({
+                "name": path.name, "target_triple": target, "archive_format": "tar.xz",
+                "size_bytes": path.stat().st_size, "sha256": _sha256_file(path),
+            })
+        check("DSR staging verifies native and policy-exempt compiled archives",
+              not verify_dsr_artifacts(release, dsr_manifest, artifact_policy, root, "0.19.0"))
+        partial = dict(dsr_manifest, status="partial")
+        check("DSR staging rejects a partial build",
+              bool(verify_dsr_artifacts(release, partial, artifact_policy, root, "0.19.0")))
+        check("DSR staging rejects omitted capsule target",
+              bool(verify_dsr_artifacts(bound, dsr_manifest, artifact_policy, root, "0.19.0")))
+        wrong_build = copy.deepcopy(dsr_manifest)
+        wrong_build["artifacts"][1]["target_triple"] = "x86_64-unknown-linux-gnu"
+        check("DSR staging checks compiled target attribution",
+              bool(verify_dsr_artifacts(release, wrong_build, artifact_policy, root, "0.19.0")))
         for name, change in (
             ("failed check", lambda receipt: receipt["checks"][0].update({"pass": False})),
             ("unobserved backend", lambda receipt: receipt["checks"][0].update(observed="embed_backend=hash_fallback")),
@@ -2017,6 +2165,8 @@ def main() -> int:
     parser.add_argument("--release-archive", type=pathlib.Path)
     parser.add_argument("--release-probe", type=pathlib.Path)
     parser.add_argument("--expected-version")
+    parser.add_argument("--dsr-manifest", type=pathlib.Path)
+    parser.add_argument("--staging-dir", type=pathlib.Path)
     parser.add_argument("--verify-logs", action="store_true")
     parser.add_argument("--verify-rch-policy", action="store_true")
     parser.add_argument("--repo-root")
@@ -2031,8 +2181,15 @@ def main() -> int:
 
     repo_root = pathlib.Path(args.repo_root).resolve() if args.repo_root else REPO
     artifact_args = (args.release_archive, args.release_probe, args.expected_version)
-    if any(artifact_args) and (not args.verify_capsule or not all(artifact_args)):
+    dsr_args = (args.dsr_manifest, args.staging_dir, args.expected_version)
+    artifact_check = args.release_archive is not None or args.release_probe is not None
+    dsr_check = args.dsr_manifest is not None or args.staging_dir is not None
+    if artifact_check and (not args.verify_capsule or not all(artifact_args) or dsr_check):
         parser.error("--release-archive, --release-probe and --expected-version require one another and --verify-capsule")
+    if dsr_check and (not args.verify_capsule or not all(dsr_args)):
+        parser.error("--dsr-manifest, --staging-dir and --expected-version require one another and --verify-capsule")
+    if args.expected_version and not (artifact_check or dsr_check):
+        parser.error("--expected-version requires archive or DSR staging verification")
     if args.verify_rch_policy and not args.verify_capsule:
         parser.error("--verify-rch-policy requires --verify-capsule")
 
@@ -2068,17 +2225,19 @@ def main() -> int:
             capsule,
             args.expected_sha,
             expected_binary=exp_bin,
-            verify_logs=args.verify_logs or args.release_archive is not None,
+            verify_logs=args.verify_logs or artifact_check or dsr_check,
             repo_root=repo_root,
         )
-        if not problems and args.release_archive:
+        if not problems and (artifact_check or dsr_check):
             problems = verify_candidate_tree(capsule, repo_root, args.expected_version)
             if not problems:
                 problems = verify_retained_test_counts(capsule, repo_root)
-            if not problems:
+            if not problems and artifact_check:
                 problems = verify_release_artifact(capsule, *artifact_args)
-        if not problems and args.verify_rch_policy:
+        if not problems and (args.verify_rch_policy or dsr_check):
             problems = verify_release_rch_policy(capsule, repo_root)
+        if not problems and dsr_check:
+            problems = verify_dsr_staging(capsule, *dsr_args, repo_root)
         if problems:
             for prob in problems:
                 print(f"[emit-proof-capsule] VERIFY FAILED: {prob}", file=sys.stderr)

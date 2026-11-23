@@ -1703,3 +1703,16 @@ targets = [
     "integration_north_star",
 ]
 mcp_targets = ["mcp_parity"]
+
+[release_artifacts]
+schema = "ee.release_artifact_policy.v1"
+native = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+
+[release_artifacts.compile_only]
+x86_64-pc-windows-msvc = "The native release probe runs POSIX executables. Windows requires a completed DSR build and exact archive and ee.exe bindings."
