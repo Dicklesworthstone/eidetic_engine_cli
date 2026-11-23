@@ -6419,12 +6419,21 @@ for definition in payload["definitions"]:
                         .map_err(|error| error.to_string())?;
                 }
                 "directory" => fs::create_dir(&receipt).map_err(|error| error.to_string())?,
-                _ => rustix::fs::mkfifoat(
-                    rustix::fs::CWD,
-                    &receipt,
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                )
-                .map_err(|error| error.to_string())?,
+                _ => {
+                    let output = std::process::Command::new("mkfifo")
+                        .args(["-m", "600"])
+                        .arg(&receipt)
+                        .output()
+                        .map_err(|error| format!("fixture: mkfifo could not run: {error}"))?;
+                    assert!(
+                        output.status.success(),
+                        "fixture: mkfifo failed: status={}, code={:?}, stdout={:?}, stderr={:?}",
+                        output.status,
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
             }
             assert!(
                 generate_harness_hook_install(&harness_options(
