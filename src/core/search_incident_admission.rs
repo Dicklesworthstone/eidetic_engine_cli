@@ -589,6 +589,10 @@ mod tests {
                         .ok_or("generation")?,
                     calibration_input_identity: None,
                     scoring_reference_time: reference,
+                    global_snapshot: None,
+                    request_identity: crate::core::search::global_handoff::request_identity(
+                        &options,
+                    ),
                 },
             };
             let mut received = PackSearchHandoff::from_value(serde_json::to_value(handoff)?)?;
