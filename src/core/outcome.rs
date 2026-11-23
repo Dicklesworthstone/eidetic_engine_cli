@@ -1098,6 +1098,7 @@ fn record_outcome_inner(
                 .is_some_and(|reason| !reason.trim().is_empty());
 
         if options.dry_run {
+            require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
             let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
             trace_sprt_quarantine("dependency_check", 0, &[]);
             let sprt = sprt_quarantine_decision_preview(
@@ -1242,6 +1243,10 @@ fn record_outcome_inner(
             });
         }
 
+        // A retry belongs to its already-recorded observation, even if the
+        // target was revised later. Only new observations require the current
+        // revision; do not redirect feedback to a different memory implicitly.
+        require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("dependency_check", 0, &[]);
         let sprt = sprt_quarantine_decision_preview(
             &connection,
@@ -1768,6 +1773,12 @@ fn apply_memory_outcome_in_txn(
             memory.workspace_id == feedback.workspace_id && memory.tombstoned_at.is_none()
         })
         .ok_or_else(missing_target)?;
+    if connection
+        .get_memory_superseded_at(&feedback.target_id)?
+        .is_some()
+    {
+        return Err(missing_target());
+    }
     let (current_alpha, current_beta) = connection
         .get_memory_bayes_posterior(&feedback.target_id)?
         .ok_or_else(missing_target)?;
@@ -2278,6 +2289,13 @@ pub(crate) fn validate_anti_pattern_candidate_feedback(
             memory.workspace_id == stored.workspace_id && memory.tombstoned_at.is_none()
         })
         .ok_or_else(invalid)?;
+    if connection
+        .get_memory_superseded_at(target_id)
+        .map_err(anti_pattern_feedback_storage_error)?
+        .is_some()
+    {
+        return Err(invalid());
+    }
     if stored.proposed_content.as_deref()
         != Some(anti_pattern_candidate_content(&memory.content, unique_ids.len()).as_str())
     {
@@ -2357,6 +2375,13 @@ fn propose_anti_pattern_candidate_in_transaction(
     else {
         return Ok(None);
     };
+    if connection
+        .get_memory_superseded_at(target_id)
+        .map_err(anti_pattern_feedback_storage_error)?
+        .is_some()
+    {
+        return Ok(None);
+    }
 
     let candidate_id = anti_pattern_candidate_id(workspace_id, target_id);
     if connection
@@ -2756,6 +2781,13 @@ pub fn review_feedback_quarantine(
         ));
     }
     if options.dry_run {
+        if !options.reject {
+            require_current_memory_outcome_revision(
+                &connection,
+                &row.target_type,
+                &row.target_id,
+            )?;
+        }
         return Ok(outcome_quarantine_review_report(
             &prepared,
             &quarantine_id,
@@ -3181,6 +3213,28 @@ fn require_outcome_target_workspace(
         return Err(DomainError::PolicyDenied {
             message: format!("{target_type} target is not bound to the requested workspace."),
             repair: Some("Use the workspace that owns the feedback target.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn require_current_memory_outcome_revision(
+    connection: &DbConnection,
+    target_type: &str,
+    target_id: &str,
+) -> Result<(), DomainError> {
+    if target_type == "memory"
+        && connection
+            .get_memory_superseded_at(target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to check outcome memory revision: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .is_some()
+    {
+        return Err(DomainError::PolicyDenied {
+            message: "New outcome feedback requires the current memory revision; the requested revision is superseded.".to_owned(),
+            repair: Some(format!("ee memory history {target_id} --json")),
         });
     }
     Ok(())
@@ -3838,6 +3892,18 @@ fn record_outcome_in_txn(
     connection: &DbConnection,
     write: OutcomeRecordInTxn<'_>,
 ) -> crate::db::Result<String> {
+    let (target_type, target_id) = match &write {
+        OutcomeRecordInTxn::Feedback { input, .. } => {
+            (&input.event.target_type, &input.event.target_id)
+        }
+        OutcomeRecordInTxn::Quarantine { input, .. } => (&input.target_type, &input.target_id),
+    };
+    if target_type == "memory" && connection.get_memory_superseded_at(target_id)?.is_some() {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Execute,
+            message: "Outcome memory was superseded before feedback could commit".to_owned(),
+        });
+    }
     match write {
         OutcomeRecordInTxn::Feedback {
             event_id,

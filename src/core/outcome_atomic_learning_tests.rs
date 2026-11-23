@@ -442,6 +442,345 @@ impl Fixture {
 }
 
 #[test]
+fn superseded_memory_preserves_feedback_receipts_but_only_its_new_revision_can_learn() {
+    let fixture = Fixture::new();
+    let _embedder = crate::core::index::install_test_hash_workspace_embedder(WORKSPACE);
+    fixture.seed_agent_validated();
+    let mut options = fixture.options();
+    options.agent_name = Some(REPLAY_AGENT.to_owned());
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    let revision = crate::core::memory::revise_memory(
+        &crate::core::memory::ReviseMemoryOptions {
+            database_path: &fixture.database,
+            original_memory_id: MEMORY,
+            content: Some("Release validation requires integration and migration checks."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: crate::core::memory::ReviseReason::Update,
+            actor: Some("atomic-learning-reviewer"),
+            dry_run: false,
+        },
+    );
+    assert!(revision.success && revision.persisted, "{revision:?}");
+    let new_id = revision.new_id.as_deref().unwrap();
+    assert!(fixture.db.get_memory_superseded_at(MEMORY).unwrap().is_some());
+    assert!(fixture.db.get_memory_superseded_at(new_id).unwrap().is_none());
+    let before = fixture.persisted_feedback_state();
+    let new_memory = fixture.db.get_memory(new_id).unwrap();
+    let new_posterior = fixture
+        .db
+        .get_memory_bayes_posterior(new_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    let mut conflicting = options.clone();
+    conflicting.reason = Some("A different observation cannot reuse the old event ID.".to_owned());
+    assert!(matches!(
+        record_outcome(&conflicting),
+        Err(DomainError::Usage { .. })
+    ));
+    for signal in ["helpful", "harmful", "neutral"] {
+        for dry_run in [false, true] {
+            let mut stale = options.clone();
+            stale.event_id = Some(HELD_EVENT.to_owned());
+            stale.source_type = "human_explicit".to_owned();
+            stale.signal = signal.to_owned();
+            stale.dry_run = dry_run;
+            let error = record_outcome(&stale).unwrap_err();
+            assert!(matches!(&error, DomainError::PolicyDenied { .. }));
+            assert!(error.message().contains("superseded"), "{error:?}");
+            assert_eq!(fixture.persisted_feedback_state(), before);
+            assert_eq!(fixture.db.get_memory(new_id).unwrap(), new_memory);
+            assert_eq!(
+                fixture.db.get_memory_bayes_posterior(new_id).unwrap(),
+                Some(new_posterior)
+            );
+        }
+    }
+
+    // The caller must explicitly choose the new revision. Its observation
+    // must never change the old revision's posterior, trust or provenance.
+    options.target_id = new_id.to_owned();
+    options.event_id = Some(HELD_EVENT.to_owned());
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    assert_eq!(
+        fixture.db.get_memory_bayes_posterior(new_id).unwrap(),
+        Some((new_posterior.0 + 1.0, new_posterior.1))
+    );
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), before.memory);
+    assert_eq!(fixture.posterior(), before.posterior);
+}
+
+#[test]
+fn superseded_memory_is_rechecked_before_feedback_or_quarantine_commit() {
+    for quarantined in [false, true] {
+        let fixture = Fixture::new();
+        let mut options = if quarantined {
+            fixture.harmful_options()
+        } else {
+            fixture.options()
+        };
+        options.agent_name = Some(REPLAY_AGENT.to_owned());
+        if quarantined {
+            options.harmful_per_source_per_hour = 1;
+            assert_eq!(
+                record_outcome(&options).unwrap().status,
+                OutcomeRecordStatus::Recorded
+            );
+            options.event_id = Some(HELD_EVENT.to_owned());
+        }
+        let superseded_state = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let observed_state = superseded_state.clone();
+        let result = with_admission_observer(
+            move |stage, connection| {
+                if stage == OutcomeAdmissionTestStage::AfterAdmissionRead {
+                    assert!(
+                        connection
+                            .mark_memory_superseded(MEMORY, &Utc::now().to_rfc3339())
+                            .unwrap()
+                    );
+                    *observed_state.borrow_mut() =
+                        Some(Fixture::feedback_state_for(connection, WORKSPACE));
+                }
+            },
+            || record_outcome(&options),
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(&error, DomainError::Storage { .. }));
+        assert!(error.message().contains("superseded"), "{error:?}");
+        assert_eq!(
+            fixture.persisted_feedback_state(),
+            superseded_state.borrow_mut().take().unwrap(),
+            "stale admission must not commit evidence, learning, audits, profiles or index work"
+        );
+        assert!(
+            fixture
+                .db
+                .get_feedback_event(options.event_id.as_deref().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fixture.db.count_table_rows("feedback_quarantine").unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
+fn superseded_quarantine_release_rolls_back_but_receipt_replay_and_rejection_work() {
+    let fixture = Fixture::new();
+    let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+    assert!(
+        fixture
+            .db
+            .mark_memory_superseded(MEMORY, &Utc::now().to_rfc3339())
+            .unwrap()
+    );
+    let before = fixture.persisted_feedback_state();
+    let mut retry = fixture.harmful_options();
+    retry.harmful_per_source_per_hour = 1;
+    retry.event_id = Some(HELD_EVENT.to_owned());
+    let replay = record_outcome(&retry).unwrap();
+    assert_eq!(replay.status, OutcomeRecordStatus::Quarantined);
+    assert!(replay.quarantine.as_ref().unwrap().replayed);
+    assert_eq!(fixture.persisted_feedback_state(), before);
+
+    let mut review = fixture.release_options(&quarantine_id);
+    review.dry_run = true;
+    assert!(matches!(
+        review_feedback_quarantine(&review),
+        Err(DomainError::PolicyDenied { .. })
+    ));
+    assert_eq!(fixture.persisted_feedback_state(), before);
+    review.dry_run = false;
+    let error = review_feedback_quarantine(&review).unwrap_err();
+    assert!(matches!(&error, DomainError::Storage { .. }));
+    assert!(error.message().contains("no longer live"), "{error:?}");
+    assert_eq!(
+        fixture.persisted_feedback_state(),
+        before,
+        "the pending-row claim and inserted feedback must roll back with stale learning"
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_feedback_quarantine(&quarantine_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+
+    review.reject = true;
+    review.dry_run = true;
+    assert_eq!(
+        review_feedback_quarantine(&review).unwrap().status,
+        "dry_run"
+    );
+    assert_eq!(fixture.persisted_feedback_state(), before);
+    review.dry_run = false;
+    assert_eq!(
+        review_feedback_quarantine(&review).unwrap().status,
+        "rejected"
+    );
+    let rejected = fixture.persisted_feedback_state();
+    assert_eq!(rejected.events, before.events);
+    assert_eq!(rejected.memory, before.memory);
+    assert_eq!(rejected.posterior, before.posterior);
+    assert_eq!(rejected.profile, before.profile);
+    assert_eq!(rejected.index_jobs, before.index_jobs);
+    review.reject = false;
+    assert_eq!(
+        review_feedback_quarantine(&review).unwrap().status,
+        "already_reviewed"
+    );
+    assert_eq!(fixture.persisted_feedback_state(), rejected);
+}
+
+#[test]
+fn superseded_memory_cannot_propose_an_anti_pattern_after_feedback_commit() {
+    let fixture = Fixture::new();
+    for ordinal in 1..3 {
+        assert_eq!(
+            record_outcome(&fixture.anti_pattern_options(ordinal))
+                .unwrap()
+                .status,
+            OutcomeRecordStatus::Recorded
+        );
+    }
+    let options = fixture.anti_pattern_options(3);
+    let superseded_state = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed_state = superseded_state.clone();
+    let report = with_admission_observer(
+        move |stage, connection| {
+            if stage == OutcomeAdmissionTestStage::BeforeAntiPatternProposal {
+                assert!(
+                    connection
+                        .mark_memory_superseded(MEMORY, &Utc::now().to_rfc3339())
+                        .unwrap()
+                );
+                *observed_state.borrow_mut() =
+                    Some(Fixture::feedback_state_for(connection, WORKSPACE));
+            }
+        },
+        || record_outcome(&options),
+    )
+    .unwrap();
+    assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+    assert!(report.degraded.is_empty(), "{report:?}");
+    let before = superseded_state.borrow_mut().take().unwrap();
+    assert_eq!(fixture.persisted_feedback_state(), before);
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &anti_pattern_candidate_id(WORKSPACE, MEMORY))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.persisted_feedback_state(), before);
+}
+
+#[test]
+fn superseded_memory_blocks_an_already_approved_anti_pattern() {
+    let fixture = Fixture::new();
+    for ordinal in 1..=3 {
+        assert_eq!(
+            record_outcome(&fixture.anti_pattern_options(ordinal))
+                .unwrap()
+                .status,
+            OutcomeRecordStatus::Recorded
+        );
+    }
+    let candidate_id = anti_pattern_candidate_id(WORKSPACE, MEMORY);
+    let validation = crate::core::curate::validate_curation_candidate(
+        &crate::core::curate::CurateValidateOptions {
+            workspace_path: fixture._root.path(),
+            database_path: Some(&fixture.database),
+            candidate_id: &candidate_id,
+            actor: Some("atomic-learning-reviewer"),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(validation.validation.decision, "approved");
+    let mut options = crate::core::curate::CurateApplyOptions {
+        workspace_path: fixture._root.path(),
+        database_path: Some(&fixture.database),
+        candidate_id: &candidate_id,
+        actor: Some("atomic-learning-reviewer"),
+        dry_run: true,
+        allow_tombstone_load_bearing: false,
+    };
+    assert_eq!(
+        crate::core::curate::apply_curation_candidate(&options)
+            .unwrap()
+            .application
+            .status,
+        "would_apply"
+    );
+    assert!(
+        fixture
+            .db
+            .mark_memory_superseded(MEMORY, &Utc::now().to_rfc3339())
+            .unwrap()
+    );
+    let before = fixture.persisted_feedback_state();
+    let candidate = fixture
+        .db
+        .get_curation_candidate(WORKSPACE, &candidate_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        validate_anti_pattern_candidate_feedback(&fixture.db, &candidate),
+        Err(DomainError::Usage { .. })
+    ));
+    for dry_run in [false, true] {
+        options.dry_run = dry_run;
+        assert_eq!(
+            crate::core::curate::apply_curation_candidate(&options)
+                .unwrap()
+                .application
+                .status,
+            "blocked"
+        );
+        assert_eq!(fixture.persisted_feedback_state(), before);
+        assert_eq!(
+            fixture
+                .db
+                .get_curation_candidate(WORKSPACE, &candidate_id)
+                .unwrap(),
+            Some(candidate.clone())
+        );
+        assert!(
+            fixture
+                .db
+                .list_procedural_rules(WORKSPACE, None, None, true)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn zero_weight_memory_feedback_is_audited_without_learning_or_profile_changes() {
     for signal in ["helpful", "harmful", "neutral"] {
         for weight in [0.0_f32, -0.0] {
