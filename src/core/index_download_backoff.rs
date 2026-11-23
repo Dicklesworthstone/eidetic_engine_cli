@@ -279,7 +279,7 @@ pub(crate) fn staging_search_roots_under(root: &Path) -> Vec<PathBuf> {
 fn direct_model_destination_name(root: &Path) -> Option<&str> {
     let name = root.file_name()?.to_str()?;
     let model = frankensearch::embed::RegisteredModel2Vec::builtin(name)?.ok()?;
-    (super::index::model2vec_model_destination_dir(root, &model) == root).then_some(name)
+    (crate::core::index::model2vec_model_destination_dir(root, &model) == root).then_some(name)
 }
 
 fn direct_model_staging_parent(root: &Path) -> Option<PathBuf> {
@@ -290,7 +290,7 @@ fn direct_model_staging_parent(root: &Path) -> Option<PathBuf> {
                 std::path::Component::CurDir | std::path::Component::ParentDir
             )
         })
-        || super::path_safety::first_existing_symlink_component(root)
+        || crate::core::path_safety::first_existing_symlink_component(root)
             .ok()?
             .is_some()
     {
@@ -302,7 +302,7 @@ fn direct_model_staging_parent(root: &Path) -> Option<PathBuf> {
         _ => {}
     }
     let parent = root.parent()?;
-    if super::path_safety::first_existing_symlink_component(parent)
+    if crate::core::path_safety::first_existing_symlink_component(parent)
         .ok()?
         .is_some()
         || !std::fs::symlink_metadata(parent).ok()?.is_dir()
@@ -343,7 +343,7 @@ pub(crate) fn direct_model_staging_path_is_authorized(root: &Path, path: &Path) 
     };
     if (Some(candidate_parent) != root.parent() && candidate_parent != parent.as_path())
         || !matches!(
-            super::path_safety::first_existing_symlink_component(path),
+            crate::core::path_safety::first_existing_symlink_component(path),
             Ok(None)
         )
     {
@@ -856,7 +856,10 @@ mod tests {
         assert!(!missing.exists());
 
         assert_eq!(absolute_staging_reclaim_root(missing.clone()), missing);
-        assert!(!missing.exists(), "root resolution must not create directories");
+        assert!(
+            !missing.exists(),
+            "root resolution must not create directories"
+        );
         Ok(())
     }
 
@@ -900,7 +903,11 @@ mod tests {
     #[test]
     fn direct_model_destination_recognition_uses_registered_canonical_names() -> TestResult {
         let root = temp_root("ee-staging-model-names-")?;
-        for name in ["potion-multilingual-128M", "potion-base-8m", "potion-base-32m"] {
+        for name in [
+            "potion-multilingual-128M",
+            "potion-base-8m",
+            "potion-base-32m",
+        ] {
             let destination = root.path().join(name);
             assert_eq!(direct_model_destination_name(&destination), Some(name));
         }
@@ -914,7 +921,10 @@ mod tests {
     #[test]
     fn direct_model_reclaim_preserves_other_models_and_active_downloads() -> TestResult {
         let root = temp_root("ee-staging-direct-")?;
-        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let model = "potion-multilingual-128M";
         let installed = parent.join(model);
         let mut child = std::process::Command::new("true")
@@ -1003,8 +1013,7 @@ mod tests {
         assert!(unknown.is_dir());
         assert!(other.is_dir());
         assert_eq!(
-            std::fs::read(installed.join("model.safetensors"))
-                .map_err(|error| error.to_string())?,
+            std::fs::read(installed.join("model.safetensors")).map_err(|error| error.to_string())?,
             b"installed"
         );
         assert_eq!(
@@ -1023,13 +1032,18 @@ mod tests {
     #[test]
     fn direct_model_staging_authority_matches_only_exact_safe_siblings() -> TestResult {
         let root = temp_root("ee-staging-authority-")?;
-        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let model = "potion-multilingual-128M";
         let installed = parent.join(model);
         let staging_name = format!(".{model}-download-12345-retained");
         let missing = parent.join(&staging_name);
         // Both the destination and a quarantined staging path may be absent.
-        assert!(direct_model_staging_path_is_authorized(&installed, &missing));
+        assert!(direct_model_staging_path_is_authorized(
+            &installed, &missing
+        ));
         assert!(!installed.exists());
         assert!(!missing.exists());
         std::fs::create_dir(&installed).map_err(|error| error.to_string())?;
@@ -1056,16 +1070,20 @@ mod tests {
             &unrelated.join("..").join(model),
             &missing
         ));
-        std::os::unix::fs::symlink(&installed, &missing)
-            .map_err(|error| error.to_string())?;
-        assert!(!direct_model_staging_path_is_authorized(&installed, &missing));
+        std::os::unix::fs::symlink(&installed, &missing).map_err(|error| error.to_string())?;
+        assert!(!direct_model_staging_path_is_authorized(
+            &installed, &missing
+        ));
 
         let linked_parent = parent.join("linked-parent");
         std::os::unix::fs::symlink(&unrelated, &linked_parent)
             .map_err(|error| error.to_string())?;
         let linked_root = linked_parent.join(model);
         let linked_candidate = linked_parent.join(staging_name);
-        assert!(!direct_model_staging_path_is_authorized(&linked_root, &linked_candidate));
+        assert!(!direct_model_staging_path_is_authorized(
+            &linked_root,
+            &linked_candidate
+        ));
         assert!(inspect_staging_dirs_under(&linked_root).entries.is_empty());
         Ok(())
     }
@@ -1074,7 +1092,10 @@ mod tests {
     #[test]
     fn direct_model_reclaim_rechecks_scope_after_an_earlier_quarantine() -> TestResult {
         let root = temp_root("ee-staging-scope-recheck-")?;
-        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let model = "potion-multilingual-128M";
         let installed = parent.join(model);
         std::fs::create_dir(&installed).map_err(|error| error.to_string())?;
@@ -1092,11 +1113,13 @@ mod tests {
         let quarantined = parent.join("quarantined-first");
         let later = SystemTime::now() + ABANDONED_STAGING_AGE + Duration::from_secs(60);
         let summary = reclaim_abandoned_staging_dirs_at(&installed, false, later, |entry| {
-            assert_eq!(entry.path, first, "changed scope must suppress the second callback");
+            assert_eq!(
+                entry.path, first,
+                "changed scope must suppress the second callback"
+            );
             std::fs::rename(&entry.path, &quarantined).map_err(|error| error.to_string())?;
             std::fs::rename(&installed, &retained).map_err(|error| error.to_string())?;
-            std::os::unix::fs::symlink(&retained, &installed)
-                .map_err(|error| error.to_string())
+            std::os::unix::fs::symlink(&retained, &installed).map_err(|error| error.to_string())
         })?;
         assert_eq!(summary.reclaimed_count, 1);
         assert_eq!(summary.kept_count, 1);
@@ -1222,10 +1245,9 @@ mod tests {
 
         // At 25h: dry-run sees all 3 reclaimable without deleting.
         let twenty_five_hours = SystemTime::now() + Duration::from_secs(25 * 60 * 60);
-        let dry =
-            reclaim_abandoned_staging_dirs_at(root.path(), true, twenty_five_hours, |_| {
-                Err("dry run must not invoke the mutation callback".to_owned())
-            })?;
+        let dry = reclaim_abandoned_staging_dirs_at(root.path(), true, twenty_five_hours, |_| {
+            Err("dry run must not invoke the mutation callback".to_owned())
+        })?;
         assert_eq!(dry.reclaimed_count, 3);
         assert_eq!(dry.reclaimed_bytes, payload.len() as u64);
         assert!(abandoned_empty.exists());
@@ -1236,15 +1258,11 @@ mod tests {
         // a partial model or an empty directory itself.
         let quarantine = root.path().join("quarantine");
         std::fs::create_dir(&quarantine).map_err(|error| error.to_string())?;
-        let real = reclaim_abandoned_staging_dirs_at(
-            root.path(),
-            false,
-            twenty_five_hours,
-            |entry| {
+        let real =
+            reclaim_abandoned_staging_dirs_at(root.path(), false, twenty_five_hours, |entry| {
                 std::fs::rename(&entry.path, quarantine.join(&entry.dir_name))
                     .map_err(|error| error.to_string())
-            },
-        )?;
+            })?;
         assert_eq!(real.reclaimed_count, 3);
         assert_eq!(real.reclaimed_bytes, payload.len() as u64);
         assert_eq!(real.failed_count, 0);
