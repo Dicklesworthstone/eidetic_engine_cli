@@ -4462,3 +4462,65 @@ authenticated typed carrier, verification against the actual restored
 projection, and explicit handling of redaction and legacy archives. Preserve
 negative source evidence and test create/verify/restore/reverify before claiming
 the gap closed. No partial recovery-format change was made in this pass.
+
+### 23.7 Pack lifecycle and selection proof — 2026-11-23
+
+`ee pack --include-tombstoned` now returns explicitly requested historical
+matches after the live index is rebuilt. The direct, build, and legacy
+query-file routes pass the option to the same pack builder. The builder
+reads omitted tombstones from its pinned source snapshot and runs the
+existing revision, validity, scope, and quality admission.
+
+The pinned standalone build at `e07bf74e3` ran all three routes against
+unpublished, healthy empty, and healthy mixed index states. The checks
+required the exact live and tombstoned IDs, default exclusion, lifecycle
+timestamps, and provenance. The executable SHA-256 was
+`62c9d5c9e602f3c4287180453f2e4b9ea9aaf7f4e63771c321b15c102af3c6b0`.
+The same binary reproduced the separate standalone search omission on
+that mixed index, now tracked in `.92`.
+
+`.90` closed on the executable evidence. Earlier runtime runs at
+`a6cd1cd44` supplied 27 passing controls across temporal validity, decision
+identity, recency, lexical cutoff ties, fallback admission, and hook status.
+The first tombstone unit stopped at an incorrect setup assertion. The
+corrected fixture verifies that a successful empty publication reports
+`NoDocuments` and writes a genuine empty generation. Its first remote
+retry exhausted the worker's build filesystem before execution, so the
+fixture remains in the test-gate backlog.
+
+#### Remaining qualification
+
+- [x] Execute the lexical cross-process selection arm against the exact
+  standalone build. The fixture produced a 20-way lexical tie. Twelve live
+  invocations and four concurrent reads agreed on one decision vector.
+  Twelve explicit-reference invocations agreed on one vector. Each vector
+  includes the ordered selected IDs, scores, explanations, omissions,
+  provenance, pack hash, and rendered text. Nine items were selected and
+  twelve omitted. The expiry control changed selection and identity at the
+  validity boundary, and the store bytes and index generation remained
+  stable during read-only retrieval.
+- [ ] Complete `.91` with verified hybrid retrieval and release-stage
+  registration after the CLI edit-scope collision clears.
+- [x] Run the `.80` reinstall cycle on the standalone build for Claude Code
+  and Codex. Each status command reported four duplicate events, each
+  with two EE commands. Installation preserved all four custom hooks per
+  harness. A repeat install left the bytes unchanged, and undo restored
+  the original bytes exactly. Findings carry event names and repair
+  commands. Duplicate totals currently appear in message text.
+- [ ] Finish `.80` with machine-readable per-event duplicate counts and
+  the full release-stage audit.
+- [ ] Qualify `.88` with exact-candidate real CASS, evolved authenticated
+  restore, admission parity, write-cost slope, and generation retention.
+- [ ] Fix `.92` on the direct search surface. The known-red fixture rebuilds
+  a mixed index and checks the exact retired docId alongside the live one.
+- [ ] Complete `.75` with the corrected fixture verdict, existing
+  formatting debt, and the remaining suite at one source revision.
+- [ ] Qualify the embedder upgrade in `bd-xayfm` with measured parity. On
+  identical admitted local model bytes, `ee model fetch embedding-default`
+  minted a receipt with no download and reduced median preparation from
+  359.29 to 136.05 ms across four fresh processes per arm. The tokenizer
+  cache first appears in a crate release that also changes the shared
+  Asupersync version. Qualify the matching stack or a compatible backport
+  with multilingual token parity and bit-identical vectors.
+- [ ] Run `.89` and the full `.76` candidate capsule under DSR after their
+  remaining prerequisites earn execution verdicts.
