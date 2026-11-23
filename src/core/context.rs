@@ -10839,7 +10839,11 @@ fn context_effective_config_policy(
             hash_labeled_u64(&mut hasher, label, u64::from(weight));
         }
     }
-    hash_context_filter_policy(&mut hasher, filters);
+    hash_context_filter_policy(
+        &mut hasher,
+        filters,
+        context_validity_reference_time(options, filters),
+    );
     finalize_blake3(hasher)
 }
 
@@ -10861,7 +10865,11 @@ fn hash_policy_string_set<'a>(
     }
 }
 
-fn hash_context_filter_policy(hasher: &mut blake3::Hasher, filters: &crate::models::QueryFilters) {
+fn hash_context_filter_policy(
+    hasher: &mut blake3::Hasher,
+    filters: &crate::models::QueryFilters,
+    reference_time: Option<DateTime<Utc>>,
+) {
     use crate::models::{FilterOperator, QueryTemporalValidityPosture};
     // All metadata predicates are conjunctive. Their grouping/order is inert.
     let mut predicates = BTreeSet::new();
@@ -10925,11 +10933,24 @@ fn hash_context_filter_policy(hasher: &mut blake3::Hasher, filters: &crate::mode
     for (label, value) in [
         ("temporal.after", filters.temporal.after),
         ("temporal.before", filters.temporal.before),
-        ("temporal.as_of", filters.temporal.as_of),
     ] {
         let value = value.map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
         hash_labeled_optional_bytes(hasher, label, value.as_deref().map(str::as_bytes));
     }
+    // A row cutoff that uses the lifecycle clock already gets its instant from
+    // referenceTime. A query may also supply a separate row cutoff or no cutoff.
+    let row_cutoff = filters.temporal.as_of.map(|cutoff| {
+        if Some(cutoff) == reference_time {
+            "referenceTime".to_owned()
+        } else {
+            cutoff.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+        }
+    });
+    hash_labeled_optional_bytes(
+        hasher,
+        "temporal.as_of",
+        row_cutoff.as_deref().map(str::as_bytes),
+    );
     let validity = match filters
         .temporal
         .validity

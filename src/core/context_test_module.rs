@@ -14880,6 +14880,18 @@ pub fn unrelated_context() -> u64 {{
             );
             assert_ne!(original.composite_hash, changed.composite_hash, "{name}");
         }
+        let mut independent_cutoff = options.clone();
+        independent_cutoff.as_of = Some(query_time("2026-05-01T00:00:01Z"));
+        independent_cutoff.filters.temporal.as_of = Some(query_time("2026-05-01T00:00:00.123Z"));
+        let first_cutoff = hash(&independent_cutoff);
+        independent_cutoff.filters.temporal.as_of = Some(query_time("2026-05-01T00:00:00.124Z"));
+        let second_cutoff = hash(&independent_cutoff);
+        assert_eq!(
+            first_cutoff
+                .digests
+                .differing_components(&second_cutoff.digests),
+            ["effectiveConfig"]
+        );
         // The published diagnostic remains an opaque digest, never raw filters.
         request.effective_config_policy = Some("private-filter-value".to_owned());
         let components = super::compute_pack_hash_components(
