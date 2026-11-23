@@ -4610,3 +4610,64 @@ malformed populations, scope/version/status changes, missing chunks, unsigned
 carriers, and stale family signatures, plus redacted-ID and legacy positives.
 These tests are also unexecuted here; the pinned verification attempt timed out
 during dependency materialization before Cargo or a remote worker ran.
+
+### 23.9 Atomic imports and current authority checks — 2026-11-23
+
+This implementation pass read the comprehensive plan and active Beads before
+prioritizing data integrity, usable recovery, and the remaining structured
+hook audit gap. It adds source fixes and regression coverage; it does not
+supply the executable evidence needed to close the acceptance Beads.
+
+- **Atomic playbook import.** Preview and apply now validate the same complete
+  candidate plan. Apply checks duplicates against the entire destination
+  population, including rules beyond the first 1,000-row display page, and
+  commits the workspace registration, rules, tags, audits, and durable index
+  jobs in one writer-fenced transaction. A later storage error leaves no
+  committed prefix. The existing index publisher runs once after the batch
+  commits; publication failures remain visible in JSON, human output, and
+  per-rule decisions while durable jobs remain retryable. Tests cover
+  invalid later input, a real later primary-key failure, missing workspace
+  registration, large-store deduplication, immediate search, duplicate-only
+  retries, and a real publication refusal. No throughput claim is made.
+- **Quarantine release revalidates current admission** (`43e0f811`).
+  Release checks native ownership and live evidence/session admission after
+  winning the pending review claim, inside the same transaction as accepted
+  feedback and learning. Refusal rolls back the claim and all effects.
+  Preview shares validation; rejection and accepted-receipt replay remain
+  available. A matching typed learning envelope preserves external experiment
+  support but cannot override the ownership of an existing native candidate.
+  Regressions cover withdrawn evidence, content and workspace drift,
+  invalidation at the claim boundary, and receipt replay.
+- **Redacted native rules require fresh review** (`e22c5ace`, supporting
+  `.88`). Newly captured backups turn changed live instructions or scope
+  into authenticated unprotected drafts, cap trust without raising lower
+  classes, and clear prior positive validation authority. Negative history,
+  applied feedback markers, source links, tags, and identities remain.
+  Unchanged and retired states stay intact. Five tests cover the trust and
+  lifecycle matrix, scope-only changes, truncation, two recovery generations,
+  and a late attempt to restore validated/protected authority. Older archives
+  lack enough authenticated information to retroclassify prior redaction.
+- **Machine-readable hook counts** (`505de530`, supporting `.80`).
+  Harness-install v2 reports managed, legacy, total and extra EE commands per
+  event, plus aggregate duplicate counts. Malformed or unreadable settings
+  report unavailable counts, while confirmed absence reports zero. Custom
+  hook ownership stays intact. The registry, schema, agent recipes, docs,
+  golden contract and shell schema assertions use v2; the v1 schema remains
+  as historical documentation.
+
+Independent source/API reviews and whitespace checks passed. Hook schema
+metaschema validation, relative-reference resolution, count-contract controls,
+registry/reference consistency and shell syntax checks passed. The degraded
+catalog was regenerated from 630 fixtures and its fingerprints checked.
+Rust compilation, formatting, behavioral tests and E2E execution remain
+unrun: Cargo, rustfmt, RCH and DSR are unavailable, and the workspace also
+experienced full storage and transport interruptions. No Actions workload
+was invoked and no behavioral Bead was closed.
+
+The next executable checks are the new `core::rule::tests::playbook_import_`
+and `core::outcome::tests::quarantine_release_rechecks_` controls,
+`core::backup::history_recovery_tests::rule_redaction_recovery`, existing
+backup compatibility tests, and `harness_hook_install_audit`. The full
+`.80` release audit, `.88` evolved mixed-family recovery/scale/retention,
+`.75` exact-source suite, and `.79` paired daemon measurement still require
+their recorded execution evidence before `.89` and `.76` qualification.

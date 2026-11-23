@@ -1131,14 +1131,16 @@ impl PlaybookImportReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
-        format!(
+        let mut output = format!(
             "{prefix}playbook import {}: imported={}, duplicates={}, skipped={}\n  source: {}\n",
             self.status,
             self.imported_count,
             self.duplicate_count,
             self.skipped_count,
             self.source_path
-        )
+        );
+        append_rule_degradations_human(&mut output, &self.degraded);
+        output
     }
 }
 
@@ -1447,6 +1449,31 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         &prepared.source_memory_ids,
     )?;
 
+    let mut report = connection
+        .with_transaction(|| insert_prepared_rule(&connection, &prepared))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to store procedural rule: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    apply_rule_index_convergence(
+        &connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+        options.database_path,
+        &report.rule_id,
+        &mut report.index_status,
+        &mut report.degraded,
+    );
+    Ok(report)
+}
+
+/// Insert the rule, audit and durable publication job under the caller's
+/// transaction. A playbook batch uses the same write contract as `rule add`,
+/// then converges the derived index once after the whole batch commits.
+fn insert_prepared_rule(
+    connection: &DbConnection,
+    prepared: &PreparedRuleAdd,
+) -> crate::db::Result<RuleAddReport> {
     let rule_id = prepared.rule_id.to_string();
     let audit_id = generate_audit_id();
     let index_job_id = generate_search_index_job_id();
@@ -1464,57 +1491,39 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         source_memory_ids: prepared.source_memory_ids.clone(),
         tags: prepared.tags.clone(),
     };
-    let audit_details = rule_add_audit_details(&rule_id, &input);
-    let index_input = CreateSearchIndexJobInput {
-        workspace_id: prepared.workspace_id.clone(),
-        job_type: SearchIndexJobType::SingleDocument,
-        document_source: Some("rule".to_owned()),
-        document_id: Some(rule_id.clone()),
-        documents_total: 1,
-    };
-
-    connection
-        .with_transaction(|| {
-            connection.insert_procedural_rule(&rule_id, &input)?;
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(input.workspace_id.clone()),
-                    actor: prepared
-                        .actor
-                        .clone()
-                        .or_else(|| Some("ee rule add".to_owned())),
-                    action: audit_actions::RULE_CREATE.to_owned(),
-                    target_type: Some("rule".to_owned()),
-                    target_id: Some(rule_id.clone()),
-                    details: Some(audit_details.clone()),
-                },
-            )?;
-            connection.insert_search_index_job(&index_job_id, &index_input)
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to store procedural rule: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-
-    let mut report = rule_add_report(
-        &prepared,
+    connection.insert_procedural_rule(&rule_id, &input)?;
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(input.workspace_id.clone()),
+            actor: prepared
+                .actor
+                .clone()
+                .or_else(|| Some("ee rule add".to_owned())),
+            action: audit_actions::RULE_CREATE.to_owned(),
+            target_type: Some("rule".to_owned()),
+            target_id: Some(rule_id.clone()),
+            details: Some(rule_add_audit_details(&rule_id, &input)),
+        },
+    )?;
+    connection.insert_search_index_job(
+        &index_job_id,
+        &CreateSearchIndexJobInput {
+            workspace_id: prepared.workspace_id.clone(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("rule".to_owned()),
+            document_id: Some(rule_id),
+            documents_total: 1,
+        },
+    )?;
+    Ok(rule_add_report(
+        prepared,
         "stored",
         true,
         Some(audit_id),
         Some(index_job_id),
         true,
-    );
-    apply_rule_index_convergence(
-        &connection,
-        &prepared.workspace_id,
-        &prepared.workspace_path,
-        options.database_path,
-        &rule_id,
-        &mut report.index_status,
-        &mut report.degraded,
-    );
-    Ok(report)
+    ))
 }
 
 /// List procedural rules for the selected workspace.
@@ -2495,130 +2504,85 @@ pub fn import_playbook(
             ),
         })?;
     validate_playbook_document(&document)?;
-    let existing = load_playbook_snapshot(
-        &mut prepared,
-        options.workspace_path,
-        true,
-        MAX_RULE_LIST_LIMIT,
-        0,
-    )?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let auth_state =
         playbook_auth_state(&document, &prepared.workspace_path, &prepared.workspace_id)?;
-    let mut existing_contents = existing
-        .rules
-        .iter()
-        .map(|rule| normalize_rule_text(&rule.content))
-        .collect::<BTreeSet<_>>();
     let actor = options
         .actor
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("ee playbook import");
-    if !options.dry_run {
-        preflight_playbook_import_candidates(
+
+    let plan = if options.dry_run {
+        prepare_playbook_import_candidates(
+            &connection,
             &document,
             &auth_state,
             &prepared,
-            &existing_contents,
             actor,
-        )?;
-    }
-
-    let mut imported_count = 0_usize;
-    let mut duplicate_count = 0_usize;
-    let mut skipped_count = 0_usize;
-    let mut downgraded_count = 0_usize;
-    let mut decisions = Vec::new();
-
-    for rule in &document.rules {
-        let content_hash = hash_str(&rule.content);
-        let mut issue_codes = Vec::new();
-        let normalized = normalize_rule_text(&rule.content);
-        if existing_contents.contains(&normalized) {
-            duplicate_count += 1;
-            decisions.push(PlaybookImportDecision {
-                source_rule_id: rule.source_rule_id.clone(),
-                content_hash,
-                status: "duplicate".to_owned(),
-                imported_rule_id: None,
-                audit_id: None,
-                index_job_id: None,
-                issue_codes,
-            });
-            continue;
+        )?
+    } else {
+        // Deduplication and writes share one writer-fenced snapshot. A second
+        // importer cannot admit the same rules between the check and commit.
+        connection
+            .with_transaction_error(|| {
+                let plan = prepare_playbook_import_candidates(
+                    &connection,
+                    &document,
+                    &auth_state,
+                    &prepared,
+                    actor,
+                )
+                .map_err(PlaybookImportError::Invalid)?;
+                persist_playbook_import_plan(
+                    &connection,
+                    &mut prepared,
+                    options.workspace_path,
+                    plan,
+                )
+            })
+            .map_err(PlaybookImportError::into_domain_error)?
+    };
+    let PlaybookImportPlan {
+        mut decisions,
+        downgraded_count,
+        ..
+    } = plan;
+    let imported_count = decisions
+        .iter()
+        .filter(|decision| decision.status == "imported")
+        .count();
+    let duplicate_count = decisions
+        .iter()
+        .filter(|decision| decision.status == "duplicate")
+        .count();
+    let skipped_count = decisions
+        .iter()
+        .filter(|decision| decision.status == "skipped")
+        .count();
+    let mut degraded = Vec::new();
+    if let Some(rule_id) = decisions
+        .iter()
+        .find_map(|decision| decision.imported_rule_id.as_deref())
+    {
+        let mut index_status = "queued".to_owned();
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            Some(&prepared.database_path),
+            rule_id,
+            &mut index_status,
+            &mut degraded,
+        );
+        if index_status != "indexed" {
+            for decision in &mut decisions {
+                if decision.status == "imported" {
+                    decision.issue_codes.push("rule_index_publish_failed".to_owned());
+                }
+            }
         }
-
-        let import_maturity = portable_import_maturity(rule, &mut issue_codes);
-        if import_maturity.is_none() {
-            skipped_count += 1;
-            decisions.push(PlaybookImportDecision {
-                source_rule_id: rule.source_rule_id.clone(),
-                content_hash,
-                status: "skipped".to_owned(),
-                imported_rule_id: None,
-                audit_id: None,
-                index_job_id: None,
-                issue_codes,
-            });
-            continue;
-        }
-        if issue_codes
-            .iter()
-            .any(|code| code == "validated_rule_imported_as_candidate")
-        {
-            downgraded_count += 1;
-        }
-        let maturity = import_maturity.unwrap_or(RuleMaturity::Candidate.as_str());
-
-        let effective_trust_class =
-            portable_import_trust_class(rule, &auth_state, &mut issue_codes);
-        if effective_trust_class != rule.trust_class {
-            downgraded_count += 1;
-        }
-
-        if options.dry_run {
-            existing_contents.insert(normalized);
-            decisions.push(PlaybookImportDecision {
-                source_rule_id: rule.source_rule_id.clone(),
-                content_hash,
-                status: "would_import".to_owned(),
-                imported_rule_id: None,
-                audit_id: None,
-                index_job_id: None,
-                issue_codes,
-            });
-            continue;
-        }
-
-        let add_options = RuleAddOptions {
-            workspace_path: &prepared.workspace_path,
-            database_path: Some(&prepared.database_path),
-            content: &rule.content,
-            scope: &rule.scope,
-            scope_pattern: rule.scope_pattern.as_deref(),
-            maturity,
-            confidence: Some(rule.confidence),
-            utility: rule.utility,
-            importance: rule.importance,
-            trust_class: effective_trust_class,
-            protected: rule.protected,
-            tags: &rule.tags,
-            source_memory_ids: &[],
-            dry_run: false,
-            actor: Some(actor),
-        };
-        let add_report = add_rule(&add_options)?;
-        existing_contents.insert(normalized);
-        imported_count += 1;
-        decisions.push(PlaybookImportDecision {
-            source_rule_id: rule.source_rule_id.clone(),
-            content_hash,
-            status: "imported".to_owned(),
-            imported_rule_id: Some(add_report.rule_id),
-            audit_id: add_report.audit_id,
-            index_job_id: add_report.index_job_id,
-            issue_codes,
-        });
     }
 
     let would_import_count = decisions
@@ -2638,7 +2602,6 @@ pub fn import_playbook(
     // Surface WHY human_explicit rules were capped (TC-D14): a store fault is
     // a high degradation of this response; a merely-unauthenticated artifact
     // degrades only when it actually cost a rule its trust class.
-    let mut degraded = Vec::new();
     let trust_was_capped = decisions.iter().any(|decision| {
         decision.issue_codes.iter().any(|code| {
             code == "playbook_trust_capped_unauthenticated"
@@ -2842,26 +2805,93 @@ fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(),
     Ok(())
 }
 
-fn preflight_playbook_import_candidates(
+struct PlaybookImportPlan {
+    decisions: Vec<PlaybookImportDecision>,
+    rules: Vec<(usize, PreparedRuleAdd)>,
+    downgraded_count: usize,
+}
+
+enum PlaybookImportError {
+    Invalid(DomainError),
+    Storage(crate::db::DbError),
+}
+
+impl From<crate::db::DbError> for PlaybookImportError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl PlaybookImportError {
+    fn into_domain_error(self) -> DomainError {
+        match self {
+            Self::Invalid(error) => error,
+            Self::Storage(error) => DomainError::Storage {
+                message: format!("Failed to store playbook rules: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            },
+        }
+    }
+}
+
+fn prepare_playbook_import_candidates(
+    connection: &DbConnection,
     document: &PlaybookPortableDocument,
     auth_state: &PlaybookAuthState,
     prepared: &PreparedRuleRead,
-    existing_contents: &BTreeSet<String>,
     actor: &str,
-) -> Result<(), DomainError> {
-    let mut seen_contents = existing_contents.clone();
+) -> Result<PlaybookImportPlan, DomainError> {
+    // The import's identity set is the complete destination population, not
+    // the first display page from `playbook list`.
+    let mut seen_contents = connection
+        .list_procedural_rules(&prepared.workspace_id, None, None, true)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect existing playbook rules: {error}"),
+            repair: Some("ee rule list --json".to_owned()),
+        })?
+        .into_iter()
+        .map(|rule| normalize_rule_text(&rule.content))
+        .collect::<BTreeSet<_>>();
+    let mut plan = PlaybookImportPlan {
+        decisions: Vec::with_capacity(document.rules.len()),
+        rules: Vec::new(),
+        downgraded_count: 0,
+    };
     for rule in &document.rules {
         let normalized = normalize_rule_text(&rule.content);
+        let mut decision = PlaybookImportDecision {
+            source_rule_id: rule.source_rule_id.clone(),
+            content_hash: hash_str(&rule.content),
+            status: "would_import".to_owned(),
+            imported_rule_id: None,
+            audit_id: None,
+            index_job_id: None,
+            issue_codes: Vec::new(),
+        };
         if seen_contents.contains(&normalized) {
+            decision.status = "duplicate".to_owned();
+            plan.decisions.push(decision);
             continue;
         }
 
-        let mut issue_codes = Vec::new();
-        let Some(maturity) = portable_import_maturity(rule, &mut issue_codes) else {
+        let Some(maturity) = portable_import_maturity(rule, &mut decision.issue_codes) else {
+            decision.status = "skipped".to_owned();
+            plan.decisions.push(decision);
             continue;
         };
-        let effective_trust_class = portable_import_trust_class(rule, auth_state, &mut issue_codes);
-        prepare_rule_add(&RuleAddOptions {
+        if decision
+            .issue_codes
+            .iter()
+            .any(|code| code == "validated_rule_imported_as_candidate")
+        {
+            plan.downgraded_count += 1;
+        }
+        let effective_trust_class =
+            portable_import_trust_class(rule, auth_state, &mut decision.issue_codes);
+        if effective_trust_class != rule.trust_class {
+            plan.downgraded_count += 1;
+        }
+        let mut candidate = prepare_rule_add(&RuleAddOptions {
             workspace_path: &prepared.workspace_path,
             database_path: Some(&prepared.database_path),
             content: &rule.content,
@@ -2889,9 +2919,45 @@ fn preflight_playbook_import_candidates(
                     .to_owned(),
             ),
         })?;
+        candidate.workspace_id.clone_from(&prepared.workspace_id);
+        plan.rules.push((plan.decisions.len(), candidate));
+        plan.decisions.push(decision);
         seen_contents.insert(normalized);
     }
-    Ok(())
+    Ok(plan)
+}
+
+/// The caller owns the transaction across the complete plan. In particular,
+/// a later rule, audit or queue failure must not leave a committed prefix.
+fn persist_playbook_import_plan(
+    connection: &DbConnection,
+    prepared: &mut PreparedRuleRead,
+    caller_path: &Path,
+    mut plan: PlaybookImportPlan,
+) -> Result<PlaybookImportPlan, PlaybookImportError> {
+    // Validation is complete before a missing workspace can be registered.
+    // Keep this row in the same transaction as every rule, audit and job so
+    // a later storage failure rolls back the entire imported destination.
+    if !plan.rules.is_empty() {
+        prepared.workspace_id = crate::core::workspace::ensure_bound_workspace(
+            connection,
+            &prepared.workspace_id,
+            &[prepared.workspace_path.as_path(), caller_path],
+        )
+        .map_err(PlaybookImportError::Invalid)?;
+        for (_, rule) in &mut plan.rules {
+            rule.workspace_id.clone_from(&prepared.workspace_id);
+        }
+    }
+    for (decision_index, rule) in &plan.rules {
+        let report = insert_prepared_rule(connection, rule)?;
+        let decision = &mut plan.decisions[*decision_index];
+        decision.status = "imported".to_owned();
+        decision.imported_rule_id = Some(report.rule_id);
+        decision.audit_id = report.audit_id;
+        decision.index_job_id = report.index_job_id;
+    }
+    Ok(plan)
 }
 
 fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
@@ -5939,6 +6005,382 @@ mod tests {
             .first()
             .map(|rule| rule.trust_class.clone())
             .ok_or_else(|| "expected one imported rule".to_owned())
+    }
+
+    fn portable_document_for_contents(
+        workspace_id: &str,
+        contents: &[&str],
+    ) -> PlaybookPortableDocument {
+        let mut document = human_explicit_portable_document(workspace_id);
+        let template = document.rules[0].clone();
+        document.rules = contents
+            .iter()
+            .map(|content| PlaybookPortableRule {
+                source_rule_id: Some(RuleId::now().to_string()),
+                content: (*content).to_owned(),
+                trust_class: TrustClass::AgentValidated.as_str().to_owned(),
+                ..template.clone()
+            })
+            .collect();
+        document.rule_count = document.rules.len();
+        document
+    }
+
+    #[test]
+    fn playbook_import_preview_and_apply_reject_invalid_later_rule_without_writes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&temp)?;
+        let document = portable_document_for_contents(
+            &workspace_id,
+            &["Run cargo fmt before publishing.", "   "],
+        );
+        let source_path = workspace_path.join("invalid-playbook.json");
+        fs::write(
+            &source_path,
+            serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
+        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            let result = import_playbook(&PlaybookImportOptions {
+                workspace_path: &workspace_path,
+                database_path: Some(&database_path),
+                source_path: &source_path,
+                dry_run,
+                actor: Some("test"),
+            });
+            ensure(
+                matches!(result, Err(DomainError::Import { .. })),
+                "preview and apply must both reject an invalid later rule",
+            )?;
+            ensure(
+                connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+                "validation failure must preserve all rules, audit rows and queued work",
+            )?;
+        }
+        ensure(
+            !workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR).exists(),
+            "validation must not start an index publication",
+        )
+    }
+
+    #[test]
+    fn playbook_import_registers_missing_workspace_only_for_valid_applied_batch() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let document = portable_document_for_contents(
+            &workspace_id,
+            &["Run cargo fmt before publishing.", "Run cargo test before publishing."],
+        );
+        let source_path = workspace_path.join("playbook-preview.json");
+        fs::write(
+            &source_path,
+            serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let preview = import_playbook(&PlaybookImportOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&database_path),
+            source_path: &source_path,
+            dry_run: true,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            preview.imported_count == 2 && !preview.durable_mutation,
+            "preview must admit valid rules without registering a workspace",
+        )?;
+        ensure(
+            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "preview must leave the unbound destination unchanged",
+        )?;
+
+        let empty_document = portable_document_for_contents(&workspace_id, &[]);
+        let empty = run_playbook_import(&workspace_path, &database_path, &empty_document)?;
+        ensure(
+            empty.imported_count == 0 && !empty.durable_mutation,
+            "an empty write plan must not register a workspace",
+        )?;
+        ensure(
+            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "an empty import must leave the unbound destination unchanged",
+        )?;
+
+        let mut invalid_document = document.clone();
+        invalid_document.rules[1].scope = RuleScope::Directory.as_str().to_owned();
+        invalid_document.rules[1].scope_pattern = None;
+        ensure(
+            run_playbook_import(&workspace_path, &database_path, &invalid_document).is_err(),
+            "an invalid later rule must reject before workspace registration",
+        )?;
+        ensure(
+            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "invalid input must not leave a workspace or committed prefix",
+        )?;
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.imported_count == 2
+                && report.durable_mutation
+                && report.workspace_id == workspace_id,
+            "a valid applied batch must register and import into its destination",
+        )?;
+        let workspaces = connection.list_workspaces().map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(&workspace_id, None, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            workspaces.len() == 1 && workspaces[0].id == workspace_id && rules.len() == 2,
+            "the registered workspace and complete batch must commit together",
+        )
+    }
+
+    #[test]
+    fn playbook_import_rolls_back_completed_prefix_on_later_storage_failure() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let document = portable_document_for_contents(
+            &workspace_id,
+            &["Run cargo fmt before publishing.", "Run cargo test before publishing."],
+        );
+        let mut prepared = PreparedRuleRead {
+            workspace_id,
+            workspace_path: workspace_path.clone(),
+            database_path: database_path.clone(),
+        };
+        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let result = connection.with_transaction_error(|| {
+            let mut plan = prepare_playbook_import_candidates(
+                &connection,
+                &document,
+                &PlaybookAuthState::Authenticated,
+                &prepared,
+                "test",
+            )
+            .map_err(PlaybookImportError::Invalid)?;
+            // A real primary-key violation after the first rule, its tags,
+            // audit and durable index job have all been inserted.
+            plan.rules[1].1.rule_id = plan.rules[0].1.rule_id.clone();
+            persist_playbook_import_plan(&connection, &mut prepared, &workspace_path, plan)
+        });
+        ensure(result.is_err(), "the second insert must fail")?;
+        connection.close().map_err(|error| error.to_string())?;
+        let reopened = open_existing_database(&database_path).map_err(|error| error.message())?;
+        ensure(
+            reopened.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "reopening must see no workspace, rules, junctions, audits or jobs from the failed batch",
+        )?;
+        ensure(
+            !workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR).exists(),
+            "a rolled-back import must never publish derived state",
+        )
+    }
+
+    #[test]
+    fn playbook_import_deduplicates_beyond_the_display_page() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&temp)?;
+        let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
+        let retained = "zzzz retained release rule beyond the first display page";
+        connection
+            .with_transaction(|| {
+                for index in 0..=MAX_RULE_LIST_LIMIT {
+                    connection.insert_procedural_rule(
+                        &RuleId::now().to_string(),
+                        &CreateProceduralRuleInput {
+                            workspace_id: workspace_id.clone(),
+                            content: if index == MAX_RULE_LIST_LIMIT {
+                                retained.to_owned()
+                            } else {
+                                format!("Existing release rule {index:04}")
+                            },
+                            confidence: 0.8,
+                            utility: 0.5,
+                            importance: 0.6,
+                            trust_class: TrustClass::AgentValidated.as_str().to_owned(),
+                            scope: RuleScope::Workspace.as_str().to_owned(),
+                            scope_pattern: None,
+                            maturity: RuleMaturity::Candidate.as_str().to_owned(),
+                            protected: false,
+                            source_memory_ids: Vec::new(),
+                            tags: Vec::new(),
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let document = portable_document_for_contents(&workspace_id, &[retained]);
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.duplicate_count == 1 && report.imported_count == 0 && !report.durable_mutation,
+            "a rule beyond the first 1,000 rows must remain a duplicate",
+        )?;
+        ensure(
+            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "duplicate-only imports must leave the complete destination unchanged",
+        )
+    }
+
+    #[test]
+    fn playbook_import_batch_is_searchable_and_duplicate_retry_is_read_only() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&temp)?;
+        let document = portable_document_for_contents(
+            &workspace_id,
+            &[
+                "Batchpublication run cargo fmt before release.",
+                "Batchpublication run cargo test before release.",
+                "Batchpublication inspect the version before release.",
+                "Batchpublication run cargo fmt before release.",
+            ],
+        );
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(report.imported_count == 3 && report.duplicate_count == 1, "batch decisions")?;
+        ensure(
+            report.degraded.is_empty(),
+            "a healthy batch must publish without a degradation",
+        )?;
+        let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            jobs.len() == 3 && jobs.iter().all(|job| job.status == "completed"),
+            "every imported rule must have completed durable publication work",
+        )?;
+        let status = crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+        })
+        .map_err(|error| format!("{error:?}"))?;
+        ensure(
+            status.health == crate::core::index::IndexHealth::Ready
+                && status.db_generation.is_some()
+                && status.db_generation == status.index_generation,
+            "one final publication must cover the complete committed batch",
+        )?;
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: None,
+                query: "Batchpublication".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        for decision in &report.decisions {
+            if let Some(id) = &decision.imported_rule_id {
+                ensure(
+                    search.results.iter().any(|hit| &hit.doc_id == id),
+                    "immediate search must include every imported native rule",
+                )?;
+                ensure(
+                    decision.audit_id.is_some() && decision.index_job_id.is_some(),
+                    "every imported rule must retain its audit and queue receipt",
+                )?;
+            }
+        }
+        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let retried = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            retried.imported_count == 0 && retried.duplicate_count == document.rules.len(),
+            "retrying the batch must not create duplicate rules",
+        )?;
+        ensure(
+            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            "a duplicate-only retry must not publish or append audit/queue rows",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playbook_import_preserves_publication_failure_and_retryable_batch() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&temp)?;
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        let index_dir = workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let blocked_target = workspace_path.join(".ee").join("blocked-index");
+        fs::create_dir(&blocked_target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&blocked_target, &index_dir)
+            .map_err(|error| error.to_string())?;
+        let document = portable_document_for_contents(
+            &workspace_id,
+            &["Keep first publication rule durable.", "Keep second publication rule durable."],
+        );
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.imported_count == 2 && report.durable_mutation,
+            "publication failure must not revoke committed rules",
+        )?;
+        let expected_repair = rule_index_repair_command(&workspace_path, Some(&database_path));
+        ensure(
+            report.degraded.iter().any(|entry| {
+                entry.code == "rule_index_publish_failed" && entry.repair == expected_repair
+            }),
+            "the import must expose the shared publisher's failure and exact-source repair",
+        )?;
+        ensure(
+            report.decisions.iter().all(|decision| {
+                decision.issue_codes.iter().any(|code| code == "rule_index_publish_failed")
+            }),
+            "every imported rule must report incomplete publication",
+        )?;
+        let json: serde_json::Value =
+            serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
+        ensure(
+            json["degraded"].as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| entry["code"] == "rule_index_publish_failed")
+            }),
+            "JSON must not discard publication warnings",
+        )?;
+        let human = report.human_summary();
+        ensure(
+            human.contains("rule_index_publish_failed") && human.contains(&expected_repair),
+            "human output must carry the same warning and repair",
+        )?;
+        let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
+        let rules = connection
+            .list_procedural_rules(&workspace_id, None, None, true)
+            .map_err(|error| error.to_string())?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(rules.len() == 2 && jobs.len() == 2, "rules and jobs remain durable")?;
+        ensure(
+            jobs.iter().all(|job| matches!(job.status.as_str(), "pending" | "failed")),
+            "the complete batch must remain retryable",
+        )
     }
 
     #[test]
