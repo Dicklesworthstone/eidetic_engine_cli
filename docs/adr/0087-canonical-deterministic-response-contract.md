@@ -237,8 +237,15 @@ example, a workspace can set:
 anchor_match_bias_cap = 0.02
 ```
 
-The policy digest binds their resolved f32 bits and a versioned algorithm tag,
-rather than config file bytes, Debug formatting, or inactive controls.
+The policy digest binds their resolved f32 bits and a versioned algorithm tag.
+It also binds the recency clock policy. Recency age is the nonnegative distance
+between the source creation minute and the scoring reference minute, both UTC
+minutes since the Unix epoch. Source rows in the same minute therefore receive
+the same recency multiplier. Validity, feedback and historical cutoffs retain
+their original decision-instant precision. Search exposes the minute in
+`metadata.qualityScoring.recencyReferenceUnixMinute` and pack JSON reports it in
+`data.request.recencyReferenceUnixMinute`. For wall-clock packs the minute is
+diagnostic. The selected outcome carries any resulting identity change.
 
 Pack candidates use the weighted ranking divided by a common bound from
 the active scope/maturity coefficients plus the anchor cap when the query has

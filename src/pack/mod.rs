@@ -4935,6 +4935,7 @@ impl ContextResponse {
                 command: PACK_COMMAND,
                 embed_backend: EmbedBackend::HashFallback,
                 request,
+                recency_reference_unix_minute: None,
                 pack,
                 agent_profile: None,
                 bead_affinity: None,
@@ -5000,6 +5001,10 @@ impl ContextResponse {
                 command,
                 embed_backend,
                 request: request.clone(),
+                recency_reference_unix_minute: cached
+                    .as_ref()
+                    .and_then(|value| value.pointer("/data/request/recencyReferenceUnixMinute"))
+                    .and_then(serde_json::Value::as_i64),
                 pack: PackDraft {
                     query: request.query.clone(),
                     budget: request.budget,
@@ -5050,6 +5055,9 @@ pub struct ContextResponseData {
     pub command: &'static str,
     pub embed_backend: EmbedBackend,
     pub request: ContextRequest,
+    /// UTC epoch minute used for recency. Live pack identity binds the
+    /// selected outcome so a new minute can still reproduce the same hash.
+    pub(crate) recency_reference_unix_minute: Option<i64>,
     pub pack: PackDraft,
     pub agent_profile: Option<serde_json::Value>,
     /// Optional bead-aware ranking explanation; omitted from JSON when absent.

@@ -80,7 +80,7 @@ durable learned memory (see [CASS Integration](#cass-integration)).
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud service or paid LLM API is required. Embeddings run locally through Frankensearch, with one-time pinned model download and offline hash fallback |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
-| **Deterministic** | Same DB + indexes + config + query → identical pack hash |
+| **Deterministic** | Same decision inputs → identical pack hash and stable tie ordering |
 | **Cancellation-aware core** | Runtime-facing async APIs use Asupersync `&Cx` and `Outcome` |
 | **CLI first, daemon optional** | Every essential workflow runs as a one-shot. No background process required |
 | **Auditable curation** | Promotions, consolidations, and tombstones produce audit entries; no silent rewrites |
@@ -239,7 +239,13 @@ for supervised foreground maintenance and write-owner work; bounded `job` and
 
 ### 4. Deterministic By Default
 
-Given the same database, indexes, config, profile, budget, seed, and query, the JSON output is byte-stable, ranking ties resolve deterministically, and context pack hashes reproduce exactly. Golden tests assert this.
+Given the same source and index snapshots, config, profile, budget, seed, query,
+and effective decision inputs, ranking ties resolve deterministically and pack
+hashes reproduce. Recency ranks memories by UTC creation minute and uses the
+selection minute reported as `data.request.recencyReferenceUnixMinute`. Live
+validity and feedback use the full decision instant and can change within that
+minute. Pass `--as-of` to pin the historical clock at millisecond precision.
+Serving metadata and elapsed timings can vary between otherwise equivalent runs.
 
 Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1` and is checkable via `ee verify proofs`.
 

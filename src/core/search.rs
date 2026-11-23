@@ -67,6 +67,7 @@ use crate::search::plan_cache::{
 use crate::search::scoring::{
     AnchorMatchCandidateSignals, RetrievalMaturity, SEARCH_SCORING_POLICY_V1,
     SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, anchor_match_score,
+    recency_age_days, recency_unix_minute,
 };
 use crate::search::{
     NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
@@ -1929,6 +1930,10 @@ struct PackSearchSnapshot {
 }
 
 impl PackSearchHandoff {
+    pub(crate) fn scoring_reference_time(&self) -> DateTime<Utc> {
+        self.snapshot.scoring_reference_time
+    }
+
     /// Read-only semantic packs admit only an explicit, validated local-model
     /// attestation. Never infer this capability from daemon readiness alone.
     pub(crate) fn has_cached_local_embedder(&self) -> bool {
@@ -2490,6 +2495,7 @@ impl SearchPerformanceTrace {
 pub struct ContextSearchReport {
     pub report: SearchReport,
     pub quality_scoring_policy: String,
+    pub(crate) scoring_reference_time: DateTime<Utc>,
     pub(crate) fusion_weights: SearchFusionWeights,
     /// Complete accepted feedback and calibration consumed by this source view.
     pub(crate) calibration_input_identity: Option<String>,
@@ -9992,6 +9998,7 @@ pub(crate) async fn run_context_search_with_prepared_generation(
     Ok(ContextSearchReport {
         report: run.report,
         quality_scoring_policy: run.quality_scoring_policy,
+        scoring_reference_time: run.scoring_reference_time,
         fusion_weights: run.fusion_weights,
         calibration_input_identity: run.pack_calibration_identity,
         preloaded_memories,
@@ -11928,7 +11935,10 @@ async fn run_search_inner_with_performance(
             trace.record_elapsed("search::relevanceFloor", relevance_floor_start);
             let tombstone_start = Instant::now();
             let above_floor = apply_tombstone_visibility_collecting(
-                options,
+                &SearchOptions {
+                    as_of: Some(scoring_reference_time),
+                    ..options.clone()
+                },
                 above_floor,
                 &mut degraded,
                 read_connection,
@@ -14846,6 +14856,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
     };
     let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
     let policy = config.policy_hash();
+    let reference_unix_minute = recency_unix_minute(reference_time);
     let query_anchors = crate::search::query::query_anchor_match_context(&options.query);
     // A plain-prose query cannot receive an anchor boost. Preserve its existing
     // pack projection, while anchor-bearing queries share a bound across lanes.
@@ -14978,13 +14989,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
         } else {
             entity_type = "other";
         }
-        let age_days = created_at.map(|created| {
-            (reference_time
-                .signed_duration_since(created)
-                .num_milliseconds()
-                .max(0) as f64
-                / 86_400_000.0) as f32
-        });
+        let age_days = created_at.map(|created| recency_age_days(created, reference_unix_minute));
         signals.age_days = age_days;
         signals.confidence = confidence.unwrap_or(1.0);
         signals.utility_score = utility.unwrap_or(1.0);
@@ -14998,6 +15003,7 @@ pub(crate) fn apply_quality_scoring_with_feedback(
             "entityType": entity_type,
             "rankingBound": ranking_bound,
             "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            "recencyReferenceUnixMinute": reference_unix_minute,
             "components": components,
             "observedSignals": {
                 "recency": age_days.is_some(), "confidence": confidence.is_some(),

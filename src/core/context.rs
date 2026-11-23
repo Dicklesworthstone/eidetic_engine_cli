@@ -2983,7 +2983,7 @@ async fn run_context_pack_attempt(
     trace.record_elapsed("requestValidate", request_start);
     let query_exclusions = QueryExclusions::from_query(&request.query);
 
-    let effective_filters = context_effective_filters(options);
+    let mut effective_filters = context_effective_filters(options);
 
     if effective_filters.redaction.requests_bypass() {
         return Err(ContextPackError::PolicyDenied(
@@ -3314,7 +3314,9 @@ async fn run_context_pack_attempt(
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_calibration_identity = None;
     let mut search_fusion_weights = None;
+    let decision_time;
     let mut search_report = if let Some(mut handoff) = remote_search.take() {
+        decision_time = handoff.scoring_reference_time();
         search_preloaded_memories = handoff.revalidate_with_feedback(
             &search_options,
             read_connection,
@@ -3350,6 +3352,7 @@ async fn run_context_pack_attempt(
         .await
         {
             Ok(context_search) => {
+                decision_time = context_search.scoring_reference_time;
                 request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
                 search_fusion_weights = Some(context_search.fusion_weights);
                 search_calibration_identity = context_search.calibration_input_identity;
@@ -3357,11 +3360,14 @@ async fn run_context_pack_attempt(
                 trace.record_search_subspans(context_search.performance);
                 context_search.report
             }
-            Err(SearchError::NoIndex) => missing_index_search_report(
-                &request.query,
-                request.candidate_pool,
-                runtime_profile.clone(),
-            ),
+            Err(SearchError::NoIndex) => {
+                decision_time = search_options.as_of.unwrap_or_else(Utc::now);
+                missing_index_search_report(
+                    &request.query,
+                    request.candidate_pool,
+                    runtime_profile.clone(),
+                )
+            }
             Err(SearchError::Cancelled(reason)) => {
                 return Err(context_pack_cancellation_error(reason));
             }
@@ -3407,8 +3413,12 @@ async fn run_context_pack_attempt(
     ) {
         // The user-global lane is a separate store with its own index; a
         // workspace index that cannot serve this request must not hide it.
+        let fallback_options = SearchOptions {
+            as_of: Some(decision_time),
+            ..search_options.clone()
+        };
         let (global_memories, global_feedback) = global_store_fallback_memories(
-            &search_options,
+            &fallback_options,
             &mut degraded,
             &mut search_preloaded_memories,
         )?;
@@ -3418,7 +3428,7 @@ async fn run_context_pack_attempt(
         search_fusion_weights = None;
         let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
             read_connection,
-            &search_options,
+            &fallback_options,
             global_memories,
             global_feedback.as_ref(),
             &mut degraded,
@@ -3657,6 +3667,11 @@ async fn run_context_pack_attempt(
     } else {
         None
     };
+    // Bind the live instant only after hashing request policy and checking L2
+    // eligibility. The requested temporal policy has no implicit timestamp.
+    if let Some(validity) = effective_filters.temporal.validity.as_mut() {
+        validity.reference_time = Some(decision_time);
+    }
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -3680,7 +3695,7 @@ async fn run_context_pack_attempt(
         &mut degraded,
         Some(&search_preloaded_memories),
         &request.task_paths,
-        request.reference_time,
+        Some(decision_time),
         &mut direct_rule_hits,
     );
     if let Some(probe) = control.why_not {
@@ -3759,7 +3774,7 @@ async fn run_context_pack_attempt(
         options.include_tombstoned,
         &mut candidates,
         &mut degraded,
-        request.reference_time,
+        Some(decision_time),
     )?;
     candidate_metrics.subspans.graph_hints = graph_hint_start.elapsed();
     candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
@@ -3789,9 +3804,6 @@ async fn run_context_pack_attempt(
                 context_workspace_ids(read_connection, &options.workspace_path, &mut degraded)
                     .into_iter()
                     .collect::<BTreeSet<_>>();
-            let validity_reference_time =
-                context_validity_reference_time(options, &effective_filters)
-                    .unwrap_or_else(Utc::now);
             let mut focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
@@ -3799,7 +3811,7 @@ async fn run_context_pack_attempt(
                 options.include_tombstoned,
                 context_include_expired(options, &effective_filters),
                 context_include_future(options, &effective_filters),
-                validity_reference_time,
+                decision_time,
                 &focus_workspace_ids,
                 &effective_filters,
                 &mut degraded,
@@ -3842,7 +3854,7 @@ async fn run_context_pack_attempt(
                 quality_score_direct_memory_candidates(
                     read_connection,
                     &search_options,
-                    Some(validity_reference_time),
+                    Some(decision_time),
                     &focus_memories,
                     &mut focus_candidates,
                     "Passive-focus",
@@ -4015,19 +4027,17 @@ async fn run_context_pack_attempt(
         .saturating_add(instruction_omissions.len());
     policy_omissions.extend(instruction_omissions);
     if options.require_fresh_sentinels {
-        let reference_time =
-            context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         policy_omissions.extend(filter_candidates_by_required_fresh_sentinels(
             read_connection,
             &mut candidates,
-            reference_time,
+            decision_time,
             &mut degraded,
         )?);
         filter_native_rule_sources_by_fresh_sentinels(
             read_connection,
             &mut direct_rule_hits,
-            reference_time,
+            decision_time,
             &mut degraded,
         )?;
     }
@@ -4556,6 +4566,8 @@ async fn run_context_pack_attempt(
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     response.data.command = command;
     response.data.embed_backend = search_report.embed_backend;
+    response.data.recency_reference_unix_minute =
+        Some(crate::search::scoring::recency_unix_minute(decision_time));
     response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
     response.data.bead_affinity = bead_affinity;

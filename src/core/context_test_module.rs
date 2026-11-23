@@ -11766,7 +11766,7 @@ pub fn unrelated_context() -> u64 {{
                     trust_subclass: Some("test".to_owned()),
                     tags: vec!["release".to_owned()],
                     valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
-                    valid_to: Some("2099-01-01T00:00:00Z".to_owned()),
+                    valid_to: Some("2098-01-01T00:00:30.500Z".to_owned()),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -11971,6 +11971,30 @@ pub fn unrelated_context() -> u64 {{
         let same_millisecond = super::run_context_pack(&timed_options)
             .map_err(|error| format!("same-millisecond pack failed: {error:?}"))?;
         assert_eq!(first_timed.data.pack.hash, same_millisecond.data.pack.hash);
+
+        timed_options.as_of = Some(query_time("2098-01-01T00:00:30.501Z"));
+        let just_expired = super::run_context_pack(&timed_options)
+            .map_err(|error| format!("pack after expiry failed: {error:?}"))?;
+        assert!(first_timed.data.recency_reference_unix_minute.is_some());
+        assert_eq!(
+            first_timed.data.recency_reference_unix_minute,
+            just_expired.data.recency_reference_unix_minute
+        );
+        assert!(
+            !just_expired
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == current_memory_id)
+        );
+        let json = crate::output::render_context_response_json(&first_timed);
+        let json: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        assert_eq!(
+            json["data"]["request"]["recencyReferenceUnixMinute"].as_i64(),
+            first_timed.data.recency_reference_unix_minute
+        );
+        assert_ne!(first_timed.data.pack.hash, just_expired.data.pack.hash);
 
         let mut replay_options = base_options;
         replay_options.as_of = Some(query_time("2098-01-03T00:00:00Z"));
@@ -14481,6 +14505,26 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(policy, after_policy);
         assert_eq!(after[0].doc_id, weaker);
         assert_ne!(digest(&before), digest(&after));
+        options.limit = 1;
+        assert_eq!(run(&options)?.0[0].doc_id, weaker);
+
+        // With otherwise identical signals, millisecond differences between
+        // writes used to compete with the stable ID tie-breaker at the limit.
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET confidence = 1.0, created_at = CASE WHEN id = '{weaker}' \
+                 THEN '2026-05-01T10:00:00.001Z' ELSE '2026-05-01T10:00:00.990Z' END"
+            ))
+            .map_err(|error| error.to_string())?;
+        options.limit = 2;
+        options.as_of = Some(query_time("2026-05-01T10:50:00.001Z"));
+        let (first, _) = run(&options)?;
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].doc_id, weaker);
+        assert_eq!(first[0].ranking_score(), first[1].ranking_score());
+        options.as_of = Some(query_time("2026-05-01T10:50:59.999Z"));
+        let (later, _) = run(&options)?;
+        assert_eq!(digest(&first), digest(&later));
         options.limit = 1;
         assert_eq!(run(&options)?.0[0].doc_id, weaker);
         Ok(())

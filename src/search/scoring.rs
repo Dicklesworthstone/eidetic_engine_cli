@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::MemoryAnchorFreshnessState;
@@ -16,6 +17,17 @@ use crate::models::MemoryAnchorFreshnessState;
 /// candidates. Pack scores divide by the common maximum active multiplier.
 /// Unobserved optional signals remain neutral.
 pub const SEARCH_SCORING_POLICY_V1: &str = "ee.search.quality_scoring.v1";
+
+/// The UTC minute cohort used by the recency term. Feedback and validity
+/// still use the original reference instant.
+pub(crate) fn recency_unix_minute(instant: DateTime<Utc>) -> i64 {
+    instant.timestamp().div_euclid(60)
+}
+
+pub(crate) fn recency_age_days(created_at: DateTime<Utc>, reference_unix_minute: i64) -> f32 {
+    let age_minutes = (reference_unix_minute - recency_unix_minute(created_at)).max(0);
+    (age_minutes as f64 / 1_440.0) as f32
+}
 
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
@@ -187,6 +199,7 @@ impl SearchScoringConfig {
     pub fn policy_hash(self) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(SEARCH_SCORING_POLICY_V1.as_bytes());
+        hasher.update(b"\0recency_clock=utc_unix_minute_v1");
         for (name, value) in [
             ("recency_tau_days", self.recency_tau_days),
             ("confidence_floor", self.confidence_floor),
@@ -895,7 +908,7 @@ mod tests {
         DEFAULT_RECENCY_FLOOR, DEFAULT_RECENCY_TAU_DAYS, DEFAULT_STALE_ANCHOR_PENALTY,
         RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
         SpeedMode, anchor_match_score, bead_affinity_score, final_score,
-        freshness_drift_multiplier, stale_anchor_floor,
+        freshness_drift_multiplier, recency_age_days, recency_unix_minute, stale_anchor_floor,
     };
     use crate::models::MemoryAnchorFreshnessState;
 
@@ -904,6 +917,22 @@ mod tests {
             (actual - expected).abs() <= 0.000_01,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    #[test]
+    fn recency_cohort_ignores_subminute_timestamp_jitter_and_keeps_aging() {
+        use chrono::{DateTime, Utc};
+
+        let instant = |seconds, nanos| DateTime::<Utc>::from_timestamp(seconds, nanos).unwrap();
+        let early = instant(-60, 0);
+        let late = instant(-1, 999_999_999);
+        let cohort = recency_unix_minute(instant(120, 0));
+        assert_eq!(recency_unix_minute(early), -1);
+        assert_eq!(recency_unix_minute(late), -1);
+        assert_eq!(recency_unix_minute(instant(179, 999_999_999)), cohort);
+        assert_eq!(recency_age_days(early, cohort), recency_age_days(late, cohort));
+        assert!(recency_age_days(late, cohort + 1) > recency_age_days(late, cohort));
+        assert_eq!(recency_age_days(instant(180, 0), cohort), 0.0);
     }
 
     #[test]

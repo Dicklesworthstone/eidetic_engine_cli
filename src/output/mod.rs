@@ -3179,6 +3179,9 @@ pub fn render_context_response_json_with_options(
             request.field_str("profile", response.data.request.profile.as_str());
             request.field_u32("maxTokens", response.data.request.budget.max_tokens());
             request.field_u32("candidatePool", response.data.request.candidate_pool);
+            if let Some(minute) = response.data.recency_reference_unix_minute {
+                request.field_raw("recencyReferenceUnixMinute", &minute.to_string());
+            }
             if let Some(max_results) = response.data.request.max_results {
                 request.field_u32("maxResults", max_results);
             }

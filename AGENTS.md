@@ -482,9 +482,12 @@ Every module includes inline `#[cfg(test)]` unit tests alongside the implementat
 
 ### Determinism Rules
 
-- Given the same database, indexes, config, and query, JSON output must be stable.
+- Given the same source, index, and decision inputs, canonical JSON fields must
+  be stable. Serving diagnostics and elapsed timings can vary by invocation.
 - Ranking ties must be deterministic.
-- Context pack hashes must be reproducible.
+- Context pack hashes must be reproducible for the same selection inputs and
+  outcome. Recency uses UTC minute cohorts. Live validity and feedback retain
+  the full decision instant, and `--as-of` pins the historical clock.
 - Tests must use `LabRuntime` and a hash embedder (not real models) where applicable.
 
 ---
