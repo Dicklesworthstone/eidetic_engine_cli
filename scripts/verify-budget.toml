@@ -166,19 +166,9 @@
 # The moment green can also mean "this was excused", no consumer can tell a
 # stage that worked from a stage that was allowed not to.
 #
-# TWO stages declare a non-required requirement today, both declared
-# 2026-09-19:
-#   "Lexical Relevance Contract (tracked red)"  -> bd-reality-core-convergence-1azkt.11
-#       the pins themselves, red on purpose, documenting the relevance defect
-#   "Lexical Relevance Contract Harness Guard"  -> bd-iqg34
-#       red for an UNRELATED reason: the RCH target-dir layout puts the test
-#       binary outside <target>/debug/deps, so the harness cannot find it
-# Two reds, two causes, two owning beads -- kept separate so neither is read as
-# the other. That count is asserted by
-# `no_stage_is_declared_non_required_without_a_bead` in
-# tests/verification_drift_guard.rs, so introducing one is a deliberate,
-# reviewable act rather than a default anybody can drift into — and removing one
-# is equally deliberate, because the count has to move in the same commit.
+# All stages are required. If a stage's requirement changes, update the
+# count checked by `no_stage_is_declared_non_required_without_a_bead` in
+# tests/verification_drift_guard.rs in the same commit.
 # 601 -> 608 on 2026-10-11 (bd-g3obb). The added 7s is the MEASURED cost of the
 # new "Rustfmt Conformance" stage -- 7.17s, 7.32s, 7.06s on three consecutive
 # local runs -- and nothing else moved.

@@ -30858,7 +30858,10 @@ mod tests {
             sort_search_hits_by_score_order(&mut hits);
             assert_eq!(hits[0].doc_id, "mem_a");
             assert_eq!(hits[1].doc_id, "mem_b");
-            assert!(hits.iter().all(|hit| hit.score.to_bits() == 0.0_f32.to_bits()));
+            assert!(
+                hits.iter()
+                    .all(|hit| hit.score.to_bits() == 0.0_f32.to_bits())
+            );
             assert_eq!(
                 hits[0].fast_score.expect("negative zero").to_bits(),
                 (-0.0_f32).to_bits()

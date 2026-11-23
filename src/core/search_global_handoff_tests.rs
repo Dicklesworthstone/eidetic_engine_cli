@@ -75,7 +75,13 @@ fn global_handoff_tracks_absent_empty_unreturned_and_excluded_sources() {
     assert_eq!(populated.report.results.len(), 1);
     let unreturned = [&first, &second]
         .into_iter()
-        .find(|id| populated.report.results.iter().all(|hit| &hit.doc_id != *id))
+        .find(|id| {
+            populated
+                .report
+                .results
+                .iter()
+                .all(|hit| &hit.doc_id != *id)
+        })
         .unwrap();
     global
         .db
@@ -181,7 +187,10 @@ fn global_handoff_keeps_body_and_feedback_snapshot_through_rehydration() {
         .unwrap();
     let preloaded = handoff.revalidate_with_feedback(&options, &fixture.db, Some(&validated));
     assert_eq!(preloaded[&global_id].confidence, 1.0);
-    assert_eq!(serde_json::to_value(&handoff.report.results).unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(&handoff.report.results).unwrap(),
+        before
+    );
     let global_hit = handoff
         .report
         .results
@@ -292,12 +301,9 @@ fn swarm_pack_reuses_global_handoff_with_canonical_pack_and_no_writes() {
         PackSearchHandoff::from_value(serde_json::to_value(handoff).unwrap())
             .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))
     };
-    let remote = crate::core::context::run_context_pack_with_search_provider(
-        &options,
-        "pack",
-        &provider,
-    )
-    .unwrap();
+    let remote =
+        crate::core::context::run_context_pack_with_search_provider(&options, "pack", &provider)
+            .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
         !remote

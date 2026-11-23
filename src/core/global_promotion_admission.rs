@@ -622,7 +622,12 @@ mod duplicate_compatibility_tests {
         for (stored_commitment, sealed_at, revealed_at, verified) in [
             (commitment.as_str(), FROM, "PRIVATE-TWIN-REVEAL", 1),
             (commitment.as_str(), "PRIVATE-TWIN-SEAL", FROM, 1),
-            (commitment.as_str(), FROM, "2019-12-31T23:59:59.999999999Z", 1),
+            (
+                commitment.as_str(),
+                FROM,
+                "2019-12-31T23:59:59.999999999Z",
+                1,
+            ),
             (commitment.as_str(), FROM, FROM, 0),
             (invalid_commitment.as_str(), FROM, FROM, 1),
         ] {

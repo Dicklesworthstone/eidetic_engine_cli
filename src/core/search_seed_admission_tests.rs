@@ -201,7 +201,9 @@ fn public_similar_rejects_invalid_reveal_authority_before_index_work() -> TestRe
     ))
     .map_err(|error| error.to_string())?;
     assert_eq!(
-        resolve(&db, &options).map_err(|error| error.to_string())?.id,
+        resolve(&db, &options)
+            .map_err(|error| error.to_string())?
+            .id,
         MEMORY
     );
     assert_eq!(

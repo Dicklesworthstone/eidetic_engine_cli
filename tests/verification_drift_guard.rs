@@ -616,11 +616,8 @@ fn excused_stages_are_counted_and_never_reported_as_passed() {
 /// Absence of a `requirement` declaration means REQUIRED, and no stage may be
 /// non-required today without a bead owning it.
 ///
-/// One stage declares one as of 2026-09-19: "Lexical Relevance Contract
-/// (tracked red)", owned by bd-reality-core-convergence-1azkt.11. Asserting the
-/// exact count makes adding or removing a declaration a deliberate, reviewable
-/// act instead of a default somebody drifts into — and the tracked_red arm
-/// refuses a stage that claims known-red status without naming who owns it.
+/// All stages are required. Changing a requirement must also update the
+/// expected count. A `tracked_red` declaration must include an owning bead.
 ///
 /// Known gap, NOT closed here: this guard and
 /// `excused_stages_are_counted_and_never_reported_as_passed` both only inspect

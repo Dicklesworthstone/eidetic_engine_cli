@@ -14600,7 +14600,11 @@ mod tests {
         let permit = handle.pool.try_acquire().expect("retain a live worker");
         let worker_router = DaemonWriteRouter {
             runtime: Arc::clone(handle.write_runtime.as_ref().expect("hosted runtime")),
-            handle: handle.write_handle.as_ref().expect("hosted producer").clone(),
+            handle: handle
+                .write_handle
+                .as_ref()
+                .expect("hosted producer")
+                .clone(),
         };
         let first_result = handle
             .shutdown_with_drain_timeouts(Duration::from_millis(10), Duration::from_millis(10));

@@ -92,8 +92,7 @@ pub(super) fn capture(
 ) -> Option<GlobalPackSearchWitness> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.pack.global_source_witness.v1");
-    if !global_store_participates_in_scope(options.memory_scope)
-        || options.query.trim().is_empty()
+    if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
     {
         hasher.update(b"not_requested");
     } else {
@@ -101,7 +100,8 @@ pub(super) fn capture(
         let paths = if let Some((paths, _)) = admitted {
             paths
         } else {
-            resolved_paths = crate::core::global_store::default_global_store_paths_from_env().ok()?;
+            resolved_paths =
+                crate::core::global_store::default_global_store_paths_from_env().ok()?;
             &resolved_paths
         };
         let participating = policy.participate.unwrap_or(true);
@@ -191,14 +191,13 @@ pub(super) fn capture(
                 )?;
             }
         } else {
-            let inclusion = crate::core::global_store::resolve_global_inclusion(
-                &GlobalInclusionInput {
+            let inclusion =
+                crate::core::global_store::resolve_global_inclusion(&GlobalInclusionInput {
                     store_present: paths.database_path.try_exists().ok()?,
                     participating,
                     config_enabled: enabled,
                     no_global_flag: false,
-                },
-            );
+                });
             // Failure to inspect an enabled store is not proof of an empty
             // lane. Keep the handoff unusable and let canonical retrieval retry.
             if inclusion.included {
@@ -283,9 +282,8 @@ impl ValidatedGlobalPackSnapshot {
             .iter()
             .map(|memory| (memory.id.as_str(), memory))
             .collect::<BTreeMap<_, _>>();
-        let (global_hits, local_hits): (Vec<_>, Vec<_>) = std::mem::take(hits)
-            .into_iter()
-            .partition(|hit| {
+        let (global_hits, local_hits): (Vec<_>, Vec<_>) =
+            std::mem::take(hits).into_iter().partition(|hit| {
                 !self.local_memories.contains_key(&hit.doc_id)
                     && global_rows.contains_key(hit.doc_id.as_str())
             });

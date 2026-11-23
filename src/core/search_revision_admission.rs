@@ -1077,7 +1077,12 @@ mod seal_tests {
         // reveal still needs valid public evidence before it can release a body.
         for (stored_commitment, sealed_at, revealed_at, verified) in [
             (commitment.as_str(), TIME, "PRIVATE-REVEAL-CANARY", 1),
-            (commitment.as_str(), TIME, "2025-12-31T23:59:59.999999999Z", 1),
+            (
+                commitment.as_str(),
+                TIME,
+                "2025-12-31T23:59:59.999999999Z",
+                1,
+            ),
             (commitment.as_str(), TIME, TIME, 0),
             (commitment.as_str(), "PRIVATE-SEALED-AT-CANARY", TIME, 1),
             (invalid_commitment.as_str(), TIME, TIME, 1),
@@ -1130,9 +1135,7 @@ mod seal_tests {
             vec![HIDDEN, PUBLIC]
         );
         assert!(degraded.is_empty());
-        assert!(
-            seed_is_visible(&db, HIDDEN, instant(TIME)?).map_err(|error| error.to_string())?
-        );
+        assert!(seed_is_visible(&db, HIDDEN, instant(TIME)?).map_err(|error| error.to_string())?);
         assert_eq!(
             db.get_memory(HIDDEN).map_err(|error| error.to_string())?,
             before

@@ -9983,8 +9983,7 @@ where
     // reconciler returns before model preparation/publication when no work
     // remains, so a healthy replay only inspects the durable index posture.
     let mut index_status = "not_applicable".to_owned();
-    if !options.dry_run
-        && (stored_count > 0 || reinforced_count > 0 || already_recorded_count > 0)
+    if !options.dry_run && (stored_count > 0 || reinforced_count > 0 || already_recorded_count > 0)
     {
         let workspace_path = if options.database_path.is_some() {
             resolve_workspace_path(options.workspace_path, false)?
@@ -23099,18 +23098,18 @@ mod tests {
             }
             let options = upgrade_batch_options(&canonical, false);
 
-            let interrupted = remember_memory_batch_stdin_with_reconcile_hook(
-                &options,
-                &input,
-                |_, _| {
+            let interrupted =
+                remember_memory_batch_stdin_with_reconcile_hook(&options, &input, |_, _| {
                     Err(DomainError::Storage {
                         message: "interrupted before batch publication".to_owned(),
                         repair: None,
                     })
-                },
-            )
-            .expect_err("stop after source commits and before the final drain");
-            assert_eq!(interrupted.message(), "interrupted before batch publication");
+                })
+                .expect_err("stop after source commits and before the final drain");
+            assert_eq!(
+                interrupted.message(),
+                "interrupted before batch publication"
+            );
 
             let connection = open_upgrade_test_db(&canonical)?;
             let memories_before = connection
@@ -24164,7 +24163,8 @@ mod tests {
                 defer_index_processing: true,
                 ..RememberWriteControls::default()
             };
-            let write = |options: &RememberMemoryOptions<'_>, controls: &RememberWriteControls<'_>| {
+            let write = |options: &RememberMemoryOptions<'_>,
+                         controls: &RememberWriteControls<'_>| {
                 if global {
                     remember_global_memory_with_controls_at_paths(
                         options,
@@ -24225,8 +24225,8 @@ mod tests {
                     }
                     other => return Err(format!("unexpected replay control outcome: {other:?}")),
                 }
-                let connection =
-                    DbConnection::open_file(&seed.database_path).map_err(|error| error.to_string())?;
+                let connection = DbConnection::open_file(&seed.database_path)
+                    .map_err(|error| error.to_string())?;
                 assert_eq!(
                     connection
                         .logical_table_digests()
@@ -24295,7 +24295,11 @@ mod tests {
             .map_err(|error| error.message())?
         {
             RememberOutcome::AlreadyRecorded(report) => report,
-            other => return Err(format!("expected replay beside live publisher, got {other:?}")),
+            other => {
+                return Err(format!(
+                    "expected replay beside live publisher, got {other:?}"
+                ));
+            }
         };
         assert_eq!(retry.memory_id, seed.memory_id.to_string());
         assert_eq!(
@@ -24319,7 +24323,11 @@ mod tests {
             .map_err(|error| error.message())?
         {
             RememberOutcome::AlreadyRecorded(report) => report,
-            other => return Err(format!("expected replay after publisher release, got {other:?}")),
+            other => {
+                return Err(format!(
+                    "expected replay after publisher release, got {other:?}"
+                ));
+            }
         };
         assert_eq!(recovered.memory_id, seed.memory_id.to_string());
         assert_eq!(recovered.index_status, "indexed");

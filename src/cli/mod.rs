@@ -98504,7 +98504,8 @@ mod tests {
     fn daemon_pack_capability_requires_retrieval_witness_version_and_workspace_authority() {
         use crate::daemon::protocol::{
             DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V3,
-            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_PACK_SEARCH,
+            DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            METHOD_PACK_SEARCH,
         };
         let mut capabilities = daemon_search_capabilities_fixture();
         capabilities["methods"] = serde_json::json!([METHOD_PACK_SEARCH]);

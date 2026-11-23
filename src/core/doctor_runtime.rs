@@ -1454,12 +1454,8 @@ pub fn replay_undo_for_workspace(
     let workspace = canonical_doctor_workspace(workspace)?;
     let override_value = read(EnvVar::DoctorBlastRadius);
     let staging_root = super::index_download_backoff::staging_reclaim_root();
-    let allowed_roots = undo_blast_radius_roots(
-        &workspace,
-        run_id,
-        override_value.as_deref(),
-        &staging_root,
-    )?;
+    let allowed_roots =
+        undo_blast_radius_roots(&workspace, run_id, override_value.as_deref(), &staging_root)?;
     replay_undo_with_authorized_roots(&workspace, run_id, &allowed_roots)
 }
 
@@ -5913,8 +5909,7 @@ mod tests {
                 fs::write(model.join("model.safetensors"), b"installed model").unwrap();
             }
             let dead_pid = dead_staging_pid();
-            let empty =
-                old_named_model_staging(&models, "potion-base-8m", dead_pid, "empty", None);
+            let empty = old_named_model_staging(&models, "potion-base-8m", dead_pid, "empty", None);
             let partial = old_named_model_staging(
                 &models,
                 "potion-base-8m",
@@ -5936,13 +5931,8 @@ mod tests {
                 "live",
                 None,
             );
-            let unknown = old_named_model_staging(
-                &models,
-                "potion-base-8m",
-                u32::MAX,
-                "unknown",
-                None,
-            );
+            let unknown =
+                old_named_model_staging(&models, "potion-base-8m", u32::MAX, "unknown", None);
             let unrelated = models.join("unrelated.txt");
             fs::write(&unrelated, b"keep unrelated bytes").unwrap();
 
@@ -5992,8 +5982,7 @@ mod tests {
             assert!(roots.contains(&empty));
             assert!(roots.contains(&partial));
             assert!(!is_path_in_blast_radius(&models, &roots));
-            let summary =
-                replay_undo_with_authorized_roots(&workspace, &run_id, &roots).unwrap();
+            let summary = replay_undo_with_authorized_roots(&workspace, &run_id, &roots).unwrap();
             assert!(matches!(summary.status, RunStatus::Undone));
             assert!(empty.is_dir());
             assert_eq!(

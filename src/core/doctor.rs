@@ -5214,7 +5214,11 @@ mod tests {
                 "fixture must fail during the bounded file read",
             )?;
             let result = check_workspace(Some(temp.path()));
-            ensure(result.severity, CheckSeverity::Error, "read failure severity")?;
+            ensure(
+                result.severity,
+                CheckSeverity::Error,
+                "read failure severity",
+            )?;
             ensure(
                 result.error_code,
                 Some(error_codes::CONFIG_UNAVAILABLE),

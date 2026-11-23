@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# bd-reality-core-convergence-1azkt.11 — execute the tracked-red lexical
-# relevance pins against the binary Gate 5 already built, and refuse to let an
-# infrastructure failure wear the tracked-red excuse.
+# bd-reality-core-convergence-1azkt.11 — execute both lexical relevance
+# regression tests against the binary Gate 5 already built.
 #
 # WHY NOT `cargo test --test lexical_relevance_contract`
 #
@@ -15,25 +14,13 @@
 # way to make a budget fit; the double charge is waste in the gate whether or
 # not anything is being added to it.
 #
-# WHY THERE IS A --guard ARM, AND WHY IT IS REQUIRED WHILE THE RUN ARM IS NOT
-#
-# `scripts/verify-budget.toml` declares the run arm `requirement =
-# "tracked_red"`, and `run_stage` excuses ANY nonzero exit from such a stage.
-# That is correct for the failure this bead owns and dangerous for every other
-# one: a missing binary, a stale binary, or a renamed test would also exit
-# nonzero and would be recorded as the known red, indistinguishable from it.
-# So the checks that establish the run arm MEANS anything live in a separate,
-# REQUIRED arm — the same split, for the same reason, as
-# `scripts/mcp_lib_tests.sh --self-test` beside `scripts/mcp_lib_tests.sh`.
-#
-# The guard proves its own predicate against synthetic input first (so a guard
-# that cannot fail is caught before it is trusted), then applies it to the live
-# binary: present, not older than its source, and enumerating exactly the two
-# pins by name.
+# Both arms are required. The guard exercises its listing check on synthetic
+# input and verifies that the live binary is current and lists both tests.
+# The run arm executes the tests and checks how many passed.
 #
 # Usage:
 #   scripts/lexical_relevance_pins.sh --guard   required: prove the harness
-#   scripts/lexical_relevance_pins.sh           tracked red: run the pins
+#   scripts/lexical_relevance_pins.sh           required: run the pins
 
 set -uo pipefail
 
@@ -236,33 +223,10 @@ ${PIN_TWO}: test
 fi
 
 binary="$(pin_binary_path)" || {
-    # TWO CAUSES REACH run_stage AS THE SAME NONZERO EXIT, AND IT EXCUSES BOTH.
-    # This stage is declared tracked_red, so `run_stage` records ANY nonzero as
-    # the known red. "The pins failed" (the red this stage exists for) and "the
-    # binary is missing" (bd-iqg34, an unrelated layout defect) are therefore
-    # indistinguishable from the stage's exit status alone. They are only
-    # distinguishable from this text, so it says which one happened, in the
-    # words a reader of the verify.sh log needs.
     cat >&2 <<BANNER
-================================================================================
-NOT THE TRACKED RED. THE HARNESS COULD NOT RUN THE PINS AT ALL.
-
-  searched : $(pin_target_dir)/debug/deps
-  for      : lexical_relevance_contract-*
-  found    : nothing
-
-This is bd-iqg34, NOT bd-reality-core-convergence-1azkt.11. The pins are not
-being reported as failing here -- they were never executed. Measured on an RCH
-fleet worker (job 30025237340881842), cargo writes this target's executable to
-  <target>/debug/build/eidetic-engine/<hash>/out/
-instead of <target>/debug/deps/, so the artifact Gate 5 built is not where the
-standard layout says it is.
-
-The search is deliberately NARROW and is not to be widened. A recursive find
-would locate some artifact, report success, and on a shared target dir could
-execute a stale or wrong-platform binary in ~0s while printing green -- a
-silent green manufactured out of a real failure.
-================================================================================
+Lexical relevance tests could not start. No executable matched
+lexical_relevance_contract-* in the Cargo test artifact directories under
+$(pin_target_dir). Run the test build and point CARGO_TARGET_DIR at its output.
 BANNER
     exit 1
 }

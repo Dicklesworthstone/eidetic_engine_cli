@@ -101,14 +101,7 @@ pub fn backfill_workspace(
     for memory in &memories {
         let change = conn
             .with_transaction(|| {
-                backfill_memory_in_txn(
-                    conn,
-                    workspace_id,
-                    &memory.id,
-                    mode,
-                    harmful_weight,
-                    actor,
-                )
+                backfill_memory_in_txn(conn, workspace_id, &memory.id, mode, harmful_weight, actor)
             })
             .map_err(|error| DomainError::Storage {
                 message: format!(
@@ -154,9 +147,10 @@ fn backfill_memory_in_txn(
     // Listing chooses the work set, not the scoring snapshot. Live feedback,
     // revisions, and retirement may have committed since that scan. Derive and
     // compare under the same writer fence that publishes the update.
-    let Some(memory) = conn.get_memory(memory_id)?.filter(|memory| {
-        memory.workspace_id == workspace_id && memory.tombstoned_at.is_none()
-    }) else {
+    let Some(memory) = conn
+        .get_memory(memory_id)?
+        .filter(|memory| memory.workspace_id == workspace_id && memory.tombstoned_at.is_none())
+    else {
         return Ok(BackfillChange::Skipped);
     };
     if conn.get_memory_superseded_at(memory_id)?.is_some() {
@@ -310,7 +304,8 @@ mod tests {
                     workspace_id: WORKSPACE.to_owned(),
                     level: "semantic".to_owned(),
                     kind: "note".to_owned(),
-                    content: "Release verification requires reproducible source evidence.".to_owned(),
+                    content: "Release verification requires reproducible source evidence."
+                        .to_owned(),
                     workflow_id: None,
                     confidence: 0.8,
                     utility: 0.5,
@@ -383,9 +378,8 @@ mod tests {
 
         fn block_commit_stage(&self, stage: &str) -> TestResult {
             let connection = DbConnection::open_file(&self.database)?;
-            connection.execute_raw(
-                "CREATE TABLE backfill_test_failpoint (enabled INTEGER NOT NULL)",
-            )?;
+            connection
+                .execute_raw("CREATE TABLE backfill_test_failpoint (enabled INTEGER NOT NULL)")?;
             connection.execute_raw("INSERT INTO backfill_test_failpoint VALUES (1)")?;
             let trigger = match stage {
                 "audit" => {
@@ -466,8 +460,11 @@ mod tests {
 
     #[test]
     fn invalid_helpful_backfill_weight_replays_as_one_helpful_event() {
-        let weight =
-            backfill_event_weight_or_default(FeedbackSignal::Helpful, f64::NAN, DEFAULT_HARMFUL_WEIGHT);
+        let weight = backfill_event_weight_or_default(
+            FeedbackSignal::Helpful,
+            f64::NAN,
+            DEFAULT_HARMFUL_WEIGHT,
+        );
         let posterior = BetaPosterior::from_feedback_events([(FeedbackSignal::Helpful, weight)]);
 
         assert!(approx_eq(posterior.alpha(), 1.5));
@@ -479,7 +476,8 @@ mod tests {
         for harmful_weight in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
             let weight =
                 backfill_event_weight_or_default(FeedbackSignal::Harmful, -1.0, harmful_weight);
-            let posterior = BetaPosterior::from_feedback_events([(FeedbackSignal::Harmful, weight)]);
+            let posterior =
+                BetaPosterior::from_feedback_events([(FeedbackSignal::Harmful, weight)]);
 
             assert!(approx_eq(posterior.alpha(), 0.5));
             assert!(approx_eq(posterior.beta(), 0.5 + DEFAULT_HARMFUL_WEIGHT));
@@ -526,7 +524,10 @@ mod tests {
         assert_eq!(after.audits.len(), 1);
         assert_eq!(after.index_jobs.len(), 1);
         let job = &after.index_jobs[0];
-        assert_eq!(job.job_type_enum(), Some(SearchIndexJobType::SingleDocument));
+        assert_eq!(
+            job.job_type_enum(),
+            Some(SearchIndexJobType::SingleDocument)
+        );
         assert_eq!(job.document_source.as_deref(), Some("memory"));
         assert_eq!(job.document_id.as_deref(), Some(MEMORY));
         assert_eq!(job.status, "pending");
@@ -534,7 +535,11 @@ mod tests {
             serde_json::from_str(after.audits[0].details.as_deref().ok_or("audit details")?)?;
         assert_eq!(details["indexJobId"].as_str(), Some(job.id.as_str()));
         assert_eq!(fixture.run(BackfillMode::FromFeedbackEvents)?.updated, 0);
-        assert_eq!(fixture.state()?, after, "a replay cannot duplicate publication");
+        assert_eq!(
+            fixture.state()?,
+            after,
+            "a replay cannot duplicate publication"
+        );
         Ok(())
     }
 
@@ -548,7 +553,11 @@ mod tests {
                 weight_hundredths: 200,
             };
             let error = fixture.run(mode).err().ok_or("failpoint must execute")?;
-            assert!(error.to_string().contains(&format!("backfill {stage} blocked")));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("backfill {stage} blocked"))
+            );
             assert_eq!(
                 fixture.state()?,
                 before,
@@ -600,7 +609,8 @@ mod tests {
         let last = work_set.last().ok_or("backfill work set")?.id.clone();
         let earlier = work_set.first().ok_or("first backfill memory")?.id.clone();
         assert_ne!(earlier, last);
-        connection.execute_raw("CREATE TABLE backfill_test_failpoint (enabled INTEGER NOT NULL)")?;
+        connection
+            .execute_raw("CREATE TABLE backfill_test_failpoint (enabled INTEGER NOT NULL)")?;
         connection.execute_raw("INSERT INTO backfill_test_failpoint VALUES (1)")?;
         connection.execute_raw(&format!(
             "CREATE TRIGGER reject_later_backfill BEFORE INSERT ON audit_log \
@@ -618,16 +628,24 @@ mod tests {
         let jobs = connection.list_search_index_jobs(WORKSPACE, None)?;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].document_id.as_deref(), Some(earlier.as_str()));
-        assert_eq!(connection.get_memory_bayes_posterior(&last)?, Some((0.5, 0.5)));
+        assert_eq!(
+            connection.get_memory_bayes_posterior(&last)?,
+            Some((0.5, 0.5))
+        );
         connection.close()?;
         fixture.allow_commit()?;
         assert_eq!(fixture.run(mode)?.updated, 1);
         let connection = DbConnection::open_file_read_only(&fixture.database)?;
         let repaired_jobs = connection.list_search_index_jobs(WORKSPACE, None)?;
         assert_eq!(repaired_jobs.len(), 2);
-        assert!(repaired_jobs.contains(&jobs[0]), "the first committed job is retained");
+        assert!(
+            repaired_jobs.contains(&jobs[0]),
+            "the first committed job is retained"
+        );
         assert_eq!(
-            connection.list_audit_by_action(audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED, None)?.len(),
+            connection
+                .list_audit_by_action(audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED, None)?
+                .len(),
             2
         );
         connection.close()?;
@@ -658,7 +676,11 @@ mod tests {
         })?;
         connection.close()?;
         assert_eq!(change, BackfillChange::Skipped);
-        assert_eq!(fixture.state()?, before, "historical revision stays immutable");
+        assert_eq!(
+            fixture.state()?,
+            before,
+            "historical revision stays immutable"
+        );
         Ok(())
     }
 
@@ -701,7 +723,11 @@ mod tests {
             dry_run: false,
             job_limit: None,
         })?;
-        assert_eq!(repaired.status, IndexProcessingStatus::Success, "{repaired:?}");
+        assert_eq!(
+            repaired.status,
+            IndexProcessingStatus::Success,
+            "{repaired:?}"
+        );
         assert_eq!(repaired.completed_jobs, 1);
         assert_eq!(repaired.jobs[0].job_id, queued.index_jobs[0].id);
         let ready = get_index_status(&status_options)?;

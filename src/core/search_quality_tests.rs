@@ -2254,7 +2254,10 @@ fn global_feedback_changes_search_quality_and_preserves_local_collisions() {
         let before = serde_json::to_value(&handoff.report.results).unwrap();
         let validated = handoff.validate_snapshot(&options, &fixture.db).unwrap();
         let memories = handoff.revalidate_with_feedback(&options, &fixture.db, Some(&validated));
-        assert_eq!(serde_json::to_value(&handoff.report.results).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&handoff.report.results).unwrap(),
+            before
+        );
         assert_eq!(memories[&local_clean].workspace_id, fixture.workspace);
         assert_eq!(memories[&local_harmful].workspace_id, fixture.workspace);
         assert_eq!(memories[&harmful].workspace_id, global.workspace);

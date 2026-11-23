@@ -1463,7 +1463,10 @@ fn lexical_search_reads_deferred_remember_without_publishing_at_default_or_quali
                 let run = run_search_with_performance(&options).unwrap();
                 complete_lexical(&run.report);
                 assert!(!run.report.source_mode_fallback);
-                assert_eq!(run.report.results[0].doc_id, remembered.memory_id.to_string());
+                assert_eq!(
+                    run.report.results[0].doc_id,
+                    remembered.memory_id.to_string()
+                );
                 assert!(
                     run.performance
                         .timings()
@@ -1534,9 +1537,7 @@ fn persisting_lexical_pack_reads_deferred_remember_without_publishing_index() {
                     .pack
                     .items
                     .iter()
-                    .any(|item| {
-                        item.memory_id.to_string() == remembered.memory_id.to_string()
-                    })
+                    .any(|item| { item.memory_id.to_string() == remembered.memory_id.to_string() })
             );
             assert!(
                 packed
@@ -1725,9 +1726,13 @@ fn readonly_hybrid_pack_reuses_complete_model_free_daemon_handoff() {
             .unwrap();
             assert!(packed.response.success);
             assert!(
-                packed.response.data.pack.items.iter().any(|item| {
-                    item.memory_id.to_string() == remembered.memory_id.to_string()
-                })
+                packed
+                    .response
+                    .data
+                    .pack
+                    .items
+                    .iter()
+                    .any(|item| { item.memory_id.to_string() == remembered.memory_id.to_string() })
             );
             assert!(
                 packed
@@ -1783,7 +1788,13 @@ fn readonly_hybrid_pack_reuses_complete_model_free_daemon_handoff() {
 fn cached_only_pack_refuses_model_requiring_requests_before_preparation() {
     let fixture = Fixture::new();
     fixture.memory(805, BODY);
-    for refusal in ["strict", "semantic", "historical", "tombstoned", "published"] {
+    for refusal in [
+        "strict",
+        "semantic",
+        "historical",
+        "tombstoned",
+        "published",
+    ] {
         let mut options = fixture.options();
         options.source_mode = SearchSourceMode::Hybrid;
         match refusal {
@@ -1791,7 +1802,7 @@ fn cached_only_pack_refuses_model_requiring_requests_before_preparation() {
             "semantic" => options.source_mode = SearchSourceMode::SemanticOnly,
             "historical" => options.as_of = Some(Utc::now()),
             "tombstoned" => options.include_tombstoned = true,
-            "published" => {},
+            "published" => {}
             _ => unreachable!(),
         }
         let index = fixture.root.join(".ee/index");
@@ -1809,12 +1820,8 @@ fn cached_only_pack_refuses_model_requiring_requests_before_preparation() {
             .db
             .list_model_registry_entries(&fixture.workspace)
             .unwrap();
-        let result = run_pack_search_with_runtime_and_cached_local_embedder(
-            &options,
-            None,
-            None,
-            true,
-        );
+        let result =
+            run_pack_search_with_runtime_and_cached_local_embedder(&options, None, None, true);
         assert!(
             matches!(result, Err(SearchError::Index(message))
                 if message.contains("already-loaded local model or a complete current lexical source snapshot")),

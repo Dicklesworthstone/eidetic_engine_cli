@@ -577,7 +577,9 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         }
         let count = session.get("message_count").and_then(Value::as_u64);
         let labeled = session.get("labeled_record_count").and_then(Value::as_u64);
-        let unlabeled = session.get("unlabeled_record_count").and_then(Value::as_u64);
+        let unlabeled = session
+            .get("unlabeled_record_count")
+            .and_then(Value::as_u64);
         let (Some(count), Some(labeled), Some(unlabeled)) = (count, labeled, unlabeled) else {
             return Err(format!(
                 "{rel}: regenerated record counts must be nonnegative integers"
