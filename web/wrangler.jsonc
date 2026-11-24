@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The static export in `out/` (`bun run build`), served as Workers static
+  // assets at eidetic-engine.org. worker.ts runs first: it sends www. to the
+  // apex and gives the extensionless share images their type; everything else
+  // goes straight to the assets.
+  "name": "eidetic-engine",
+  "main": "worker.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "eidetic-engine.org", "custom_domain": true },
+    { "pattern": "www.eidetic-engine.org", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./out",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  }
+}

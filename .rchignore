@@ -258,3 +258,12 @@ proptest-regressions/combinator/
 /skills/rehearsal-promotion-review/scripts/__pycache__/
 /skills/session-review-memory-distillation/scripts/__pycache__/
 /skills/situation-framing/scripts/__pycache__/
+
+# The website's installed packages and build output (web/README.md). Narrow on
+# purpose: web/'s tracked source still syncs, so the fleet identifier guard,
+# which scans every tracked file, keeps covering it on the lane.
+/web/node_modules/
+/web/.next/
+/web/out/
+/web/.wrangler/
+/web/.generated/

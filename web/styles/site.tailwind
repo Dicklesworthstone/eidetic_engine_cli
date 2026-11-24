@@ -1,0 +1,457 @@
+@import "tailwindcss" source(none);
+
+/* The sources Tailwind reads for class names. Named explicitly: this file is
+   compiled by the CLI (scripts/build-style.ts), not by Next, and nothing outside
+   these folders should contribute a class. */
+@source "../app";
+@source "../components";
+@source "../lib";
+
+/* Eidetic Engine: the FrankenSuite laboratory, in recall violet. The page is a
+   dark field and memories are points of light in it; the one lit colour is the
+   colour of a memory being recalled. */
+
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+  /* The muted tone of notes and captions. Tailwind's slate-500 (#64748b) is about 4.2:1 on the ink, under
+     WCAG AA for small text; this one is about 5.2:1 and still a clear step below slate-400. */
+  --color-slate-500: #77839c;
+}
+
+/* The system, in roles:
+   - ink: the dark field memories live in; every surface is a step above it.
+   - recall: the one violet word, actions, and "this is what ee does" (violet is a memory being recalled).
+   - chapter: each chapter wears one colour of the memory-level palette (lib/palette.ts), set as --chapter.
+   - the reticle: corner ticks on anything that is a specimen or a figure, the instrument's frame. */
+:root {
+  --ink: #05040d;
+  --ink-raised: #0b0a1a;
+  --recall: #a78bfa;
+  --recall-bright: #c4b5fd;
+  --recall-soft: rgba(167, 139, 250, 0.12);
+  --hairline: rgba(221, 214, 254, 0.08);
+  --hairline-strong: rgba(221, 214, 254, 0.16);
+  --chapter: #a78bfa;
+  --ease-stripe: cubic-bezier(0.19, 1, 0.22, 1);
+  color-scheme: dark;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5.5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  background-color: var(--ink);
+  color: #e2e8f0;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+  letter-spacing: -0.011em;
+  overflow-x: hidden;
+}
+
+/* Display type: the size carries the weight; tracking tightens as it grows. */
+h1,
+h2,
+h3 {
+  font-weight: 800;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+h4,
+h5 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.display-1 {
+  font-size: clamp(3.1rem, 7.2vw, 7.4rem);
+  line-height: 0.94;
+  letter-spacing: -0.05em;
+}
+
+.display-2 {
+  font-size: clamp(2.5rem, 5.6vw, 5.4rem);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.display-3 {
+  font-size: clamp(1.9rem, 3.4vw, 3.2rem);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+}
+
+.lede {
+  font-size: clamp(1.06rem, 1.25vw, 1.22rem);
+  line-height: 1.62;
+  color: #cbd5e1;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Film grain, inline so nothing is fetched. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%27120%27%20height%3D%27120%27%3E%3Cfilter%20id%3D%27n%27%3E%3CfeTurbulence%20type%3D%27fractalNoise%27%20baseFrequency%3D%270.85%27%20numOctaves%3D%272%27%20stitchTiles%3D%27stitch%27%20seed%3D%272%27/%3E%3C/filter%3E%3Crect%20width%3D%27120%27%20height%3D%27120%27%20filter%3D%27url(%23n)%27/%3E%3C/svg%3E");
+  opacity: 0.035;
+  pointer-events: none;
+  z-index: 60;
+  contain: strict;
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #030209;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1f1a3a;
+  border: 2px solid #030209;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8b5cf6;
+}
+
+/* Floating chrome over moving content (the header, the dock): the only blurred glass. */
+.glass-modern {
+  background: rgba(8, 6, 20, 0.82);
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+  border: 1px solid rgba(167, 139, 250, 0.14);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* A panel: a surface one step above the ink, an edge and a top light, no blur. */
+.panel {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 40%),
+    rgba(14, 11, 32, 0.66);
+  border: 1px solid var(--hairline);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.panel-strong {
+  border-color: rgba(167, 139, 250, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 60px -24px rgba(139, 92, 246, 0.45);
+}
+
+/* Rows separated by hairlines instead of a box each. */
+.ruled > * + * {
+  border-top: 1px solid var(--hairline);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lift {
+    transition:
+      transform 400ms var(--ease-stripe),
+      border-color 400ms var(--ease-stripe),
+      box-shadow 400ms var(--ease-stripe);
+  }
+
+  .lift:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--chapter) 40%, transparent);
+    box-shadow: 0 0 40px -12px color-mix(in srgb, var(--chapter) 35%, transparent);
+  }
+}
+
+/* The one violet word. Solid, so it reads; the hero's is the one lit gradient. */
+.recall-word {
+  color: var(--recall);
+}
+
+.recall-gradient {
+  background: linear-gradient(100deg, #f5d0fe 0%, #c4b5fd 32%, #a78bfa 56%, #67e8f9 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* A lit sphere in the chapter's colour, like a memory point: the page's signature mark. */
+.sphere {
+  display: inline-block;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 34% 30%, #ffffff 0%, var(--sphere, var(--chapter)) 32%, color-mix(in srgb, var(--sphere, var(--chapter)) 45%, #000) 78%);
+  box-shadow: 0 0 18px -2px color-mix(in srgb, var(--sphere, var(--chapter)) 70%, transparent);
+}
+
+/* The chapter numeral: drawn as an outline so it is architecture, not text to read. */
+.chapter-numeral {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  line-height: 0.8;
+  letter-spacing: -0.06em;
+  color: transparent;
+  -webkit-text-stroke: 1px color-mix(in srgb, var(--chapter) 55%, transparent);
+}
+
+/* A field of light behind the hero and the footer: one violet source, and a cool one opposite. */
+.field-light {
+  background:
+    radial-gradient(60rem 40rem at 12% -10%, rgba(139, 92, 246, 0.2), transparent 62%),
+    radial-gradient(40rem 30rem at 100% 110%, rgba(34, 211, 238, 0.07), transparent 60%);
+}
+
+/* The engineering grid, faded at its edges. */
+.lattice {
+  background-image:
+    linear-gradient(rgba(221, 214, 254, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(221, 214, 254, 0.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse at 30% 20%, black 20%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse at 30% 20%, black 20%, transparent 70%);
+}
+
+/* The hero's specimen: feathered into the ink on its open sides. */
+.specimen-feather {
+  mask-image: linear-gradient(to bottom, black 82%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 82%, transparent 100%);
+}
+
+/* Focus: one visible ring everywhere, in the recall colour. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--recall);
+  outline-offset: 2px;
+}
+
+/* The mobile dock keeps the page's last lines clear of itself. */
+@media (max-width: 767px) {
+  .dock-clearance {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+}
+
+/* <Reveal>: shown in the HTML; once <RevealController> arms the page, a block below the fold waits, hidden,
+   until it scrolls into view. Only the entrance is a transition. */
+.reveal.is-shown {
+  transition:
+    opacity 0.8s var(--ease-stripe) var(--reveal-delay, 0s),
+    transform 0.8s var(--ease-stripe) var(--reveal-delay, 0s);
+}
+
+.reveal-armed .reveal:not(.is-shown) {
+  opacity: 0;
+  transform: translateY(32px);
+  transition: none;
+}
+
+/* The first view: until the page has settled, the sections below it are skipped at about the height they will
+   have. The script in app/layout.tsx arms this, and <SkipOffscreen> ends it. */
+.first-view [data-skip] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 1500px;
+}
+
+@media (max-width: 767px) {
+  .first-view [data-skip] {
+    contain-intrinsic-block-size: auto 2400px;
+  }
+}
+
+[data-skip] {
+  contain: layout paint style;
+}
+
+.skip-offscreen [data-skip] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto var(--skip-height);
+}
+
+/* The hero's entrance: no script, so it never waits for hydration. */
+.rise-in {
+  animation: rise-in 0.9s var(--ease-stripe) var(--rise-delay, 0ms) both;
+}
+
+@keyframes rise-in {
+  from {
+    /* Not 0: browsers leave text at exactly 0 out of the page's largest paint until something repaints it. */
+    opacity: 0.01;
+    transform: translateY(32px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2.2s ease-in-out infinite;
+}
+
+/* A line that writes itself in, for the pack card and the explainers. */
+@keyframes type-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.type-in {
+  animation: type-in 420ms var(--ease-stripe) both;
+}
+
+/* The explainers' range inputs (components/explain/demo.tsx). */
+.demo-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.demo-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, color-mix(in srgb, var(--chapter) 60%, transparent), rgba(255, 255, 255, 0.12));
+}
+
+.demo-range::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.demo-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--chapter) 60%, transparent);
+}
+
+.demo-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -7px;
+  height: 18px;
+  width: 18px;
+  border-radius: 9999px;
+  background: var(--chapter);
+  border: 3px solid var(--ink);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--chapter) 60%, transparent),
+    0 0 14px color-mix(in srgb, var(--chapter) 45%, transparent);
+}
+
+.demo-range::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 9999px;
+  background: var(--chapter);
+  border: 3px solid var(--ink);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--chapter) 60%, transparent),
+    0 0 14px color-mix(in srgb, var(--chapter) 45%, transparent);
+}
+
+.demo-range:focus-visible {
+  outline: 2px solid var(--chapter);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* An arc that draws itself in (the loop diagram, the pipeline). */
+.draw-in {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: draw-in 1.1s var(--ease-stripe) forwards;
+}
+
+@keyframes draw-in {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* A dash that flows along a path: the direction data moves. */
+.flow {
+  stroke-dasharray: 3 9;
+  animation: flow 1.6s linear infinite;
+}
+
+@keyframes flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+/* SVG diagrams: text in the page's fonts, numbers aligned. */
+.diagram text {
+  font-family: var(--font-sans);
+}
+
+.diagram .mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot,
+  .rise-in,
+  .type-in,
+  .draw-in,
+  .flow {
+    animation: none;
+  }
+
+  .draw-in {
+    stroke-dashoffset: 0;
+  }
+
+  .reveal.is-shown {
+    transition: none;
+  }
+}

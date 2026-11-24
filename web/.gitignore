@@ -1,0 +1,13 @@
+# Dependencies and build output
+/node_modules/
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+.wrangler/
+
+# The compiled stylesheet and its import module (scripts/build-style.ts writes both from styles/site.tailwind).
+/.generated/
+
+# Written by `next dev` before next.config.ts set agentRules: false; the repository root AGENTS.md is the contract.
+/AGENTS.md
