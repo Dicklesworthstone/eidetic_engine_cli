@@ -48,6 +48,7 @@ use crate::models::{MemorySeal, validate_attestation_seal_fields};
 mod evidence_admission_counts;
 mod evidence_lifecycle;
 mod evidence_reader_projection;
+mod memory_seal_authority;
 mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
