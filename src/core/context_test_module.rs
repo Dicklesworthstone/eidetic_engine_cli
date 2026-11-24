@@ -12865,6 +12865,338 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn attempt_family_pack_guard_fixture(
+        connection: &DbConnection,
+        count: usize,
+    ) -> Result<(CreateMemoryInput, Vec<PackCandidate>), String> {
+        connection.migrate().map_err(|error| error.to_string())?;
+        let input = CreateMemoryInput {
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(9_000)).to_string(),
+            level: "working".to_owned(),
+            kind: "fact".to_owned(),
+            content: "ordinary pack candidate".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        };
+        connection
+            .insert_workspace(
+                &input.workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-attempt-family-pack-guard".to_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let candidates = (0..count)
+            .map(|index| pagination_candidate(9_100 + index as u128))
+            .collect::<Result<Vec<_>, _>>()?;
+        connection
+            .with_transaction(|| {
+                for candidate in &candidates {
+                    connection.insert_memory(&candidate.memory_id.to_string(), &input)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+        Ok((input, candidates))
+    }
+
+    #[test]
+    fn attempt_family_pack_guard_skips_empty_and_family_free_candidate_batches() -> TestResult {
+        for count in [0, 1, crate::db::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE + 1] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let (input, originals) = attempt_family_pack_guard_fixture(&connection, count)?;
+            for declaration_only in [false, true] {
+                if declaration_only {
+                    connection.execute_raw(&format!(
+                        "INSERT INTO attempt_families (workspace_id, family_id, declared_size, origin, created_at, updated_at) VALUES ('{}', 'orphan', 3, 'declared', '2026-01-01', '2026-01-01')",
+                        input.workspace_id,
+                    )).map_err(|error| error.to_string())?;
+                }
+                let before = connection
+                    .list_memories(&input.workspace_id, None, true)
+                    .map_err(|error| error.to_string())?;
+                let generation = connection
+                    .get_workspace_generation(&input.workspace_id)
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .begin_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                let mut candidates = originals.clone();
+                if count > 0 {
+                    candidates.push(originals[0].clone());
+                    candidates.push(pagination_candidate(99_999)?);
+                    // The old resolver replaces annotations, including stale ones.
+                    candidates[0].attempt_family_multiplicity =
+                        Some(crate::pack::PackAttemptFamilyMultiplicitySnapshot {
+                            schema: crate::pack::PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
+                            effective_discount_factor: 0.5,
+                            promotion_posture: "blocked_incomplete".to_owned(),
+                            promotion_reason: "stale annotation".to_owned(),
+                            memberships: Vec::new(),
+                        });
+                }
+                let ids = candidates
+                    .iter()
+                    .map(|item| item.memory_id.to_string())
+                    .collect::<Vec<_>>();
+                let reference = connection
+                    .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
+                        &ids,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if count > crate::db::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE {
+                    assert!(
+                        reference.query_count > 1,
+                        "fixture crosses the candidate batch boundary"
+                    );
+                }
+                let mut expected = candidates.clone();
+                for item in &mut expected {
+                    item.attempt_family_multiplicity = reference
+                        .by_memory_id
+                        .get(&item.memory_id.to_string())
+                        .and_then(super::pack_attempt_family_multiplicity_snapshot);
+                }
+                let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+                    super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                        &connection,
+                        &mut candidates,
+                    )
+                });
+                result.map_err(|error| error.to_string())?;
+                assert_eq!(queries.len(), usize::from(count > 0));
+                for query in &queries {
+                    assert!(query.contains("EXISTS") && query.contains("LIMIT 1"));
+                    assert!(!query.contains("FROM memories AS candidate"));
+                }
+                assert_eq!(
+                    candidates, expected,
+                    "source identity, provenance and scores stay unchanged"
+                );
+                let request = ContextRequest::from_query("ordinary pack candidate")
+                    .map_err(|error| error.to_string())?;
+                let assemble = |items| {
+                    assemble_draft_with_profile(
+                        request.profile,
+                        request.query.clone(),
+                        request.budget,
+                        items,
+                    )
+                    .map_err(|error| error.to_string())
+                };
+                let actual_draft = assemble(candidates)?;
+                let expected_draft = assemble(expected)?;
+                assert_eq!(actual_draft, expected_draft);
+                assert_eq!(
+                    super::compute_pack_hash(&request, &actual_draft, &[]),
+                    super::compute_pack_hash(&request, &expected_draft, &[])
+                );
+                assert!(
+                    connection.begin_read_snapshot().is_err(),
+                    "annotation must retain the caller's snapshot"
+                );
+                connection
+                    .rollback_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(
+                    connection
+                        .list_memories(&input.workspace_id, None, true)
+                        .map_err(|error| error.to_string())?,
+                    before
+                );
+                assert_eq!(
+                    connection
+                        .get_workspace_generation(&input.workspace_id)
+                        .map_err(|error| error.to_string())?,
+                    generation
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_family_pack_guard_retains_pointer_only_and_inherited_membership() -> TestResult {
+        for inheritance in ["direct", "logical_revision", "legacy_root"] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let (input, mut candidates) = attempt_family_pack_guard_fixture(&connection, 1)?;
+            let root_id = candidates[0].memory_id.to_string();
+            connection.execute_raw(&format!(
+                "UPDATE memories SET attempt_family_id = 'legacy-pointer', attempt_family_size = 3 WHERE id = '{root_id}'"
+            )).map_err(|error| error.to_string())?;
+            if inheritance != "direct" {
+                if inheritance == "legacy_root" {
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE memories SET logical_id = NULL WHERE id = '{root_id}'"
+                        ))
+                        .map_err(|error| error.to_string())?;
+                }
+                let revision = pagination_candidate(99_998)?;
+                connection
+                    .insert_memory_revision(&revision.memory_id.to_string(), &root_id, &input)
+                    .map_err(|error| error.to_string())?;
+                candidates = vec![revision];
+            }
+            connection
+                .begin_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let id = candidates[0].memory_id.to_string();
+            let reference = connection
+                .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
+                    std::slice::from_ref(&id),
+                )
+                .map_err(|error| error.to_string())?;
+            let expected = reference
+                .by_memory_id
+                .get(&id)
+                .and_then(super::pack_attempt_family_multiplicity_snapshot)
+                .ok_or_else(|| format!("{inheritance} reference must retain legacy membership"))?;
+            let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+                super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                    &connection,
+                    &mut candidates,
+                )
+            });
+            result.map_err(|error| error.to_string())?;
+            assert_eq!(
+                candidates[0].attempt_family_multiplicity.as_ref(),
+                Some(&expected),
+                "{inheritance}"
+            );
+            assert_ne!(expected.promotion_posture, "eligible");
+            assert!(
+                queries
+                    .iter()
+                    .any(|sql| sql.contains("FROM memories AS candidate"))
+            );
+            assert!(connection.begin_read_snapshot().is_err());
+            connection
+                .rollback_read_snapshot()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_family_pack_guard_probe_failure_keeps_loader_errors_and_transaction() -> TestResult {
+        for table in ["attempt_family_members", "memories"] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let (_, mut candidates) = attempt_family_pack_guard_fixture(&connection, 1)?;
+            connection.begin().map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(&format!(
+                    "ALTER TABLE {table} RENAME TO temporarily_hidden_source"
+                ))
+                .map_err(|error| error.to_string())?;
+            let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+                super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                    &connection,
+                    &mut candidates,
+                )
+            });
+            let error =
+                result.expect_err("unavailable authority must not become an empty membership");
+            assert!(
+                error
+                    .to_string()
+                    .contains("failed to batch-resolve authoritative attempt-family membership")
+            );
+            assert!(
+                queries
+                    .iter()
+                    .any(|sql| sql.contains("FROM memories AS candidate")),
+                "failed probe still attempts the authoritative loader"
+            );
+            assert!(
+                connection.begin().is_err(),
+                "the helper must not roll back the caller's transaction"
+            );
+            connection.rollback().map_err(|error| error.to_string())?;
+            super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                &connection,
+                &mut candidates,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_family_pack_guard_keeps_absence_bound_to_the_read_snapshot() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("family-guard.db");
+        let writer = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        let (input, mut candidates) = attempt_family_pack_guard_fixture(&writer, 1)?;
+        let reader = DbConnection::open_file_read_only(&path).map_err(|error| error.to_string())?;
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        super::annotate_attempt_family_multiplicity_in_current_snapshot(&reader, &mut candidates)
+            .map_err(|error| error.to_string())?;
+        writer
+            .set_memory_attempt_family(
+                &candidates[0].memory_id.to_string(),
+                &crate::db::MemoryAttemptFamily {
+                    family_id: "late-family".to_owned(),
+                    declared_size: Some(3),
+                    attempt_index: Some(1),
+                    disposition: Some("selected".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let generation = writer
+            .get_workspace_generation(&input.workspace_id)
+            .map_err(|error| error.to_string())?;
+        let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+            super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                &reader,
+                &mut candidates,
+            )
+        });
+        result.map_err(|error| error.to_string())?;
+        assert_eq!(queries.len(), 1);
+        assert!(
+            candidates[0].attempt_family_multiplicity.is_none(),
+            "concurrent membership stays outside the pinned snapshot"
+        );
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        super::annotate_attempt_family_multiplicity_in_current_snapshot(&reader, &mut candidates)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            candidates[0]
+                .attempt_family_multiplicity
+                .as_ref()
+                .map(|snapshot| snapshot.effective_discount_factor),
+            Some(1.0 / 3.0)
+        );
+        assert!(reader.begin_read_snapshot().is_err());
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            writer
+                .get_workspace_generation(&input.workspace_id)
+                .map_err(|error| error.to_string())?,
+            generation
+        );
+        Ok(())
+    }
+
     #[test]
     fn authoritative_batch_annotation_drives_selected_and_rejected_pack_scores()
     -> Result<(), String> {
@@ -12956,11 +13288,18 @@ pub fn unrelated_context() -> u64 {{
         connection
             .begin_read_snapshot()
             .map_err(|error| error.to_string())?;
-        super::annotate_attempt_family_multiplicity_in_current_snapshot(
-            &connection,
-            &mut candidates,
-        )
-        .map_err(|error| error.to_string())?;
+        let (result, queries) = crate::db::capture_query_sql_for_test(|| {
+            super::annotate_attempt_family_multiplicity_in_current_snapshot(
+                &connection,
+                &mut candidates,
+            )
+        });
+        result.map_err(|error| error.to_string())?;
+        assert!(
+            queries
+                .iter()
+                .any(|sql| sql.contains("FROM memories AS candidate"))
+        );
         super::apply_attempt_family_multiplicity_discount(&mut candidates)
             .map_err(|error| error.to_string())?;
 

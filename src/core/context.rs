@@ -4071,8 +4071,10 @@ async fn run_context_pack_attempt(
     }
     trace.record_elapsed("memoryTierAdmission", tier_admission_start);
 
+    let attempt_family_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     annotate_attempt_family_multiplicity_in_current_snapshot(read_connection, &mut candidates)?;
+    trace.record_elapsed("attemptFamilyAdmission", attempt_family_start);
 
     // Run after every memory fan-in, including graph, focus, and global lanes.
     // Stored trust and redaction opt-outs cannot authorize prompt overrides.
@@ -6699,6 +6701,33 @@ fn annotate_attempt_family_multiplicity_in_current_snapshot(
     connection: &DbConnection,
     candidates: &mut [PackCandidate],
 ) -> Result<(), ContextPackError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    // Ordinary imported corpora have no attempt families. Do not run the
+    // candidate join and its per-candidate revision subqueries merely to
+    // rediscover that absence on every pack (GH #87). Both authoritative
+    // membership sources must be empty in the same database view:
+    // declarations alone do not bind a memory, but legacy pointers do, even
+    // when there is no declaration or ledger row. The pointer probe can use
+    // V094's sparse idx_memories_attempt_family index and reads no bodies.
+    // One statement also keeps the absence proof coherent when a local pack
+    // explicitly disables request-wide snapshot pinning.
+    // An unavailable probe is not evidence of absence; retain the existing
+    // loader and its error behavior in that case.
+    let memberships_absent = connection
+        .query(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM attempt_family_members LIMIT 1) \
+             OR EXISTS (SELECT 1 FROM memories WHERE attempt_family_id IS NOT NULL LIMIT 1)",
+            &[],
+        )
+        .is_ok_and(|rows| rows.is_empty());
+    if memberships_absent {
+        for candidate in candidates {
+            candidate.attempt_family_multiplicity = None;
+        }
+        return Ok(());
+    }
     let memory_ids = candidates
         .iter()
         .map(|candidate| candidate.memory_id.to_string())

@@ -320,3 +320,24 @@ evidence, fallback, storage failure, record reuse and a valid ledger with the
 wrong selection. These additions improve qualification evidence; native tests,
 the 10,000-memory gate and the contributor's larger workload still require
 actual execution before any acceleration or resolution claim.
+
+### Client-side attempt-family admission
+
+The public pack trace now separates `attemptFamilyAdmission` from candidate
+construction and final `packAssembly`. The elapsed SLO warning covers more than
+the final assembly span, so its duration alone cannot attribute a regression to
+token counting or selection.
+
+Ordinary imported corpora without attempt-family membership skip the candidate
+join and correlated revision queries. One read-only statement checks both the
+canonical membership ledger and legacy memory pointers, using `EXISTS` probes
+with `LIMIT 1`; the pointer predicate matches V094's partial index. An empty
+declaration is not membership, while any ledger member or pointer retains the
+full authoritative resolver. Probe errors also retain that resolver. The check
+shares the caller's source snapshot and remains one coherent read when local
+request-wide pinning is disabled. It is not cached across requests.
+
+This removes unnecessary admission work without changing the ranking policy,
+pack format, or persistence path. It is not a measured end-to-end speedup. The
+native regression suite and the paired 10,000-memory warm-pack gate above must
+still run before issue #87 or `bd-reality-core-convergence-1azkt.79` is closed.
