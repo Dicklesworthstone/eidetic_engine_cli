@@ -4192,14 +4192,29 @@ fn prepare_rule_update(
         ));
     }
     if previous.trust_class == TrustClass::PeerHumanAttested.as_str()
-        && content != previous.content
         && requested_trust_class.is_none()
     {
-        return Err(rule_read_usage_error(
-            "updating peer_human_attested rule content requires an explicit lower --trust-class because locally revised bytes are not covered by the signed member attestation"
-                .to_owned(),
-            "ee rule update --help",
-        ));
+        // Recovery can preserve a noncanonical spelling of the same scope.
+        // Invalid prior applicability cannot authorize a local semantic edit.
+        let same_applicability =
+            RuleScope::from_str(&previous.scope)
+                .ok()
+                .is_some_and(|previous_scope| {
+                    previous_scope == scope
+                        && normalize_rule_scope_pattern(
+                            &prepared.workspace_path,
+                            previous_scope,
+                            previous.scope_pattern.as_deref(),
+                        )
+                        .is_ok_and(|previous_pattern| previous_pattern == scope_pattern)
+                });
+        if content != previous.content || !same_applicability {
+            return Err(rule_read_usage_error(
+                "updating peer_human_attested rule content or applicability requires an explicit lower --trust-class because local semantic changes cannot retain the signed member attestation"
+                    .to_owned(),
+                "ee rule update --help",
+            ));
+        }
     }
     let trust_class = requested_trust_class.map_or_else(
         || previous.trust_class.clone(),
@@ -7649,25 +7664,11 @@ mod tests {
     }
 
     #[test]
-    fn rule_update_cannot_preserve_peer_attestation_on_locally_changed_content() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace_path =
-            resolve_workspace_path(tempdir.path(), false).map_err(|error| error.message())?;
-        let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(&workspace_path);
+    fn rule_update_cannot_preserve_peer_attestation_on_locally_changed_semantics() -> TestResult {
+        let (tempdir, database_path, workspace_id) = rule_source_fixture()?;
         let rule_id = "rule_01234567890123456789054321";
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        connection.migrate().map_err(|error| error.to_string())?;
-        connection
-            .insert_workspace(
-                &workspace_id,
-                &CreateWorkspaceInput {
-                    path: workspace_path.display().to_string(),
-                    name: Some("peer-attested-rule-update".to_owned()),
-                },
-            )
-            .map_err(|error| error.to_string())?;
         connection
             .insert_procedural_rule(
                 rule_id,
@@ -7678,8 +7679,8 @@ mod tests {
                     utility: 0.7,
                     importance: 0.8,
                     trust_class: TrustClass::PeerHumanAttested.as_str().to_owned(),
-                    scope: "workspace".to_owned(),
-                    scope_pattern: None,
+                    scope: "directory".to_owned(),
+                    scope_pattern: Some("src".to_owned()),
                     maturity: "candidate".to_owned(),
                     protected: false,
                     source_memory_ids: Vec::new(),
@@ -7687,13 +7688,16 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
-        let error = update_rule(&RuleUpdateOptions {
-            workspace_path: &workspace_path,
+        let base = RuleUpdateOptions {
+            workspace_path: tempdir.path(),
             database_path: Some(&database_path),
             rule_id,
-            content: Some("Run a locally rewritten release procedure."),
+            content: None,
             scope: None,
             scope_pattern: None,
             clear_scope_pattern: false,
@@ -7706,28 +7710,136 @@ mod tests {
             clear_tags: false,
             source_memory_ids: None,
             clear_source_memory_ids: false,
-            dry_run: false,
+            dry_run: true,
             actor: Some("test"),
-        })
-        .expect_err("local content rewrite must not retain peer attestation");
-        let error_message = error.message();
-        ensure(
-            error_message.contains("explicit lower --trust-class"),
-            format!("error must require an explicit trust downgrade, got `{error_message}`"),
-        )?;
+        };
+        for dry_run in [true, false] {
+            for (content, scope, scope_pattern, clear_scope_pattern) in [
+                (
+                    Some("Run a locally rewritten release procedure."),
+                    None,
+                    None,
+                    false,
+                ),
+                // This changes only the scope kind, retaining the exact pattern.
+                (None, Some("file_pattern"), None, false),
+                (None, None, Some("tests"), false),
+                (None, Some("workspace"), None, true),
+                (None, Some("global"), None, false),
+            ] {
+                let error = update_rule(&RuleUpdateOptions {
+                    content,
+                    scope,
+                    scope_pattern,
+                    clear_scope_pattern,
+                    dry_run,
+                    ..base.clone()
+                })
+                .expect_err(
+                    "local instruction or applicability edits must not retain peer attestation",
+                );
+                ensure(
+                    error.message().contains("explicit lower --trust-class"),
+                    format!("edit must require an explicit trust downgrade, got {error:?}"),
+                )?;
+            }
+            let unchanged = update_rule(&RuleUpdateOptions {
+                content: Some("Run the signed team release procedure."),
+                scope: Some("directory"),
+                scope_pattern: Some("src//./"),
+                dry_run,
+                ..base.clone()
+            })
+            .map_err(|error| error.message())?;
+            ensure(
+                !unchanged.changed
+                    && !unchanged.persisted
+                    && unchanged.rule.trust_class == TrustClass::PeerHumanAttested.as_str(),
+                "normalized semantic no-op must retain attestation without writing",
+            )?;
+        }
 
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        let stored = connection
+        ensure(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
+            "refused and no-op updates must preserve every row, audit, job and generation",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let tags = vec!["release".to_owned()];
+        for dry_run in [true, false] {
+            let metadata = update_rule(&RuleUpdateOptions {
+                utility: Some(0.6),
+                tags: Some(&tags),
+                dry_run,
+                ..base.clone()
+            })
+            .map_err(|error| error.message())?;
+            ensure(
+                metadata.changed
+                    && metadata.persisted != dry_run
+                    && metadata.rule.trust_class == TrustClass::PeerHumanAttested.as_str()
+                    && metadata.rule.scope == "directory"
+                    && metadata.rule.scope_pattern.as_deref() == Some("src"),
+                "local ranking and tags must preserve unchanged instruction attestation",
+            )?;
+        }
+        // Recovery retains raw historical scope spelling. Canonicalizing it
+        // during a metadata edit must not revoke unchanged applicability.
+        let legacy_rule_id = "rule_01234567890123456789054322";
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let mut legacy = connection
             .get_procedural_rule(rule_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "peer-attested rule disappeared after rejected update".to_owned())?;
-        ensure(
-            stored.content == "Run the signed team release procedure."
-                && stored.trust_class == TrustClass::PeerHumanAttested.as_str(),
-            "rejected update must preserve the original attested rule",
-        )?;
-        connection.close().map_err(|error| error.to_string())
+            .ok_or_else(|| "peer-attested rule disappeared".to_owned())?;
+        legacy.id = legacy_rule_id.to_owned();
+        legacy.scope_pattern = Some("src//./".to_owned());
+        connection
+            .insert_procedural_rule_for_recovery(&legacy)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            let metadata = update_rule(&RuleUpdateOptions {
+                rule_id: legacy_rule_id,
+                utility: Some(0.55),
+                dry_run,
+                ..base.clone()
+            })
+            .map_err(|error| error.message())?;
+            ensure(
+                metadata.changed
+                    && metadata.persisted != dry_run
+                    && metadata.rule.trust_class == TrustClass::PeerHumanAttested.as_str()
+                    && metadata.rule.scope == "directory"
+                    && metadata.rule.scope_pattern.as_deref() == Some("src"),
+                "legacy scope spelling must normalize without losing peer attestation",
+            )?;
+        }
+        for dry_run in [true, false] {
+            let revised = update_rule(&RuleUpdateOptions {
+                content: Some("Run a locally revised release procedure."),
+                scope: Some("file_pattern"),
+                scope_pattern: Some("tests/**/*.rs"),
+                trust_class: Some("agent_assertion"),
+                dry_run,
+                ..base.clone()
+            })
+            .map_err(|error| error.message())?;
+            ensure(
+                revised.changed
+                    && revised.persisted != dry_run
+                    && revised.rule.trust_class == TrustClass::AgentAssertion.as_str()
+                    && revised.rule.scope == "file_pattern"
+                    && revised.rule.scope_pattern.as_deref() == Some("tests/**/*.rs"),
+                "explicit trust downgrade must permit local instruction and applicability edits",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
