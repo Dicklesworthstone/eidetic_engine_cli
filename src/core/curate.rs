@@ -5986,6 +5986,7 @@ pub fn validate_curation_candidate(
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
 
+    require_memory_update_target_authority(&connection, &stored)?;
     let now = Utc::now().to_rfc3339();
     let prompt_injection_guard = crate::core::config_surface::get_config(
         &crate::core::config_surface::ConfigSurfaceOptions {
@@ -6442,6 +6443,7 @@ fn apply_curation_candidate_with_recipe(
     // source has been sealed or held for review. Run before constructing any
     // response containing the retained target or proposed procedural text.
     source_admission::require_procedural_candidate_sources(&connection, &stored)?;
+    require_memory_update_target_authority(&connection, &stored)?;
     let global_merge_index_paths = crate::core::global_promotion::merge_index_paths(
         &connection,
         &stored,
@@ -11128,6 +11130,7 @@ fn validate_guarded_candidate_for_review(
     workspace_id: &str,
     stored: &StoredCurationCandidate,
 ) -> Result<(), DomainError> {
+    require_memory_update_target_authority(connection, stored)?;
     crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
         |message| DomainError::UsageCodeWithDetails {
             code: "global_merge_snapshot_changed",
@@ -12208,6 +12211,13 @@ fn consolidation_pair_preserves_metadata(
     ))
 }
 
+fn steward_consolidation_source_id(stored: &StoredCurationCandidate) -> Option<&str> {
+    if stored.source_type != crate::curate::CandidateSource::RuleEngine.as_str() {
+        return None;
+    }
+    stored.source_id.as_deref().filter(|id| id.starts_with("mem_"))
+}
+
 /// Revalidate a `Consolidate` candidate at apply time. A candidate only
 /// earns absorb semantics (lineage link + duplicate tombstone) when it is
 /// provably steward-derived for exactly this (workspace, source, target)
@@ -12221,13 +12231,9 @@ fn resolve_consolidate_absorb(
     stored: &StoredCurationCandidate,
     target_memory: Option<&StoredMemory>,
 ) -> Result<ConsolidateAbsorbResolution, DomainError> {
-    let steward_source_type = crate::curate::CandidateSource::RuleEngine.as_str();
-    let Some(source_id) = stored.source_id.as_deref() else {
+    let Some(source_id) = steward_consolidation_source_id(stored) else {
         return Ok(ConsolidateAbsorbResolution::LegacyUpdate);
     };
-    if stored.source_type != steward_source_type || !source_id.starts_with("mem_") {
-        return Ok(ConsolidateAbsorbResolution::LegacyUpdate);
-    }
 
     let mut issues = Vec::new();
     let Some(target_id) = stored.target_memory_id.as_deref() else {
@@ -14498,6 +14504,94 @@ fn blocked_validation(
     }
 }
 
+/// Generic rewrites may change the current memory, never a sealed body, a
+/// pending review, or an immutable predecessor. Historical rows remain valid
+/// source evidence for separate derived/procedural objects; explicit retirement
+/// also keeps its existing lifecycle semantics. Applied receipts authorize no
+/// new mutation and must remain replayable after the target changes lifecycle.
+fn require_memory_update_target_authority(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    if !matches!(stored.status.as_str(), "pending" | "approved")
+        || !matches!(
+            CandidateType::from_str(&stored.candidate_type),
+            Ok(CandidateType::Consolidate
+                | CandidateType::Supersede
+                | CandidateType::Merge
+                | CandidateType::ParaphraseDedupProposal
+                | CandidateType::Split
+                | CandidateType::Promote
+                | CandidateType::Deprecate)
+        )
+    {
+        return Ok(());
+    }
+    // Steward absorption has its own source/target metadata admission and
+    // blocked-plan contract. It must never be mistaken for a prose rewrite.
+    if stored.candidate_type == CandidateType::Consolidate.as_str()
+        && steward_consolidation_source_id(stored).is_some()
+    {
+        return Ok(());
+    }
+    source_admission::with_snapshot(connection, || {
+        let unavailable = || DomainError::Storage {
+            message: "Could not verify current curation target authority; no memory update was authorized."
+                .to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        };
+        let target_id = required_stored_target_memory_id(stored)?;
+        let Some(target) = connection.get_memory(target_id).map_err(|_| unavailable())? else {
+            // The ordinary target validator owns missing and foreign rows.
+            return Ok(());
+        };
+        if target.workspace_id != stored.workspace_id || target.tombstoned_at.is_some() {
+            return Ok(());
+        }
+        let refuse = |reason: &str, repair: String| DomainError::Usage {
+            message: format!(
+                "Curation target {target_id} {reason}; no memory update was authorized."
+            ),
+            repair: Some(repair),
+        };
+        if connection
+            .get_memory_superseded_at(target_id)
+            .map_err(|_| unavailable())?
+            .is_some()
+        {
+            return Err(refuse(
+                "is superseded",
+                format!("Inspect ee memory history {target_id} --json and propose against the current revision."),
+            ));
+        }
+        if crate::core::memory::resolve_memory_seal_lineage(connection, &target)
+            .map_err(|_| unavailable())?
+            .is_some_and(|seal| seal.is_sealed())
+        {
+            return Err(refuse(
+                "has a closed seal",
+                "Reveal the target through the verified memory reveal workflow before proposing a rewrite."
+                    .to_owned(),
+            ));
+        }
+        if crate::core::memory_lifecycle::pending_memory_review_ids(
+            connection,
+            &stored.workspace_id,
+            &[target_id],
+        )
+        .map_err(|_| unavailable())?
+        .contains(target_id)
+        {
+            return Err(refuse(
+                "is held for pending review",
+                "Resolve the target's pending feedback review before proposing a rewrite."
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    })
+}
+
 fn validate_target_memory(
     stored: &StoredCurationCandidate,
     target_memory: Option<&StoredMemory>,
@@ -16009,6 +16103,7 @@ fn revalidate_generic_candidate_application_in_transaction(
     if target.as_ref() != decision.target_snapshot.as_ref() {
         return Err(stale("target memory changed during preparation"));
     }
+    require_memory_update_target_authority(connection, stored)?;
     if decision.tombstone_memory
         && !decision.allow_tombstone_load_bearing
         && let Some(protection) =
@@ -29745,6 +29840,310 @@ mod tests {
         Ok(connection)
     }
 
+    fn withhold_curation_target_for_test(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        condition: &str,
+    ) -> TestResult {
+        match condition {
+            "target_superseded" => connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET superseded_at = '2026-08-01T00:00:00Z' WHERE id = '{memory_id}'"
+                ))
+                .map_err(|error| error.to_string()),
+            "target_sealed" => connection
+                .insert_memory_seal(
+                    memory_id,
+                    &crate::models::memory_seal_commitment(b"withheld release instruction"),
+                    "2026-08-01T00:00:00Z",
+                )
+                .map_err(|error| error.to_string()),
+            "target_review_pending" => connection
+                .insert_feedback_quarantine(
+                    &format!("fq_{:026}", 1),
+                    &crate::db::CreateFeedbackQuarantineInput {
+                        workspace_id: workspace_id.to_owned(),
+                        source_id: "curation-target-authority-test".to_owned(),
+                        target_type: "memory".to_owned(),
+                        target_id: memory_id.to_owned(),
+                        signal: "harmful".to_owned(),
+                        weight: 1.0,
+                        source_type: "automated_check".to_owned(),
+                        proposed_event_id: None,
+                        recorded_at: "2026-08-01T00:00:00Z".to_owned(),
+                        reason: "Pending target review".to_owned(),
+                        event_reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                    },
+                )
+                .map_err(|error| error.to_string()),
+            "target_authority_unavailable" => connection
+                .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_curation_target_seals")
+                .map_err(|error| error.to_string()),
+            _ => Err("unknown curation target authority condition".to_owned()),
+        }
+    }
+
+    #[test]
+    fn generic_memory_update_authority_guards_validation_review_and_apply() -> TestResult {
+        let kinds = [
+            "supersede",
+            "consolidate",
+            "merge",
+            "paraphrase_dedup_proposal",
+            "split",
+            "promote",
+            "deprecate",
+        ];
+        for (condition, expected) in [
+            ("target_superseded", "is superseded"),
+            ("target_sealed", "has a closed seal"),
+            ("target_review_pending", "held for pending review"),
+            (
+                "target_authority_unavailable",
+                "Could not verify current curation target authority",
+            ),
+        ] {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            fs::create_dir(directory.path().join(".ee")).map_err(|error| error.to_string())?;
+            let database = directory.path().join("ee.db");
+            let workspace_id = test_workspace_id(directory.path());
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D61)).to_string();
+            let first_candidate_id = curate_id(0x7D70);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &first_candidate_id,
+                kinds[0],
+                Some("approved"),
+                Some("Verify the signed artifact before deployment."),
+            )?;
+            for (offset, kind) in kinds.iter().enumerate().skip(1) {
+                insert_test_candidate(
+                    &connection,
+                    TestCandidateInput {
+                        workspace_id: &workspace_id,
+                        memory_id: &memory_id,
+                        candidate_id: &curate_id(0x7D70 + offset as u128),
+                        source_id: "fb_01234567890123456789012345",
+                        candidate_type: kind,
+                        status: Some("approved"),
+                        proposed_content: (!matches!(*kind, "promote" | "deprecate"))
+                            .then_some("Verify the signed artifact before deployment."),
+                    },
+                )?;
+            }
+            for (offset, kind) in kinds.iter().enumerate() {
+                let preview = apply_curation_candidate(&super::CurateApplyOptions {
+                    workspace_path: directory.path(),
+                    database_path: Some(&database),
+                    candidate_id: &curate_id(0x7D70 + offset as u128),
+                    actor: Some("target-authority-test"),
+                    dry_run: true,
+                    allow_tombstone_load_bearing: false,
+                })
+                .map_err(|error| error.message())?;
+                assert_eq!(preview.application.status, "would_apply", "{kind}");
+                assert!(!preview.durable_mutation);
+            }
+            withhold_curation_target_for_test(&connection, &workspace_id, &memory_id, condition)?;
+            let target_before = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?;
+            let audits_before = connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?;
+            for (offset, kind) in kinds.iter().enumerate() {
+                let candidate_id = curate_id(0x7D70 + offset as u128);
+                let candidate_before = connection
+                    .get_curation_candidate(&workspace_id, &candidate_id)
+                    .map_err(|error| error.to_string())?;
+                for dry_run in [true, false] {
+                    let errors = [
+                        validate_curation_candidate(&super::CurateValidateOptions {
+                            workspace_path: directory.path(),
+                            database_path: Some(&database),
+                            candidate_id: &candidate_id,
+                            actor: Some("target-authority-test"),
+                            dry_run,
+                        })
+                        .expect_err("withheld target cannot be validated"),
+                        apply_curation_candidate(&super::CurateApplyOptions {
+                            workspace_path: directory.path(),
+                            database_path: Some(&database),
+                            candidate_id: &candidate_id,
+                            actor: Some("target-authority-test"),
+                            dry_run,
+                            allow_tombstone_load_bearing: false,
+                        })
+                        .expect_err("withheld target cannot be rewritten"),
+                        super::review_curation_candidate(&super::CurateReviewOptions {
+                            workspace_path: directory.path(),
+                            database_path: Some(&database),
+                            candidate_id: &candidate_id,
+                            action: super::CurateReviewAction::Accept,
+                            actor: Some("target-authority-test"),
+                            dry_run,
+                            snoozed_until: None,
+                            reason: None,
+                            merge_into_candidate_id: None,
+                        })
+                        .expect_err("review acceptance cannot bypass target authority"),
+                    ];
+                    for error in errors {
+                        assert!(
+                            error.message().contains(expected),
+                            "{condition}/{kind}: {}",
+                            error.message()
+                        );
+                        assert!(!error.message().contains("Run cargo fmt"));
+                        assert!(!error.message().contains("Verify the signed artifact"));
+                        assert!(error.repair().is_some());
+                    }
+                }
+                assert_eq!(
+                    connection
+                        .get_curation_candidate(&workspace_id, &candidate_id)
+                        .map_err(|error| error.to_string())?,
+                    candidate_before,
+                );
+            }
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?,
+                target_before,
+            );
+            assert_eq!(
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                audits_before,
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generic_memory_update_authority_preserves_receipt_replay_and_rejection() -> TestResult {
+        for condition in [
+            "target_superseded",
+            "target_sealed",
+            "target_review_pending",
+            "target_authority_unavailable",
+        ] {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            fs::create_dir(directory.path().join(".ee")).map_err(|error| error.to_string())?;
+            let database = directory.path().join("ee.db");
+            let workspace_id = test_workspace_id(directory.path());
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7D81)).to_string();
+            let applied_id = curate_id(0x7D82);
+            let rejected_id = curate_id(0x7D83);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &applied_id,
+                "promote",
+                Some("approved"),
+                None,
+            )?;
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &applied_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("candidate missing before application")?;
+            let target = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("target missing before application")?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let decision = super::evaluate_candidate_for_apply(
+                &stored,
+                Some(&target),
+                &super::ConsolidateAbsorbResolution::LegacyUpdate,
+                &now,
+            );
+            assert!(decision.should_persist);
+            super::persist_candidate_application(
+                &connection,
+                &workspace_id,
+                &stored,
+                &decision,
+                None,
+                &now,
+                "target-authority-test",
+            )
+            .map_err(|error| error.message())?;
+            insert_test_candidate(
+                &connection,
+                TestCandidateInput {
+                    workspace_id: &workspace_id,
+                    memory_id: &memory_id,
+                    candidate_id: &rejected_id,
+                    source_id: "fb_01234567890123456789012345",
+                    candidate_type: "supersede",
+                    status: Some("pending"),
+                    proposed_content: Some("Verify the signed artifact before deployment."),
+                },
+            )?;
+            withhold_curation_target_for_test(&connection, &workspace_id, &memory_id, condition)?;
+            let target_before = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?;
+            let audits_before = connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?;
+            let replay = apply_curation_candidate(&super::CurateApplyOptions {
+                workspace_path: directory.path(),
+                database_path: Some(&database),
+                candidate_id: &applied_id,
+                actor: Some("target-authority-test"),
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(replay.application.status, "already_applied", "{condition}");
+            assert!(!replay.durable_mutation);
+            assert_eq!(
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                audits_before,
+            );
+            let rejection = super::review_curation_candidate(&super::CurateReviewOptions {
+                workspace_path: directory.path(),
+                database_path: Some(&database),
+                candidate_id: &rejected_id,
+                action: super::CurateReviewAction::Reject,
+                actor: Some("target-authority-test"),
+                dry_run: false,
+                snoozed_until: None,
+                reason: Some("Target is no longer available for this rewrite."),
+                merge_into_candidate_id: None,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(rejection.mutation.to_status, "rejected", "{condition}");
+            assert!(rejection.durable_mutation);
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|error| error.to_string())?,
+                target_before,
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn generic_candidate_apply_rechecks_prepared_rows_and_expiry_before_writing() -> TestResult {
         for (interleave, candidate_type, expected_refusal) in [
@@ -29753,6 +30152,14 @@ mod tests {
             ("target_utility_changed", "rule", "target memory changed"),
             ("target_tombstoned", "procedure", "is tombstoned"),
             ("expired_during_wait", "supersede", "TTL expired"),
+            ("target_superseded", "supersede", "is superseded"),
+            ("target_sealed", "merge", "has a closed seal"),
+            ("target_review_pending", "split", "held for pending review"),
+            (
+                "target_authority_unavailable",
+                "paraphrase_dedup_proposal",
+                "Could not verify current curation target authority",
+            ),
         ] {
             let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
             let database = dir.path().join("ee.db");
@@ -29852,6 +30259,24 @@ mod tests {
                     );
                 }
                 "expired_during_wait" => {}
+                "target_superseded"
+                | "target_sealed"
+                | "target_review_pending"
+                | "target_authority_unavailable" => {
+                    withhold_curation_target_for_test(
+                        &connection,
+                        &workspace_id,
+                        &memory_id,
+                        interleave,
+                    )?;
+                    assert_eq!(
+                        connection
+                            .get_memory(&memory_id)
+                            .map_err(|error| error.to_string())?,
+                        Some(target.clone()),
+                        "sidecar-only drift must be caught even when StoredMemory is identical",
+                    );
+                }
                 _ => return Err("unknown apply interleaving".to_owned()),
             }
             let memory_before = connection
