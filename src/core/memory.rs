@@ -6604,6 +6604,21 @@ fn propose_curation_candidate_for_remember(
     }
 
     let started = Instant::now();
+    let tag_neighbor_ids =
+        tag_overlap_neighbor_ids(connection, &prepared.workspace_id, &memory_input.tags)?;
+    // This proposal uses current search, without a historical as-of. Eligible
+    // search neighbors must also share a tag, so live tag IDs plus this memory
+    // bound the possible cluster without running semantic retrieval.
+    let memory_not_in_tags = !tag_neighbor_ids.iter().any(|id| id == memory_id);
+    let potential_cluster_size = tag_neighbor_ids.len() + usize::from(memory_not_in_tags);
+    if potential_cluster_size < REMEMBER_CURATION_CLUSTER_THRESHOLD {
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "skipped_too_few_neighbors",
+            degradations: Vec::new(),
+        });
+    }
+
     let mut degradations = Vec::new();
     // Search neighbor lookup can repair a stale index as a side effect. A
     // deferred write must leave publication to its caller or a later worker,
@@ -6628,12 +6643,9 @@ fn propose_curation_candidate_for_remember(
             Vec::new()
         }
     };
-    append_tag_overlap_neighbor_ids(
-        connection,
-        &prepared.workspace_id,
-        &mut member_ids,
-        &memory_input.tags,
-    )?;
+    // Cluster admission already deduplicates in first-seen order. Appending
+    // here preserves search priority without a quadratic scan of broad tags.
+    member_ids.extend(tag_neighbor_ids);
 
     let cluster = remember_candidate_cluster(
         connection,
@@ -6850,12 +6862,11 @@ fn remember_search_neighbor_ids(
         .collect())
 }
 
-fn append_tag_overlap_neighbor_ids(
+fn tag_overlap_neighbor_ids(
     connection: &DbConnection,
     workspace_id: &str,
-    member_ids: &mut Vec<String>,
     tags: &[String],
-) -> Result<(), DomainError> {
+) -> Result<Vec<String>, DomainError> {
     let mut tag_matches: BTreeMap<String, usize> = BTreeMap::new();
     for tag in tags {
         let tagged_ids = connection
@@ -6871,12 +6882,7 @@ fn append_tag_overlap_neighbor_ids(
     let mut ranked = tag_matches.into_iter().collect::<Vec<_>>();
     sort_by_ulid_payload_or_lexical(&mut ranked, |(memory_id, _)| memory_id.as_str());
     ranked.sort_by(|(_, left_count), (_, right_count)| right_count.cmp(left_count));
-    for (memory_id, _) in ranked {
-        if !member_ids.contains(&memory_id) {
-            member_ids.push(memory_id);
-        }
-    }
-    Ok(())
+    Ok(ranked.into_iter().map(|(memory_id, _)| memory_id).collect())
 }
 
 fn remember_candidate_cluster(
@@ -6889,55 +6895,46 @@ fn remember_candidate_cluster(
     let required_tags = memory_input.tags.iter().cloned().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut cluster = Vec::new();
-    let candidate_ids: Vec<String> = std::iter::once(memory_id.to_owned())
+    let candidate_ids = std::iter::once(memory_id.to_owned())
         .chain(member_ids)
-        .filter(|id| seen.insert(id.clone()))
-        .collect();
+        .filter(|id| seen.insert(id.clone()));
 
-    for page in candidate_ids.chunks(32) {
-        let batch_ids = page.iter().map(String::as_str).collect::<Vec<_>>();
-        let batch_result =
-            connection
-                .get_memories_batch(&batch_ids)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to load curation neighbor memory: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                })?;
-
-        for candidate_id in page {
-            let Some(memory) = batch_result.get(candidate_id).cloned() else {
-                continue;
-            };
-            if memory.workspace_id != workspace_id
-                || memory.tombstoned_at.is_some()
-                || memory.level != memory_input.level
-                || memory.kind != memory_input.kind
-            {
-                continue;
-            }
-            if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id
-            {
-                continue;
-            }
-            let candidate_tags =
-                connection
-                    .get_memory_tags(&memory.id)
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to load curation neighbor tags: {error}"),
-                        repair: Some("ee doctor --json".to_owned()),
-                    })?;
-            if !required_tags.is_empty()
-                && !candidate_tags
-                    .iter()
-                    .any(|tag| required_tags.contains(tag.as_str()))
-            {
-                continue;
-            }
-            cluster.push(memory);
-            if cluster.len() > REMEMBER_CURATION_NEIGHBOR_LIMIT {
-                break;
-            }
+    // Small get_memories_batch calls are individual primary-key seeks. Read
+    // them lazily so a full cluster never fetches the unused tail of a page.
+    for candidate_id in candidate_ids {
+        let Some(memory) = connection
+            .get_memory(&candidate_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load curation neighbor memory: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+        else {
+            continue;
+        };
+        if memory.workspace_id != workspace_id
+            || memory.tombstoned_at.is_some()
+            || memory.level != memory_input.level
+            || memory.kind != memory_input.kind
+        {
+            continue;
         }
+        if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id {
+            continue;
+        }
+        let candidate_tags = connection.get_memory_tags(&memory.id).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to load curation neighbor tags: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+        if !required_tags.is_empty()
+            && !candidate_tags
+                .iter()
+                .any(|tag| required_tags.contains(tag.as_str()))
+        {
+            continue;
+        }
+        cluster.push(memory);
         if cluster.len() > REMEMBER_CURATION_NEIGHBOR_LIMIT {
             break;
         }
@@ -18722,6 +18719,222 @@ mod tests {
             .list_all_memory_links(None)
             .map_err(|error| error.to_string())?;
         ensure(links.is_empty(), true, "no durable links when disabled")
+    }
+
+    fn remember_curation_growth_fixture() -> Result<(DbConnection, CreateMemoryInput), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        for (id, path) in [
+            (workspace_id, "/tmp/remember-curation-growth"),
+            ("wsp_01234567890123456789012346", "/tmp/remember-curation-other"),
+        ] {
+            connection
+                .insert_workspace(
+                    id,
+                    &CreateWorkspaceInput {
+                        path: path.to_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let input = CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Run cargo fmt --check before releasing the workspace.".to_owned(),
+            workflow_id: None,
+            confidence: 0.8,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: None,
+            tags: vec!["cargo".to_owned(), "release".to_owned()],
+            valid_from: None,
+            valid_to: None,
+        };
+        Ok((connection, input))
+    }
+
+    fn remember_curation_growth_id(ordinal: u32) -> String {
+        MemoryId::from_uuid(uuid::Uuid::from_u128(u128::from(ordinal))).to_string()
+    }
+
+    #[test]
+    fn remember_curation_skips_search_only_below_the_live_tag_cluster_threshold() -> TestResult {
+        let (connection, input) = remember_curation_growth_fixture()?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let prepared = PreparedRememberMemory {
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(0)),
+            workspace_id: input.workspace_id.clone(),
+            workspace_path: temp.path().to_path_buf(),
+            database_path: temp.path().join("missing-search.db"),
+            index_dir: temp.path().join("missing-index"),
+            content: input.content.clone(),
+            workflow_id: None,
+            level: MemoryLevel::Procedural,
+            kind: MemoryKind::Rule,
+            typed_fields_json: None,
+            attempt_family: None,
+            creation_companions: PreparedRememberCreationCompanions::default(),
+            confidence: input.confidence,
+            tags: input.tags.clone(),
+            provenance_uri: None,
+            policy_bypass: None,
+            valid_from: None,
+            valid_to: None,
+            validity_status: "current".to_owned(),
+            validity_window_kind: "unbounded".to_owned(),
+        };
+        connection
+            .insert_memory(
+                &remember_curation_growth_id(99),
+                &CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012346".to_owned(),
+                    ..input.clone()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(&remember_curation_growth_id(98), &input)
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory(&remember_curation_growth_id(98))
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(&remember_curation_growth_id(97), &input)
+            .map_err(|error| error.to_string())?;
+        connection
+            .restore_imported_memory_supersession(
+                &remember_curation_growth_id(97),
+                "2026-01-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+
+        for ordinal in [0, 1] {
+            connection
+                .insert_memory(&remember_curation_growth_id(ordinal), &input)
+                .map_err(|error| error.to_string())?;
+            let (report, queries) = crate::db::capture_query_sql_for_test(|| {
+                propose_curation_candidate_for_remember(
+                    &connection,
+                    &prepared,
+                    &remember_curation_growth_id(0),
+                    &input,
+                    true,
+                    true,
+                )
+            });
+            let report = report.map_err(|error| error.message())?;
+            ensure(report.status, "skipped_too_few_neighbors", "small cluster")?;
+            assert!(report.candidate.is_none());
+            assert!(report.degradations.is_empty(), "unused search must not fail");
+            assert_eq!(queries.len(), input.tags.len(), "only tag IDs are read");
+        }
+
+        connection
+            .insert_memory(&remember_curation_growth_id(2), &input)
+            .map_err(|error| error.to_string())?;
+        let report = propose_curation_candidate_for_remember(
+            &connection,
+            &prepared,
+            &remember_curation_growth_id(0),
+            &input,
+            true,
+            true,
+        )
+        .map_err(|error| error.message())?;
+        // The missing search database is a negative control: once a cluster
+        // is possible, the existing semantic lookup and its failure report run.
+        assert!(report.degradations.iter().any(|entry| {
+            entry.code == "auto_propose_search_neighbor_lookup_failed"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn remember_curation_hydrates_only_the_selected_prefix_of_broad_tags() -> TestResult {
+        let (connection, input) = remember_curation_growth_fixture()?;
+        for ordinal in (0..=64).rev() {
+            connection
+                .insert_memory(&remember_curation_growth_id(ordinal), &input)
+                .map_err(|error| error.to_string())?;
+        }
+        let tagged = tag_overlap_neighbor_ids(&connection, &input.workspace_id, &input.tags)
+            .map_err(|error| error.message())?;
+        ensure(
+            tagged.clone(),
+            (0..=64).map(remember_curation_growth_id).collect::<Vec<_>>(),
+            "tag ties retain canonical ID order",
+        )?;
+        let mut members = vec![remember_curation_growth_id(64); 2];
+        members.extend((1..=63).rev().map(remember_curation_growth_id));
+        members.extend(tagged);
+        let (cluster, queries) = crate::db::capture_query_sql_for_test(|| {
+            remember_candidate_cluster(
+                &connection,
+                &input.workspace_id,
+                &remember_curation_growth_id(0),
+                &input,
+                members,
+            )
+        });
+        let cluster = cluster.map_err(|error| error.message())?;
+        let mut expected = vec![remember_curation_growth_id(0)];
+        expected.extend(
+            (1..=64)
+                .rev()
+                .take(REMEMBER_CURATION_NEIGHBOR_LIMIT)
+                .map(remember_curation_growth_id),
+        );
+        sort_by_ulid_payload_or_lexical(&mut expected, String::as_str);
+        ensure(
+            cluster.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+            expected,
+            "first-seen search ranking survives overlap and duplicate IDs",
+        )?;
+        assert!(
+            queries.len() <= 2 * (REMEMBER_CURATION_NEIGHBOR_LIMIT + 1),
+            "a full cluster reads only its memory rows and tags: {} queries",
+            queries.len(),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remember_curation_lazy_reads_preserve_neighbor_admission() -> TestResult {
+        let (connection, input) = remember_curation_growth_fixture()?;
+        for ordinal in 0..=7 {
+            let mut candidate = input.clone();
+            match ordinal {
+                1 => candidate.tags = vec!["unrelated".to_owned()],
+                2 => candidate.level = "episodic".to_owned(),
+                3 => candidate.kind = "fact".to_owned(),
+                5 => candidate.workspace_id = "wsp_01234567890123456789012346".to_owned(),
+                _ => {}
+            }
+            connection
+                .insert_memory(&remember_curation_growth_id(ordinal), &candidate)
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .tombstone_memory(&remember_curation_growth_id(4))
+            .map_err(|error| error.to_string())?;
+        let cluster = remember_candidate_cluster(
+            &connection,
+            &input.workspace_id,
+            &remember_curation_growth_id(0),
+            &input,
+            (0..=8).rev().map(remember_curation_growth_id).collect(),
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            cluster.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+            [0, 6, 7].into_iter().map(remember_curation_growth_id).collect(),
+            "missing, foreign, tombstoned, wrong-kind, wrong-level and unrelated rows stay out",
+        )
     }
 
     #[test]
