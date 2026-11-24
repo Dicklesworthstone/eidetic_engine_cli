@@ -2862,7 +2862,52 @@ def emit(text, codes):
     payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": header + "\n" + text}}
     print(json.dumps(payload, separators=(",", ":")))
     _ee_record_invocation("emitted", len(payload["hookSpecificOutput"]["additionalContext"].encode("utf-8")), codes)
+def patch_file_paths(patch):
+    # Codex supplies apply_patch as a raw string. Read only its structural
+    # headers: hunk lines carry a leading space, + or -, so quoted headers in
+    # source content must never become recall paths. Malformed patches are a
+    # no-op here; the harness remains responsible for applying the patch.
+    if len(patch) > 1048576:
+        return []
+    # Only newline/CRLF delimit patch records; Unicode line separators can be
+    # literal source content and must not manufacture file headers.
+    lines = patch.strip().replace("\r\n", "\n").split("\n")
+    if len(lines) < 3 or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
+        return []
+    paths = []
+    kind = None
+    may_move = False
+    for line in lines[1:-1]:
+        if line.startswith(("*** Add File: ", "*** Update File: ", "*** Delete File: ")):
+            kind, path = line[4:].split(" File: ", 1)
+            if not path or "\x00" in path:
+                return []
+            paths.append(path)
+            may_move = kind == "Update"
+            continue
+        if line.startswith("*** Move to: "):
+            if not may_move:
+                return []
+            path = line[len("*** Move to: "):]
+            if not path or "\x00" in path:
+                return []
+            paths.append(path)
+            may_move = False
+            continue
+        may_move = False
+        if kind == "Add" and line.startswith("+"):
+            continue
+        if kind == "Update":
+            if line == "" or line.startswith((" ", "+", "-")) or line == "@@" or line.startswith("@@ "):
+                continue
+            if line == "*** End of File":
+                kind = None
+                continue
+        return []
+    return paths
 tool_input = data.get("tool_input") or {}
+if isinstance(tool_input, str) and data.get("tool_name") == "apply_patch":
+    tool_input = {"edits": [{"path": path} for path in patch_file_paths(tool_input)]}
 if not isinstance(tool_input, dict):
     sys.exit(0)
 paths = []
@@ -2890,11 +2935,14 @@ for path in paths:
         continue
     if path not in seen:
         seen.append(path)
+        if len(seen) == MAX_PATHS:
+            break
 if not seen:
     sys.exit(0)
 cmd = [ee, "recall", "--use-daemon"]
 for path in seen[:MAX_PATHS]:
-    cmd.extend(["--path", path])
+    # Keep even option-shaped file names as values, never CLI switches.
+    cmd.append("--path=" + path)
 cmd.extend(["--budget-tokens", str(BUDGET), "--format", "hook", "--fields", "command,ambientContext"])
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
@@ -5872,10 +5920,19 @@ mod tests {
         event: &serde_json::Value,
         launcher: &Path,
     ) -> Result<std::process::Output, String> {
+        run_python_hook_probe(script, event, launcher, &launcher.join("missing-ee"))
+    }
+
+    fn run_python_hook_probe(
+        script: &str,
+        event: &serde_json::Value,
+        launcher: &Path,
+        ee_binary: &Path,
+    ) -> Result<std::process::Output, String> {
         let mut child = Command::new("python3")
             .arg("-c")
             .arg(format!("{}\n{script}", python_invocation_recorder()))
-            .arg(launcher.join("missing-ee"))
+            .arg(ee_binary)
             .current_dir(launcher)
             .env("EE_AMBIENT_CONTEXT", "true")
             .env("EE_AMBIENT_CONTEXT_VERBOSITY", "standard")
@@ -5903,6 +5960,157 @@ mod tests {
             ));
         }
         Ok(output)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_edit_hook_recalls_apply_patch_files_and_move_destinations() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let ee_binary = temp.path().join("ee-probe");
+        fs::write(
+            &ee_binary,
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+pathlib.Path("recall-argv.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+print(json.dumps({"success": True, "data": {"ambientContext": {"text": "Anchored recall fixture"}}, "degraded": []}))
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::set_permissions(&ee_binary, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        let event = serde_json::json!({
+            "cwd": workspace,
+            "session_id": "patch-recall",
+            "tool_name": "apply_patch",
+            "tool_input": "*** Begin Patch\n*** Update File: src/old name.rs\n*** Move to: src/new name.rs\n@@\n-old\n+new\n*** Add File: src/added.rs\n+*** Update File: not-a-target.rs\n+*** Move to: also-not-a-target.rs\n+body\u{2028}*** Delete File: unicode-spoof.rs\n*** Delete File: src/removed.rs\n*** Update File: ./src/added.rs\n@@ *** Update File: quoted-context.rs\n *** Delete File: quoted-content.rs\n-old\n+new\n*** End of File\n*** End Patch\n"
+        });
+        let output = run_python_hook_probe(pre_edit_python(), &event, temp.path(), &ee_binary)?;
+        assert!(output.stderr.is_empty());
+        let command: Vec<String> = serde_json::from_slice(
+            &fs::read(workspace.join("recall-argv.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(command[0], "recall");
+        assert_eq!(command[1], "--use-daemon");
+        let paths: Vec<_> = command
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--path="))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "src/old name.rs",
+                "src/new name.rs",
+                "src/added.rs",
+                "src/removed.rs"
+            ]
+        );
+        let response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let context = response["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .ok_or("hook context missing")?;
+        assert!(context.contains("Anchored recall fixture"));
+        assert!(context.contains("provenance=ee:ee.ambient_context.v1"));
+        assert_eq!(response["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        let duplicate = run_python_hook_probe(pre_edit_python(), &event, temp.path(), &ee_binary)?;
+        assert!(duplicate.stdout.is_empty(), "repeat context must stay deduplicated");
+        assert!(duplicate.stderr.is_empty());
+        assert!(!temp.path().join("recall-argv.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn pre_edit_hook_ignores_malformed_or_unrelated_patch_strings() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        for patch in [
+            "*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch",
+            "*** Begin Patch\n*** Add File: src/lib.rs\n+new",
+            "*** Begin Patch\n*** Add File: src/lib.rs\nbare body\n*** End Patch",
+            "*** Begin Patch\n*** Move to: src/lib.rs\n*** End Patch",
+            "*** Begin Patch\n*** Delete File: src/lib.rs\n*** Move to: next.rs\n*** End Patch",
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Move to: next.rs\n*** End Patch",
+            "*** Begin Patch\n*** Add File: \n+new\n*** End Patch",
+            "*** Begin Patch\n*** Add File: src/\0lib.rs\n+new\n*** End Patch",
+            "*** Begin Patch\n*** Add File: src/lib.rs\n+new\n*** End Patch\ntrailer",
+        ] {
+            let event = serde_json::json!({
+                "cwd": temp.path(), "tool_name": "apply_patch", "tool_input": patch
+            });
+            let output = run_python_hook_state_probe(pre_edit_python(), &event, temp.path())?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert!(
+                !temp.path().join("relative-state").exists(),
+                "malformed patch must not invoke EE or record a command failure: {patch:?}"
+            );
+        }
+        let patch = "*** Begin Patch\n*** Delete File: src/lib.rs\n*** End Patch";
+        for tool in ["Edit", "Write", "Bash", ""] {
+            let event = serde_json::json!({
+                "cwd": temp.path(), "tool_name": tool, "tool_input": patch
+            });
+            let output = run_python_hook_state_probe(pre_edit_python(), &event, temp.path())?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert!(!temp.path().join("relative-state").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pre_edit_patch_paths_obey_workspace_scope_and_budget() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let mut patch = format!(
+            "*** Begin Patch\n*** Delete File: ../outside.rs\n*** Delete File: {}\n*** Delete File: --config=literal.rs\n*** Delete File: $(touch sentinel).rs\n",
+            temp.path().join("absolute-outside.rs").display()
+        );
+        for index in 0..12 {
+            patch.push_str(&format!("*** Delete File: src/file{index}.rs\n"));
+        }
+        patch.push_str("*** End Patch\n");
+        let event = serde_json::json!({
+            "cwd": "workspace", "tool_name": "apply_patch", "tool_input": patch
+        });
+        let prefix = pre_edit_python()
+            .split_once("try:\n    result = subprocess.run(cmd,")
+            .ok_or("recall subprocess boundary missing")?
+            .0;
+        for (verbosity, limit, budget) in [
+            ("quiet", 4, "200"),
+            ("standard", 8, "400"),
+            ("verbose", 12, "800"),
+        ] {
+            let probe = format!(
+                "os.environ['EE_AMBIENT_CONTEXT_VERBOSITY'] = '{verbosity}'\n{prefix}\nprint(json.dumps(cmd))\n"
+            );
+            let output = run_python_hook_state_probe(&probe, &event, temp.path())?;
+            assert!(output.stderr.is_empty());
+            let command: Vec<String> =
+                serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+            let paths: Vec<_> = command
+                .iter()
+                .filter_map(|argument| argument.strip_prefix("--path="))
+                .collect();
+            assert_eq!(paths.len(), limit);
+            assert_eq!(paths[..2], ["--config=literal.rs", "$(touch sentinel).rs"]);
+            let last_expected = format!("src/file{}.rs", limit - 3);
+            assert_eq!(paths.last().copied(), Some(last_expected.as_str()));
+            assert!(
+                command
+                    .windows(2)
+                    .any(|pair| pair[0] == "--budget-tokens" && pair[1] == budget)
+            );
+        }
+        assert!(!workspace.join("sentinel").exists());
+        assert!(!workspace.join("relative-state").exists());
+        Ok(())
     }
 
     #[test]
