@@ -9,7 +9,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use ee::core::recorder::{
-    RecorderEventOptions, RecorderEventsListOptions, RecorderFinishOptions, RecorderStartOptions,
+    RecordPersistedEventError, RecorderEventOptions, RecorderEventsListOptions,
+    RecorderFinishOptions, RecorderStartOptions,
     finish_and_persist_recording, list_recorder_events, record_and_persist_event,
     start_and_persist_recording,
 };
@@ -45,6 +46,25 @@ fn event_options(run_id: &str, payload: Option<&str>) -> RecorderEventOptions {
         previous_event_hash: None,
         max_payload_bytes: DEFAULT_MAX_PAYLOAD,
         dry_run: false,
+    }
+}
+
+fn stored_event_input(run_id: &str, sequence: u64) -> CreateRecorderEventInput {
+    CreateRecorderEventInput {
+        run_id: run_id.to_owned(),
+        sequence,
+        event_type: "state_change".to_owned(),
+        timestamp: "2026-01-01T00:00:00Z".to_owned(),
+        payload_hash: None,
+        payload_bytes: 0,
+        redaction_status: "clean".to_owned(),
+        redacted_bytes: 0,
+        previous_event_hash: (sequence > 1).then(|| format!("blake3:fixture-{}", sequence - 1)),
+        event_hash: format!("blake3:fixture-{sequence}"),
+        chain_status: if sequence == 1 { "root" } else { "linked" }.to_owned(),
+        source_span_id: None,
+        source_line_start: None,
+        source_line_end: None,
     }
 }
 
@@ -219,6 +239,113 @@ fn record_and_persist_event_rejects_chain_mismatch() {
 }
 
 #[test]
+fn record_and_persist_event_rejects_predecessor_for_empty_chain() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    let mut options = event_options(&start.run_id, Some("first"));
+    options.previous_event_hash = Some("blake3:unexpected-predecessor".to_owned());
+    assert!(matches!(
+        record_and_persist_event(&conn, &options),
+        Err(RecordPersistedEventError::ChainMismatch { .. })
+    ));
+    assert!(
+        conn.list_recorder_events(&start.run_id)
+            .expect("events")
+            .is_empty()
+    );
+}
+
+#[test]
+fn recorder_terminal_runs_refuse_core_and_direct_database_appends() {
+    let conn = connect();
+    for status in ["completed", "abandoned", "imported"] {
+        let run_id = format!("run_terminal_{status}");
+        conn.insert_recorder_run(
+            &run_id,
+            &CreateRecorderRunInput {
+                workspace_id: None,
+                agent_id: "agent_terminal".to_owned(),
+                session_id: None,
+                source_type: if status == "imported" { "cass" } else { "live" }.to_owned(),
+                source_id: None,
+                status: status.to_owned(),
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+                ended_at: Some("2026-01-01T00:01:00Z".to_owned()),
+                event_count: 0,
+                redacted_count: 0,
+                payload_bytes: 0,
+                chain_complete: true,
+            },
+        )
+        .expect("terminal fixture");
+        let before = conn.get_recorder_run(&run_id).expect("run");
+        assert!(matches!(
+            record_and_persist_event(&conn, &event_options(&run_id, Some("late"))),
+            Err(RecordPersistedEventError::RunNotActive { .. })
+        ));
+        assert!(
+            conn.insert_recorder_event(
+                &format!("evt_terminal_{status}"),
+                &stored_event_input(&run_id, 1),
+            )
+            .is_err(),
+            "direct writes must also refuse {status} runs"
+        );
+        assert_eq!(conn.get_recorder_run(&run_id).expect("unchanged run"), before);
+        assert!(conn.list_recorder_events(&run_id).expect("events").is_empty());
+    }
+}
+
+#[test]
+fn recorder_append_refuses_a_gap_before_the_tail() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    for sequence in [1, 3] {
+        conn.insert_recorder_event(
+            &format!("evt_gap_{sequence}"),
+            &stored_event_input(&start.run_id, sequence),
+        )
+        .expect("sparse history fixture");
+    }
+    let error = record_and_persist_event(&conn, &event_options(&start.run_id, Some("next")))
+        .expect_err("a tail lookup must not hide a gap");
+    assert!(error.to_string().contains("non-contiguous"), "{error}");
+    assert_eq!(
+        conn.list_recorder_events(&start.run_id)
+            .expect("events")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn recorder_append_refuses_malformed_earlier_rows_without_hydrating_them() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    record_and_persist_event(&conn, &event_options(&start.run_id, Some("first"))).expect("first");
+    let last = record_and_persist_event(&conn, &event_options(&start.run_id, Some("second")))
+        .expect("second");
+    // The isolated fixture models damaged historical metadata. The source-line
+    // CHECK accepts this positive integer, but the existing u32 decoder rejects it.
+    conn.execute_raw("DROP TRIGGER recorder_events_no_update")
+        .expect("fixture trigger");
+    conn.execute_raw("UPDATE recorder_events SET source_line_start = 4294967296 WHERE sequence = 1")
+        .expect("corrupt earlier metadata");
+    assert!(
+        conn.list_recorder_events(&start.run_id).is_err(),
+        "old full-row reader rejects it"
+    );
+    let error = record_and_persist_event(&conn, &event_options(&start.run_id, Some("third")))
+        .expect_err("aggregate guard must retain the decoder's rejection");
+    assert!(error.to_string().contains("malformed event rows"), "{error}");
+    let tail = conn
+        .list_recorder_events_filtered(Some(&start.run_id), None, None, 1)
+        .expect("last row remains valid");
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].event_id, last.event_id, "no later event was inserted");
+}
+
+#[test]
 fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
@@ -258,6 +385,270 @@ fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
 }
 
 #[test]
+fn recorder_finish_replay_preserves_timestamp_and_terminal_identity() {
+    let conn = connect();
+    for status in [RecorderRunStatus::Completed, RecorderRunStatus::Abandoned] {
+        let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("recorded")))
+            .expect("event");
+        let options = RecorderFinishOptions {
+            run_id: start.run_id.clone(),
+            status,
+            dry_run: false,
+        };
+        let first = finish_and_persist_recording(&conn, &options).expect("finish");
+        let before = conn.get_recorder_run(&start.run_id).expect("terminal row");
+        let replay = finish_and_persist_recording(&conn, &options).expect("idempotent finish");
+        assert_eq!(replay.data_json(), first.data_json());
+        assert_eq!(
+            conn.get_recorder_run(&start.run_id).expect("unchanged row"),
+            before
+        );
+
+        for requested in [
+            RecorderRunStatus::Active,
+            RecorderRunStatus::Imported,
+            if status == RecorderRunStatus::Completed {
+                RecorderRunStatus::Abandoned
+            } else {
+                RecorderRunStatus::Completed
+            },
+        ] {
+            let attempt = RecorderFinishOptions {
+                status: requested,
+                ..options.clone()
+            };
+            assert!(
+                finish_and_persist_recording(&conn, &attempt).is_err(),
+                "cannot relabel {status} as {requested}"
+            );
+            assert_eq!(
+                conn.get_recorder_run(&start.run_id)
+                    .expect("unchanged terminal"),
+                before
+            );
+        }
+    }
+}
+
+#[test]
+fn recorder_finish_validates_status_and_dry_run_keeps_run_open() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    record_and_persist_event(&conn, &event_options(&start.run_id, Some("first"))).expect("event");
+    let before = conn.get_recorder_run(&start.run_id).expect("active row");
+    for status in [RecorderRunStatus::Active, RecorderRunStatus::Imported] {
+        assert!(
+            finish_and_persist_recording(
+                &conn,
+                &RecorderFinishOptions {
+                    run_id: start.run_id.clone(),
+                    status,
+                    dry_run: false,
+                },
+            )
+            .is_err()
+        );
+    }
+    let preview = finish_and_persist_recording(
+        &conn,
+        &RecorderFinishOptions {
+            run_id: start.run_id.clone(),
+            status: RecorderRunStatus::Completed,
+            dry_run: true,
+        },
+    )
+    .expect("preview");
+    assert!(preview.dry_run);
+    assert_eq!(preview.event_count, 1);
+    assert_eq!(
+        conn.get_recorder_run(&start.run_id).expect("still open"),
+        before
+    );
+    assert_eq!(
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("second")))
+            .expect("append after preview")
+            .sequence,
+        2
+    );
+}
+
+#[test]
+fn recorder_finish_preview_works_on_read_only_connection_and_releases_snapshot() {
+    let directory = tempfile::tempdir().expect("directory");
+    let database = directory.path().join("recorder-preview.db");
+    let writer = DbConnection::open_file(&database).expect("database");
+    writer.migrate().expect("schema");
+    let start = start_and_persist_recording(&writer, &start_options()).expect("start");
+    record_and_persist_event(&writer, &event_options(&start.run_id, Some("first")))
+        .expect("event");
+    let before = writer.get_recorder_run(&start.run_id).expect("active row");
+    let reader = DbConnection::open_file_read_only(&database).expect("read-only database");
+    let options = RecorderFinishOptions {
+        run_id: start.run_id.clone(),
+        status: RecorderRunStatus::Completed,
+        dry_run: true,
+    };
+    let preview = finish_and_persist_recording(&reader, &options).expect("read-only preview");
+    assert!(preview.dry_run);
+    assert_eq!(preview.event_count, 1);
+    assert_eq!(
+        writer.get_recorder_run(&start.run_id).expect("unchanged"),
+        before
+    );
+
+    record_and_persist_event(&writer, &event_options(&start.run_id, Some("second")))
+        .expect("writer continues after preview");
+    let second = finish_and_persist_recording(&reader, &options).expect("new preview snapshot");
+    assert_eq!(second.event_count, 2, "the prior read snapshot was released");
+}
+
+#[test]
+fn recorder_finish_preview_preserves_a_caller_owned_transaction() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    let result: ee::db::Result<()> = conn.with_transaction(|| {
+        conn.insert_recorder_event(
+            "evt_preview_uncommitted",
+            &stored_event_input(&start.run_id, 1),
+        )?;
+        let preview = finish_and_persist_recording(
+            &conn,
+            &RecorderFinishOptions {
+                run_id: start.run_id.clone(),
+                status: RecorderRunStatus::Completed,
+                dry_run: true,
+            },
+        )
+        .expect("preview inside the caller's snapshot");
+        assert_eq!(preview.event_count, 1);
+        assert_eq!(
+            conn.list_recorder_events(&start.run_id)?.len(),
+            1,
+            "preview must not roll back its caller's pending event"
+        );
+        Err(ee::db::DbError::MalformedRow {
+            operation: ee::db::DbOperation::Execute,
+            message: "deliberate caller rollback".to_owned(),
+        })
+    });
+    assert!(result.is_err());
+    assert!(
+        conn.list_recorder_events(&start.run_id)
+            .expect("after rollback")
+            .is_empty(),
+        "preview must not commit its caller's pending event"
+    );
+}
+
+#[test]
+fn recorder_recovered_abandoned_run_keeps_missing_end_timestamp() {
+    let conn = connect();
+    let run_id = "run_recovered_abandoned";
+    conn.insert_recorder_run(
+        run_id,
+        &CreateRecorderRunInput {
+            workspace_id: None,
+            agent_id: "agent_recovered".to_owned(),
+            session_id: None,
+            source_type: "live".to_owned(),
+            source_id: None,
+            status: "abandoned".to_owned(),
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            ended_at: None,
+            event_count: 0,
+            redacted_count: 0,
+            payload_bytes: 0,
+            chain_complete: true,
+        },
+    )
+    .expect("interrupted run restored as abandoned");
+    let before = conn.get_recorder_run(run_id).expect("history");
+    let error = finish_and_persist_recording(
+        &conn,
+        &RecorderFinishOptions {
+            run_id: run_id.to_owned(),
+            status: RecorderRunStatus::Abandoned,
+            dry_run: false,
+        },
+    )
+    .expect_err("recovery did not attest a live finish timestamp");
+    assert!(matches!(
+        error,
+        ee::models::DomainError::UsageCodeWithDetails {
+            code: "recorder_run_already_finished",
+            ..
+        }
+    ));
+    assert_eq!(
+        conn.get_recorder_run(run_id).expect("unchanged history"),
+        before
+    );
+}
+
+#[test]
+fn recorder_finish_and_parallel_appends_share_one_terminal_snapshot() {
+    const WRITERS: usize = 4;
+    let directory = tempfile::tempdir().expect("directory");
+    let database = directory.path().join("recorder-finish-race.db");
+    let conn = DbConnection::open_file(&database).expect("database");
+    conn.migrate().expect("schema");
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    record_and_persist_event(&conn, &event_options(&start.run_id, Some("initial")))
+        .expect("initial event");
+    let barrier = Arc::new(Barrier::new(WRITERS + 1));
+    let mut writers = Vec::new();
+    for index in 0..WRITERS {
+        let path = database.clone();
+        let run_id = start.run_id.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(thread::spawn(move || {
+            let writer = DbConnection::open_file(path).expect("writer");
+            barrier.wait();
+            record_and_persist_event(
+                &writer,
+                &event_options(&run_id, Some(&format!("event-{index}"))),
+            )
+        }));
+    }
+    barrier.wait();
+    let finished = finish_and_persist_recording(
+        &conn,
+        &RecorderFinishOptions {
+            run_id: start.run_id.clone(),
+            status: RecorderRunStatus::Completed,
+            dry_run: false,
+        },
+    )
+    .expect("finish while appends contend");
+    let mut accepted = 1_u64;
+    for writer in writers {
+        match writer.join().expect("writer joins") {
+            Ok(_) => accepted += 1,
+            Err(RecordPersistedEventError::RunNotActive { .. }) => {}
+            Err(error) => panic!("unexpected append failure: {error}"),
+        }
+    }
+    let rows = conn.list_recorder_events(&start.run_id).expect("final events");
+    let stored = conn
+        .get_recorder_run(&start.run_id)
+        .expect("run")
+        .expect("present");
+    assert_eq!(u64::try_from(rows.len()).expect("bounded fixture"), accepted);
+    assert_eq!(finished.event_count, accepted);
+    assert_eq!(stored.event_count, accepted);
+    assert_eq!(
+        stored.payload_bytes,
+        rows.iter().map(|row| row.payload_bytes).sum::<u64>()
+    );
+    assert_eq!(stored.ended_at.as_deref(), Some(finished.ended_at.as_str()));
+    assert!(matches!(
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("too late"))),
+        Err(RecordPersistedEventError::RunNotActive { .. })
+    ));
+}
+
+#[test]
 fn recorder_store_appending_many_events_yields_matching_row_count() {
     // Bead acceptance: "Appending 1000 events through hook API yields 1000 rows."
     let conn = connect();
@@ -291,7 +682,7 @@ fn recorder_store_list_filters_across_multiple_sources() {
             session_id: None,
             source_type: "synthetic".to_owned(),
             source_id: Some("fixture://synthetic".to_owned()),
-            status: "imported".to_owned(),
+            status: "active".to_owned(),
             started_at: "2026-01-01T00:00:00Z".to_owned(),
             ended_at: None,
             event_count: 1,
@@ -359,7 +750,7 @@ fn recorder_store_list_filters_by_run_and_time_window() {
             session_id: None,
             source_type: "synthetic".to_owned(),
             source_id: Some("fixture://window".to_owned()),
-            status: "imported".to_owned(),
+            status: "active".to_owned(),
             started_at: "2026-01-01T00:00:00Z".to_owned(),
             ended_at: None,
             event_count: 3,

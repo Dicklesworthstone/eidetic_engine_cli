@@ -2109,7 +2109,7 @@ pub fn execute_recorder_import(
         };
 
         connection
-            .insert_recorder_event(&event.event_id, &event_input)
+            .insert_recorder_event_for_import(&event.event_id, &event_input)
             .map_err(|error| RecorderImportError {
                 code: RecorderImportErrorCode::DatabaseError,
                 message: format!("Failed to insert recorder event: {error}"),
@@ -2187,6 +2187,32 @@ pub fn execute_recorder_import(
 // a stable surface here so the CLI side stays thin.
 // ============================================================================
 
+#[cfg(test)]
+type RecorderFinishRollupHook = Box<dyn FnOnce(&crate::db::DbConnection)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static RECORDER_FINISH_ROLLUP_HOOK: std::cell::RefCell<Option<RecorderFinishRollupHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn with_recorder_finish_rollup_hook<T>(
+    hook: impl FnOnce(&crate::db::DbConnection) + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreHook(Option<RecorderFinishRollupHook>);
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _restore = RestoreHook(
+        RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))),
+    );
+    operation()
+}
+
 /// Persist a new recorder run row alongside the in-memory start report.
 ///
 /// The caller has already opened a connection (typically against the workspace's
@@ -2234,84 +2260,71 @@ pub fn record_and_persist_event(
 ) -> Result<RecorderEventReport, RecordPersistedEventError> {
     validate_run_id_token(&options.run_id).map_err(RecordPersistedEventError::InvalidRunId)?;
 
-    let mut recorder_error = None;
-    let report = conn
-        .with_transaction(|| {
-            if conn.get_recorder_run(&options.run_id)?.is_none() {
-                recorder_error = Some(RecordPersistedEventError::RunNotFound(
-                    options.run_id.clone(),
-                ));
-                return Err(crate::db::DbError::MalformedRow {
-                    operation: crate::db::DbOperation::Query,
-                    message: "recorder run not found".to_owned(),
-                });
-            }
-            let existing = conn.list_recorder_events(&options.run_id)?;
-            let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
-            let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
+    conn.with_transaction_error(|| {
+        let run = conn
+            .get_recorder_run(&options.run_id)?
+            .ok_or_else(|| {
+                RecordPersistedEventError::RunNotFound(options.run_id.clone())
+            })?;
+        if run.status != RecorderRunStatus::Active.as_str() || run.ended_at.is_some() {
+            return Err(RecordPersistedEventError::RunNotActive {
+                run_id: options.run_id.clone(),
+                status: run.status,
+            });
+        }
+        let tail = conn.recorder_append_tail(&options.run_id)?;
+        let sequence = tail
+            .as_ref()
+            .map_or(0, |event| event.sequence)
+            .checked_add(1)
+            .filter(|sequence| i64::try_from(*sequence).is_ok())
+            .ok_or_else(|| RecordPersistedEventError::Storage {
+                message: "recorder event sequence exceeds SQLite integer storage".to_owned(),
+            })?;
+        let previous_event_hash = tail.map(|event| event.event_hash);
 
-            // Honor any explicitly-provided previous-hash by validating it agrees with the
-            // tail of the persisted chain. Mismatch is a serious error: surface it.
-            if let (Some(provided), Some(actual)) = (
-                options.previous_event_hash.as_deref(),
-                previous_event_hash.as_deref(),
-            ) {
-                if provided != actual {
-                    recorder_error = Some(RecordPersistedEventError::ChainMismatch {
-                        expected: actual.to_owned(),
-                        provided: provided.to_owned(),
-                    });
-                    return Err(crate::db::DbError::MalformedRow {
-                        operation: crate::db::DbOperation::Query,
-                        message: "recorder previous_event_hash mismatch".to_owned(),
-                    });
-                }
-            }
+        // Honor an explicit predecessor even for the first event: silently
+        // dropping it would report success for a chain precondition that failed.
+        if let Some(provided) = options.previous_event_hash.as_deref()
+            && previous_event_hash.as_deref() != Some(provided)
+        {
+            return Err(RecordPersistedEventError::ChainMismatch {
+                expected: previous_event_hash
+                    .clone()
+                    .unwrap_or_else(|| "<root>".to_owned()),
+                provided: provided.to_owned(),
+            });
+        }
 
-            let opts_with_chain = RecorderEventOptions {
-                previous_event_hash: previous_event_hash.clone(),
-                ..options.clone()
+        let opts_with_chain = RecorderEventOptions {
+            previous_event_hash: previous_event_hash.clone(),
+            ..options.clone()
+        };
+        let report = record_event(&opts_with_chain, sequence)
+            .map_err(RecordPersistedEventError::Validation)?;
+
+        if !report.dry_run {
+            let input = crate::db::CreateRecorderEventInput {
+                run_id: report.run_id.clone(),
+                sequence: report.sequence,
+                event_type: report.event_type.as_str().to_owned(),
+                timestamp: report.timestamp.clone(),
+                payload_hash: report.payload_hash.clone(),
+                payload_bytes: report.payload_bytes,
+                redaction_status: report.redaction_status.as_db_str().to_owned(),
+                redacted_bytes: report.redacted_bytes,
+                previous_event_hash: report.previous_event_hash.clone(),
+                event_hash: report.event_hash.clone(),
+                chain_status: report.chain_status.as_str().to_owned(),
+                source_span_id: None,
+                source_line_start: None,
+                source_line_end: None,
             };
-            let report = match record_event(&opts_with_chain, sequence) {
-                Ok(report) => report,
-                Err(error) => {
-                    recorder_error = Some(RecordPersistedEventError::Validation(error));
-                    return Err(crate::db::DbError::MalformedRow {
-                        operation: crate::db::DbOperation::Query,
-                        message: "recorder event validation failed".to_owned(),
-                    });
-                }
-            };
+            conn.insert_recorder_event(&report.event_id, &input)?;
+        }
 
-            if !report.dry_run {
-                let input = crate::db::CreateRecorderEventInput {
-                    run_id: report.run_id.clone(),
-                    sequence: report.sequence,
-                    event_type: report.event_type.as_str().to_owned(),
-                    timestamp: report.timestamp.clone(),
-                    payload_hash: report.payload_hash.clone(),
-                    payload_bytes: report.payload_bytes,
-                    redaction_status: report.redaction_status.as_db_str().to_owned(),
-                    redacted_bytes: report.redacted_bytes,
-                    previous_event_hash: report.previous_event_hash.clone(),
-                    event_hash: report.event_hash.clone(),
-                    chain_status: report.chain_status.as_str().to_owned(),
-                    source_span_id: None,
-                    source_line_start: None,
-                    source_line_end: None,
-                };
-                conn.insert_recorder_event(&report.event_id, &input)?;
-            }
-
-            Ok(report)
-        })
-        .map_err(|error| {
-            recorder_error.unwrap_or_else(|| RecordPersistedEventError::Storage {
-                message: format!("Failed to persist recorder event transaction: {error}"),
-            })
-        })?;
-
-    Ok(report)
+        Ok(report)
+    })
 }
 
 /// Mark a persisted recorder run as finished and stamp its end timestamp +
@@ -2329,72 +2342,160 @@ pub fn finish_and_persist_recording(
         }
     })?;
 
-    if conn
-        .get_recorder_run(&options.run_id)
-        .map_err(|error| crate::models::DomainError::Storage {
-            message: format!("Failed to read recorder run {}: {error}", options.run_id),
-            repair: Some("ee status --json".to_owned()),
-        })?
-        .is_none()
-    {
-        return Err(crate::models::DomainError::NotFound {
-            resource: "recorder run".to_owned(),
-            id: options.run_id.clone(),
-            repair: Some(
-                "Start a run with `ee recorder start --json` before finishing it.".to_owned(),
-            ),
+    if !matches!(
+        options.status,
+        RecorderRunStatus::Completed | RecorderRunStatus::Abandoned
+    ) {
+        return Err(crate::models::DomainError::Usage {
+            message: "Recorder finish status must be completed or abandoned.".to_owned(),
+            repair: Some("Use --status completed or --status abandoned.".to_owned()),
         });
     }
 
-    let stored_events = conn
-        .list_recorder_events(&options.run_id)
-        .map_err(|error| crate::models::DomainError::Storage {
-            message: format!(
-                "Failed to read recorder events for run {}: {error}",
-                options.run_id
-            ),
-            repair: Some("ee status --json".to_owned()),
+    let mut lifecycle_error = None;
+    with_recorder_finish_snapshot(conn, options.dry_run, || {
+        let Some(run) = conn.get_recorder_run(&options.run_id)? else {
+            lifecycle_error = Some(crate::models::DomainError::NotFound {
+                resource: "recorder run".to_owned(),
+                id: options.run_id.clone(),
+                repair: Some(
+                    "Start a run with `ee recorder start --json` before finishing it.".to_owned(),
+                ),
+            });
+            return Err(crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Query,
+                message: "recorder run not found".to_owned(),
+            });
+        };
+        if run.status == options.status.as_str()
+            && let Some(ended_at) = &run.ended_at
+        {
+            return Ok(RecorderFinishReport {
+                schema: RECORDER_FINISH_SCHEMA_V1,
+                run_id: run.run_id,
+                status: options.status,
+                ended_at: ended_at.clone(),
+                event_count: run.event_count,
+                dry_run: options.dry_run,
+            });
+        }
+        // Recovery may abandon an interrupted run without inventing an end
+        // timestamp. That history is closed too; it cannot become a new live
+        // finish or fabricate the timestamp required by the finish report.
+        if run.status != RecorderRunStatus::Active.as_str() || run.ended_at.is_some() {
+            lifecycle_error = Some(crate::models::DomainError::UsageCodeWithDetails {
+                code: "recorder_run_already_finished",
+                message: format!(
+                    "Recorder run {} is already closed with status {}.",
+                    options.run_id, run.status
+                ),
+                repair: Some("Start a new run with `ee recorder start --json`; finished runs cannot be reopened or relabeled.".to_owned()),
+                details_json: json!({
+                    "runId": options.run_id,
+                    "status": run.status,
+                    "requestedStatus": options.status.as_str(),
+                }).to_string(),
+            });
+            return Err(crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Execute,
+                message: "recorder run is already closed".to_owned(),
+            });
+        }
+
+        // A real finish keeps these reads and the status change under the same
+        // writer fence as append. Each accepted event is either in this rollup
+        // or refused after the run becomes terminal. Previews own no writes.
+        let stored_events = conn.list_recorder_events(&options.run_id)?;
+        let event_count = usize_to_u64(stored_events.len());
+        let payload_bytes = stored_events.iter().try_fold(0_u64, |total, event| {
+            total
+                .checked_add(event.payload_bytes)
+                .ok_or_else(|| crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Query,
+                    message: "recorder payload byte total overflowed".to_owned(),
+                })
         })?;
-    let event_count = u64::try_from(stored_events.len()).unwrap_or(u64::MAX);
-    let payload_bytes: u64 = stored_events.iter().map(|e| e.payload_bytes).sum();
-    let redacted_count: u64 = stored_events
-        .iter()
-        .filter(|e| e.redaction_status != "clean")
-        .count() as u64;
-    let chain_complete = stored_events.iter().all(|e| e.chain_status != "broken");
-
-    let report = finish_recording(options, event_count);
-
-    if !options.dry_run {
-        let sql = format!(
-            "UPDATE recorder_runs SET status = '{status}', ended_at = '{ended}', event_count = {events}, payload_bytes = {payload}, redacted_count = {redacted}, chain_complete = {chain} WHERE run_id = '{run}'",
-            status = options.status.as_str(),
-            ended = report.ended_at,
-            events = event_count,
-            payload = payload_bytes,
-            redacted = redacted_count,
-            chain = i64::from(chain_complete),
-            run = options.run_id,
+        let redacted_count = usize_to_u64(
+            stored_events
+                .iter()
+                .filter(|event| event.redaction_status != "clean")
+                .count(),
         );
-        // Route the durable UPDATE through `with_transaction` so it holds
-        // the cross-process write-owner flock, retries transient contention,
-        // and runs under the storage panic guard like every other production
-        // write in this file; a bare `execute_raw` has none of those
-        // (bd-d67os.27).
-        conn.with_transaction(|| conn.execute_raw(&sql))
-            .map_err(|error| crate::models::DomainError::Storage {
-                message: format!("Failed to mark recorder run finished: {error}"),
-                repair: Some("ee status --json".to_owned()),
-            })?;
+        let chain_complete = stored_events
+            .iter()
+            .all(|event| event.chain_status != "broken");
+        let report = finish_recording(options, event_count);
+
+        #[cfg(test)]
+        if let Some(hook) = RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook(conn);
+        }
+
+        if !options.dry_run {
+            conn.finish_recorder_run(
+                &options.run_id,
+                &crate::db::FinishRecorderRunInput {
+                    status: options.status,
+                    ended_at: report.ended_at.clone(),
+                    event_count,
+                    redacted_count,
+                    payload_bytes,
+                    chain_complete,
+                },
+            )?;
+        }
+        Ok(report)
+    })
+    .map_err(|error| {
+        lifecycle_error.unwrap_or_else(|| crate::models::DomainError::Storage {
+            message: format!("Failed to finish recorder run transaction: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        })
+    })
+}
+
+fn with_recorder_finish_snapshot<T>(
+    conn: &crate::db::DbConnection,
+    dry_run: bool,
+    operation: impl FnOnce() -> crate::db::Result<T>,
+) -> crate::db::Result<T> {
+    if !dry_run {
+        return conn.with_transaction(operation);
     }
 
-    Ok(report)
+    let owned = match conn.begin_read_snapshot() {
+        Ok(()) => true,
+        Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
+        Err(error) => return Err(error),
+    };
+    struct ReadSnapshotGuard<'a> {
+        conn: &'a crate::db::DbConnection,
+        active: bool,
+    }
+    impl Drop for ReadSnapshotGuard<'_> {
+        fn drop(&mut self) {
+            if self.active
+                && let Err(error) = self.conn.rollback_read_snapshot()
+            {
+                tracing::error!(%error, "failed to release recorder finish preview snapshot");
+            }
+        }
+    }
+    let mut guard = ReadSnapshotGuard {
+        conn,
+        active: owned,
+    };
+    let result = operation();
+    if guard.active {
+        conn.rollback_read_snapshot()?;
+        guard.active = false;
+    }
+    result
 }
 
 /// Validate that `run_id` matches the constraint enforced by the recorder_runs
 /// CHECK clause: `GLOB 'run_*' AND length >= 8`, ASCII alphanumerics + `_-`. We
-/// reject anything else so the inline-string SQL in `finish_and_persist_recording`
-/// cannot be coaxed into injection.
+/// reject anything else before addressing the persisted recorder store.
 fn validate_run_id_token(run_id: &str) -> Result<(), String> {
     if !run_id.starts_with("run_") {
         return Err(format!(
@@ -2424,6 +2525,8 @@ pub enum RecordPersistedEventError {
     InvalidRunId(String),
     /// The supplied run id was syntactically valid but absent from the store.
     RunNotFound(String),
+    /// A terminal run, or a run with an end stamp, cannot accept live events.
+    RunNotActive { run_id: String, status: String },
     /// `record_event` rejected the inputs (usually payload too large).
     Validation(RecorderEventError),
     /// The caller asserted a previous-event-hash that disagrees with persisted chain.
@@ -2437,6 +2540,10 @@ impl std::fmt::Display for RecordPersistedEventError {
         match self {
             Self::InvalidRunId(message) | Self::Storage { message } => f.write_str(message),
             Self::RunNotFound(run_id) => write!(f, "recorder run not found: {run_id}"),
+            Self::RunNotActive { run_id, status } => write!(
+                f,
+                "recorder run {run_id} is not open for events (status {status})"
+            ),
             Self::Validation(error) => write!(f, "{error}"),
             Self::ChainMismatch { expected, provided } => write!(
                 f,
@@ -2447,6 +2554,14 @@ impl std::fmt::Display for RecordPersistedEventError {
 }
 
 impl std::error::Error for RecordPersistedEventError {}
+
+impl From<crate::db::DbError> for RecordPersistedEventError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self::Storage {
+            message: format!("Failed to persist recorder event transaction: {error}"),
+        }
+    }
+}
 
 // ============================================================================
 // Events List
@@ -3179,6 +3294,100 @@ mod tests {
         assert_eq!(report.run_id, "run_test");
         assert_eq!(report.status, RecorderRunStatus::Completed);
         assert_eq!(report.event_count, 10);
+    }
+
+    #[test]
+    fn finish_holds_writer_fence_from_rollup_through_terminal_publication() -> TestResult {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = directory.path().join("recorder-finish-fence.db");
+        let conn =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let started = start_and_persist_recording(
+            &conn,
+            &RecorderStartOptions {
+                agent_id: "agent_finish_fence".to_owned(),
+                session_id: None,
+                workspace_id: None,
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        let event = RecorderEventOptions {
+            run_id: started.run_id.clone(),
+            event_type: RecorderEventType::StateChange,
+            payload: Some("before finish".to_owned()),
+            redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+        record_and_persist_event(&conn, &event).map_err(|error| error.to_string())?;
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (append_tx, append_rx) = mpsc::channel();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let contender = std::thread::spawn(move || -> Result<_, String> {
+            let writer =
+                crate::db::DbConnection::open_file(database).map_err(|error| error.to_string())?;
+            ready_tx.send(()).map_err(|error| error.to_string())?;
+            append_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())?;
+            attempt_tx.send(()).map_err(|error| error.to_string())?;
+            Ok(record_and_persist_event(&writer, &event))
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let finished = with_recorder_finish_rollup_hook(
+            move |connection| {
+                assert!(
+                    connection.write_owner_depth_for_test() > 0,
+                    "the rollup must be read under the same writer fence as finalization"
+                );
+                assert!(append_tx.send(()).is_ok(), "release waiting appender");
+                assert!(
+                    attempt_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+                    "appender reaches the contested transaction before finish commits"
+                );
+            },
+            || {
+                finish_and_persist_recording(
+                    &conn,
+                    &RecorderFinishOptions {
+                        run_id: started.run_id.clone(),
+                        status: RecorderRunStatus::Completed,
+                        dry_run: false,
+                    },
+                )
+            },
+        )
+        .map_err(|error| error.message())?;
+        let appended = contender
+            .join()
+            .map_err(|_| "append thread panicked".to_owned())??;
+        assert!(matches!(
+            appended,
+            Err(RecordPersistedEventError::RunNotActive { .. })
+        ));
+        assert_eq!(finished.event_count, 1);
+        let stored = conn
+            .get_recorder_run(&started.run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "finished run disappeared".to_owned())?;
+        assert_eq!(stored.event_count, 1);
+        assert_eq!(stored.ended_at.as_deref(), Some(finished.ended_at.as_str()));
+        assert_eq!(
+            conn.list_recorder_events(&started.run_id)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[test]

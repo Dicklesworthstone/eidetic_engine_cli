@@ -1508,7 +1508,7 @@ impl DbConnection {
     }
 
     #[cfg(test)]
-    fn write_owner_depth_for_test(&self) -> usize {
+    pub(crate) fn write_owner_depth_for_test(&self) -> usize {
         FILE_WRITE_OWNER_DEPTHS.with(|depths| {
             depths
                 .borrow()
@@ -43846,6 +43846,16 @@ pub struct CreateRecorderEventInput {
     pub source_line_end: Option<u32>,
 }
 
+/// Final counters computed while holding the recorder's write transaction.
+pub(crate) struct FinishRecorderRunInput {
+    pub status: crate::models::RecorderRunStatus,
+    pub ended_at: String,
+    pub event_count: u64,
+    pub redacted_count: u64,
+    pub payload_bytes: u64,
+    pub chain_complete: bool,
+}
+
 /// Stored recorder run.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -43939,35 +43949,48 @@ impl DbConnection {
     /// breaks every consumer that joins recorder_runs on `ended_at IS NOT
     /// NULL`.
     ///
-    /// Uses parameterized `execute_for` rather than the
-    /// `format!`-into-`execute_raw` shape that `finish_and_persist_recording`
-    /// uses today — that older call site is safe by construction (every
-    /// interpolated value is either an enum-static-str, a chrono RFC3339
-    /// string, or a u64 / bool), but the safety relies on the caller
-    /// validating every input. Channeling new writes through the
-    /// parameterized path removes the validation-discipline dependency
-    /// for the new call site, and gives a single place to add cross-cutting
-    /// instrumentation later.
+    /// Only the unfinished import path may stamp this timestamp. Live runs
+    /// finish through the atomic status-and-counter transition instead.
     pub fn stamp_recorder_run_ended_at(&self, run_id: &str, ended_at: &str) -> Result<()> {
-        self.execute_for(
+        let changed = self.execute_for(
             DbOperation::Execute,
-            "UPDATE recorder_runs SET ended_at = ?1 WHERE run_id = ?2",
+            "UPDATE recorder_runs SET ended_at = ?1 WHERE run_id = ?2 AND status = 'imported' AND ended_at IS NULL",
             &[
                 Value::Text(ended_at.to_string()),
                 Value::Text(run_id.to_string()),
             ],
         )?;
+        if changed != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("recorder import is absent or already finished: {run_id}"),
+            });
+        }
         Ok(())
     }
 
-    /// Insert a recorder event record.
+    /// Insert a live event only while its run is active and has no end stamp.
+    ///
+    /// The predicate is part of the INSERT, so even callers outside the core
+    /// append transaction cannot race a finish and append to a terminal run.
+    /// Historical import and recovery use separately named paths below.
     pub fn insert_recorder_event(
         &self,
         event_id: &str,
         input: &CreateRecorderEventInput,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.insert_recorder_event_at(event_id, input, &now)
+        self.insert_recorder_event_at(event_id, input, &now, Some("active"))
+    }
+
+    /// Populate an unfinished import without opening terminal runs to live writes.
+    pub(crate) fn insert_recorder_event_for_import(
+        &self,
+        event_id: &str,
+        input: &CreateRecorderEventInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.insert_recorder_event_at(event_id, input, &now, Some("imported"))
     }
 
     fn insert_recorder_event_at(
@@ -43975,14 +43998,15 @@ impl DbConnection {
         event_id: &str,
         input: &CreateRecorderEventInput,
         created_at: &str,
+        required_open_status: Option<&str>,
     ) -> Result<()> {
         let sequence = recorder_event_sequence_value(input.sequence)?;
         let payload_bytes = sqlite_u64_value("recorder event payload_bytes", input.payload_bytes)?;
         let redacted_bytes =
             sqlite_u64_value("recorder event redacted_bytes", input.redacted_bytes)?;
-        self.execute_for(
+        let inserted = self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO recorder_events (event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO recorder_events (event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16 WHERE ?17 IS NULL OR EXISTS (SELECT 1 FROM recorder_runs WHERE run_id = ?2 AND status = ?17 AND ended_at IS NULL)",
             &[
                 Value::Text(event_id.to_string()),
                 Value::Text(input.run_id.clone()),
@@ -44004,8 +44028,58 @@ impl DbConnection {
                     .source_line_end
                     .map_or(Value::Null, |v| Value::BigInt(i64::from(v))),
                 Value::Text(created_at.to_owned()),
+                required_open_status.map_or(Value::Null, |status| Value::Text(status.to_owned())),
             ],
         )?;
+        if inserted != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "recorder event requires an unfinished {} run: {}",
+                    required_open_status.unwrap_or("historical"),
+                    input.run_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Finalize only an open live run; callers compute the rollup in the same
+    /// write transaction. The SQL predicate protects alternate callers too.
+    pub(crate) fn finish_recorder_run(
+        &self,
+        run_id: &str,
+        input: &FinishRecorderRunInput,
+    ) -> Result<()> {
+        if !matches!(
+            input.status,
+            crate::models::RecorderRunStatus::Completed
+                | crate::models::RecorderRunStatus::Abandoned
+        ) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "recorder finish status must be completed or abandoned".to_owned(),
+            });
+        }
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE recorder_runs SET status = ?1, ended_at = ?2, event_count = ?3, redacted_count = ?4, payload_bytes = ?5, chain_complete = ?6 WHERE run_id = ?7 AND status = 'active' AND ended_at IS NULL",
+            &[
+                Value::Text(input.status.as_str().to_owned()),
+                Value::Text(input.ended_at.clone()),
+                sqlite_u64_value("recorder run event_count", input.event_count)?,
+                sqlite_u64_value("recorder run redacted_count", input.redacted_count)?,
+                sqlite_u64_value("recorder run payload_bytes", input.payload_bytes)?,
+                Value::BigInt(i64::from(input.chain_complete)),
+                Value::Text(run_id.to_owned()),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("recorder run is no longer active: {run_id}"),
+            });
+        }
         Ok(())
     }
 
@@ -44065,6 +44139,7 @@ impl DbConnection {
                 source_line_end: row.source_line_end,
             },
             &row.created_at,
+            None,
         )
     }
 
@@ -44086,6 +44161,74 @@ impl DbConnection {
             &[Value::Text(run_id.to_string())],
         )?;
         rows.iter().map(stored_recorder_event_from_row).collect()
+    }
+
+    /// Read one indexed tail row without hydrating the entire event history.
+    ///
+    /// The aggregate still scans the run: it preserves the old row decoder's
+    /// required-column checks and refuses sparse/duplicate sequences instead
+    /// of silently extending a damaged chain. Call inside the append's writer
+    /// transaction so the aggregate and tail describe the same history.
+    pub(crate) fn recorder_append_tail(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<StoredRecorderEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            r"SELECT COUNT(*), COUNT(DISTINCT sequence), MIN(sequence), MAX(sequence),
+                COALESCE(SUM(CASE WHEN
+                    typeof(event_id) != 'text' OR typeof(run_id) != 'text'
+                    OR typeof(event_type) != 'text' OR typeof(timestamp) != 'text'
+                    OR typeof(redaction_status) != 'text' OR typeof(event_hash) != 'text'
+                    OR typeof(chain_status) != 'text' OR typeof(created_at) != 'text'
+                    OR typeof(sequence) != 'integer' OR sequence < 1
+                    OR typeof(payload_bytes) != 'integer' OR payload_bytes < 0
+                    OR typeof(redacted_bytes) != 'integer' OR redacted_bytes < 0
+                    OR (source_line_start IS NOT NULL AND
+                        (typeof(source_line_start) != 'integer' OR source_line_start < 0 OR source_line_start > 4294967295))
+                    OR (source_line_end IS NOT NULL AND
+                        (typeof(source_line_end) != 'integer' OR source_line_end < 0 OR source_line_end > 4294967295))
+                    THEN 1 ELSE 0 END), 0)
+                FROM recorder_events WHERE run_id = ?1",
+            &[Value::Text(run_id.to_owned())],
+        )?;
+        let row = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "recorder append integrity aggregate is missing".to_owned(),
+        })?;
+        let count = required_u64(row, 0, DbOperation::Query, "event_count")?;
+        let distinct = required_u64(row, 1, DbOperation::Query, "distinct_sequence_count")?;
+        let malformed = required_u64(row, 4, DbOperation::Query, "malformed_event_count")?;
+        if malformed != 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("recorder run {run_id} contains malformed event rows"),
+            });
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let first = required_u64(row, 2, DbOperation::Query, "first_sequence")?;
+        let last = required_u64(row, 3, DbOperation::Query, "last_sequence")?;
+        if distinct != count || first != 1 || last != count {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("recorder run {run_id} has non-contiguous event sequences"),
+            });
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at FROM recorder_events WHERE run_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            &[Value::Text(run_id.to_owned())],
+        )?;
+        let tail = rows.first().map(stored_recorder_event_from_row).transpose()?;
+        if tail.as_ref().map(|event| event.sequence) != Some(last) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("recorder run {run_id} changed while reading its append tail"),
+            });
+        }
+        Ok(tail)
     }
 
     /// List recorder events with optional filters.

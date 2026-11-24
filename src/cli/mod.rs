@@ -30897,8 +30897,11 @@ where
     E: Write,
 {
     let status = match args.status.parse::<crate::models::RecorderRunStatus>() {
-        Ok(s) => s,
-        Err(_) => {
+        Ok(
+            status @ (crate::models::RecorderRunStatus::Completed
+            | crate::models::RecorderRunStatus::Abandoned),
+        ) => status,
+        Ok(_) | Err(_) => {
             let error = DomainError::Usage {
                 message: format!("Invalid recorder finish status '{}'.", args.status),
                 repair: Some("Use one of: completed, abandoned.".to_owned()),
@@ -30973,6 +30976,17 @@ where
                 ),
             };
             write_domain_error(&domain_error, mode, stdout, stderr)
+        }
+        crate::core::recorder::RecordPersistedEventError::RunNotActive { run_id, status } => {
+            write_recorder_event_usage_error(
+                mode,
+                stdout,
+                stderr,
+                "recorder_run_not_active",
+                error.to_string(),
+                "Start a new run with `ee recorder start --json`; finished runs cannot accept new events.",
+                serde_json::json!({"runId": run_id, "status": status}),
+            )
         }
         crate::core::recorder::RecordPersistedEventError::Storage { message } => {
             let domain_error = DomainError::Storage {
@@ -76633,6 +76647,37 @@ mod tests {
             socket_path.exists(),
             "daemon stop must not unlink a socket unless an ee daemon answers",
         )
+    }
+
+    #[test]
+    fn recorder_finish_rejects_active_and_imported_status_in_dry_run() -> TestResult {
+        for status in ["active", "imported"] {
+            let (exit, stdout, stderr) = invoke(&[
+                "ee",
+                "--json",
+                "recorder",
+                "finish",
+                "run_finish_validation",
+                "--status",
+                status,
+                "--dry-run",
+            ]);
+            ensure_equal(&exit, &ProcessExitCode::Usage, "invalid finish status exit")?;
+            ensure(stderr.is_empty(), "finish status error keeps JSON on stdout")?;
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["schema"],
+                &serde_json::json!("ee.error.v2"),
+                "finish status error schema",
+            )?;
+            ensure_contains(
+                value["error"]["message"].as_str().unwrap_or_default(),
+                "Invalid recorder finish status",
+                "finish rejects non-live terminal states before dry-run planning",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
