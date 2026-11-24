@@ -976,3 +976,160 @@ fn procedural_source_admission_accepts_history_and_non_memory_review_targets() -
     assert!(!preview.durable_mutation);
     Ok(())
 }
+
+fn use_revision_source(fixture: &mut SourceFixture, logical_id: &str) -> TestResult {
+    let original = fixture
+        .connection
+        .get_memory(&fixture.memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing source root")?;
+    let revision_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x73_a00)).to_string();
+    fixture
+        .connection
+        .insert_memory_revision(
+            &revision_id,
+            logical_id,
+            &CreateMemoryInput {
+                workspace_id: original.workspace_id,
+                level: original.level,
+                kind: original.kind,
+                content: original.content,
+                workflow_id: original.workflow_id,
+                confidence: original.confidence,
+                utility: original.utility,
+                importance: original.importance,
+                provenance_uri: original.provenance_uri,
+                trust_class: original.trust_class,
+                trust_subclass: original.trust_subclass,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    fixture.memory_id = revision_id;
+    Ok(())
+}
+
+#[test]
+fn inherited_seals_guard_derivation_reflection_and_batched_source_selection() -> TestResult {
+    let mut fixture = SourceFixture::new(0x73_900)?;
+    let root_id = fixture.memory_id.clone();
+    fixture.withdraw("sealed")?;
+    use_revision_source(&mut fixture, &root_id)?;
+    let body = fixture.source_body()?;
+    let ids = [fixture.memory_id.as_str()];
+    assert!(
+        fixture
+            .connection
+            .get_memory_seal(&fixture.memory_id)
+            .map_err(|error| error.to_string())?
+            .is_none(),
+        "the source has no direct sidecar; admission must follow its root"
+    );
+    let withheld = curate_core::source_admission::withheld_memory_ids(
+        &fixture.connection,
+        &fixture.workspace_id,
+        &ids,
+    )
+    .map_err(|issue| issue.message)?;
+    assert_eq!(withheld, [fixture.memory_id.clone()].into_iter().collect());
+    assert!(!withheld.contains(&root_id), "mask the requested revision");
+    for dry_run in [true, false] {
+        let error = fixture.derive(dry_run).expect_err("inherited closed seal");
+        assert_private_refusal(&error.message(), &body, posture_code("sealed"));
+        for untyped_source in [true, false] {
+            let error = fixture
+                .reflect(dry_run, untyped_source)
+                .expect_err("reflection must obey the same inherited seal");
+            assert_private_refusal(&error.message(), &body, posture_code("sealed"));
+        }
+    }
+    assert_eq!(fixture.candidate_count()?, 1);
+    assert!(
+        fixture
+            .connection
+            .query("SELECT request_id FROM reflection_request_ledger", &[])
+            .map_err(|error| error.to_string())?
+            .is_empty()
+    );
+
+    assert!(
+        fixture
+            .connection
+            .mark_memory_seal_revealed(&root_id, "2026-05-24T00:06:00Z")
+            .map_err(|error| error.to_string())?
+    );
+    fixture.derive(true).map_err(|error| error.message())?;
+    fixture.reflect(true, false).map_err(|error| error.message())?;
+    assert!(
+        curate_core::source_admission::withheld_memory_ids(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &ids,
+        )
+        .map_err(|issue| issue.message)?
+        .is_empty()
+    );
+
+    // A directly closed revision stays withheld even if the inherited seal
+    // is already revealed. Whole sidecars, not individual fields, decide.
+    fixture.withdraw("sealed")?;
+    let error = fixture
+        .derive(true)
+        .expect_err("direct seal overrides root reveal");
+    assert_private_refusal(&error.message(), &body, posture_code("sealed"));
+    let withheld = curate_core::source_admission::withheld_memory_ids(
+        &fixture.connection,
+        &fixture.workspace_id,
+        &ids,
+    )
+    .map_err(|issue| issue.message)?;
+    assert_eq!(withheld, [fixture.memory_id.clone()].into_iter().collect());
+    Ok(())
+}
+
+#[test]
+fn broken_source_lineage_is_unavailable_even_with_a_direct_verified_reveal() -> TestResult {
+    for direct_reveal in [false, true] {
+        let mut fixture = SourceFixture::new(0x73_b00)?;
+        let missing_root = MemoryId::from_uuid(uuid::Uuid::from_u128(0x73_b10)).to_string();
+        use_revision_source(&mut fixture, &missing_root)?;
+        let body = fixture.source_body()?;
+        if direct_reveal {
+            fixture.withdraw("sealed")?;
+            fixture.release("sealed")?;
+        }
+        let before = fixture
+            .connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            let error = fixture.derive(dry_run).expect_err("broken source lineage");
+            assert_private_refusal(&error.message(), &body, posture_code("unavailable"));
+            for untyped_source in [true, false] {
+                let error = fixture
+                    .reflect(dry_run, untyped_source)
+                    .expect_err("broken reflection source lineage");
+                assert_private_refusal(&error.message(), &body, posture_code("unavailable"));
+            }
+        }
+        let issue = curate_core::source_admission::withheld_memory_ids(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &[fixture.memory_id.as_str()],
+        )
+        .expect_err("broken batch authority must not become an empty mask");
+        assert_private_refusal(&issue.message, &body, "current memory source seal");
+        assert_eq!(issue.code, posture_code("unavailable"));
+        assert_eq!(
+            fixture
+                .connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "refused proposals and previews must preserve all durable state"
+        );
+    }
+    Ok(())
+}

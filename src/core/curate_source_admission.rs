@@ -125,8 +125,9 @@ pub(crate) fn withheld_memory_ids(
     withheld.extend(
         seals
             .into_iter()
-            .filter(|(_, seal)| seal.is_sealed())
-            .map(|(memory_id, _)| memory_id),
+            // The sidecar names its authority root; the mask must name the
+            // requested revision whose body the caller would disclose.
+            .filter_map(|(memory_id, seal)| seal.is_sealed().then_some(memory_id)),
     );
     Ok(withheld)
 }

@@ -13090,29 +13090,14 @@ impl MemoryReviseReport {
 ///
 /// Seals are anchored to the original row. A successful reveal publishes a
 /// new live revision with the same logical id, so readers must validate that
-/// lineage before following it back to the root seal.
+/// lineage before following it back to the root seal. Use the same strict
+/// authority projection as retrieval: a broken explicit root is unavailable
+/// authority, never evidence that a memory is unsealed.
 pub(crate) fn resolve_memory_seal_lineage(
     connection: &DbConnection,
     memory: &StoredMemory,
 ) -> crate::db::Result<Option<MemorySeal>> {
-    if let Some(seal) = connection.get_memory_seal(&memory.id)? {
-        return Ok(Some(seal));
-    }
-    let Some(logical_id) = connection.get_memory_logical_id(&memory.id)? else {
-        return Ok(None);
-    };
-    if logical_id == memory.id {
-        return Ok(None);
-    }
-    let Some(root) = connection.get_memory(&logical_id)? else {
-        return Ok(None);
-    };
-    if root.workspace_id != memory.workspace_id
-        || connection.get_memory_logical_id(&root.id)?.as_deref() != Some(logical_id.as_str())
-    {
-        return Ok(None);
-    }
-    connection.get_memory_seal(&root.id)
+    connection.get_effective_memory_seal(&memory.id)
 }
 
 /// Revise an existing memory by creating a new immutable version.
@@ -20197,6 +20182,80 @@ mod tests {
                 "closed lineage remains unchanged",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_lineage_blocks_revision_and_attestation_despite_a_verified_leaf_seal()
+    -> TestResult {
+        let (_temp, database_path, seal) = sealed_revision_fixture("Committed protocol bytes.")?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .mark_memory_seal_revealed(&seal.memory_id, "2026-08-11T00:01:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        let original = connection
+            .get_memory(&seal.memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("missing revision source")?;
+        let prepared = prepare_revision_seal(
+            &connection,
+            &original,
+            Some("Revised protocol bytes."),
+            UnchangedRevisionPolicy::Reject,
+        )?;
+        assert!(prepared.is_some());
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET logical_id = 'mem_00000000000000000000000999' WHERE id = '{}'",
+                seal.memory_id,
+            ))
+            .map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        // StoredMemory intentionally omits logical_id. The writer must inspect
+        // live lineage even when the prepared row and direct seal still match.
+        assert_eq!(
+            connection
+                .get_memory(&seal.memory_id)
+                .map_err(|error| error.to_string())?,
+            Some(original.clone())
+        );
+        assert!(require_unchanged_revision_seal(&connection, &original, &prepared).is_err());
+        assert!(
+            crate::core::attest::build_memory_attestation(&connection, &seal.memory_id).is_err()
+        );
+        assert!(
+            crate::core::attest::build_memory_attestation_for_workspace(
+                &connection,
+                &seal.memory_id,
+                &original.workspace_id,
+            )
+            .is_err()
+        );
+        for dry_run in [true, false] {
+            let mut options = seal_revision_options(&database_path, &seal.memory_id);
+            options.content = Some("Revised protocol bytes.");
+            options.dry_run = dry_run;
+            let report = revise_memory(&options);
+            assert!(!report.success && !report.persisted);
+            assert_eq!(report.dry_run, dry_run);
+            assert!(report.new_id.is_none() && report.index_job_id.is_none());
+            assert_eq!(
+                report.error.as_deref(),
+                Some("Could not verify original memory seal; revision was not written")
+            );
+        }
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "invalid lineage must not publish revisions, audits or index jobs"
+        );
         Ok(())
     }
 
