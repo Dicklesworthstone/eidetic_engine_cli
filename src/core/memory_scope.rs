@@ -1258,8 +1258,17 @@ pub fn current_agent_name() -> Option<String> {
 
 #[must_use]
 pub fn remember_trust_subclass(base: &str) -> Option<String> {
+    remember_trust_subclass_for_agent(base, current_agent_name().as_deref())
+}
+
+/// Attribute a request without consulting the long-lived host's identity.
+#[must_use]
+pub(crate) fn remember_trust_subclass_for_agent(
+    base: &str,
+    agent_name: Option<&str>,
+) -> Option<String> {
     let base = base.trim();
-    let Some(agent) = current_agent_name() else {
+    let Some(agent) = agent_name.map(str::trim).filter(|agent| !agent.is_empty()) else {
         return normalized_non_empty(base.to_owned());
     };
     if base.is_empty() {

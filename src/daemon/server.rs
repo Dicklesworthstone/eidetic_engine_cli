@@ -5056,6 +5056,10 @@ struct DaemonWriteParams {
     confidence: f32,
     source: Option<String>,
     workflow_id: Option<String>,
+    /// Producer identity is supplied by the caller, separately from the
+    /// envelope's transport `agent_id`. Omission stays anonymous.
+    #[serde(default)]
+    agent_name: Option<String>,
     #[serde(default)]
     valid_from: Option<String>,
     #[serde(default)]
@@ -5084,6 +5088,8 @@ impl DaemonWriteParams {
             "workflow",
             "workflowId",
             "workflow_id",
+            "agentName",
+            "agent_name",
             "validFrom",
             "valid_from",
             "validTo",
@@ -5123,6 +5129,10 @@ impl DaemonWriteParams {
             confidence,
             source: optional_string_any(object, &["source"])?,
             workflow_id: optional_string_any(object, &["workflow", "workflowId", "workflow_id"])?,
+            agent_name: Self::normalize_agent_name(optional_string_any(
+                object,
+                &["agentName", "agent_name"],
+            )?)?,
             valid_from: optional_string_any(object, &["validFrom", "valid_from"])?,
             valid_to: optional_string_any(object, &["validTo", "valid_to"])?,
             dry_run: optional_bool_any(object, &["dryRun", "dry_run"])?.unwrap_or(false),
@@ -5133,6 +5143,26 @@ impl DaemonWriteParams {
             )?
             .unwrap_or(true),
         })
+    }
+
+    fn normalize_agent_name(agent_name: Option<String>) -> Result<Option<String>, String> {
+        // Match EE_AGENT_NAME's trim/empty normalization. The durable trust
+        // subclass separates fields with these delimiters, so an explicit
+        // caller must also round-trip without injecting another field.
+        let agent_name = agent_name
+            .map(|agent| agent.trim().to_owned())
+            .filter(|agent| !agent.is_empty());
+        if agent_name.as_deref().is_some_and(|agent| {
+            agent
+                .chars()
+                .any(|character| matches!(character, ';' | ',' | '|') || character.is_control())
+        }) {
+            return Err(
+                "field `agentName` must not contain semicolons, commas, pipes, or control characters"
+                    .to_owned(),
+            );
+        }
+        Ok(agent_name)
     }
 
     fn options(&self) -> crate::core::memory::RememberMemoryOptions<'_> {
@@ -5172,7 +5202,7 @@ impl DaemonWriteParams {
     /// Reconstruct from a `WriteOperation::Custom` payload inside the actor's
     /// `process_batch`. Errors map to a domain write failure for that op.
     fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
-        let params: Self =
+        let mut params: Self =
             serde_json::from_value(payload.clone()).map_err(|error| error.to_string())?;
         if params.dry_run {
             return Err("dry-run previews must not enter the durable write-owner actor".to_owned());
@@ -5180,6 +5210,7 @@ impl DaemonWriteParams {
         if !params.confidence.is_finite() || !(0.0..=1.0).contains(&params.confidence) {
             return Err("field `confidence` must be a number between 0 and 1".to_owned());
         }
+        params.agent_name = Self::normalize_agent_name(params.agent_name)?;
         Ok(params)
     }
 }
@@ -5305,7 +5336,10 @@ fn dispatch_write(
 /// operation, opening a writable store, or claiming a committed memory/job.
 fn dispatch_write_preview(request: &DaemonRequest, params: &DaemonWriteParams) -> DaemonResponse {
     let result =
-        crate::core::memory::remember_memory(&params.options()).and_then(|report| {
+        crate::core::memory::remember_memory(&params.options()).and_then(|mut report| {
+            report.producer = crate::core::memory::remember_producer_metadata_for_agent(
+                params.agent_name.as_deref(),
+            );
             let remember = serde_json::from_str::<serde_json::Value>(&report.json_output())
                 .map_err(|error| crate::models::DomainError::Storage {
                     message: format!("Could not encode remember preview: {error}"),
@@ -5937,10 +5971,11 @@ fn execute_daemon_txn_batch(
                 prepared_entries.push(PreparedDaemonTxnBatchEntry::Outcome(entry));
             }
             DaemonTxnBatchEntry::Remember(entry) => {
-                let write = crate::core::memory::prepare_remember_txn_write_for_connection(
+                let write = crate::core::memory::prepare_remember_txn_write_for_connection_with_agent(
                     &connection,
                     &entry.options(),
                     true,
+                    entry.agent_name.as_deref(),
                 )?;
                 // Use the longest reachable status so successful publication
                 // cannot grow a boundary-sized acknowledgement after COMMIT.
@@ -11946,7 +11981,8 @@ mod tests {
         assert!(params.options().valid_from.is_none());
         assert!(params.options().valid_to.is_none());
         let mut legacy_payload = params.to_payload();
-        for field in ["dry_run", "valid_from", "valid_to"] {
+        assert!(params.agent_name.is_none());
+        for field in ["dry_run", "valid_from", "valid_to", "agent_name"] {
             legacy_payload
                 .as_object_mut()
                 .expect("payload")
@@ -11985,7 +12021,7 @@ mod tests {
 
     #[test]
     fn daemon_write_params_nullable_strings_round_trip_through_rpc_and_actor() {
-        for present in 0_u8..32 {
+        for present in 0_u8..64 {
             let expected = DaemonWriteParams {
                 workspace_path: PathBuf::from("/tmp/daemon-write-roundtrip"),
                 content: "Preserve every optional write string.".to_owned(),
@@ -11995,6 +12031,7 @@ mod tests {
                 confidence: 0.5,
                 source: (present & 2 != 0).then(|| "manual://roundtrip".to_owned()),
                 workflow_id: (present & 4 != 0).then(|| "workflow-roundtrip".to_owned()),
+                agent_name: (present & 32 != 0).then(|| "caller-roundtrip".to_owned()),
                 valid_from: (present & 8 != 0).then(|| "2020-01-01T00:00:00Z".to_owned()),
                 valid_to: (present & 16 != 0).then(|| "2120-01-01T00:00:00Z".to_owned()),
                 dry_run: false,
@@ -12007,6 +12044,7 @@ mod tests {
                 ("tags", expected.tags.as_deref()),
                 ("source", expected.source.as_deref()),
                 ("workflow_id", expected.workflow_id.as_deref()),
+                ("agent_name", expected.agent_name.as_deref()),
                 ("valid_from", expected.valid_from.as_deref()),
                 ("valid_to", expected.valid_to.as_deref()),
             ] {
@@ -12057,6 +12095,8 @@ mod tests {
             "workflow",
             "workflowId",
             "workflow_id",
+            "agentName",
+            "agent_name",
             "validFrom",
             "valid_from",
             "validTo",
@@ -12070,6 +12110,93 @@ mod tests {
                 "null must match omission for {field}"
             );
         }
+    }
+
+    #[test]
+    fn daemon_write_agent_aliases_normalize_without_falling_back_to_later_identity() {
+        for (aliases, expected) in [
+            (
+                serde_json::json!({ "agentName": "  Amber Finch  " }),
+                Some("Amber Finch"),
+            ),
+            (
+                serde_json::json!({ "agent_name": "  Cedar-Pine  " }),
+                Some("Cedar-Pine"),
+            ),
+            (
+                serde_json::json!({ "agentName": "", "agent_name": "ignored" }),
+                None,
+            ),
+            (
+                serde_json::json!({ "agentName": "  \t ", "agent_name": "ignored" }),
+                None,
+            ),
+            (
+                serde_json::json!({ "agentName": null, "agent_name": "ignored" }),
+                None,
+            ),
+            (
+                serde_json::json!({ "agentName": "Amber Finch", "agent_name": 42 }),
+                Some("Amber Finch"),
+            ),
+        ] {
+            let mut value = serde_json::json!({
+                "workspacePath": "/tmp/daemon-write-agent", "content": "Keep caller attribution.",
+            });
+            for (key, alias_value) in aliases.as_object().expect("alias object") {
+                value[key.as_str()] = alias_value.clone();
+            }
+            let params = DaemonWriteParams::from_value(&value).expect("valid caller identity");
+            assert_eq!(params.agent_name.as_deref(), expected, "{aliases}");
+            assert_eq!(
+                DaemonWriteParams::from_payload(&params.to_payload()).expect("actor identity"),
+                params
+            );
+            let mut actor_payload = params.to_payload();
+            actor_payload["agent_name"] =
+                serde_json::json!(expected.map(|name| format!("  {name}  ")));
+            assert_eq!(
+                DaemonWriteParams::from_payload(&actor_payload).expect("normalize actor identity"),
+                params
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_write_rejects_ambiguous_agent_names_before_source_mutation() {
+        let fixture = DaemonRememberReportFixture::new();
+        for name in [
+            "first; agent:second",
+            "first,second",
+            "first|second",
+            "first\nsecond",
+            "first\tsecond",
+            "first\0second",
+        ] {
+            let mut payload = fixture
+                .params("Reject ambiguous producer attribution.")
+                .to_payload();
+            payload["agent_name"] = serde_json::json!(name);
+            assert!(DaemonWriteParams::from_payload(&payload).is_err());
+            let operation = crate::core::write_owner::WriteOperation::Custom {
+                operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
+                payload: payload.clone(),
+            };
+            assert!(execute_daemon_txn_batch(&[operation]).is_err());
+            let mut request = DaemonRequest::new(
+                "req-invalid-agent",
+                TEST_AGENT_ID,
+                METHOD_WRITE,
+                payload,
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let response = dispatch_write(&request, None);
+            assert_eq!(
+                response.error.expect("reject invalid caller").code,
+                DAEMON_WRITE_PARAMS_INVALID_CODE
+            );
+        }
+        fixture.assert_no_source_write();
     }
 
     #[test]
@@ -12142,6 +12269,8 @@ mod tests {
             ("workflow", Some("workflowId")),
             ("workflowId", Some("workflow_id")),
             ("workflow_id", None),
+            ("agentName", Some("agent_name")),
+            ("agent_name", None),
             ("validFrom", Some("valid_from")),
             ("valid_from", None),
             ("validTo", Some("valid_to")),
@@ -12904,6 +13033,7 @@ mod tests {
                     confidence: 0.8,
                     source: Some("manual://daemon-invalid-remember-batch".to_string()),
                     workflow_id: None,
+                    agent_name: None,
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
@@ -12951,6 +13081,7 @@ mod tests {
                 confidence: 0.8,
                 source: Some("manual://daemon-storeless-remember-batch".to_string()),
                 workflow_id: None,
+                agent_name: None,
                 valid_from: None,
                 valid_to: None,
                 dry_run: false,
@@ -12998,35 +13129,41 @@ mod tests {
             crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
         initialized.close().expect("close daemon fixture database");
 
-        let remember_op = |content: &str| crate::core::write_owner::WriteOperation::Custom {
-            operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
-            payload: serde_json::to_value(DaemonWriteParams {
-                workspace_path: workspace_path.clone(),
-                content: content.to_string(),
-                level: "procedural".to_string(),
-                kind: "rule".to_string(),
-                tags: Some("daemon-batch".to_string()),
-                confidence: 0.8,
-                source: Some("manual://daemon-remember-batch".to_string()),
-                workflow_id: None,
-                valid_from: None,
-                valid_to: None,
-                dry_run: false,
-                auto_link: false,
-                propose_candidates: false,
-            })
-            .expect("remember payload"),
+        let remember_op = |content: &str, agent_name: Option<&str>| {
+            crate::core::write_owner::WriteOperation::Custom {
+                operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
+                payload: serde_json::to_value(DaemonWriteParams {
+                    workspace_path: workspace_path.clone(),
+                    content: content.to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    tags: Some("daemon-batch".to_string()),
+                    confidence: 0.8,
+                    source: Some("manual://daemon-remember-batch".to_string()),
+                    workflow_id: None,
+                    agent_name: agent_name.map(str::to_owned),
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
+                    auto_link: false,
+                    propose_candidates: false,
+                })
+                .expect("remember payload"),
+            }
         };
 
+        let callers = [Some("Amber Finch"), Some("Cedar-Pine"), None];
         let results = execute_daemon_txn_batch(&[
-            remember_op("Daemon remember batch row one."),
-            remember_op("Daemon remember batch row two."),
+            remember_op("Daemon remember batch row one.", callers[0]),
+            remember_op("Daemon remember batch row two.", callers[1]),
+            remember_op("Daemon remember batch row three.", callers[2]),
         ])
         .expect("remember batch");
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 3);
         let memory_ids = results
             .iter()
-            .map(|result| match result {
+            .zip(callers)
+            .map(|(result, caller)| match result {
                 crate::core::write_owner::WriteResult::MemoryCommitted { memory } => {
                     assert_eq!(memory.index_status, "indexed");
                     let report = memory.report.as_ref().expect("full remember report");
@@ -13037,6 +13174,7 @@ mod tests {
                         Some(memory.index_job_id.as_str())
                     );
                     assert_eq!(report.workspace_id, workspace_id);
+                    assert_eq!(report.producer.identity.agent_name.as_deref(), caller);
                     memory.memory_id.clone()
                 }
                 other => panic!("expected successful memory result, got {other:?}"),
@@ -13045,6 +13183,7 @@ mod tests {
         for (result, expected_content) in results.into_iter().zip([
             "Daemon remember batch row one.",
             "Daemon remember batch row two.",
+            "Daemon remember batch row three.",
         ]) {
             let wire = daemon_write_result_json(result);
             assert_eq!(wire["success"], true);
@@ -13072,11 +13211,15 @@ mod tests {
 
         let connection = crate::db::DbConnection::open_file(&database_path).expect("open db");
         let mut workspace_id = None;
-        for memory_id in &memory_ids {
+        for (memory_id, caller) in memory_ids.iter().zip(callers) {
             let memory = connection
                 .get_memory(memory_id)
                 .expect("query memory")
                 .expect("memory exists");
+            assert_eq!(
+                crate::core::memory_scope::memory_producer_agent(&memory).as_deref(),
+                caller
+            );
             workspace_id = Some(memory.workspace_id);
         }
         let workspace_id = workspace_id.expect("workspace id");
@@ -13101,7 +13244,7 @@ mod tests {
                 .index_document_counts
                 .as_ref()
                 .map(|counts| counts.memories),
-            Some(2)
+            Some(3)
         );
         let search = crate::core::search::run_search_with_filters(
             &crate::core::search::SearchOptions {
@@ -13192,6 +13335,7 @@ mod tests {
                 confidence: 0.73,
                 source: Some("manual://daemon-report".to_owned()),
                 workflow_id: None,
+                agent_name: None,
                 valid_from: None,
                 valid_to: None,
                 dry_run: false,
@@ -13268,6 +13412,108 @@ mod tests {
                 1,
                 "reporting must never repeat the committed source write"
             );
+        }
+    }
+
+    #[test]
+    fn daemon_remember_keeps_two_callers_and_anonymous_preview_storage_and_scope_separate() {
+        use crate::core::memory_scope::{MemoryScopeContext, memory_producer_agent};
+
+        let fixture = DaemonRememberReportFixture::new();
+        // Identical content must retain each producer even when remember's
+        // near-duplicate path finds a previously committed caller's memory.
+        let content = "Preserve each caller when several agents remember the same fact.";
+        let callers = [Some("Amber Finch"), Some("Cedar-Pine"), None];
+        let mut memory_ids = Vec::new();
+        for (ordinal, caller) in callers.into_iter().enumerate() {
+            let mut payload = fixture.params(content).to_payload();
+            payload["agentName"] = serde_json::json!(caller.map(|name| format!("  {name}  ")));
+            payload["dryRun"] = serde_json::json!(true);
+            let mut request = DaemonRequest::new(
+                format!("req-agent-{ordinal}"),
+                TEST_AGENT_ID,
+                METHOD_WRITE,
+                payload,
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let preview = dispatch_write(&request, None);
+            assert!(preview.error.is_none(), "{preview:?}");
+            assert_eq!(
+                preview.agent_id, TEST_AGENT_ID,
+                "transport identity stays separate"
+            );
+            let preview = preview.result.expect("preview result");
+            assert_eq!(preview["success"], true, "{preview}");
+            assert_eq!(preview["persisted"], false);
+            let producer = &preview["remember"]["data"]["producer"];
+            assert_eq!(producer["identity"]["agentName"], serde_json::json!(caller));
+            assert_eq!(
+                producer["identity"]["status"],
+                if caller.is_some() { "known" } else { "unobserved" }
+            );
+            if ordinal == 0 {
+                fixture.assert_no_source_write();
+            }
+
+            request.params["dryRun"] = serde_json::json!(false);
+            let response = dispatch_write(&request, None);
+            assert!(response.error.is_none(), "{response:?}");
+            assert_eq!(response.agent_id, TEST_AGENT_ID);
+            let result = response.result.expect("committed result");
+            assert_eq!(result["success"], true, "{result}");
+            assert_eq!(result["persisted"], true);
+            assert_eq!(result["reportStatus"], "complete");
+            assert_eq!(&result["remember"]["data"]["producer"], producer);
+            memory_ids.push(result["entityId"].as_str().expect("memory ID").to_owned());
+        }
+
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect caller attribution");
+        let memories = connection
+            .list_memories(&fixture.workspace_id, None, false)
+            .expect("memories");
+        assert_eq!(
+            memories.len(), callers.len(),
+            "each caller retains its source write"
+        );
+        let audits = connection
+            .list_audit_entries(Some(&fixture.workspace_id), None)
+            .expect("audit rows");
+        for (memory_id, caller) in memory_ids.iter().zip(callers) {
+            let stored = memories
+                .iter()
+                .find(|memory| &memory.id == memory_id)
+                .expect("caller memory");
+            assert_eq!(stored.content, content);
+            assert_eq!(stored.trust_class, "human_explicit");
+            assert_eq!(memory_producer_agent(stored).as_deref(), caller);
+            let audit = audits
+                .iter()
+                .find(|audit| {
+                    audit.target_id.as_deref() == Some(memory_id.as_str())
+                        && audit.action == crate::db::audit_actions::MEMORY_CREATE
+                })
+                .expect("memory-create audit");
+            let details: serde_json::Value =
+                serde_json::from_str(audit.details.as_deref().expect("audit details"))
+                    .expect("audit JSON");
+            assert_eq!(
+                details["trustSubclass"],
+                serde_json::json!(stored.trust_subclass)
+            );
+            for reader in callers {
+                let scope = MemoryScopeContext {
+                    scope: crate::models::MemoryScope::SelfOnly,
+                    strict_scope: true,
+                    current_agent: reader.map(str::to_owned),
+                    team_members: std::collections::BTreeSet::new(),
+                    team_roster_read_error: None,
+                };
+                assert_eq!(
+                    scope.memory_in_scope(stored),
+                    caller.is_some() && caller == reader
+                );
+            }
         }
     }
 

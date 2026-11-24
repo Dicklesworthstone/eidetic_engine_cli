@@ -295,21 +295,31 @@ pub struct RememberMemoryReport {
 }
 
 fn remember_producer_metadata() -> ProducerMetadata {
-    super::memory_scope::current_agent_name().map_or_else(
-        || ProducerMetadata::manual_remember(None, None),
-        |agent| {
-            ProducerMetadata::known_agent(
-                ProducerSourceSystem::Cli,
-                Some(&agent),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        },
-    )
+    remember_producer_metadata_for_agent(super::memory_scope::current_agent_name().as_deref())
+}
+
+/// Build the same producer metadata for local and explicitly attributed writes.
+/// `None` means an anonymous caller, never the identity of the hosting process.
+#[must_use]
+pub(crate) fn remember_producer_metadata_for_agent(agent_name: Option<&str>) -> ProducerMetadata {
+    agent_name
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .map_or_else(
+            || ProducerMetadata::manual_remember(None, None),
+            |agent| {
+                ProducerMetadata::known_agent(
+                    ProducerSourceSystem::Cli,
+                    Some(agent),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            },
+        )
 }
 
 /// Options for closing a workflow lifecycle group.
@@ -3605,6 +3615,7 @@ struct RememberFinishInput {
     audit_id: String,
     index_job_id: String,
     memory_input: CreateMemoryInput,
+    producer: ProducerMetadata,
     policy_bypass: Option<RememberPolicyBypassReport>,
     near_duplicates: Vec<RememberNearDuplicate>,
     defer_index_processing: bool,
@@ -5107,8 +5118,8 @@ fn build_prepared_remember_txn_write(
     prepared: PreparedRememberMemory,
     id_source: &mut RememberIdSource<'_>,
     defer_index_processing: bool,
-    auto_link: bool,
-    propose_candidates: bool,
+    options: &RememberMemoryOptions<'_>,
+    agent_name: Option<&str>,
     write_replay_guard: RememberWriteReplayGuard,
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
     let memory_id = prepared.memory_id.to_string();
@@ -5128,9 +5139,7 @@ fn build_prepared_remember_txn_write(
         utility: UnitScore::neutral().into_inner(),
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
-        trust_class: if prepared.attempt_family.is_some()
-            && super::memory_scope::current_agent_name().is_some()
-        {
+        trust_class: if prepared.attempt_family.is_some() && agent_name.is_some() {
             // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
             // a registered agent identity (the same actor signal
             // remember_trust_subclass records) is an agent fan-out record and
@@ -5144,7 +5153,10 @@ fn build_prepared_remember_txn_write(
         } else {
             TrustClass::HumanExplicit.as_str().to_owned()
         },
-        trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
+        trust_subclass: super::memory_scope::remember_trust_subclass_for_agent(
+            "ee remember",
+            agent_name,
+        ),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
         valid_to: prepared.valid_to.clone(),
@@ -5182,11 +5194,12 @@ fn build_prepared_remember_txn_write(
             audit_id,
             index_job_id,
             memory_input,
+            producer: remember_producer_metadata_for_agent(agent_name),
             policy_bypass,
             near_duplicates,
             defer_index_processing,
-            auto_link,
-            propose_candidates,
+            auto_link: options.auto_link,
+            propose_candidates: options.propose_candidates,
             write_replay_guard,
         },
         typed_fields_json,
@@ -5201,6 +5214,23 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     connection: &DbConnection,
     options: &RememberMemoryOptions<'_>,
     defer_index_processing: bool,
+) -> Result<PreparedRememberTxnWrite, DomainError> {
+    prepare_remember_txn_write_for_connection_with_agent(
+        connection,
+        options,
+        defer_index_processing,
+        super::memory_scope::current_agent_name().as_deref(),
+    )
+}
+
+/// Prepare an already-normalized caller identity before dedup, durable audit,
+/// and report construction. Daemon callers validate their identity at both
+/// RPC and actor admission; local callers retain their process identity.
+pub(crate) fn prepare_remember_txn_write_for_connection_with_agent(
+    connection: &DbConnection,
+    options: &RememberMemoryOptions<'_>,
+    defer_index_processing: bool,
+    agent_name: Option<&str>,
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     let mut id_source = RememberIdSource::Ambient;
@@ -5230,8 +5260,8 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
         prepared,
         &mut id_source,
         defer_index_processing,
-        options.auto_link,
-        options.propose_candidates,
+        options,
+        agent_name,
         write_replay_guard,
     )
 }
@@ -5493,6 +5523,7 @@ fn finish_remember_memory_after_primary_commit(
         audit_id,
         index_job_id,
         memory_input,
+        producer,
         policy_bypass,
         near_duplicates,
         defer_index_processing,
@@ -5712,7 +5743,7 @@ fn finish_remember_memory_after_primary_commit(
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
-        producer: remember_producer_metadata(),
+        producer,
         created_at,
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
@@ -15907,19 +15938,25 @@ mod tests {
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = setup_remember_test_workspace(&connection)?;
         let target_id = "mem_embeddeduptarget0000000000";
+        let mut target_input =
+            remember_test_memory_input(&workspace_id, "Prefer remote RCH verification.");
+        target_input.trust_subclass = crate::core::memory_scope::remember_trust_subclass_for_agent(
+            "ee remember",
+            Some("Amber Finch"),
+        );
         connection
-            .insert_memory_with_content_simhash(
-                target_id,
-                &remember_test_memory_input(&workspace_id, "Prefer remote RCH verification."),
-                [1_u8; 16],
-            )
+            .insert_memory_with_content_simhash(target_id, &target_input, [1_u8; 16])
             .map_err(|error| error.to_string())?;
 
         let memory_id = "mem_embeddedupnew0000000000000";
         let audit_id = "audit_embeddedupnew0000000000001";
         let index_job_id = "sidx_embeddedupnew0000000000000";
-        let memory_input =
+        let mut memory_input =
             remember_test_memory_input(&workspace_id, "Prefer remote RCH verification.");
+        memory_input.trust_subclass = crate::core::memory_scope::remember_trust_subclass_for_agent(
+            "ee remember",
+            Some("Cedar-Pine"),
+        );
         let index_input = CreateSearchIndexJobInput {
             workspace_id: workspace_id.clone(),
             job_type: SearchIndexJobType::SingleDocument,
@@ -15947,7 +15984,7 @@ mod tests {
             None,
             &decision,
             Some("link_embeddedupnew0000000000000"),
-            "{}",
+            &remember_audit_details(memory_id, &memory_input, None, None),
             &index_input,
             None,
             None,
@@ -15955,6 +15992,34 @@ mod tests {
             &PreparedRememberCreationCompanions::default(),
         )
         .map_err(|error| error.to_string())?;
+
+        for (id, expected_agent) in [(target_id, "Amber Finch"), (memory_id, "Cedar-Pine")] {
+            let stored = connection
+                .get_memory(id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "deduplicated caller memory missing".to_owned())?;
+            ensure(
+                crate::core::memory_scope::memory_producer_agent(&stored).as_deref(),
+                Some(expected_agent),
+                "dedup preserves each memory's producer",
+            )?;
+        }
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "deduplicated memory audit missing".to_owned())?;
+        let audit_details: serde_json::Value = serde_json::from_str(
+            audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            audit_details["trustSubclass"].as_str(),
+            memory_input.trust_subclass.as_deref(),
+            "dedup audit preserves the new caller",
+        )?;
 
         let candidates = connection
             .list_memory_simhash_candidates(&workspace_id, [2_u8; 16], 0, 10)
