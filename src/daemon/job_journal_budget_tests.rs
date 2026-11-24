@@ -24,6 +24,7 @@ fn row(key: &str, timestamp: &str, padding: usize) -> DaemonJobRow {
         error: None,
         dry_run: false,
         durable_mutation: false,
+        mutation_may_have_occurred: false,
         recovered_from_orphan: false,
         recovery_reason: None,
     }

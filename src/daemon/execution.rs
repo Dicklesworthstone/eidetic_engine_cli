@@ -145,6 +145,7 @@ impl DaemonExecution {
             error: None,
             dry_run: false,
             durable_mutation: false,
+            mutation_may_have_occurred: false,
             recovered_from_orphan: false,
             recovery_reason: None,
         };
@@ -228,6 +229,7 @@ impl DaemonExecution {
         row.error = Some(reason.to_owned());
         row.completed_at = Some(recorded_at.clone());
         row.recorded_at = recorded_at;
+        row.mutation_may_have_occurred = true;
         append_rows(&self.table_path, std::slice::from_ref(&row))?;
         self.active = None;
         Ok(())

@@ -52,6 +52,8 @@ use crate::policy::{
     memory_decay_freshness_score,
 };
 
+mod cass_import;
+pub use cass_import::validate_cass_import_store;
 mod consolidate;
 use consolidate::{
     CONSOLIDATION_SIEVE_ALGORITHM, ConsolidationCandidatePlan, ConsolidationCandidateSelection,
@@ -494,6 +496,8 @@ pub enum JobType {
     IndexRebuild,
     /// Process queued incremental search index jobs.
     IndexCoalesce,
+    /// Refresh a bounded selection of CASS sessions and queue their indexes.
+    CassImport,
     /// Apply time-based decay to memory confidence.
     DecaySweep,
     /// Persist one memory-debt trend snapshot for curate doctor.
@@ -544,6 +548,7 @@ impl JobType {
         match self {
             Self::IndexRebuild => "index_rebuild",
             Self::IndexCoalesce => "index_coalesce",
+            Self::CassImport => "cass_import",
             Self::DecaySweep => "decay_sweep",
             Self::MemoryDebtSnapshot => "memory_debt_snapshot",
             Self::ConsolidationPass => "consolidation_pass",
@@ -572,6 +577,7 @@ impl JobType {
         &[
             Self::IndexRebuild,
             Self::IndexCoalesce,
+            Self::CassImport,
             Self::DecaySweep,
             Self::MemoryDebtSnapshot,
             Self::ConsolidationPass,
@@ -600,6 +606,7 @@ impl JobType {
         match self {
             Self::IndexRebuild => "Rebuild search indexes from source of truth",
             Self::IndexCoalesce => "Process queued incremental search index jobs",
+            Self::CassImport => "Import CASS session history and queue index publication",
             Self::DecaySweep => "Apply time-based decay to memory confidence",
             Self::MemoryDebtSnapshot => "Persist one memory-debt trend snapshot",
             Self::ConsolidationPass => {
@@ -664,6 +671,7 @@ impl FromStr for JobType {
         match normalized.as_str() {
             "index_rebuild" => Ok(Self::IndexRebuild),
             "index_coalesce" => Ok(Self::IndexCoalesce),
+            "cass_import" => Ok(Self::CassImport),
             "decay_sweep" => Ok(Self::DecaySweep),
             "memory_debt_snapshot" => Ok(Self::MemoryDebtSnapshot),
             "consolidation_pass" => Ok(Self::ConsolidationPass),
@@ -1899,6 +1907,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::IndexCoalesce => vec![
             ResourceBudget::time_limit_ms(120_000), // 2 minutes
             ResourceBudget::item_limit(10_000),
+        ],
+        JobType::CassImport => vec![
+            ResourceBudget::time_limit_ms(120_000),
+            ResourceBudget::item_limit(10),
         ],
         JobType::DecaySweep => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
@@ -3538,14 +3550,18 @@ impl ManualRunner {
                 dry_run: self.options.dry_run,
             });
         }
-        // A real index parent reason reaches execute_job_work's typed gate
+        // A real index/import parent reason reaches the executor's typed gate
         // before store validation. A flag alone has no runtime attribution at
         // admission, so preserve its existing generic shutdown report.
         if cancellation_requested
-            && !(matches!(job_type, JobType::IndexRebuild | JobType::IndexCoalesce)
-                && self.options.cancellation_cx.as_ref().is_some_and(|parent| {
-                    parent.checkpoint().is_err() || parent.is_cancel_requested()
-                }))
+            && !(matches!(
+                job_type,
+                JobType::IndexRebuild | JobType::IndexCoalesce | JobType::CassImport
+            ) && self
+                .options
+                .cancellation_cx
+                .as_ref()
+                .is_some_and(|parent| parent.checkpoint().is_err() || parent.is_cancel_requested()))
         {
             job.start(now);
             let completion_time = chrono::Utc::now().to_rfc3339();
@@ -3641,7 +3657,7 @@ impl ManualRunner {
                 );
             }
         }
-        if self.cancellation_requested() {
+        if job_type != JobType::CassImport && self.cancellation_requested() {
             return (
                 RunOutcome::Cancelled,
                 Some(0),
@@ -3657,6 +3673,7 @@ impl ManualRunner {
         match job_type {
             JobType::IndexRebuild => self.execute_index_rebuild(budget),
             JobType::IndexCoalesce => self.execute_index_coalesce(budget),
+            JobType::CassImport => self.execute_cass_import(budget),
             JobType::DecaySweep => self.execute_decay_sweep(budget),
             JobType::MemoryDebtSnapshot => self.execute_memory_debt_snapshot(budget),
             JobType::ConsolidationPass => self.execute_consolidation_pass(budget),
@@ -11414,7 +11431,12 @@ mod tests {
             true,
             "all() includes TeamSteward",
         )?;
-        ensure(all.len(), 22, "all() lists every JobType variant")?;
+        ensure(
+            all.contains(&JobType::CassImport),
+            true,
+            "all() includes CassImport",
+        )?;
+        ensure(all.len(), 23, "all() lists every JobType variant")?;
         Ok(())
     }
 

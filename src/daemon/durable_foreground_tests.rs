@@ -85,6 +85,37 @@ fn matching_handler_workspace_is_accepted_without_dry_run_writes() -> TestResult
 }
 
 #[test]
+fn cass_import_requires_an_existing_store_before_journal_or_lease_creation() -> TestResult {
+    for explicit_database in [false, true] {
+        let (_temp, mut options) = fixture()?;
+        let root = PathBuf::from(&options.workspace);
+        options.job_types = vec![JobType::CassImport, JobType::IndexCoalesce];
+        if explicit_database {
+            options.runner_options.database_path = Some(root.join("missing-store.db"));
+        }
+        assert!(run_daemon_foreground_durable(&options).is_err());
+        assert!(!root.join(".ee").exists());
+        assert!(!root.join("missing-store.db").exists());
+        assert!(!daemon_job_table_path(&root).exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn cass_import_dry_run_plans_without_initializing_a_store() -> TestResult {
+    let (_temp, mut options) = fixture()?;
+    let root = PathBuf::from(&options.workspace);
+    options.job_types = vec![JobType::CassImport, JobType::IndexCoalesce];
+    options.dry_run = true;
+    let report = run_daemon_foreground_durable(&options)?;
+    assert!(report.dry_run);
+    assert_eq!(report.requested_jobs, 6);
+    assert_eq!(report.completed_jobs, 0);
+    assert!(!root.join(".ee").exists());
+    Ok(())
+}
+
+#[test]
 fn pre_cancelled_request_creates_no_lease_or_job_rows() -> TestResult {
     let (_temp, mut options) = fixture()?;
     options.runner_options.cancellation_flag = Some(Arc::new(AtomicBool::new(true)));
@@ -282,6 +313,37 @@ fn checked_local_identity_remapping_preserves_the_actual_handler_result() -> Tes
     assert_eq!(rows[1].duration_ms, Some(12));
     assert_eq!(rows[1].items_processed, Some(34));
     assert!(rows[1].durable_mutation);
+    Ok(())
+}
+
+#[test]
+fn journal_preserves_an_unknown_handler_mutation_outcome() -> TestResult {
+    let (_temp, options) = fixture()?;
+    let root = Path::new(&options.workspace);
+    let mut execution = DaemonExecution::begin(&options)?;
+    let invocation = execution.begin_next_job()?.unwrap();
+    let mut result = result_for(&invocation);
+    result.outcome = RunOutcome::Cancelled;
+    result.details = Some(serde_json::json!({
+        "durableMutation": null,
+        "mutationStatus": "unknown",
+        "mutationMayHaveOccurred": true,
+    }));
+    let adapted = take_result(report_for(vec![result]), "local-job", &invocation)?;
+    execution.finish_job(&invocation, &adapted)?;
+    let rows = load_daemon_job_rows(root)?;
+    assert!(!rows[1].durable_mutation);
+    assert!(rows[1].mutation_may_have_occurred);
+    assert_eq!(rows[1].data_json()["mutationMayHaveOccurred"], true);
+
+    // Rows written before this field existed must still load successfully.
+    let mut legacy = rows[1].data_json();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("mutationMayHaveOccurred");
+    let legacy: crate::serve::DaemonJobRow = serde_json::from_value(legacy)?;
+    assert!(!legacy.mutation_may_have_occurred);
     Ok(())
 }
 

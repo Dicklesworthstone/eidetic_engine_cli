@@ -94,6 +94,16 @@ impl CassImportOptions {
             include_spans: true,
         }
     }
+
+    /// Stable identity of this selection's resumable import ledger.
+    ///
+    /// Maintenance uses the same identity to observe retained progress after
+    /// failure or cancellation without reading unrelated import ledgers.
+    pub(crate) fn ledger_id(&self) -> String {
+        let workspace_path = normalize_path(&self.workspace_path);
+        let since = self.since.map(format_since_cutoff);
+        stable_import_id(&source_id(&workspace_path, self.limit, since.as_deref()))
+    }
 }
 
 /// Per-session import result.
@@ -966,6 +976,20 @@ pub fn import_cass_sessions(
         discover_sessions(client, &workspace_path, options.limit)?,
         options.since,
     )?;
+    // CASS is an external producer: its --limit argument is not an enforced
+    // import budget. Refuse an oversized positive-limit selection before any
+    // store or ledger is created. Preserve the existing upstream-defined
+    // zero-limit behavior; bounded maintenance jobs never submit zero.
+    if options.limit > 0 && sessions.len() > options.limit as usize {
+        return Err(CassImportError::InvalidJson {
+            source: "sessions",
+            message: format!(
+                "CASS returned {} selected sessions, exceeding the requested limit of {}",
+                sessions.len(),
+                options.limit,
+            ),
+        });
+    }
     cass_request_checkpoint()?;
 
     if options.dry_run {
@@ -6790,6 +6814,78 @@ mod tests {
             format!("error should mention PATH lookup, got {cass_error}"),
         )?;
         ensure(!marker.exists(), "fake cass from PATH must not execute")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_oversized_selection_before_store_creation() -> TestResult {
+        let root = unique_test_dir("selection-limit")?;
+        let workspace = root.join("workspace");
+        let binary_dir = root.join("bin");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&binary_dir).map_err(|error| error.to_string())?;
+        let binary = binary_dir.join("cass");
+        let sessions = json!({
+            "sessions": [
+                {"path": root.join("source-a.jsonl"), "workspace": workspace, "agent": "codex"},
+                {"path": root.join("source-b.jsonl"), "workspace": workspace, "agent": "codex"}
+            ]
+        });
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\ncat <<'EE_CASS_LIMIT'\n{sessions}\nEE_CASS_LIMIT\n"),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+        let client = CassClient::with_binary(binary);
+        let mut options = CassImportOptions::new(&workspace);
+        options.limit = 1;
+        let error = import_cass_sessions(&client, &options)
+            .err()
+            .ok_or_else(|| "oversized selection must be refused".to_owned())?;
+        ensure(
+            matches!(
+                &error,
+                CassImportError::InvalidJson {
+                    source: "sessions",
+                    ..
+                }
+            ),
+            "oversized selection must report a CASS contract failure",
+        )?;
+        ensure(
+            error
+                .to_string()
+                .contains("exceeding the requested limit of 1"),
+            "selection error must identify the violated count budget",
+        )?;
+        ensure(
+            !error.to_string().contains("source-a.jsonl"),
+            "selection error must not disclose upstream session paths",
+        )?;
+        ensure(
+            !workspace.join(".ee").exists(),
+            "oversized selection must not create the store or ledger",
+        )?;
+
+        // The generic import API previously forwarded zero unchanged. This
+        // budget fix does not reinterpret that upstream-defined request.
+        options.limit = 0;
+        options.dry_run = true;
+        let preview = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &preview.sessions_discovered,
+            &2,
+            "zero-limit preview compatibility",
+        )?;
+        ensure(
+            !workspace.join(".ee").exists(),
+            "preview must stay read-only",
+        )
     }
 
     #[test]

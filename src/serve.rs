@@ -2866,6 +2866,10 @@ pub struct DaemonJobRow {
     pub error: Option<String>,
     pub dry_run: bool,
     pub durable_mutation: bool,
+    /// The handler may have written state, but its durable outcome could not
+    /// be established. A false durable_mutation alone is not proof of rollback.
+    #[serde(default)]
+    pub mutation_may_have_occurred: bool,
     pub recovered_from_orphan: bool,
     pub recovery_reason: Option<String>,
 }
@@ -3056,6 +3060,7 @@ pub fn record_daemon_foreground_start(
             error: None,
             dry_run: false,
             durable_mutation: false,
+            mutation_may_have_occurred: false,
             recovered_from_orphan: false,
             recovery_reason: None,
         });
@@ -3142,6 +3147,7 @@ pub fn recover_orphaned_daemon_jobs(
             error: Some(reason.to_owned()),
             dry_run: row.dry_run,
             durable_mutation: false,
+            mutation_may_have_occurred: !row.dry_run,
             recovered_from_orphan: true,
             recovery_reason: Some(reason.to_owned()),
         });
@@ -3471,6 +3477,12 @@ fn row_from_result(
             .details
             .as_ref()
             .and_then(|details| details.get("durableMutation"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        mutation_may_have_occurred: result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("mutationMayHaveOccurred"))
             .and_then(JsonValue::as_bool)
             .unwrap_or(false),
         recovered_from_orphan: false,

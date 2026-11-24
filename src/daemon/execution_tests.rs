@@ -92,6 +92,7 @@ fn restart_preserves_completed_ticks_and_recovers_only_the_inflight_job() -> Tes
     assert_eq!(rows.iter().filter(|row| row.status == "success").count(), 2);
     let recovered = rows.last().unwrap();
     assert!(recovered.recovered_from_orphan);
+    assert!(recovered.mutation_may_have_occurred);
     assert_eq!(recovered.run_id, old_run);
     assert_eq!(recovered.tick, 2);
     assert_eq!(recovered.runner_job_id, interrupted.runner_job_id);
@@ -181,6 +182,7 @@ fn stop_closes_only_the_active_job_and_does_not_claim_rollback() -> TestResult {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].status, "cancelled");
     assert!(rows[1].reason.contains("outcome may be unknown"));
+    assert!(rows[1].mutation_may_have_occurred);
     assert!(!rows[1].recovered_from_orphan);
     assert_eq!(daemon_status_report(root, &[], 0)?.open_job_count, 0);
     drop(execution);

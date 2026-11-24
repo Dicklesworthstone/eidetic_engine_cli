@@ -131,6 +131,7 @@ pub fn record_daemon_foreground_start(
                 error: None,
                 dry_run: false,
                 durable_mutation: false,
+                mutation_may_have_occurred: false,
                 recovered_from_orphan: false,
                 recovery_reason: None,
             }
@@ -335,6 +336,7 @@ fn recover_orphaned_daemon_jobs_inner(
         row.items_processed = None;
         row.error = Some(reason.to_owned());
         row.durable_mutation = false;
+        row.mutation_may_have_occurred = !row.dry_run;
         row.recovered_from_orphan = true;
         row.recovery_reason = Some(reason.to_owned());
         write_row(&mut file, &row)?;
@@ -822,6 +824,12 @@ fn row_from_result(
             .details
             .as_ref()
             .and_then(|details| details.get("durableMutation"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        mutation_may_have_occurred: result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("mutationMayHaveOccurred"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
         recovered_from_orphan: false,

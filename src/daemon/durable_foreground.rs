@@ -145,6 +145,19 @@ pub async fn run_daemon_foreground_durable_supervised(
     if options.dry_run {
         return Outcome::Ok(summary);
     }
+    // CASS refresh requires an already initialized, addressed store. Refuse
+    // before acquiring the execution lease or recovering journal rows: those
+    // operations create .ee even when the importer itself never starts.
+    if options
+        .job_types
+        .contains(&crate::steward::JobType::CassImport)
+        && let Err(error) = crate::steward::validate_cass_import_store(
+            Path::new(&options.workspace),
+            options.runner_options.database_path.as_deref(),
+        )
+    {
+        return Outcome::Err(error);
+    }
     let mut execution = match DaemonExecution::begin(options) {
         Ok(execution) => execution,
         Err(error) => return Outcome::Err(error),

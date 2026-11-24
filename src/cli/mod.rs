@@ -16366,7 +16366,9 @@ fn render_hook_status_human(report: &crate::hooks::HarnessHookInstallReport) -> 
         report.install_audit.duplicate_hook_count,
     ) {
         (Some(events), Some(hooks)) => {
-            out.push_str(&format!("  duplicates: events={events} extraHooks={hooks}\n"));
+            out.push_str(&format!(
+                "  duplicates: events={events} extraHooks={hooks}\n"
+            ));
         }
         _ => out.push_str("  duplicates: unavailable (settings were not inspected)\n"),
     }
@@ -68208,6 +68210,42 @@ where
         .database
         .map(PathBuf::as_path)
         .map(absolute_path_or_lexical);
+    // Admission must precede the maintenance lock and history writer: both
+    // may create .ee, which would conceal an invalid CASS import target.
+    if request.job_type == crate::steward::JobType::CassImport {
+        let admission = selected_workspace.as_deref().map_or_else(
+            || Err("CASS import requires a workspace path; pass --workspace <path>.".to_owned()),
+            |workspace_path| {
+                crate::steward::validate_cass_import_store(
+                    workspace_path,
+                    explicit_database.as_deref(),
+                )
+            },
+        );
+        if let Err(message) = admission {
+            let data = serde_json::json!({
+                "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                "command": request.command,
+                "requestedJob": request.job_type.as_str(),
+                "workspace": selected_workspace.as_deref().map(|path| path.display().to_string()),
+                "dryRun": request.dry_run,
+                "includeDecay": request.include_decay,
+                "asOf": request.as_of,
+                "durableMutation": false,
+                "summary": {"total": 1, "succeeded": 0, "skipped": 0, "failed": 1},
+                "job": null,
+                "history": {"persisted": false, "path": null},
+                "results": [],
+                "degraded": [{
+                    "code": "cass_import_store_unavailable",
+                    "severity": "medium",
+                    "message": message,
+                    "repair": "Address an initialized workspace and its database, then retry the same CASS import job.",
+                }],
+            });
+            return write_maintenance_response(cli, stdout, false, data);
+        }
+    }
     let history_path = selected_workspace.as_deref().map(|workspace_path| {
         maintenance_job_history_path(workspace_path, explicit_database.as_deref())
     });
@@ -68394,7 +68432,8 @@ where
     }
 
     let success = degraded.is_empty();
-    let durable_mutation = row["durableMutation"].as_bool().unwrap_or(false);
+    let durable_mutation = row["durableMutation"].clone();
+    let mutation_may_have_occurred = row["mutationMayHaveOccurred"].as_bool().unwrap_or(false);
     let succeeded = u8::from(result_json["outcome"].as_str() == Some("success"));
     let skipped = u8::from(result_json["outcome"].as_str() == Some("skipped"));
     let failed = u8::from(matches!(
@@ -68412,6 +68451,7 @@ where
         "includeDecay": request.include_decay,
         "asOf": request.as_of,
         "durableMutation": durable_mutation,
+        "mutationMayHaveOccurred": mutation_may_have_occurred,
         "summary": {
             "total": 1,
             "succeeded": succeeded,
@@ -68880,6 +68920,12 @@ fn maintenance_job_history_row(
 ) -> serde_json::Value {
     let result_json = result.data_json();
     let now = chrono::Utc::now().to_rfc3339();
+    // Explicit null means an admitted job could not establish its retained
+    // progress. Only an absent field permits the historical no-mutation default.
+    let durable_mutation = result_json["details"]
+        .get("durableMutation")
+        .cloned()
+        .unwrap_or(serde_json::Value::Bool(false));
     serde_json::json!({
         "schema": MAINTENANCE_JOB_ROW_SCHEMA_V1,
         "id": result.job_id.as_str(),
@@ -68897,7 +68943,8 @@ fn maintenance_job_history_row(
         "itemsProcessed": result.items_processed,
         "durationMs": result.duration_ms,
         "dryRun": result.dry_run,
-        "durableMutation": result_json["details"]["durableMutation"].as_bool().unwrap_or(false),
+        "durableMutation": durable_mutation,
+        "mutationMayHaveOccurred": result_json["details"]["mutationMayHaveOccurred"].as_bool().unwrap_or(false),
         "error": result.error.as_deref(),
         "details": result_json["details"].clone(),
         "budgetUsed": result_json["budgetUsed"].clone(),
@@ -76663,7 +76710,10 @@ mod tests {
                 "--dry-run",
             ]);
             ensure_equal(&exit, &ProcessExitCode::Usage, "invalid finish status exit")?;
-            ensure(stderr.is_empty(), "finish status error keeps JSON on stdout")?;
+            ensure(
+                stderr.is_empty(),
+                "finish status error keeps JSON on stdout",
+            )?;
             let value: serde_json::Value =
                 serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
             ensure_equal(
@@ -101925,6 +101975,110 @@ demos:
             }
             _ => Err("expected Remember command".to_string()),
         }
+    }
+
+    #[test]
+    fn cass_import_maintenance_admission_does_not_create_missing_store() -> TestResult {
+        for command in ["job run", "maintenance run"] {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = directory.path().to_string_lossy().into_owned();
+            let cli = Cli::try_parse_from(["ee", "--workspace", &workspace, "--json"])
+                .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let mut stdout = Vec::new();
+                let exit = super::run_maintenance_job(
+                    &cli,
+                    super::MaintenanceJobRunRequest {
+                        command,
+                        job_type: crate::steward::JobType::CassImport,
+                        database: None,
+                        index_dir: None,
+                        dry_run,
+                        include_decay: false,
+                        structural_decay: true,
+                        as_of: None,
+                        time_limit_ms: None,
+                        item_limit: None,
+                    },
+                    &mut stdout,
+                );
+                ensure_equal(
+                    &exit,
+                    &ProcessExitCode::UnsatisfiedDegradedMode,
+                    "CASS import refuses a missing store before maintenance admission",
+                )?;
+                let response: serde_json::Value =
+                    serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
+                ensure_equal(&response["success"], &serde_json::json!(false), "failure")?;
+                ensure_equal(
+                    &response["data"]["durableMutation"],
+                    &serde_json::json!(false),
+                    "no mutation on refused admission",
+                )?;
+                ensure_equal(
+                    &response["data"]["history"]["persisted"],
+                    &serde_json::json!(false),
+                    "no history is written for an invalid target",
+                )?;
+                ensure(
+                    !directory.path().join(".ee").exists(),
+                    "neither lock nor history may create .ee before CASS target validation",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_history_preserves_unknown_import_mutation() -> TestResult {
+        for (details, mutation, possible) in [
+            (None, serde_json::json!(false), false),
+            (
+                Some(serde_json::json!({"durableMutation": false})),
+                serde_json::json!(false),
+                false,
+            ),
+            (
+                Some(serde_json::json!({"durableMutation": true})),
+                serde_json::json!(true),
+                false,
+            ),
+            (
+                Some(serde_json::json!({"durableMutation": null, "mutationMayHaveOccurred": true})),
+                serde_json::Value::Null,
+                true,
+            ),
+        ] {
+            let result = crate::steward::JobRunResult {
+                job_id: "job-import-progress".to_owned(),
+                job_type: crate::steward::JobType::CassImport,
+                outcome: crate::steward::RunOutcome::Failed,
+                duration_ms: 1,
+                items_processed: None,
+                error: Some("import did not finish".to_owned()),
+                budget_summary: None,
+                details,
+                dry_run: false,
+            };
+            let row = super::maintenance_job_history_row(
+                "job run",
+                crate::steward::JobType::CassImport,
+                None,
+                None,
+                &result,
+            );
+            ensure_equal(
+                &row["durableMutation"],
+                &mutation,
+                "retained mutation knowledge",
+            )?;
+            ensure_equal(
+                &row["mutationMayHaveOccurred"],
+                &serde_json::json!(possible),
+                "history preserves import uncertainty",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
