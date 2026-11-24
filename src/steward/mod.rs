@@ -42,7 +42,9 @@ use crate::db::{
     StoredMemory, StoredMemoryLink, WalCheckpointMode, audit_actions, feedback_scoring,
     generate_audit_id,
 };
-use crate::graph::decay::{StructuralDecayMultiplier, compute_structural_decay_adjustment};
+use crate::graph::decay::{
+    StructuralDecayIndex, StructuralDecayMultiplier, try_compute_structural_decay_index,
+};
 use crate::models::RedactionLevel;
 use crate::policy::{
     MEMORY_DECAY_SOURCE, MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives,
@@ -2298,6 +2300,14 @@ pub fn run_score_decay_job(
     conn: &DbConnection,
     options: &ScoreDecayJobOptions,
 ) -> Result<ScoreDecayJobReport, String> {
+    run_score_decay_job_with_structural_index(conn, options, try_compute_structural_decay_index)
+}
+
+fn run_score_decay_job_with_structural_index(
+    conn: &DbConnection,
+    options: &ScoreDecayJobOptions,
+    build_structural_index: impl FnOnce(&Graph) -> crate::graph::GraphResult<StructuralDecayIndex>,
+) -> Result<ScoreDecayJobReport, String> {
     validate_score_decay_options(options)?;
     score_decay_check_cancelled(options)?;
     let as_of = options
@@ -2315,6 +2325,14 @@ pub fn run_score_decay_job(
         .list_memories(&options.workspace_id, None, false)
         .map_err(|error| format!("Failed to list memories for score decay: {error}"))?;
     score_decay_check_cancelled(options)?;
+    // The item budget limits mutations, not the graph that protects them.
+    // Omitting a bridge's unselected neighbors can turn a safe limited sweep
+    // into a demotion or tombstone that a full sweep would refuse.
+    let structural_memory_ids = if options.include_decay_actions && options.structural_decay {
+        memories.iter().map(|memory| memory.id.clone()).collect()
+    } else {
+        BTreeSet::new()
+    };
     if let Some(limit) = options.item_limit {
         memories.truncate(
             usize::try_from(limit)
@@ -2326,11 +2344,20 @@ pub fn run_score_decay_job(
     } else {
         BTreeMap::new()
     };
-    let structural_adjustments = if options.include_decay_actions && options.structural_decay {
-        structural_decay_adjustments(conn, &memories, &access_times, &as_of_timestamp, options)?
-    } else {
-        BTreeMap::new()
-    };
+    let structural_adjustments =
+        if options.include_decay_actions && options.structural_decay && !memories.is_empty() {
+            structural_decay_adjustments(
+                conn,
+                &structural_memory_ids,
+                &memories,
+                &access_times,
+                &as_of_timestamp,
+                options,
+                build_structural_index,
+            )?
+        } else {
+            BTreeMap::new()
+        };
 
     let all_feedback_events = conn
         .list_feedback_events(&options.workspace_id)
@@ -2611,20 +2638,25 @@ fn validate_score_decay_options(options: &ScoreDecayJobOptions) -> Result<(), St
 
 fn structural_decay_adjustments(
     conn: &DbConnection,
+    memory_ids: &BTreeSet<String>,
     memories: &[StoredMemory],
     access_times: &BTreeMap<String, DateTime<Utc>>,
     as_of: &DateTime<Utc>,
     options: &ScoreDecayJobOptions,
+    build_structural_index: impl FnOnce(&Graph) -> crate::graph::GraphResult<StructuralDecayIndex>,
 ) -> Result<BTreeMap<String, ScoreDecayStructuralAdjustment>, String> {
-    let memory_ids = memories
-        .iter()
-        .map(|memory| memory.id.clone())
-        .collect::<BTreeSet<_>>();
     let links = conn
         .list_all_memory_links(None)
         .map_err(|error| format!("Failed to list memory links for structural decay: {error}"))?;
     score_decay_check_cancelled(options)?;
-    let graph = structural_decay_graph(&memory_ids, &links);
+    let graph = structural_decay_graph(memory_ids, &links);
+    // FNX onion layers and articulation points describe the whole graph.
+    // Reuse one successful analysis instead of cloning and analyzing it for
+    // every memory, and authorize no lifecycle changes on timeout or failure.
+    let structural_index = build_structural_index(&graph);
+    score_decay_check_cancelled(options)?;
+    let structural_index = structural_index
+        .map_err(|error| format!("Failed to compute structural decay protection: {error}"))?;
     let mut adjustments = BTreeMap::new();
     for memory in memories {
         score_decay_check_cancelled(options)?;
@@ -2638,7 +2670,7 @@ fn structural_decay_adjustments(
         let age_days =
             as_of.signed_duration_since(reference).num_seconds().max(0) as f64 / 86_400.0;
         let base_decay = 1.0 - memory_decay_freshness_score(age_days, half_life_days);
-        let structural = compute_structural_decay_adjustment(&graph, &memory.id);
+        let structural = structural_index.adjustment(&memory.id);
         adjustments.insert(
             memory.id.clone(),
             score_decay_structural_adjustment(&memory.id, base_decay, structural),
@@ -8680,6 +8712,7 @@ mod tests {
         CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
         GraphSnapshotStatus, MemoryLinkRelation, MemoryLinkSource, audit_actions,
     };
+    use crate::graph::decay::compute_structural_decay_adjustment;
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
     use std::collections::{BTreeMap, BTreeSet};
@@ -13024,6 +13057,204 @@ mod tests {
             true,
             "structural adjustments json",
         )
+    }
+
+    #[test]
+    fn score_decay_item_limit_keeps_full_topology_and_reuses_one_analysis() -> TestResult {
+        const MEMORY_C: &str = "mem_00000000000000000000009903";
+        const MEMORY_D: &str = "mem_00000000000000000000009904";
+        let connection = open_score_decay_db()?;
+        for id in [SCORE_MEMORY_A, SCORE_MEMORY_B, MEMORY_C, MEMORY_D] {
+            insert_score_memory(&connection, id, 0.8)?;
+            set_score_memory_timestamp(&connection, id, "2026-01-01T00:00:00Z")?;
+        }
+        for (index, (source, target)) in [
+            (SCORE_MEMORY_A, SCORE_MEMORY_B),
+            (SCORE_MEMORY_B, MEMORY_C),
+            (MEMORY_C, SCORE_MEMORY_A),
+            (SCORE_MEMORY_A, MEMORY_D),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_score_memory_link(
+                &connection,
+                &format!("link_{:026}", index + 1),
+                source,
+                target,
+            )?;
+        }
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2029-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        options.dry_run = true;
+        let builds = std::cell::Cell::new(0);
+        let complete = run_score_decay_job_with_structural_index(&connection, &options, |graph| {
+            builds.set(builds.get() + 1);
+            try_compute_structural_decay_index(graph)
+        })?;
+        assert_eq!(builds.get(), 1, "one graph analysis for all four memories");
+        assert_eq!(complete.scanned_count, 4);
+        let bridge = complete
+            .changes
+            .iter()
+            .find(|change| change.memory_id == SCORE_MEMORY_A)
+            .ok_or_else(|| "complete sweep omitted the bridge proposal".to_owned())?;
+        assert_eq!(bridge.decay_action, MemoryDecayAction::Preserve);
+        assert!(
+            bridge
+                .structural_adjustment
+                .as_ref()
+                .is_some_and(|adjustment| adjustment.is_articulation_point)
+        );
+
+        // Topology needs every live ID, but timestamps outside the selected
+        // item budget must not be interpreted as lifecycle work.
+        set_score_memory_timestamp(&connection, MEMORY_D, "malformed-unselected-timestamp")?;
+        let before = score_decay_durable_state(&connection)?;
+        for limit in [1, 2] {
+            options.item_limit = Some(limit);
+            let bounded = run_score_decay_job(&connection, &options)?;
+            assert_eq!(
+                bounded.scanned_count,
+                usize::try_from(limit).expect("small fixture limit")
+            );
+            assert_eq!(
+                bounded
+                    .changes
+                    .iter()
+                    .find(|change| change.memory_id == SCORE_MEMORY_A),
+                Some(bridge),
+                "an item limit must not change the bridge's protection or decay decision"
+            );
+        }
+        assert_eq!(score_decay_durable_state(&connection)?, before);
+
+        let unselected = connection
+            .list_memories(SCORE_WORKSPACE_ID, None, false)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>();
+        options.item_limit = Some(1);
+        options.dry_run = false;
+        let applied = run_score_decay_job(&connection, &options)?;
+        assert_eq!(applied.scanned_count, 1);
+        assert_eq!(applied.applied_count, 1, "score decay remains actionable");
+        assert_eq!(applied.demoted_count, 0);
+        assert_eq!(applied.tombstoned_count, 0);
+        let retained = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "bounded sweep lost the bridge".to_owned())?;
+        assert_eq!(retained.level, "procedural");
+        assert!(retained.tombstoned_at.is_none());
+        assert_eq!(
+            connection
+                .list_memories(SCORE_WORKSPACE_ID, None, false)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .skip(1)
+                .collect::<Vec<_>>(),
+            unselected,
+            "the complete topology does not enlarge the mutation budget"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_graph_failure_preserves_memory_feedback_audits_and_index_jobs() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_feedback(
+            &connection,
+            "fb_00000000000000000000009951",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        let before = score_decay_durable_state(&connection)?;
+        for failure in [
+            crate::graph::GraphError::AlgorithmTimeout {
+                algorithm: "onion_layers".to_owned(),
+                timeout_ms: 2_000,
+            },
+            crate::graph::GraphError::GraphEngine {
+                operation: "articulation_points",
+                source: "injected graph worker failure".to_owned(),
+            },
+        ] {
+            let error =
+                run_score_decay_job_with_structural_index(&connection, &options, |_| Err(failure))
+                    .expect_err("unavailable graph protection must refuse lifecycle mutation");
+            assert!(
+                error.contains("Failed to compute structural decay protection"),
+                "{error}"
+            );
+            assert_eq!(score_decay_durable_state(&connection)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_cancellation_during_graph_analysis_precedes_its_result() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID)
+            .with_cancellation_flag(Arc::clone(&cancelled));
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        let before = score_decay_durable_state(&connection)?;
+        for fail_analysis in [false, true] {
+            cancelled.store(false, Ordering::SeqCst);
+            let error = run_score_decay_job_with_structural_index(&connection, &options, |graph| {
+                let result = if fail_analysis {
+                    Err(crate::graph::GraphError::AlgorithmTimeout {
+                        algorithm: "articulation_points".to_owned(),
+                        timeout_ms: 2_000,
+                    })
+                } else {
+                    try_compute_structural_decay_index(graph)
+                };
+                cancelled.store(true, Ordering::SeqCst);
+                result
+            })
+            .expect_err("cancellation during analysis must stop before durable writes");
+            assert!(score_decay_was_cancelled(&error), "{error}");
+            assert_eq!(score_decay_durable_state(&connection)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn score_decay_skips_graph_work_for_empty_or_disabled_selection() -> TestResult {
+        let connection = open_score_decay_db()?;
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        options.dry_run = true;
+        let unused = |_: &Graph| -> crate::graph::GraphResult<StructuralDecayIndex> {
+            panic!("this sweep has no structural lifecycle work")
+        };
+        let empty = run_score_decay_job_with_structural_index(&connection, &options, unused)?;
+        assert_eq!(empty.scanned_count, 0);
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        options.item_limit = Some(0);
+        let zero = run_score_decay_job_with_structural_index(&connection, &options, unused)?;
+        assert_eq!(zero.scanned_count, 0);
+        options.item_limit = None;
+        options.structural_decay = false;
+        let disabled = run_score_decay_job_with_structural_index(&connection, &options, unused)?;
+        assert_eq!(disabled.scanned_count, 1);
+        options.structural_decay = true;
+        options.include_decay_actions = false;
+        let scores = run_score_decay_job_with_structural_index(&connection, &options, unused)?;
+        assert_eq!(scores.scanned_count, 1);
+        Ok(())
     }
 
     #[test]

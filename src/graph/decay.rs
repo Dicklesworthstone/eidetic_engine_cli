@@ -137,6 +137,19 @@ pub fn compute_structural_decay_index(graph: &Graph) -> StructuralDecayIndex {
     compute_structural_decay_index_with_policy(graph, StructuralDecayPolicy::default())
 }
 
+/// Build authoritative structural protection for lifecycle mutations. A failed
+/// graph analysis must not be interpreted as evidence that no bridge exists.
+pub fn try_compute_structural_decay_index(graph: &Graph) -> GraphResult<StructuralDecayIndex> {
+    Ok(StructuralDecayIndex {
+        onion: try_compute_onion_layers(graph)?,
+        articulation_points: try_compute_articulation_points(graph)?
+            .memory_ids
+            .into_iter()
+            .collect(),
+        policy: StructuralDecayPolicy::default(),
+    })
+}
+
 #[must_use]
 pub fn compute_structural_decay_index_with_policy(
     graph: &Graph,
@@ -464,6 +477,18 @@ mod tests {
                 compute_structural_decay_adjustment_with_policy(&graph, memory_id, policy)
             );
         }
+    }
+
+    #[test]
+    fn fallible_structural_decay_index_retains_complete_protection() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("c", "a"), ("a", "leaf")]);
+        let expected = compute_structural_decay_index(&graph);
+        let actual = try_compute_structural_decay_index(&graph).expect("complete graph analysis");
+        assert_eq!(actual, expected);
+        assert!(actual.adjustment("a").is_articulation_point);
+        assert!(!actual.adjustment("leaf").is_articulation_point);
+        assert_eq!(actual.adjustment("missing").structural_multiplier, 1.0);
     }
 
     // bd-1n0np.20.3 — bridge-exemption unit coverage over the existing
