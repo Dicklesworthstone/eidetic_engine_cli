@@ -168,5 +168,9 @@ removed first, or the custom domain will not attach.
   chapter page's two) as PNG. The static export writes them without an extension.
 - It hands everything else to the static assets unchanged.
 
+The static export writes each chapter page as `<slug>.html`, and the assets' `auto-trailing-slash`
+handling serves that file at `/<slug>` and redirects `/<slug>/` to it. So every link, canonical URL
+and sitemap entry for a chapter page is written without a trailing slash.
+
 `public/_headers` caches `/_next/static/*` immutably, and sets `nosniff` and a referrer policy on every
 response.
