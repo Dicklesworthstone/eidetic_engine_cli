@@ -2586,33 +2586,75 @@ fn hydrate_inbound_team_memory_body(
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Ok(());
     };
+    if row.workspace_id != workspace_id {
+        return Ok(());
+    }
+    let Some(origin_event_id) = body_ref_field(row, "originEventId") else {
+        return Ok(());
+    };
     let Some(local_id) = local_inbound_memory_id_for_body_row(connection, workspace_id, row) else {
         return Ok(());
     };
-    let Some(existing) = connection
+    let Some(observed) = connection
         .get_memory(&local_id)
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .map_err(OriginStreamError::from)?
     else {
         return Ok(());
     };
-    if existing.workspace_id != workspace_id
+    connection.with_transaction_error(|| {
+        hydrate_inbound_team_memory_body_in_current_transaction(
+            connection,
+            workspace_id,
+            &observed,
+            &origin_event_id,
+            text,
+        )
+    })
+}
+
+fn hydrate_inbound_team_memory_body_in_current_transaction(
+    connection: &DbConnection,
+    workspace_id: &str,
+    observed: &crate::db::StoredMemory,
+    origin_event_id: &str,
+    text: &str,
+) -> Result<(), OriginStreamError> {
+    let Some(existing) = connection.get_memory(&observed.id)? else {
+        return Ok(());
+    };
+    // Resolving a cache reference does not authorize replacing a newer revision
+    // or another origin's stub. Recheck the exact observation under the writer
+    // fence, while retaining legacy history-stub suffix formats.
+    if existing != *observed
+        || existing.workspace_id != workspace_id
+        || existing.tombstoned_at.is_some()
         || existing.trust_class != "peer_human_attested"
+        || existing.provenance_uri.as_deref() != Some(origin_event_id)
         || !existing.content.starts_with("[ee.team.history]")
+        || connection.get_memory_superseded_at(&existing.id)?.is_some()
     {
         return Ok(());
     }
-    connection
-        .apply_memory_curation_update(
-            &local_id,
-            &crate::db::ApplyMemoryCurationInput {
-                workspace_id: workspace_id.to_owned(),
-                content: text.to_owned(),
-                confidence: existing.confidence,
-                trust_class: existing.trust_class,
-            },
-        )
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    enqueue_inbound_memory_index_job(connection, workspace_id, &local_id, "team-inbound-body")
+    let changed = connection.apply_memory_curation_update(
+        &existing.id,
+        &crate::db::ApplyMemoryCurationInput {
+            workspace_id: workspace_id.to_owned(),
+            content: text.to_owned(),
+            confidence: existing.confidence,
+            trust_class: existing.trust_class.clone(),
+        },
+    )?;
+    if changed {
+        // The source generation and its publication obligation must commit
+        // together. Failed enqueue leaves the stub available for cache retry.
+        enqueue_inbound_memory_index_job(
+            connection,
+            workspace_id,
+            &existing.id,
+            "team-inbound-body",
+        )?;
+    }
+    Ok(())
 }
 
 /// Drain coalesced inbound Incremental jobs so `--memory-scope team`
@@ -5736,10 +5778,6 @@ fn inbound_team_trust_subclass(
     parts.join("; ")
 }
 
-/// One coalesced Incremental job per inbound source stays inside the
-/// 16-job amplification budget even when a round admits hundreds of rows.
-const TEAM_INBOUND_INDEX_JOB_CAP: usize = 16;
-
 /// Inbound projections are memory documents. The jobs table CHECK only
 /// allows `memory|session|rule|import`; `team-inbound*` is not a source.
 const TEAM_INBOUND_INDEX_SOURCE: &str = "memory";
@@ -5748,44 +5786,30 @@ fn enqueue_inbound_memory_index_job(
     connection: &DbConnection,
     workspace_id: &str,
     _memory_id: &str,
-    reason: &str,
+    _reason: &str,
 ) -> Result<(), OriginStreamError> {
-    let jobs = connection
-        .list_search_index_jobs(workspace_id, None)
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    if jobs.iter().any(|job| {
-        job.document_source.as_deref() == Some(TEAM_INBOUND_INDEX_SOURCE)
-            && job.document_id.is_none()
-            && matches!(
-                job.status_enum(),
-                Some(crate::db::SearchIndexJobStatus::Pending)
-                    | Some(crate::db::SearchIndexJobStatus::Running)
-            )
-    }) {
-        return Ok(());
-    }
-    let pending = jobs
-        .iter()
-        .filter(|job| job.status_enum() == Some(crate::db::SearchIndexJobStatus::Pending))
-        .count();
-    if pending >= TEAM_INBOUND_INDEX_JOB_CAP {
-        return Ok(());
-    }
-    let generation = jobs
-        .iter()
-        .filter(|job| job.document_source.as_deref() == Some(TEAM_INBOUND_INDEX_SOURCE))
-        .count();
-    let hex = blake3::hash(format!("{reason}:{workspace_id}:{generation}").as_bytes()).to_hex();
-    let job_id = format!("sidx_{}", &hex.as_str()[..26]);
-    if connection
-        .get_search_index_job(&job_id)
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    connection
-        .insert_search_index_job(
+    // Keep at most one new pending whole-memory obligation for an inbound
+    // burst, even for callers outside hydration's transaction. This fence is
+    // reentrant and does not open a nested SQL transaction.
+    connection.with_write_owner_fence(OriginStreamError::from, || {
+        let jobs = connection.list_pending_search_index_jobs(workspace_id, None)?;
+        if jobs.iter().any(|job| {
+            job.job_type_enum() == Some(SearchIndexJobType::Incremental)
+                && job.document_source.as_deref() == Some(TEAM_INBOUND_INDEX_SOURCE)
+                && job.document_id.is_none()
+        }) {
+            return Ok(());
+        }
+        // A running job may already hold an older source snapshot. It needs a
+        // pending successor; unrelated pending jobs cannot substitute for it.
+        // Fresh IDs also remain valid after completed job history is pruned.
+        let job_id = format!(
+            "sidx_{}",
+            crate::models::MemoryId::now()
+                .to_string()
+                .trim_start_matches("mem_")
+        );
+        connection.insert_search_index_job(
             &job_id,
             &CreateSearchIndexJobInput {
                 workspace_id: workspace_id.to_owned(),
@@ -5794,9 +5818,9 @@ fn enqueue_inbound_memory_index_job(
                 document_id: None,
                 documents_total: 1,
             },
-        )
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    Ok(())
+        )?;
+        Ok(())
+    })
 }
 
 /// Mint a typed `mem_*` Crockford id from the origin event hash so pack
@@ -10302,6 +10326,323 @@ mod tests {
         .expect("id");
         crate::models::MemoryId::from_str(&mixed).expect(&mixed);
         assert_ne!(high, mixed);
+    }
+
+    fn inbound_hydration_atomic_fixture()
+    -> (DbConnection, String, crate::db::StoredMeshBodyCacheMetadata) {
+        let connection = open_db();
+        let workspace_id = "wsp_persistfixture000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-hydration-atomic".to_owned(),
+                    name: Some("hydration atomicity".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x31)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_hydration_atomic".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some("agent:Analysts".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let key = "body_hydration_atomic";
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: workspace_id.to_owned(),
+                body_cache_key: key.to_owned(),
+                origin_node_id: "node_hydration_atomic".to_owned(),
+                origin_workspace_id: workspace_id.to_owned(),
+                logical_memory_id: "mem_originbody0000000000000001".to_owned(),
+                content_hash: "blake3:deadbeef".to_owned(),
+                body_ref_json: Some(
+                    serde_json::json!({
+                        "originEventId": "evt_hydration_atomic",
+                        "localMemoryId": memory_id,
+                    })
+                    .to_string(),
+                ),
+                preview_hash: None,
+                size_bytes: Some(22),
+                cache_status: "available".to_owned(),
+                local_body_hash: Some(format!(
+                    "blake3:{}",
+                    blake3::hash(b"hydrated team evidence").to_hex()
+                )),
+                cached_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("available body metadata");
+        let row = connection
+            .get_mesh_body_cache_metadata(workspace_id, key)
+            .expect("body metadata")
+            .expect("body row");
+        (connection, memory_id, row)
+    }
+
+    #[test]
+    fn inbound_hydration_rolls_back_and_retries_publication_enqueue_failure() {
+        let (connection, memory_id, row) = inbound_hydration_atomic_fixture();
+        let workspace_id = row.workspace_id.as_str();
+        assert!(
+            connection
+                .list_pending_search_index_jobs(workspace_id, None)
+                .expect("pending jobs")
+                .is_empty(),
+            "the failpoint must reach insertion rather than reuse an existing job"
+        );
+        connection
+            .execute_raw("CREATE TABLE hydration_index_failpoint (enabled INTEGER NOT NULL)")
+            .expect("failpoint table");
+        connection
+            .execute_raw("INSERT INTO hydration_index_failpoint VALUES (1)")
+            .expect("enable failpoint");
+        connection
+            .execute_raw(
+                "CREATE TRIGGER reject_hydration_index BEFORE INSERT ON search_index_jobs \
+                 WHEN (SELECT enabled FROM hydration_index_failpoint) = 1 \
+                 BEGIN SELECT RAISE(ABORT, 'hydration index blocked'); END",
+            )
+            .expect("index failpoint");
+        let before = connection.logical_table_digests().expect("before snapshot");
+        let failed = hydrate_inbound_team_memory_body(
+            &connection,
+            workspace_id,
+            &row,
+            b"hydrated team evidence",
+        );
+        assert!(matches!(failed, Err(OriginStreamError::Db(_))));
+        assert_eq!(
+            connection.logical_table_digests().expect("failed snapshot"),
+            before,
+            "body, provenance, generation, and available cache metadata must roll back together"
+        );
+
+        connection
+            .execute_raw("UPDATE hydration_index_failpoint SET enabled = 0")
+            .expect("allow retry");
+        hydrate_inbound_team_memory_body(
+            &connection,
+            workspace_id,
+            &row,
+            b"hydrated team evidence",
+        )
+        .expect("retry hydration");
+        assert_eq!(
+            connection
+                .get_memory(&memory_id)
+                .expect("memory")
+                .expect("row")
+                .content,
+            "hydrated team evidence"
+        );
+        let jobs = connection
+            .list_pending_search_index_jobs(workspace_id, None)
+            .expect("queued publication");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].job_type_enum(),
+            Some(SearchIndexJobType::Incremental)
+        );
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+        assert!(jobs[0].document_id.is_none());
+        let hydrated = connection
+            .logical_table_digests()
+            .expect("hydrated snapshot");
+        hydrate_inbound_team_memory_body(
+            &connection,
+            workspace_id,
+            &row,
+            b"hydrated team evidence",
+        )
+        .expect("repeat hydration");
+        assert_eq!(
+            connection.logical_table_digests().expect("repeat snapshot"),
+            hydrated,
+            "an already hydrated body must not be rewritten or queued again"
+        );
+    }
+
+    #[test]
+    fn inbound_hydration_rechecks_source_identity_and_live_revision_under_transaction() {
+        for case in [
+            "content",
+            "provenance",
+            "trust",
+            "tombstoned",
+            "superseded",
+            "workspace",
+            "origin",
+            "row_workspace",
+        ] {
+            let (connection, memory_id, mut row) = inbound_hydration_atomic_fixture();
+            let workspace_id = row.workspace_id.clone();
+            let mut observed = connection
+                .get_memory(&memory_id)
+                .expect("memory")
+                .expect("row");
+            let update = match case {
+                "content" => Some("content = '[ee.team.history] note refreshed commitment'"),
+                "provenance" => Some("provenance_uri = 'evt_refreshed_origin'"),
+                "trust" => Some("trust_class = 'human_explicit'"),
+                "tombstoned" => Some("tombstoned_at = '2026-08-15T01:00:00Z'"),
+                "superseded" => Some("superseded_at = '2026-08-15T01:00:00Z'"),
+                _ => None,
+            };
+            if let Some(update) = update {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET {update} WHERE id = '{memory_id}'"
+                    ))
+                    .expect("intervening source change");
+            }
+            if matches!(case, "trust" | "tombstoned") {
+                // These rows must remain protected even when the observation
+                // was captured after their retirement or trust transition.
+                observed = connection
+                    .get_memory(&memory_id)
+                    .expect("current memory")
+                    .expect("current row");
+            }
+            let before = connection.logical_table_digests().expect("before snapshot");
+            if case == "row_workspace" {
+                row.workspace_id = "wsp_other".to_owned();
+                hydrate_inbound_team_memory_body(
+                    &connection,
+                    &workspace_id,
+                    &row,
+                    b"hydrated team evidence",
+                )
+                .expect("foreign metadata is ignored");
+            } else {
+                connection
+                    .with_transaction_error(|| {
+                        hydrate_inbound_team_memory_body_in_current_transaction(
+                            &connection,
+                            if case == "workspace" {
+                                "wsp_other"
+                            } else {
+                                &workspace_id
+                            },
+                            &observed,
+                            if case == "origin" {
+                                "evt_other_origin"
+                            } else {
+                                "evt_hydration_atomic"
+                            },
+                            "hydrated team evidence",
+                        )
+                    })
+                    .expect("changed or retired observation is ignored");
+            }
+            assert_eq!(
+                connection.logical_table_digests().expect("after snapshot"),
+                before,
+                "{case} must not change a body, provenance, generation, cache row, or job"
+            );
+        }
+    }
+
+    #[test]
+    fn inbound_hydration_queues_one_successor_behind_running_and_unrelated_jobs() {
+        let (connection, memory_id, row) = inbound_hydration_atomic_fixture();
+        let workspace_id = row.workspace_id.as_str();
+        enqueue_inbound_memory_index_job(&connection, workspace_id, &memory_id, "team-inbound")
+            .expect("initial broad job");
+        let running_id = connection
+            .list_pending_search_index_jobs(workspace_id, None)
+            .expect("initial job")[0]
+            .id
+            .clone();
+        assert!(
+            connection
+                .start_search_index_job(&running_id)
+                .expect("start old snapshot")
+        );
+        for index in 0..16 {
+            connection
+                .insert_search_index_job(
+                    &format!("sidx_{:026}", index + 100),
+                    &CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.to_owned(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("session".to_owned()),
+                        document_id: Some(format!("session-unrelated-{index}")),
+                        documents_total: 1,
+                    },
+                )
+                .expect("unrelated backlog");
+        }
+        hydrate_inbound_team_memory_body(
+            &connection,
+            workspace_id,
+            &row,
+            b"hydrated team evidence",
+        )
+        .expect("hydrate despite unrelated backlog");
+        let pending = connection
+            .list_pending_search_index_jobs(workspace_id, None)
+            .expect("pending jobs");
+        assert_eq!(pending.len(), 17);
+        let broad: Vec<_> = pending
+            .iter()
+            .filter(|job| {
+                job.job_type_enum() == Some(SearchIndexJobType::Incremental)
+                    && job.document_source.as_deref() == Some("memory")
+                    && job.document_id.is_none()
+            })
+            .collect();
+        assert_eq!(
+            broad.len(),
+            1,
+            "one additional obligation covers the inbound burst"
+        );
+        let successor_id = broad[0].id.clone();
+        assert_ne!(successor_id, running_id);
+        let before_burst = connection.logical_table_digests().expect("before burst");
+        for _ in 0..500 {
+            enqueue_inbound_memory_index_job(
+                &connection,
+                workspace_id,
+                &memory_id,
+                "team-inbound-body",
+            )
+            .expect("coalesce inbound burst");
+        }
+        assert_eq!(
+            connection.logical_table_digests().expect("after burst"),
+            before_burst,
+            "unrelated queue depth must not amplify one pending inbound obligation"
+        );
+        connection
+            .complete_search_index_job(&running_id, 1)
+            .expect("late completion of old snapshot");
+        assert_eq!(
+            connection
+                .get_search_index_job(&successor_id)
+                .expect("successor")
+                .expect("durable successor")
+                .status,
+            "pending",
+            "completing an older snapshot cannot acknowledge the hydrated generation"
+        );
     }
 
     #[test]
