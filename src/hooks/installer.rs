@@ -1808,21 +1808,22 @@ fn read_harness_hook_invocations(
     } else {
         workspace.join(root)
     };
+    read_harness_hook_invocations_at(&root, audit)
+}
+
+fn read_harness_hook_invocations_at(
+    root: &Path,
+    audit: &mut HarnessHookInstallAuditReport,
+) -> Vec<HarnessHookInvocation> {
     let mut invocations = Vec::new();
     for surface in ["session_start_orient", "pre_edit_recall"] {
         let path = root.join(format!("{surface}.last.json"));
-        let read = || -> Option<HarnessHookInvocation> {
-            let metadata = fs::symlink_metadata(&path).ok()?;
-            if !metadata.is_file() || metadata.len() > 16_384 {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            fs::File::open(&path)
-                .ok()?
-                .take(16_385)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            let item: HarnessHookInvocation = serde_json::from_slice(&bytes).ok()?;
+        let read = || -> Result<Option<HarnessHookInvocation>, ()> {
+            let Some(snapshot) = read_harness_file_snapshot(&path, 16_384).map_err(|_| ())? else {
+                return Ok(None);
+            };
+            let item: HarnessHookInvocation =
+                serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
             if item.surface != surface
                 || !matches!(
                     item.outcome.as_str(),
@@ -1844,38 +1845,42 @@ fn read_harness_hook_invocations(
                     .iter()
                     .any(|message| message.len() > 2048 || message.chars().any(char::is_control))
             {
-                return None;
+                return Err(());
             }
-            Some(item)
+            Ok(Some(item))
         };
-        if let Some(item) = read() {
-            if matches!(
-                item.outcome.as_str(),
-                "timeout" | "command_error" | "invalid_response"
-            ) {
+        match read() {
+            Ok(Some(item)) => {
+                if matches!(
+                    item.outcome.as_str(),
+                    "timeout" | "command_error" | "invalid_response"
+                ) {
+                    audit.findings.push(HarnessHookInstallAuditFinding {
+                        code: "hook_invocation_failed".to_owned(),
+                        status: "invocation_failed".to_owned(),
+                        event: Some(surface.to_owned()),
+                        matcher: None,
+                        target_path: Some(path.display().to_string()),
+                        hook_counts: None,
+                        message: format!("Last {surface} invocation at {}: {} after {} ms; emitted {} bytes.", item.updated_at, item.outcome, item.duration_ms, item.emitted_bytes),
+                        repair: "Run the underlying recall/orient command in this workspace; inspect its JSON response and refresh stale hooks.".to_owned(),
+                    });
+                }
+                invocations.push(item);
+            }
+            Ok(None) => {}
+            Err(()) => {
                 audit.findings.push(HarnessHookInstallAuditFinding {
-                    code: "hook_invocation_failed".to_owned(),
-                    status: "invocation_failed".to_owned(),
+                    code: "hook_invocation_unreadable".to_owned(),
+                    status: "unknown".to_owned(),
                     event: Some(surface.to_owned()),
                     matcher: None,
                     target_path: Some(path.display().to_string()),
                     hook_counts: None,
-                    message: format!("Last {surface} invocation at {}: {} after {} ms; emitted {} bytes.", item.updated_at, item.outcome, item.duration_ms, item.emitted_bytes),
-                    repair: "Run the underlying recall/orient command in this workspace; inspect its JSON response and refresh stale hooks.".to_owned(),
+                    message: format!("Last {surface} invocation state is unreadable; installation freshness does not establish runtime health."),
+                    repair: "Retry hook status after the current invocation finishes; inspect hook-state permissions if this persists.".to_owned(),
                 });
             }
-            invocations.push(item);
-        } else if path.exists() {
-            audit.findings.push(HarnessHookInstallAuditFinding {
-                code: "hook_invocation_unreadable".to_owned(),
-                status: "unknown".to_owned(),
-                event: Some(surface.to_owned()),
-                matcher: None,
-                target_path: Some(path.display().to_string()),
-                hook_counts: None,
-                message: format!("Last {surface} invocation state is unreadable; installation freshness does not establish runtime health."),
-                repair: "Retry hook status after the current invocation finishes; inspect hook-state permissions if this persists.".to_owned(),
-            });
         }
     }
     invocations
@@ -2037,9 +2042,18 @@ fn read_harness_settings_for_audit(
     snippets: &[HarnessHookSnippet],
     findings: &mut Vec<HarnessHookInstallAuditFinding>,
 ) -> Result<Option<serde_json::Value>, ()> {
-    let text = match fs::read_to_string(settings_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    // Status and print inspect the same user-controlled path as install. They
+    // must not follow symlinks, allocate an unbounded file, or block on a FIFO.
+    let text = match read_harness_settings_snapshot(settings_path).and_then(|snapshot| {
+        snapshot
+            .map(|snapshot| {
+                String::from_utf8(snapshot.bytes)
+                    .map_err(|error| harness_settings_io_error(settings_path, error))
+            })
+            .transpose()
+    }) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(None),
         Err(error) => {
             findings.push(HarnessHookInstallAuditFinding {
                 code: "harness_config_unreadable".to_owned(),
@@ -2049,7 +2063,7 @@ fn read_harness_settings_for_audit(
                 target_path: Some(settings_path.display().to_string()),
                 hook_counts: None,
                 message: format!("Failed to read harness settings: {error}"),
-                repair: "Fix settings file permissions before auditing or installing hooks."
+                repair: "Use a readable regular UTF-8 settings file no larger than 4 MiB with no symlink components, then retry `ee hook status --json`."
                     .to_owned(),
             });
             return Err(());
@@ -2120,7 +2134,9 @@ fn harness_hook_event_has_auditable_shape(entries: &serde_json::Value) -> bool {
                         return false;
                     };
                     kind != "command"
-                        || hook.get("command").is_some_and(serde_json::Value::is_string)
+                        || hook
+                            .get("command")
+                            .is_some_and(serde_json::Value::is_string)
                 })
             })
     })
@@ -2374,14 +2390,15 @@ fn audit_harness_hook_snippet(
                     counts.managed_count = counts.managed_count.saturating_add(1);
                 }
                 HarnessHookOwnership::LegacyUnmanagedEe => {
-                    counts.legacy_unmanaged_count =
-                        counts.legacy_unmanaged_count.saturating_add(1);
+                    counts.legacy_unmanaged_count = counts.legacy_unmanaged_count.saturating_add(1);
                 }
                 HarnessHookOwnership::UserCustom => {}
             }
         }
     }
-    counts.ee_hook_count = counts.managed_count.saturating_add(counts.legacy_unmanaged_count);
+    counts.ee_hook_count = counts
+        .managed_count
+        .saturating_add(counts.legacy_unmanaged_count);
     counts.duplicate_count = counts.ee_hook_count.saturating_sub(1);
     if counts.ee_hook_count == 0 {
         return HarnessHookInstallAuditFinding {
@@ -2414,8 +2431,7 @@ fn audit_harness_hook_snippet(
             hook_counts: Some(counts),
             message: format!(
                 "{} ee-managed {} hooks are configured{legacy_note}; duplicate hooks can run more than once per event.",
-                counts.ee_hook_count,
-                snippet.event
+                counts.ee_hook_count, snippet.event
             ),
             repair: format!(
                 "Run `ee hook {} --install --workspace . --json` to replace duplicates with one current hook.",
@@ -3146,16 +3162,23 @@ fn harness_same_file_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool
 fn read_harness_settings_snapshot(
     path: &Path,
 ) -> Result<Option<HarnessSettingsSnapshot>, DomainError> {
+    read_harness_file_snapshot(path, HARNESS_SETTINGS_MAX_BYTES)
+}
+
+fn read_harness_file_snapshot(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Option<HarnessSettingsSnapshot>, DomainError> {
     ensure_harness_path_is_not_symlink(path, "settings data path")?;
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(harness_settings_io_error(path, error)),
     };
-    if !before.is_file() || before.len() > HARNESS_SETTINGS_MAX_BYTES as u64 {
+    if !before.is_file() || before.len() > max_bytes as u64 {
         return Err(harness_settings_io_error(
             path,
-            "expected a regular file no larger than 4 MiB",
+            format!("expected a regular file no larger than {max_bytes} bytes"),
         ));
     }
     // NONBLOCK prevents a raced-in FIFO from hanging before metadata validation.
@@ -3168,7 +3191,7 @@ fn read_harness_settings_snapshot(
     }
     let mut bytes = Vec::new();
     (&file)
-        .take(HARNESS_SETTINGS_MAX_BYTES as u64 + 1)
+        .take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| harness_settings_io_error(path, error))?;
     let after = file
@@ -3177,7 +3200,7 @@ fn read_harness_settings_snapshot(
     ensure_harness_path_is_not_symlink(path, "settings data path")?;
     let current =
         fs::symlink_metadata(path).map_err(|error| harness_settings_io_error(path, error))?;
-    if bytes.len() > HARNESS_SETTINGS_MAX_BYTES
+    if bytes.len() > max_bytes
         || bytes.len() as u64 != after.len()
         || !harness_same_file_metadata(&opened, &after)
         || !harness_same_file_metadata(&after, &current)
@@ -5132,6 +5155,251 @@ mod tests {
             undo,
             ee_binary_path: Some(PathBuf::from("/usr/local/bin/ee")),
         }
+    }
+
+    fn assert_harness_audit_unavailable(report: &HarnessHookInstallReport) {
+        assert!(report.read_only);
+        assert!(report.written_paths.is_empty());
+        assert_eq!(report.install_audit.status, "config_not_writable");
+        assert_eq!(report.install_audit.hook_fresh_count, 0);
+        assert_eq!(report.install_audit.duplicate_event_count, None);
+        assert_eq!(report.install_audit.duplicate_hook_count, None);
+        assert!(
+            report
+                .install_audit
+                .findings
+                .iter()
+                .all(|finding| finding.hook_counts.is_none())
+        );
+        assert!(report.install_audit.findings.iter().any(|finding| {
+            finding.code == "harness_config_unreadable" && !finding.repair.is_empty()
+        }));
+    }
+
+    #[test]
+    fn harness_status_bounded_reads_preserve_missing_and_regular_settings() -> TestResult {
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings = temp.path().join("settings.json");
+            let options = harness_options(target, settings.clone(), false, false);
+            let missing =
+                generate_harness_hook_install(&options).map_err(|error| error.message())?;
+            assert!(!missing.install_audit.config_present);
+            assert_eq!(missing.install_audit.duplicate_hook_count, Some(0));
+            assert!(
+                !settings.exists(),
+                "status must not create missing settings"
+            );
+
+            let mut document = serde_json::json!({"userPreference": "preserved"});
+            merge_harness_hooks(target, &mut document, &missing.snippets)
+                .map_err(|error| error.message())?;
+            let mut bytes = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
+            bytes.resize(HARNESS_SETTINGS_MAX_BYTES, b' ');
+            fs::write(&settings, &bytes).map_err(|error| error.to_string())?;
+            let fresh = generate_harness_hook_install(&options).map_err(|error| error.message())?;
+            assert_eq!(fresh.install_audit.status, "fresh");
+            assert_eq!(fresh.install_audit.duplicate_hook_count, Some(0));
+            assert_eq!(fresh.install_audit.hook_fresh_count, 4);
+            assert!(fresh.read_only);
+            assert!(fresh.written_paths.is_empty());
+            assert_eq!(
+                fs::read(&settings).map_err(|error| error.to_string())?,
+                bytes
+            );
+            assert!(!harness_backup_path(&settings).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn harness_status_refuses_oversized_invalid_utf8_and_nonfile_settings() -> TestResult {
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            for kind in ["oversized", "invalid_utf8", "directory"] {
+                let temp = TempDir::new().map_err(|error| error.to_string())?;
+                let settings = temp.path().join("settings.json");
+                let bytes = match kind {
+                    "oversized" => {
+                        let mut bytes = b"{}".to_vec();
+                        bytes.resize(HARNESS_SETTINGS_MAX_BYTES + 1, b' ');
+                        Some(bytes)
+                    }
+                    "invalid_utf8" => Some(vec![0xff]),
+                    _ => None,
+                };
+                if let Some(bytes) = &bytes {
+                    fs::write(&settings, bytes).map_err(|error| error.to_string())?;
+                } else {
+                    fs::create_dir(&settings).map_err(|error| error.to_string())?;
+                }
+                let report = generate_harness_hook_install(&harness_options(
+                    target,
+                    settings.clone(),
+                    false,
+                    false,
+                ))
+                .map_err(|error| error.message())?;
+                assert_harness_audit_unavailable(&report);
+                if let Some(bytes) = bytes {
+                    assert_eq!(
+                        fs::read(&settings).map_err(|error| error.to_string())?,
+                        bytes
+                    );
+                } else {
+                    assert!(settings.is_dir());
+                }
+                assert!(!harness_backup_path(&settings).exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_status_refuses_linked_settings_instead_of_counting_the_target() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+            for kind in ["leaf", "parent", "dangling"] {
+                let temp = TempDir::new().map_err(|error| error.to_string())?;
+                let actual = temp.path().join("actual");
+                fs::create_dir(&actual).map_err(|error| error.to_string())?;
+                let actual_settings = actual.join("settings.json");
+                let snippets = harness_hook_snippets(target, &fixed_ee_binary());
+                let mut document = serde_json::json!({});
+                merge_harness_hooks(target, &mut document, &snippets)
+                    .map_err(|error| error.message())?;
+                let bytes = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
+                fs::write(&actual_settings, &bytes).map_err(|error| error.to_string())?;
+                let link = temp.path().join("linked");
+                let settings = match kind {
+                    "parent" => {
+                        symlink(&actual, &link).map_err(|error| error.to_string())?;
+                        link.join("settings.json")
+                    }
+                    "dangling" => {
+                        symlink(actual.join("absent.json"), &link)
+                            .map_err(|error| error.to_string())?;
+                        link.clone()
+                    }
+                    _ => {
+                        symlink(&actual_settings, &link).map_err(|error| error.to_string())?;
+                        link.clone()
+                    }
+                };
+                let report =
+                    generate_harness_hook_install(&harness_options(target, settings, false, false))
+                        .map_err(|error| error.message())?;
+                assert_harness_audit_unavailable(&report);
+                assert!(
+                    fs::symlink_metadata(&link)
+                        .map_err(|error| error.to_string())?
+                        .file_type()
+                        .is_symlink()
+                );
+                assert_eq!(
+                    fs::read(&actual_settings).map_err(|error| error.to_string())?,
+                    bytes
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_status_refuses_fifo_without_waiting_for_contents() -> TestResult {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings = temp.path().join("settings.json");
+        let output = Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&settings)
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert!(output.status.success(), "mkfifo failed: {output:?}");
+        // Keep a writer open so a regressed read_to_string cannot get EOF.
+        // Closing it after the timed observation releases an open reader. Do
+        // not wait for a regressed reader that has not reached its open yet.
+        let pipe_guard = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&settings)
+            .map_err(|error| error.to_string())?;
+        let options = harness_options(HarnessHookTarget::ClaudeCode, settings, false, false);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let report = generate_harness_hook_install(&options).map_err(|error| error.message());
+            let _ = sender.send(report);
+        });
+        let observed = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        drop(pipe_guard);
+        if observed.is_ok() || reader.is_finished() {
+            reader
+                .join()
+                .map_err(|_| "hook status panicked".to_owned())?;
+        }
+        let report =
+            observed.map_err(|error| format!("hook status blocked on FIFO: {error}"))??;
+        assert_harness_audit_unavailable(&report);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_invocation_status_uses_bounded_unlinked_snapshot() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let root = temp.path().join("state");
+        fs::create_dir(&root).map_err(|error| error.to_string())?;
+        let path = root.join("session_start_orient.last.json");
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "surface": "session_start_orient", "outcome": "emitted",
+            "updatedAt": "2026-11-01T00:00:00Z", "durationMs": 1,
+            "emittedBytes": 10, "degradedCodes": []
+        }))
+        .map_err(|error| error.to_string())?;
+        bytes.resize(16_384, b' ');
+        fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        let mut audit = audit_harness_hook_install(HarnessHookTarget::ClaudeCode, None, &[]);
+        assert_eq!(read_harness_hook_invocations_at(&root, &mut audit).len(), 1);
+        assert!(
+            audit
+                .findings
+                .iter()
+                .all(|finding| finding.code != "hook_invocation_unreadable")
+        );
+        bytes.push(b' ');
+        fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        assert!(read_harness_hook_invocations_at(&root, &mut audit).is_empty());
+        assert!(
+            audit
+                .findings
+                .iter()
+                .any(|finding| finding.code == "hook_invocation_unreadable")
+        );
+
+        bytes.truncate(16_384);
+        fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        let linked = temp.path().join("linked-state");
+        symlink(&root, &linked).map_err(|error| error.to_string())?;
+        let before = audit.findings.len();
+        assert!(read_harness_hook_invocations_at(&linked, &mut audit).is_empty());
+        assert_eq!(audit.findings.len(), before + 2);
+        let missing = root.join("pre_edit_recall.last.json");
+        symlink(root.join("absent.json"), &missing).map_err(|error| error.to_string())?;
+        let before = audit.findings.len();
+        assert_eq!(read_harness_hook_invocations_at(&root, &mut audit).len(), 1);
+        assert_eq!(audit.findings.len(), before + 1);
+        assert_eq!(
+            audit.findings.last().map(|finding| finding.code.as_str()),
+            Some("hook_invocation_unreadable")
+        );
+        assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, bytes);
+        Ok(())
     }
 
     #[test]
