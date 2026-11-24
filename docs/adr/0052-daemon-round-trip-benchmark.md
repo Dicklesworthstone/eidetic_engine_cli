@@ -341,3 +341,24 @@ This removes unnecessary admission work without changing the ranking policy,
 pack format, or persistence path. It is not a measured end-to-end speedup. The
 native regression suite and the paired 10,000-memory warm-pack gate above must
 still run before issue #87 or `bd-reality-core-convergence-1azkt.79` is closed.
+
+### Selected-memory drift and canonical rendering
+
+Final pack assembly deduplicates the selected local memories before checking
+provenance drift and shares the resulting hints across repeated IDs. It reuses
+the request's local memory rows and Git probe. One schema-validating read skips
+per-memory anchor lookups when the anchor table is empty. Populated stores keep
+the existing indexed equality reads and strict row decoder. An unavailable
+batch falls back to isolated reads so one damaged anchor cannot suppress
+another memory's freshness warning; error counts and emitted facets retain
+selected-item semantics. The `selectedMemoryDrift` phase measures this work
+inside `packAssembly`.
+
+Canonical Markdown is rendered once for its placeholder-footer text digest.
+Finalization reuses those exact bytes and substitutes only the terminal typed
+identity footer after the composite hash is known. A footer-shaped string in
+memory content or the query is ordinary content and is never replaced.
+
+These changes remove repeated work from the client side of warm packs. Source
+and SQL checks do not qualify the end-to-end performance gate; the current
+native suite and paired release-profile measurements remain required.

@@ -2013,6 +2013,24 @@ pub fn memory_drift_selection_hint_for_memory(
     memory: &StoredMemory,
 ) -> Result<Option<MemoryDriftSelectionHint>, DomainError> {
     let hint = memory_drift_report_hint_from_memory(connection, git, memory)?;
+    Ok(selected_memory_drift_hint(memory, hint))
+}
+
+/// Evaluate selected memory drift from anchors read in the same source snapshot.
+/// The caller must distinguish an empty successful read from unavailable anchors.
+pub(crate) fn memory_drift_selection_hint_for_memory_with_anchors(
+    git: &GitDriftProbe,
+    memory: &StoredMemory,
+    anchors: Vec<StoredMemoryAnchor>,
+) -> Option<MemoryDriftSelectionHint> {
+    let hint = memory_drift_report_hint_from_memory_and_anchors(git, memory, anchors);
+    selected_memory_drift_hint(memory, hint)
+}
+
+fn selected_memory_drift_hint(
+    memory: &StoredMemory,
+    hint: MemoryDriftSelectionHint,
+) -> Option<MemoryDriftSelectionHint> {
     let provenance_selection = matches!(
         memory.provenance_verification_status.trim(),
         "mismatch" | "missing" | "skipped"
@@ -2023,9 +2041,9 @@ pub fn memory_drift_selection_hint_for_memory(
             .iter()
             .any(|anchor| anchor.freshness_state != "current");
     if provenance_selection || anchor_selection {
-        Ok(Some(hint))
+        Some(hint)
     } else {
-        Ok(None)
+        None
     }
 }
 

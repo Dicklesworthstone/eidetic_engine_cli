@@ -28182,6 +28182,47 @@ impl DbConnection {
         rows.iter().map(stored_memory_anchor_from_row).collect()
     }
 
+    /// Read selected memories' anchors without loading their bodies or derived
+    /// index metadata. Missing and anchor-free memories have no map entry.
+    /// The caller owns the snapshot; a failed read never returns a partial map.
+    pub(crate) fn list_memory_anchors_batch(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<StoredMemoryAnchor>>> {
+        let ids = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut anchors = BTreeMap::<String, Vec<StoredMemoryAnchor>>::new();
+        // Ordinary corpora may have no anchors at all. Validate the complete
+        // projection before treating absence as authoritative, and keep that
+        // proof within this call's source snapshot. A failed probe falls
+        // through to the normal reader instead of manufacturing empty state.
+        if ids.len() > 1
+            && self
+                .query_for(
+                    DbOperation::Query,
+                    "SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors LIMIT 1",
+                    &[],
+                )
+                .is_ok_and(|rows| rows.is_empty())
+        {
+            return Ok(anchors);
+        }
+        for id in ids {
+            // Retain the established indexed equality reads when anchors do
+            // exist. FrankenSQLite can turn a multi-bind IN predicate into a
+            // corpus scan, while UNION ALL still executes its arms separately.
+            let rows = self.list_memory_anchors(id)?;
+            if !rows.is_empty() {
+                anchors.insert(id.to_owned(), rows);
+            }
+        }
+        Ok(anchors)
+    }
+
     /// Load index-source sidecars in bounded ID batches inside the caller's
     /// snapshot. Keep typed fields separate from the anchor join so a large
     /// sidecar is never duplicated once per anchor. Existing anchor order and
@@ -63983,6 +64024,238 @@ UPDATE memories
     }
 
     #[test]
+    fn memory_anchor_batch_skips_empty_population_and_deduplicates_source_reads() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let ids = (0..257)
+            .map(|index| format!("mem_{index:026}"))
+            .collect::<Vec<_>>();
+        let mut requested = ids.iter().rev().map(String::as_str).collect::<Vec<_>>();
+        requested.extend([ids[0].as_str(), ids[256].as_str()]);
+        let unrelated = "mem_00000000000000000000000999";
+        for id in [
+            ids[0].as_str(),
+            ids[1].as_str(),
+            ids[256].as_str(),
+            unrelated,
+        ] {
+            connection.insert_memory(
+                id,
+                &test_memory_input(
+                    "wsp_01234567890123456789012345",
+                    "Ordinary prose without extracted anchors.",
+                ),
+            )?;
+        }
+        let (empty, queries) =
+            super::capture_query_sql_for_test(|| connection.list_memory_anchors_batch(&requested));
+        ensure(empty?.is_empty(), "ordinary memories have no anchor rows")?;
+        ensure_equal(
+            &queries.len(),
+            &1,
+            "confirmed empty anchor population avoids all per-memory reads",
+        )?;
+        ensure(
+            queries[0].ends_with("FROM memory_anchors LIMIT 1"),
+            "absence is observed with a bounded schema-validating read",
+        )?;
+        for (id, kind, value, freshness) in [
+            (
+                ids[0].as_str(),
+                MemoryAnchorKind::Symbol,
+                "Source::run",
+                MemoryAnchorFreshnessState::Suspect,
+            ),
+            (
+                ids[0].as_str(),
+                MemoryAnchorKind::Path,
+                "src/zeta.rs",
+                MemoryAnchorFreshnessState::Current,
+            ),
+            (
+                ids[0].as_str(),
+                MemoryAnchorKind::Path,
+                "src/alpha.rs",
+                MemoryAnchorFreshnessState::Stale,
+            ),
+            (
+                ids[256].as_str(),
+                MemoryAnchorKind::EnvVar,
+                "EE_PACK_TRACE",
+                MemoryAnchorFreshnessState::Current,
+            ),
+            (
+                unrelated,
+                MemoryAnchorKind::Path,
+                "src/unrelated.rs",
+                MemoryAnchorFreshnessState::Stale,
+            ),
+        ] {
+            let mut anchor = crate::models::CreateMemoryAnchorInput::from_raw(
+                id,
+                kind,
+                value,
+                0.73,
+                crate::models::MemoryAnchorSource::Explicit,
+                "test://anchor-batch",
+                3,
+            )
+            .ok_or_else(|| TestFailure::new("test anchor should build"))?;
+            anchor.freshness_state = freshness;
+            connection.upsert_memory_anchors(&[anchor])?;
+        }
+        connection.begin_read_snapshot()?;
+        let (anchors, queries) =
+            super::capture_query_sql_for_test(|| connection.list_memory_anchors_batch(&requested));
+        let anchors = anchors?;
+        ensure_equal(
+            &queries.len(),
+            &258,
+            "257 distinct IDs with anchors require one probe and one read per unique memory",
+        )?;
+        ensure(
+            queries.iter().skip(1).all(|sql| {
+                sql.contains("FROM memory_anchors WHERE memory_id = ?1 ORDER BY")
+                    && !sql.contains("?2")
+                    && !sql.contains(" IN (")
+                    && !sql.contains("FROM memories")
+                    && !sql.contains("JOIN memories")
+            }),
+            "anchor reads preserve indexed equality predicates and never hydrate memory bodies",
+        )?;
+        ensure_equal(
+            &anchors.len(),
+            &2,
+            "missing, anchor-free and unrelated memories remain absent",
+        )?;
+        ensure_equal(
+            &anchors[&ids[0]].len(),
+            &3,
+            "all first-memory anchors survive",
+        )?;
+        ensure_equal(&anchors[&ids[256]].len(), &1, "last-memory anchor survives")?;
+        for id in [&ids[0], &ids[1], &ids[2], &ids[256]] {
+            ensure_equal(
+                &anchors.get(id).cloned().unwrap_or_default(),
+                &connection.list_memory_anchors(id)?,
+                "batch and scalar readers preserve every field and canonical order",
+            )?;
+        }
+        ensure(
+            connection.begin_read_snapshot().is_err(),
+            "successful batch leaves the caller's snapshot open",
+        )?;
+        connection.rollback_read_snapshot()?;
+        let (single, queries) = super::capture_query_sql_for_test(|| {
+            connection.list_memory_anchors_batch(&[ids[0].as_str(), ids[0].as_str()])
+        });
+        ensure_equal(
+            &single?,
+            &std::collections::BTreeMap::from([(ids[0].clone(), anchors[&ids[0]].clone())]),
+            "duplicate single-memory requests retain the complete anchor set",
+        )?;
+        ensure_equal(
+            &queries.len(),
+            &1,
+            "one unique memory uses its scalar read without an extra population probe",
+        )?;
+        let (empty, queries) =
+            super::capture_query_sql_for_test(|| connection.list_memory_anchors_batch(&[]));
+        ensure(
+            empty?.is_empty() && queries.is_empty(),
+            "empty anchor requests perform no SQL",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_anchor_batch_rejects_late_malformed_rows_and_storage_failures() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        // A permissive fixture models damaged stored rows without disabling
+        // constraints on a real schema. No memory table is needed by this API.
+        connection.execute_raw(
+            "CREATE TABLE memory_anchors (memory_id TEXT, anchor_kind TEXT, anchor_value_hash TEXT, redacted_anchor_value TEXT, confidence REAL, source TEXT, provenance TEXT, captured_span_hash TEXT, freshness_state TEXT, generation INTEGER, created_at TEXT, updated_at TEXT)",
+        )?;
+        let ids = (0..257)
+            .map(|index| format!("mem_{index:026}"))
+            .collect::<Vec<_>>();
+        let hash = format!("blake3:{}", "a".repeat(64));
+        for (id, freshness) in [(ids[0].as_str(), "current"), (ids[256].as_str(), "invalid")] {
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_anchors VALUES (?1, 'path', ?2, '[path]', 0.8, 'remember', 'test://anchor-batch', ?2, ?3, 3, '2026-11-24T00:00:00Z', '2026-11-24T00:00:00Z')",
+                &[
+                    Value::Text(id.to_owned()),
+                    Value::Text(hash.clone()),
+                    Value::Text(freshness.to_owned()),
+                ],
+            )?;
+        }
+        let requested = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        connection.begin_read_snapshot()?;
+        let (failed, queries) =
+            super::capture_query_sql_for_test(|| connection.list_memory_anchors_batch(&requested));
+        let error = failed.expect_err("a malformed later memory must not return a partial batch");
+        ensure(
+            matches!(&error, DbError::MalformedRow { .. }),
+            "malformed batch rows retain the scalar decoder's failure",
+        )?;
+        ensure_equal(
+            &queries.len(),
+            &258,
+            "malformed row follows the presence probe and all earlier memory reads",
+        )?;
+        ensure_equal(
+            &error.to_string(),
+            &connection
+                .list_memory_anchors(&ids[256])
+                .expect_err("scalar reader must refuse the same malformed row")
+                .to_string(),
+            "batch and scalar readers report the same malformed row",
+        )?;
+        ensure_equal(
+            &connection.list_memory_anchors(&ids[0])?.len(),
+            &1,
+            "healthy neighbors remain readable after a failed batch",
+        )?;
+        ensure(
+            connection.begin_read_snapshot().is_err(),
+            "failed batch leaves the caller's snapshot open",
+        )?;
+        connection.rollback_read_snapshot()?;
+
+        connection.begin()?;
+        connection.execute_raw("ALTER TABLE memory_anchors RENAME TO unavailable_batch_anchors")?;
+        ensure(
+            connection.list_memory_anchors_batch(&requested).is_err(),
+            "storage failure must not become successful anchor absence",
+        )?;
+        connection.execute_raw("CREATE TABLE memory_anchors (memory_id TEXT)")?;
+        ensure(
+            connection.list_memory_anchors_batch(&requested).is_err(),
+            "an empty table with a broken projection must not authorize empty state",
+        )?;
+        let (empty, queries) =
+            super::capture_query_sql_for_test(|| connection.list_memory_anchors_batch(&[]));
+        ensure(
+            empty?.is_empty() && queries.is_empty(),
+            "empty input does not require an available anchor table",
+        )?;
+        ensure(
+            connection.begin_read_snapshot().is_err(),
+            "storage failure does not commit or roll back the caller's transaction",
+        )?;
+        connection.rollback()?;
+        ensure_equal(
+            &connection.list_memory_anchors_batch(&[ids[0].as_str()])?[&ids[0]].len(),
+            &1,
+            "caller rollback restores the source for an isolated retry",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn insert_memory_freshness_transition_audit_records_redacted_row() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -64689,19 +64962,15 @@ UPDATE memories
             )?;
             if tombstoned {
                 ensure(
-                    connection.restore_imported_memory_tombstone(
-                        memory_id,
-                        "2030-01-02T00:00:00Z",
-                    )?,
+                    connection
+                        .restore_imported_memory_tombstone(memory_id, "2030-01-02T00:00:00Z")?,
                     "fixture tombstone is present",
                 )?;
             }
             if superseded {
                 ensure(
-                    connection.restore_imported_memory_supersession(
-                        memory_id,
-                        "2030-01-01T00:00:00Z",
-                    )?,
+                    connection
+                        .restore_imported_memory_supersession(memory_id, "2030-01-01T00:00:00Z")?,
                     "fixture supersession is present",
                 )?;
             }
@@ -64790,7 +65059,11 @@ UPDATE memories
             "all optional fields clear without regenerating the chain or advancing updated_at",
         )?;
         let report = connection.inspect_sampled_memory_provenance(workspace_id, 1)?;
-        ensure_equal(&report.missing_count, &1, "missing chain remains observable")?;
+        ensure_equal(
+            &report.missing_count,
+            &1,
+            "missing chain remains observable",
+        )?;
         ensure_equal(
             &report.verified_count,
             &0,

@@ -64,6 +64,7 @@ use crate::core::index::{
 };
 use crate::core::memory_drift::{
     GitDriftProbe, MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory,
+    memory_drift_selection_hint_for_memory_with_anchors,
 };
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
@@ -4498,6 +4499,7 @@ async fn run_context_pack_attempt(
         .iter()
         .filter(|item| item.tombstoned_at.is_some())
         .count();
+    let memory_drift_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     push_selected_context_memory_drift_degradations(
         read_connection,
@@ -4506,6 +4508,7 @@ async fn run_context_pack_attempt(
         &mut draft,
         &mut degraded,
     );
+    trace.record_elapsed("selectedMemoryDrift", memory_drift_start);
     let read_pool_stats = read_pool.stats();
     let read_pool_request_ad_hoc_bypass_count = read_pool_stats
         .ad_hoc_bypass_count
@@ -5516,41 +5519,72 @@ fn push_selected_context_memory_drift_degradations(
         &[workspace_path],
     )
     .ok();
-    // GH #49: one git probe per pack, so HEAD, commit distances, and captured
-    // blobs are resolved once for all selected items instead of per item.
-    let git = GitDriftProbe::new(workspace_path);
-    for item in &mut draft.items {
-        let memory_id = item.memory_id.to_string();
+    let memory_ids = draft
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut memories = BTreeMap::new();
+    let mut unavailable_memories = BTreeSet::new();
+    for memory_id in &memory_ids {
         // Only reuse preloaded rows belonging to the local workspace; global-store
         // memories are absent from the local connection and must stay skipped to
         // match `connection.get_memory(&memory_id)` semantics.
-        let preloaded = preloaded_memories.get(&memory_id).filter(|memory| {
+        let preloaded = preloaded_memories.get(memory_id).filter(|memory| {
             local_workspace_id
                 .as_deref()
                 .is_some_and(|workspace_id| memory.workspace_id == workspace_id)
         });
-        let fetched = if preloaded.is_some() {
-            None
+        let memory = if let Some(preloaded) = preloaded {
+            std::borrow::Cow::Borrowed(preloaded)
         } else {
-            match connection.get_memory(&memory_id) {
-                Ok(row) => row,
+            match connection.get_memory(memory_id) {
+                Ok(Some(memory)) => std::borrow::Cow::Owned(memory),
+                Ok(None) => continue,
                 Err(_) => {
-                    read_errors = read_errors.saturating_add(1);
+                    unavailable_memories.insert(memory_id.as_str());
                     continue;
                 }
             }
         };
-        let Some(memory) = preloaded.or(fetched.as_ref()) else {
-            continue;
+        memories.insert(memory_id.as_str(), memory);
+    }
+    let selected_memory_refs = memories.keys().copied().collect::<Vec<_>>();
+    // Query only selected source rows. The ordinary anchor-free pack needs one
+    // bounded read, while a damaged batch still uses isolated reads so healthy
+    // memories retain their hints and each unavailable item stays diagnostic.
+    let mut anchors = connection
+        .list_memory_anchors_batch(&selected_memory_refs)
+        .ok();
+    // GH #49: share git facts and computed hints for duplicate selected items.
+    let git = GitDriftProbe::new(workspace_path);
+    let mut selected_hints = BTreeMap::new();
+    for (memory_id, memory) in &memories {
+        let hint = if let Some(anchors) = anchors.as_mut() {
+            Ok(memory_drift_selection_hint_for_memory_with_anchors(
+                &git,
+                memory,
+                anchors.remove(*memory_id).unwrap_or_default(),
+            ))
+        } else {
+            memory_drift_selection_hint_for_memory(connection, &git, memory)
         };
-        match memory_drift_selection_hint_for_memory(connection, &git, memory) {
-            Ok(Some(hint)) => {
+        selected_hints.insert(*memory_id, hint);
+    }
+    for item in &mut draft.items {
+        let memory_id = item.memory_id.to_string();
+        if unavailable_memories.contains(memory_id.as_str()) {
+            read_errors = read_errors.saturating_add(1);
+            continue;
+        }
+        match selected_hints.get(memory_id.as_str()) {
+            Some(Ok(Some(hint))) => {
                 item.freshness_facets
-                    .push(pack_freshness_facet_from_memory_drift_hint(&hint));
-                hints.push(hint);
+                    .push(pack_freshness_facet_from_memory_drift_hint(hint));
+                hints.push(hint.clone());
             }
-            Ok(None) => {}
-            Err(_) => read_errors = read_errors.saturating_add(1),
+            Some(Err(_)) => read_errors = read_errors.saturating_add(1),
+            Some(Ok(None)) | None => {}
         }
     }
 
@@ -10123,14 +10157,38 @@ fn finalize_context_response(
         task_lens,
     );
     log_pack_hash_components(&components);
-    let composite_hash = components.composite_hash;
+    let PackHashComponents {
+        digests,
+        composite_hash,
+        rendered_text: mut finalized_text,
+    } = components;
     response.data.pack.hash = Some(composite_hash.clone());
-    response.data.pack_hash_components = Some(components.digests);
-    let finalized_text = crate::output::render_context_markdown_for_finalization(
-        &crate::pack::ContextMarkdownInput::from(&*response),
-        output_options.include_non_affecting_degradations,
-        &composite_hash,
+    response.data.pack_hash_components = Some(digests);
+    let placeholder_footer = crate::pack::context_markdown_identity_footer(
+        response.schema,
+        crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
     );
+    // Hashing has already rendered the complete canonical prompt. Replace only
+    // its typed terminal footer, preserving identical-looking source text and
+    // avoiding a second pass over every item, provenance entry and DNA block.
+    if let Some(body_len) = finalized_text
+        .strip_suffix(&placeholder_footer)
+        .map(str::len)
+    {
+        finalized_text.truncate(body_len);
+        finalized_text.push_str(&crate::pack::context_markdown_identity_footer(
+            response.schema,
+            &composite_hash,
+        ));
+    } else {
+        // Keep the established renderer as a correctness fallback if a future
+        // rendering attachment no longer preserves the terminal footer.
+        finalized_text = crate::output::render_context_markdown_for_finalization(
+            &crate::pack::ContextMarkdownInput::from(&*response),
+            output_options.include_non_affecting_degradations,
+            &composite_hash,
+        );
+    }
     response.data.finalized_text = Some(finalized_text);
     if let Some(profile) = response.data.agent_profile.as_mut() {
         set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
@@ -10141,6 +10199,7 @@ fn finalize_context_response(
 struct PackHashComponents {
     digests: crate::pack::PackHashComponentDigests,
     composite_hash: String,
+    rendered_text: String,
 }
 
 /// Default metadata for the public draft-hash builder. Production finalizes
@@ -10372,6 +10431,7 @@ fn compute_context_pack_hash_components(
     PackHashComponents {
         composite_hash: compute_pack_hash_composite(&digests, output_options.include_skipped),
         digests,
+        rendered_text,
     }
 }
 

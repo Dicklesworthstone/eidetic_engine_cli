@@ -4839,9 +4839,9 @@ pub fn unrelated_context() -> u64 {{
                     "all evidence links, duplicates and the ordinary hit must share one memory body read: {queries:?}"
                 );
                 assert!(
-                    memory_reads.iter().all(|sql| {
-                        sql.contains("id = ?1") || sql.contains("id IN (?1)")
-                    }),
+                    memory_reads
+                        .iter()
+                        .all(|sql| { sql.contains("id = ?1") || sql.contains("id IN (?1)") }),
                     "shared links must be deduplicated before memory hydration: {memory_reads:?}"
                 );
                 assert_eq!(
@@ -12883,6 +12883,517 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn selected_context_drift_fixture(
+        connection: &DbConnection,
+        workspace_path: &Path,
+        count: usize,
+        with_anchors: bool,
+    ) -> Result<(Vec<MemoryId>, BTreeMap<String, StoredMemory>), String> {
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(34_000)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let ids = (0..count)
+            .map(|index| MemoryId::from_uuid(uuid::Uuid::from_u128(34_100 + index as u128)))
+            .collect::<Vec<_>>();
+        connection
+            .with_transaction(|| {
+                for (index, memory_id) in ids.iter().enumerate() {
+                    let memory_id = memory_id.to_string();
+                    connection.insert_memory(
+                        &memory_id,
+                        &CreateMemoryInput {
+                            workspace_id: workspace_id.clone(),
+                            level: "working".to_owned(),
+                            kind: "fact".to_owned(),
+                            content: format!("Selected drift memory {index}."),
+                            workflow_id: None,
+                            confidence: 0.9,
+                            utility: 0.8,
+                            importance: 0.7,
+                            provenance_uri: None,
+                            trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                            trust_subclass: None,
+                            tags: Vec::new(),
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )?;
+                    let status = ["verified", "mismatch", "missing", "unverified", "skipped"]
+                        [index % 5];
+                    connection.execute_raw(&format!(
+                        "UPDATE memories SET provenance_verification_status = '{status}' WHERE id = '{memory_id}'"
+                    ))?;
+                    if !with_anchors || index % 5 == 0 {
+                        continue;
+                    }
+                    for (kind, value) in [
+                        (crate::models::MemoryAnchorKind::Schema, "ee.response.v2"),
+                        (crate::models::MemoryAnchorKind::Command, "cargo fmt --check"),
+                    ] {
+                        let mut anchor = crate::models::CreateMemoryAnchorInput::from_raw(
+                            &memory_id,
+                            kind,
+                            value,
+                            0.9,
+                            crate::models::MemoryAnchorSource::Explicit,
+                            "manual://selected-drift-fixture",
+                            1,
+                        )
+                        .expect("fixture anchors are valid");
+                        anchor.freshness_state = match index % 5 {
+                            3 => crate::models::MemoryAnchorFreshnessState::Stale,
+                            4 => crate::models::MemoryAnchorFreshnessState::Suspect,
+                            _ => crate::models::MemoryAnchorFreshnessState::Current,
+                        };
+                        connection.upsert_memory_anchors(&[anchor])?;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+        let mut memories = BTreeMap::new();
+        for memory_id in &ids {
+            let id = memory_id.to_string();
+            let memory = connection
+                .get_memory(&id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("fixture memory {id} is missing"))?;
+            memories.insert(id, memory);
+        }
+        Ok((ids, memories))
+    }
+
+    fn selected_context_drift_draft(ids: &[MemoryId]) -> Result<crate::pack::PackDraft, String> {
+        let mut draft = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "selected memory drift batching",
+            TokenBudget::default_context(),
+            [pagination_candidate(34_001)?],
+        )
+        .map_err(|error| error.to_string())?;
+        let template = draft.items.pop().ok_or("fixture item was not selected")?;
+        draft.items = ids
+            .iter()
+            .enumerate()
+            .map(|(index, memory_id)| {
+                let mut item = template.clone();
+                item.rank = u32::try_from(index + 1).map_err(|error| error.to_string())?;
+                item.memory_id = *memory_id;
+                item.content = format!("Selected drift item {memory_id}.");
+                item.provenance = vec![
+                    PackProvenance::new(
+                        ProvenanceUri::EeMemory(*memory_id),
+                        "selected drift source",
+                    )
+                    .map_err(|error| error.to_string())?,
+                ];
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        draft.used_tokens = draft.items.iter().map(|item| item.estimated_tokens).sum();
+        draft.selection_audit.candidate_count = ids.len();
+        draft.selection_audit.selected_count = ids.len();
+        draft.selection_audit.budget_used = draft.used_tokens;
+        draft.hash = Some("blake3:drift-annotation-must-preserve-existing-fields".to_owned());
+        Ok(draft)
+    }
+
+    // Preserve the former point-read implementation as an independent oracle
+    // for batching, including per-selected-occurrence hints and error counts.
+    fn selected_context_drift_point_reference(
+        connection: &DbConnection,
+        workspace_path: &Path,
+        preloaded: &BTreeMap<String, StoredMemory>,
+        draft: &mut crate::pack::PackDraft,
+        degraded: &mut Vec<ContextResponseDegradation>,
+    ) {
+        if draft.items.is_empty() {
+            return;
+        }
+        let local_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            connection,
+            &crate::core::workspace::stable_workspace_id(workspace_path),
+            &[workspace_path],
+        )
+        .ok();
+        let git = crate::core::memory_drift::GitDriftProbe::new(workspace_path);
+        let mut hints = Vec::new();
+        let mut read_errors = 0usize;
+        for item in &mut draft.items {
+            let id = item.memory_id.to_string();
+            let cached = preloaded.get(&id).filter(|memory| {
+                local_workspace_id
+                    .as_deref()
+                    .is_some_and(|workspace_id| memory.workspace_id == workspace_id)
+            });
+            let fetched = if cached.is_some() {
+                None
+            } else {
+                match connection.get_memory(&id) {
+                    Ok(memory) => memory,
+                    Err(_) => {
+                        read_errors += 1;
+                        continue;
+                    }
+                }
+            };
+            let Some(memory) = cached.or(fetched.as_ref()) else {
+                continue;
+            };
+            match crate::core::memory_drift::memory_drift_selection_hint_for_memory(
+                connection, &git, memory,
+            ) {
+                Ok(Some(hint)) => {
+                    item.freshness_facets
+                        .push(super::pack_freshness_facet_from_memory_drift_hint(&hint));
+                    hints.push(hint);
+                }
+                Ok(None) => {}
+                Err(_) => read_errors += 1,
+            }
+        }
+        if let Some(hint) = super::highest_risk_context_memory_drift_hint(&hints) {
+            super::push_degradation(
+                degraded,
+                hint.degraded_code
+                    .as_deref()
+                    .unwrap_or("memory_drift_source_unverifiable"),
+                super::context_severity_for_memory_drift_hint(hint),
+                format!(
+                    "Context pack selected {count} memor{suffix} with stale provenance evidence; highest-risk status={} memoryId={} reason={} evidenceCount={}.",
+                    hint.drift_status.as_str(),
+                    hint.memory_id,
+                    hint.top_reason,
+                    hint.evidence_count,
+                    count = hints.len(),
+                    suffix = if hints.len() == 1 { "y" } else { "ies" },
+                ),
+                Some(hint.revalidation_command.clone()),
+            );
+        }
+        if read_errors > 0 {
+            super::push_degradation(
+                degraded,
+                "memory_drift_source_unverifiable",
+                ContextResponseSeverity::Medium,
+                format!(
+                    "Context pack could not inspect provenance drift status for {read_errors} selected memor{suffix}.",
+                    suffix = if read_errors == 1 { "y" } else { "ies" },
+                ),
+                Some("ee doctor --json".to_owned()),
+            );
+        }
+    }
+
+    #[test]
+    fn selected_context_drift_batches_preserve_point_read_output_and_local_scope() -> TestResult {
+        for (count, with_anchors) in [(0, false), (1, false), (64, false), (64, true)] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let workspace_path = Path::new("/tmp/ee-selected-drift-batch");
+            let (ids, memories) =
+                selected_context_drift_fixture(&connection, workspace_path, count, with_anchors)?;
+            if !with_anchors {
+                assert!(
+                    connection
+                        .query("SELECT memory_id FROM memory_anchors LIMIT 1", &[])
+                        .map_err(|error| error.to_string())?
+                        .is_empty(),
+                    "the scale fixture must exercise the anchor-free fast path"
+                );
+            }
+            let mut selected_ids = ids.clone();
+            if let Some(id) = ids.first() {
+                selected_ids.extend([*id, *id]);
+            }
+            if let Some(id) = ids.get(1) {
+                selected_ids.extend([*id, *id]);
+            }
+            let absent_id = MemoryId::from_uuid(uuid::Uuid::from_u128(34_999));
+            if count > 0 {
+                selected_ids.extend([absent_id, absent_id]);
+            }
+            for preload_stride in [0, 2, 1] {
+                let mut preloaded = ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| preload_stride > 0 && index % preload_stride == 0)
+                    .map(|(_, id)| (id.to_string(), memories[&id.to_string()].clone()))
+                    .collect::<BTreeMap<_, _>>();
+                if let Some(source) = memories.values().next() {
+                    let mut foreign = source.clone();
+                    foreign.id = absent_id.to_string();
+                    foreign.workspace_id = "wsp_foreign_drift_fixture".to_owned();
+                    foreign.provenance_verification_status = "missing".to_owned();
+                    preloaded.insert(foreign.id.clone(), foreign.clone());
+                    if preload_stride == 2
+                        && let Some(id) = ids.get(1)
+                    {
+                        foreign.id = id.to_string();
+                        preloaded.insert(foreign.id.clone(), foreign);
+                    }
+                }
+                let mut expected = selected_context_drift_draft(&selected_ids)?;
+                let mut actual = expected.clone();
+                let mut expected_degraded = Vec::new();
+                let mut actual_degraded = Vec::new();
+                connection
+                    .begin_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+                selected_context_drift_point_reference(
+                    &connection,
+                    workspace_path,
+                    &preloaded,
+                    &mut expected,
+                    &mut expected_degraded,
+                );
+                let (_, queries) = crate::db::capture_query_sql_for_test(|| {
+                    super::push_selected_context_memory_drift_degradations(
+                        &connection,
+                        workspace_path,
+                        &preloaded,
+                        &mut actual,
+                        &mut actual_degraded,
+                    );
+                });
+                assert_eq!(
+                    actual, expected,
+                    "count={count}, with_anchors={with_anchors}, preload_stride={preload_stride}"
+                );
+                assert_eq!(actual_degraded, expected_degraded);
+                let anchor_reads = queries
+                    .iter()
+                    .filter(|sql| sql.contains("FROM memory_anchors "))
+                    .count();
+                let expected_anchor_reads = if with_anchors {
+                    count + 1
+                } else {
+                    usize::from(count > 0)
+                };
+                assert_eq!(anchor_reads, expected_anchor_reads, "{queries:?}");
+                let unique_missing = selected_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<BTreeSet<_>>()
+                    .iter()
+                    .filter(|id| {
+                        !preloaded.get(*id).is_some_and(|memory| {
+                            memories
+                                .get(*id)
+                                .is_some_and(|local| memory.workspace_id == local.workspace_id)
+                        })
+                    })
+                    .count();
+                let memory_reads = queries
+                    .iter()
+                    .filter(|sql| sql.contains("FROM memories WHERE id "))
+                    .count();
+                assert_eq!(memory_reads, unique_missing, "{queries:?}");
+                if count == 0 {
+                    assert!(queries.is_empty());
+                }
+                assert!(
+                    connection.begin_read_snapshot().is_err(),
+                    "drift inspection must retain the caller's snapshot"
+                );
+                connection
+                    .rollback_read_snapshot()
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_context_drift_batch_errors_preserve_unaffected_items_and_error_counts() -> TestResult
+    {
+        for corrupt_anchors in [true, false] {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let workspace_path = Path::new("/tmp/ee-selected-drift-batch-error");
+            let (ids, memories) =
+                selected_context_drift_fixture(&connection, workspace_path, 3, true)?;
+            let mut selected_ids = ids.clone();
+            selected_ids.push(ids[2]);
+            connection.begin().map_err(|error| error.to_string())?;
+            let malformed_id = ids[2].to_string();
+            let sql = if corrupt_anchors {
+                format!(
+                    "UPDATE memory_anchors SET created_at = X'41' WHERE memory_id = '{malformed_id}'"
+                )
+            } else {
+                format!("UPDATE memories SET content = X'41' WHERE id = '{malformed_id}'")
+            };
+            connection
+                .execute_raw(&sql)
+                .map_err(|error| error.to_string())?;
+            if corrupt_anchors {
+                assert!(connection.list_memory_anchors(&malformed_id).is_err());
+            } else {
+                assert!(connection.get_memory(&malformed_id).is_err());
+            }
+            let preloaded = if corrupt_anchors {
+                memories
+            } else {
+                BTreeMap::new()
+            };
+            let mut expected = selected_context_drift_draft(&selected_ids)?;
+            let mut actual = expected.clone();
+            let mut expected_degraded = Vec::new();
+            let mut actual_degraded = Vec::new();
+            selected_context_drift_point_reference(
+                &connection,
+                workspace_path,
+                &preloaded,
+                &mut expected,
+                &mut expected_degraded,
+            );
+            let (_, queries) = crate::db::capture_query_sql_for_test(|| {
+                super::push_selected_context_memory_drift_degradations(
+                    &connection,
+                    workspace_path,
+                    &preloaded,
+                    &mut actual,
+                    &mut actual_degraded,
+                );
+            });
+            assert_eq!(actual, expected);
+            assert_eq!(actual_degraded, expected_degraded);
+            assert_eq!(actual.items[1].freshness_facets.len(), 1);
+            assert!(actual.items[2].freshness_facets.is_empty());
+            assert!(actual.items[3].freshness_facets.is_empty());
+            assert!(actual_degraded.iter().any(|entry| {
+                entry.code == "memory_drift_source_unverifiable"
+                    && entry.message.contains("2 selected memories")
+            }));
+            if corrupt_anchors {
+                let anchor_reads = queries
+                    .iter()
+                    .filter(|sql| sql.contains("FROM memory_anchors "))
+                    .count();
+                assert!(
+                    (5..=7).contains(&anchor_reads),
+                    "probe and failed batch followed by one read per unique memory: {queries:?}"
+                );
+            } else {
+                let memory_reads = queries
+                    .iter()
+                    .filter(|sql| sql.contains("FROM memories WHERE id "))
+                    .count();
+                assert_eq!(memory_reads, 3, "{queries:?}");
+                assert_eq!(
+                    queries
+                        .iter()
+                        .filter(|sql| sql.contains("FROM memory_anchors "))
+                        .count(),
+                    3
+                );
+            }
+            assert!(
+                connection.begin().is_err(),
+                "inspection must retain the caller's transaction"
+            );
+            connection.rollback().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_context_drift_batches_reuse_the_callers_pinned_anchor_snapshot() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path();
+        let database_path = workspace_path.join("selected-drift.db");
+        let writer = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let (ids, memories) = selected_context_drift_fixture(&writer, workspace_path, 1, false)?;
+        let id = ids[0].to_string();
+        let anchor = crate::models::CreateMemoryAnchorInput::from_raw(
+            &id,
+            crate::models::MemoryAnchorKind::Command,
+            "cargo fmt --check",
+            0.9,
+            crate::models::MemoryAnchorSource::Explicit,
+            "manual://selected-drift-snapshot",
+            1,
+        )
+        .ok_or("snapshot anchor")?;
+        writer
+            .upsert_memory_anchors(&[anchor])
+            .map_err(|error| error.to_string())?;
+        let reader =
+            DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let original = selected_context_drift_draft(&[ids[0], ids[0]])?;
+        let mut expected = original.clone();
+        let mut expected_degraded = Vec::new();
+        selected_context_drift_point_reference(
+            &reader,
+            workspace_path,
+            &memories,
+            &mut expected,
+            &mut expected_degraded,
+        );
+        assert!(expected_degraded.is_empty());
+        writer
+            .execute_raw(&format!(
+                "UPDATE memory_anchors SET freshness_state = 'stale' WHERE memory_id = '{id}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let generation = writer
+            .get_workspace_generation(&memories[&id].workspace_id)
+            .map_err(|error| error.to_string())?;
+        let mut actual = original.clone();
+        let mut actual_degraded = Vec::new();
+        super::push_selected_context_memory_drift_degradations(
+            &reader,
+            workspace_path,
+            &memories,
+            &mut actual,
+            &mut actual_degraded,
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(actual_degraded, expected_degraded);
+        assert!(reader.begin_read_snapshot().is_err());
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let mut fresh = original;
+        let mut fresh_degraded = Vec::new();
+        super::push_selected_context_memory_drift_degradations(
+            &reader,
+            workspace_path,
+            &memories,
+            &mut fresh,
+            &mut fresh_degraded,
+        );
+        assert!(fresh.items.iter().all(|item| {
+            item.freshness_facets.len() == 1 && item.freshness_facets[0].stale_anchor
+        }));
+        assert_eq!(fresh_degraded.len(), 1);
+        assert!(fresh_degraded[0].message.contains("2 memories"));
+        assert!(reader.begin_read_snapshot().is_err());
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            writer
+                .get_workspace_generation(&memories[&id].workspace_id)
+                .map_err(|error| error.to_string())?,
+            generation
+        );
+        Ok(())
+    }
+
     fn attempt_family_pack_guard_fixture(
         connection: &DbConnection,
         count: usize,
@@ -16011,6 +16522,91 @@ pub fn unrelated_context() -> u64 {{
             crate::pack::render_context_response_markdown(response)
         );
         assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 7);
+        Ok(())
+    }
+
+    #[test]
+    fn finalization_reuses_rendered_prompt_with_exact_footer_and_policy_parity() -> TestResult {
+        let (mut request, mut draft) = pack_hash_v2_fixture(Vec::new())?;
+        let literal_footer = crate::pack::context_markdown_identity_footer(
+            crate::models::RESPONSE_SCHEMA_V2,
+            crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+        );
+        request.query = format!("Preserve literal footer evidence {literal_footer}");
+        let source_content = format!(
+            "Keep ee.pack.hash.self.v1 literal in the selected body.{literal_footer}This is source text, not the terminal identity footer."
+        );
+        draft.items[0].content = source_content.clone();
+        let degradations = vec![
+            ContextResponseDegradation {
+                code: "context_lexical_fallback".to_owned(),
+                severity: ContextResponseSeverity::Medium,
+                message: "Canonical retrieval fallback remains in the prompt.".to_owned(),
+                repair: Some("ee index rebuild --workspace .".to_owned()),
+            },
+            ContextResponseDegradation {
+                code: "graph_feature_disabled".to_owned(),
+                severity: ContextResponseSeverity::Low,
+                message: "Non-affecting graph notice follows output policy.".to_owned(),
+                repair: None,
+            },
+            ContextResponseDegradation {
+                code: "pack_assembly_elapsed_over_budget".to_owned(),
+                severity: ContextResponseSeverity::Low,
+                message: "Delivery timing is excluded from canonical text.".to_owned(),
+                repair: None,
+            },
+        ];
+        for include_non_affecting_degradations in [false, true] {
+            for with_dna in [false, true] {
+                let options = super::ContextPackOutputOptions {
+                    include_non_affecting_degradations,
+                    ..super::ContextPackOutputOptions::default().with_pack_dna(with_dna)
+                };
+                let mut response = crate::pack::ContextResponse::new(
+                    request.clone(),
+                    draft.clone(),
+                    degradations.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                response.data.embed_backend = EmbedBackend::NeuralLocal;
+                if with_dna {
+                    response.data.pack_dna = Some(serde_json::json!({
+                        "schema": "ee.context.pack_dna.v1", "snapshotVersion": 17,
+                        "egoSubgraph": {"nodes": [], "edges": []}
+                    }));
+                }
+                let expected = super::compute_context_pack_hash_components(
+                    &crate::pack::ContextMarkdownInput::from(&response),
+                    options,
+                    Some(17),
+                    None,
+                );
+                let expected_text = crate::output::render_context_markdown_for_finalization(
+                    &crate::pack::ContextMarkdownInput::from(&response),
+                    include_non_affecting_degradations,
+                    &expected.composite_hash,
+                );
+
+                super::finalize_context_response(&mut response, options, Some(17), None);
+
+                assert_eq!(
+                    response.data.finalized_text.as_deref(),
+                    Some(expected_text.as_str())
+                );
+                assert_eq!(
+                    response.data.pack.hash.as_deref(),
+                    Some(expected.composite_hash.as_str())
+                );
+                assert_eq!(
+                    response.data.pack_hash_components.as_ref(),
+                    Some(&expected.digests)
+                );
+                assert_eq!(response.data.pack.items[0].content, source_content);
+                assert!(!expected_text.contains("Delivery timing is excluded"));
+                assert_finalized_text_contract(&response)?;
+            }
+        }
         Ok(())
     }
 
