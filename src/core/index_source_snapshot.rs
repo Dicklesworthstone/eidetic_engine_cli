@@ -214,14 +214,13 @@ fn live_source_allocation_fits(
         crate::db::EVIDENCE_SEARCH_CANDIDATE_PREDICATE
     );
     let memory_ids = format!("SELECT m.id FROM memories m WHERE {MEMORY_SCOPE}");
-    let seal_placeholder = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.replace('\'', "''");
     let evidence_ids = format!("SELECT e.id FROM evidence_spans e WHERE {evidence_scope}");
     let rule_ids = "SELECT id FROM procedural_rules WHERE workspace_id = ?1";
     let mut budget = SourceReadBudget::new(max_source_bytes);
     for (table, columns, scope) in [
         (
             "memories m",
-            "id workspace_id level kind content workflow_id provenance_uri trust_class trust_subclass provenance_chain_hash provenance_chain_hash_version provenance_verification_status provenance_verified_at provenance_verification_note created_at updated_at tombstoned_at valid_from valid_to typed_fields_json",
+            "id workspace_id level kind content workflow_id provenance_uri trust_class trust_subclass provenance_chain_hash provenance_chain_hash_version provenance_verification_status provenance_verified_at provenance_verification_note created_at updated_at tombstoned_at valid_from valid_to logical_id typed_fields_json",
             MEMORY_SCOPE.to_owned(),
         ),
         (
@@ -230,9 +229,9 @@ fn live_source_allocation_fits(
             format!("memory_id IN ({memory_ids})"),
         ),
         (
-            "memory_seals",
-            "memory_id content_commitment sealed_at revealed_at",
-            format!("memory_id IN ({memory_ids} AND m.content = '{seal_placeholder}')"),
+            "memories m",
+            "id workspace_id logical_id",
+            MEMORY_SCOPE.to_owned(),
         ),
         (
             "sessions",
@@ -278,6 +277,36 @@ fn live_source_allocation_fits(
         }
     }
 
+    // Effective seal hydration materializes root identity and chosen seal
+    // fields beside each candidate. Charge repeated roots per candidate, not
+    // once per distinct root, using the same cancellable rowid pages. Reading
+    // both possible seals is conservative when the direct one takes precedence.
+    let root_fields = source_length_expression("id workspace_id logical_id");
+    let seal_fields =
+        source_length_expression("memory_id content_commitment sealed_at revealed_at");
+    let authority_bytes = format!(
+        "coalesce((SELECT {root_fields} FROM memories root WHERE root.id = m.logical_id), 0) + coalesce((SELECT {seal_fields} FROM memory_seals seal WHERE seal.memory_id = m.id), 0) + coalesce((SELECT {seal_fields} FROM memory_seals seal WHERE seal.memory_id = m.logical_id), 0)"
+    );
+    let Some(remaining) = budget
+        .charged
+        .and_then(|used| budget.maximum.checked_sub(used))
+    else {
+        return Ok(false);
+    };
+    let measured = measurement::sum(
+        cx,
+        db,
+        workspace_id,
+        "memories m",
+        &authority_bytes,
+        MEMORY_SCOPE,
+        remaining / SourceReadBudget::TEXT_COPIES,
+    );
+    super::index_checkpoint(cx)?;
+    if !budget.charge(0, measured?, 0) {
+        return Ok(false);
+    }
+
     // Revisions predating anchor extraction have no association rows to count.
     // Bound their request-local extraction before its map, hashes and projected
     // copies are allocated. A stored anchor set is used as-is by the reader.
@@ -288,7 +317,7 @@ fn live_source_allocation_fits(
         missing_anchor_allocation_size(
             db,
             workspace_id,
-            &format!("{MEMORY_SCOPE} AND NOT EXISTS (SELECT 1 FROM memory_anchors ma WHERE ma.memory_id = m.id) AND NOT (m.content = '{seal_placeholder}' AND EXISTS (SELECT 1 FROM memory_seals ms WHERE ms.memory_id = m.id))"),
+            &format!("{MEMORY_SCOPE} AND NOT EXISTS (SELECT 1 FROM memory_anchors ma WHERE ma.memory_id = m.id)"),
         )?,
     ) {
         return Ok(false);
@@ -1261,6 +1290,67 @@ mod tests {
                 >= anchors.len() as u64
                     * (4096 + SourceReadBudget::TEXT_COPIES * MEMORY.len() as u64)
         );
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_source_preflight_charges_inherited_authority_outside_the_live_corpus() {
+        const REVISION: &str = "mem_00000000000000000000000072";
+        for field in ["logical_id", "sealed_at"] {
+            let (_root, db, path) = fixture_with_content("A short root memory.");
+            db.insert_memory_revision(
+                REVISION,
+                MEMORY,
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "A short current revision.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("revision");
+            assert!(db.tombstone_memory(MEMORY).expect("historical root"));
+            db.insert_memory_seal(
+                MEMORY,
+                &crate::models::memory_seal_commitment(b"A short root memory."),
+                "2026-08-08T06:00:00Z",
+            )
+            .expect("root seal");
+            let read = DbConnection::open_file_read_only(&path).expect("read-only control");
+            read.begin_read_snapshot().expect("control snapshot");
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                assert!(
+                    live_source_allocation_fits(&cx, &read, WORKSPACE, 128 * 1024)
+                        .expect("small inherited authority fits")
+                );
+                read.commit_read_snapshot().expect("control snapshot ends");
+            })
+            .expect("control runtime");
+            let oversized = "x".repeat(256 * 1024);
+            if field == "logical_id" {
+                set_test_text(&db, "memories", field, "id", MEMORY, Some(&oversized));
+            } else {
+                set_test_text(
+                    &db,
+                    "memory_seals",
+                    field,
+                    "memory_id",
+                    MEMORY,
+                    Some(&oversized),
+                );
+            }
+            assert_source_refusal_is_read_only(&db, &path, 128 * 1024);
+        }
     }
 
     #[cfg(feature = "lexical-bm25")]

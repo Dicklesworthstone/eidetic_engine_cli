@@ -17609,7 +17609,7 @@ fn apply_tombstone_visibility_with_connection(
     // Seal authority is hydrated beside source bodies in the caller's pinned
     // snapshot, not once per hit. A failed batch retains the point getter's
     // fail-closed semantics while isolating any single malformed sidecar.
-    let batch_seals = match connection.get_memory_seals_batch(&hit_doc_ids) {
+    let batch_seals = match connection.get_effective_memory_seals_batch(&hit_doc_ids) {
         Ok(seals) => Some(seals),
         Err(error) => {
             tracing::warn!(
@@ -17643,7 +17643,7 @@ fn apply_tombstone_visibility_with_connection(
                 // content was revealed; a failed lookup cannot grant access.
                 let seal = match batch_seals.as_ref() {
                     Some(seals) if memory.id == hit.doc_id => Ok(seals.get(&memory.id).cloned()),
-                    _ => connection.get_memory_seal(&memory.id),
+                    _ => connection.get_effective_memory_seal(&memory.id),
                 };
                 match seal {
                     Ok(Some(seal)) if seal.is_sealed() => {
@@ -25820,10 +25820,11 @@ mod tests {
     }
 
     #[test]
-    fn memory_visibility_obeys_seal_authority_independent_of_body_spelling() -> TestResult {
+    fn memory_visibility_obeys_seal_authority_independent_of_body_and_revision() -> TestResult {
         const WORKSPACE: &str = "wsp_00000000000000000000000923";
         const SEALED: &str = "mem_00000000000000000000000923";
         const PLACEHOLDER: &str = "mem_00000000000000000000000924";
+        const REVISION: &str = "mem_00000000000000000000000925";
         const BODY: &str = "UNREVEALED-SOURCE-BODY-CANARY";
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
@@ -25845,6 +25846,15 @@ mod tests {
                 .insert_memory(id, &test_memory_input(WORKSPACE, content))
                 .map_err(|error| error.to_string())?;
         }
+        connection
+            .insert_memory_with_timestamps(
+                REVISION,
+                &test_memory_input(WORKSPACE, BODY),
+                "2026-01-02T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                SEALED,
+            )
+            .map_err(|error| error.to_string())?;
         let before = connection
             .list_memories(WORKSPACE, None, true)
             .map_err(|error| error.to_string())?;
@@ -25865,6 +25875,7 @@ mod tests {
         let hits = vec![
             memory_visibility_hit(SEALED, BODY),
             memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
+            memory_visibility_hit(REVISION, BODY),
         ];
         let mut degraded = Vec::new();
         let (visible, queries) = crate::db::capture_query_sql_for_test(|| {
@@ -25872,14 +25883,14 @@ mod tests {
         });
         let seal_reads: Vec<_> = queries
             .iter()
-            .filter(|sql| sql.contains("FROM memory_seals WHERE"))
+            .filter(|sql| sql.contains("LEFT JOIN memory_seals AS root_seal"))
             .collect();
         assert_eq!(
             seal_reads.len(),
             1,
             "seal checks must be batched across candidates"
         );
-        assert!(seal_reads[0].contains("WHERE memory_id IN ("));
+        assert!(seal_reads[0].contains("WHERE candidate.id IN ("));
         assert_eq!(visible.len(), 1);
         assert_eq!(
             visible[0].doc_id, PLACEHOLDER,
@@ -25894,7 +25905,7 @@ mod tests {
         assert_eq!(
             apply_tombstone_visibility(&options, hits.clone(), &mut Vec::new(), Some(&connection),)
                 .len(),
-            2
+            3
         );
 
         // A corrupt sidecar fails the batch, then the point-read fallback
@@ -25907,7 +25918,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert!(
             connection
-                .get_memory_seals_batch(&[SEALED, PLACEHOLDER])
+                .get_effective_memory_seals_batch(&[SEALED, PLACEHOLDER, REVISION])
                 .is_err()
         );
         let mut corrupt = Vec::new();

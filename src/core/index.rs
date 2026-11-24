@@ -4913,12 +4913,17 @@ fn memory_documents_with_anchors_with_cx(
         if let Some(cx) = request {
             index_checkpoint(cx)?;
         }
+        let memory_ids: Vec<&str> = chunk.iter().map(|memory| memory.id.as_str()).collect();
+        let seals = db.get_effective_memory_seals_batch(&memory_ids)?;
         let mut admitted = Vec::with_capacity(chunk.len());
         for memory in chunk {
             if let Some(cx) = request {
                 index_checkpoint(cx)?;
             }
-            if !memory_has_seal_sidecar(db, memory)? {
+            if !seals
+                .get(&memory.id)
+                .is_some_and(crate::models::MemorySeal::is_sealed)
+            {
                 admitted.push(memory);
             }
         }
@@ -4961,21 +4966,6 @@ fn memory_documents_with_anchors_with_cx(
         "captured memory index sidecars in batches"
     );
     Ok(documents)
-}
-
-/// Sealed eligibility is sidecar state, never a content-string heuristic.
-///
-/// A verified reveal publishes a new live revision without a seal row, while
-/// the superseded placeholder retains its seal as historical evidence. Thus
-/// the placeholder row is always excluded and the revealed revision is not.
-fn memory_has_seal_sidecar(
-    db: &DbConnection,
-    memory: &crate::db::StoredMemory,
-) -> Result<bool, DbError> {
-    if memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-        return Ok(false);
-    }
-    Ok(db.get_memory_seal(&memory.id)?.is_some())
 }
 
 fn processing_mode_for_job(job: &StoredSearchIndexJob) -> &'static str {
@@ -10749,9 +10739,14 @@ fn current_index_corpus_counts_with_snapshot(
     caller_holds_snapshot: bool,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
     let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+    let memory_ids: Vec<&str> = memories.iter().map(|memory| memory.id.as_str()).collect();
+    let seals = db.get_effective_memory_seals_batch(&memory_ids)?;
     let mut indexable_memory_count = 0_usize;
     for memory in &memories {
-        if !memory_has_seal_sidecar(db, memory)? {
+        if !seals
+            .get(&memory.id)
+            .is_some_and(crate::models::MemorySeal::is_sealed)
+        {
             indexable_memory_count = indexable_memory_count.saturating_add(1);
         }
     }
@@ -20410,6 +20405,136 @@ mod tests {
             !contention.acquired_at.is_empty(),
             "contention acquired_at timestamp",
         )
+    }
+
+    #[test]
+    fn index_projection_and_counts_obey_effective_seals_without_body_heuristics() -> TestResult {
+        const PUBLIC: &str = "mem_00000000000000000000000001";
+        const ROOT: &str = "mem_00000000000000000000000002";
+        const REVISION: &str = "mem_00000000000000000000000003";
+        const LITERAL: &str = "mem_00000000000000000000000004";
+        let fixture = RequestedIndexRepairFixture::new()?;
+        for number in [2, 3] {
+            fixture.insert_memory(number, &fixture.workspace_id, Vec::new())?;
+        }
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE memories SET logical_id = '{ROOT}' WHERE id = '{REVISION}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        fixture
+            .db
+            .insert_memory(
+                LITERAL,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for id in [ROOT, LITERAL] {
+            let memory = fixture
+                .db
+                .get_memory(id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "seal fixture memory disappeared".to_owned())?;
+            fixture
+                .db
+                .insert_memory_seal(
+                    id,
+                    &crate::models::memory_seal_commitment(memory.content.as_bytes()),
+                    "2026-08-08T06:00:00Z",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        assert!(
+            fixture
+                .db
+                .mark_memory_seal_revealed(LITERAL, "2026-08-08T07:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        let memories = fixture
+            .db
+            .list_memories_for_retrieval_with_global(&fixture.workspace_id, None, false)
+            .map_err(|error| error.to_string())?;
+        let (projected, queries) = crate::db::capture_query_sql_for_test(|| {
+            source_snapshot::capture(&fixture.db, || {
+                memory_documents_with_anchors(&fixture.db, &memories)
+            })
+        });
+        let projected = projected.map_err(|error| error.to_string())?;
+        assert_eq!(
+            projected
+                .iter()
+                .map(|document| document.id())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([PUBLIC, LITERAL])
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("LEFT JOIN memory_seals AS root_seal"))
+                .count(),
+            1,
+            "index projection must batch effective seal authority"
+        );
+        assert_eq!(
+            current_index_corpus_counts(&fixture.db, &fixture.workspace_id)
+                .map_err(|error| error.to_string())?
+                .0
+                .memories,
+            2
+        );
+
+        assert!(
+            fixture
+                .db
+                .mark_memory_seal_revealed(ROOT, "2026-08-08T07:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        let projected = source_snapshot::capture(&fixture.db, || {
+            memory_documents_with_anchors(&fixture.db, &memories)
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            projected
+                .iter()
+                .map(|document| document.id())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([PUBLIC, ROOT, REVISION, LITERAL])
+        );
+        assert_eq!(
+            current_index_corpus_counts(&fixture.db, &fixture.workspace_id)
+                .map_err(|error| error.to_string())?
+                .0
+                .memories,
+            4
+        );
+
+        fixture.db.execute_raw(&format!(
+            "UPDATE memory_seals SET sealed_at = 'invalid-parent-seal' WHERE memory_id = '{ROOT}'"
+        )).map_err(|error| error.to_string())?;
+        assert!(
+            source_snapshot::capture(&fixture.db, || {
+                memory_documents_with_anchors(&fixture.db, &memories)
+            })
+            .is_err()
+        );
+        assert!(current_index_corpus_counts(&fixture.db, &fixture.workspace_id).is_err());
+        Ok(())
     }
 
     #[test]

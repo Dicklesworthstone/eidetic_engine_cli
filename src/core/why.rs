@@ -1855,7 +1855,7 @@ fn explain_memory_in_scope_with_budget(
     // Seal authority is required even when damaged or legacy storage contains
     // a populated body. Resolve it once in the caller's source snapshot and
     // withhold bytes before any body-dependent explanation enrichment.
-    let seal = match resolve_why_memory_seal(conn, &memory) {
+    let seal = match conn.get_effective_memory_seal(&memory.id) {
         Ok(seal) => seal,
         Err(_) => {
             return WhyReport::error(
@@ -2851,38 +2851,6 @@ fn build_report(
     match selection_inputs.graph_retrieval {
         Some(graph) => report.with_graph_retrieval(graph),
         None => report,
-    }
-}
-
-/// Disclosure must not interpret an invalid explicit revision root as absence
-/// of a seal. Keep this strict read policy local to `why`; legacy rows without
-/// an explicit root retain their direct-seal or ordinary-memory behavior.
-fn resolve_why_memory_seal(
-    conn: &DbConnection,
-    memory: &crate::db::StoredMemory,
-) -> crate::db::Result<Option<crate::models::MemorySeal>> {
-    let direct_seal = conn.get_memory_seal(&memory.id)?;
-    let Some(logical_id) = conn.get_memory_logical_id(&memory.id)? else {
-        return Ok(direct_seal);
-    };
-    if logical_id == memory.id {
-        return Ok(direct_seal);
-    }
-    let invalid_lineage = || crate::db::DbError::MalformedRow {
-        operation: crate::db::DbOperation::Query,
-        message: "Memory seal revision root could not be verified".to_owned(),
-    };
-    let root = conn.get_memory(&logical_id)?.ok_or_else(invalid_lineage)?;
-    if root.workspace_id != memory.workspace_id
-        || conn.get_memory_logical_id(&root.id)?.as_deref() != Some(logical_id.as_str())
-    {
-        return Err(invalid_lineage());
-    }
-    // A direct seal still takes precedence, but cannot authenticate a broken
-    // explicit lineage. Without one, the validated root supplies authority.
-    match direct_seal {
-        Some(seal) => Ok(Some(seal)),
-        None => conn.get_memory_seal(&root.id),
     }
 }
 

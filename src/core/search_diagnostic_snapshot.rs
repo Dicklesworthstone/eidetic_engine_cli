@@ -67,6 +67,14 @@ pub(super) fn admit_memories(
     let rows = connection
         .get_memories_batch(&refs)
         .map_err(|_| admission_error())?;
+    let authority_ids: Vec<&str> = rows
+        .values()
+        .filter(|row| row.workspace_id == workspace.id)
+        .map(|row| row.id.as_str())
+        .collect();
+    let seals = connection
+        .get_effective_memory_seals_batch(&authority_ids)
+        .map_err(|_| admission_error())?;
     let final_by_id: BTreeMap<&str, &SearchHit> = diag
         .final_hits
         .iter()
@@ -83,11 +91,7 @@ pub(super) fn admit_memories(
         // Source truth is mandatory even when a stale index contains plaintext
         // instead of the seal placeholder. A failed seal lookup cannot authorize
         // a diagnostic read of material the canonical projection omits.
-        if connection
-            .get_memory_seal(&row.id)
-            .map_err(|_| admission_error())?
-            .is_some_and(|seal| seal.is_sealed())
-        {
+        if seals.get(&row.id).is_some_and(|seal| seal.is_sealed()) {
             continue;
         }
         let mut hit = final_by_id.get(id.as_str()).map_or_else(
@@ -987,16 +991,24 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_admission_preserves_verified_reveals_without_reviving_closed_seals() -> TestResult
+    fn diagnostic_admission_preserves_inherited_reveals_without_reviving_closed_seals() -> TestResult
     {
+        const VISIBLE_ROOT: &str = "mem_00000000000000000000000101";
+        const HIDDEN_ROOT: &str = "mem_00000000000000000000000102";
         let (_temp, options, db) = fixture()?;
-        db.insert_memory(VISIBLE, &input(WORKSPACE, PHRASE))
-            .map_err(|e| e.to_string())?;
-        db.insert_memory(HIDDEN, &input(WORKSPACE, PHRASE))
-            .map_err(|e| e.to_string())?;
-        for id in [VISIBLE, HIDDEN] {
-            db.insert_memory_seal(
+        for (id, root) in [(VISIBLE, VISIBLE_ROOT), (HIDDEN, HIDDEN_ROOT)] {
+            db.insert_memory(root, &input(WORKSPACE, PHRASE))
+                .map_err(|e| e.to_string())?;
+            db.insert_memory_with_timestamps(
                 id,
+                &input(WORKSPACE, PHRASE),
+                "2026-07-01T00:01:00Z",
+                "2026-07-01T00:01:00Z",
+                root,
+            )
+            .map_err(|e| e.to_string())?;
+            db.insert_memory_seal(
+                root,
                 &crate::models::memory_seal_commitment(PHRASE.as_bytes()),
                 "2026-07-01T00:00:00Z",
             )
@@ -1014,7 +1026,7 @@ mod tests {
         assert_arms(&closed, &[]);
         assert!(closed.final_hits.is_empty());
         assert!(
-            db.mark_memory_seal_revealed(VISIBLE, "2026-07-02T00:00:00Z")
+            db.mark_memory_seal_revealed(VISIBLE_ROOT, "2026-07-02T00:00:00Z")
                 .map_err(|e| e.to_string())?
         );
         let mut revealed = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
@@ -1037,7 +1049,7 @@ mod tests {
         );
         assert_eq!(revealed.pre_fusion.lexical.results[0].rank, 2);
         assert!(
-            db.get_memory_seal(HIDDEN)
+            db.get_effective_memory_seal(HIDDEN)
                 .map_err(|e| e.to_string())?
                 .ok_or("closed seal")?
                 .is_sealed()

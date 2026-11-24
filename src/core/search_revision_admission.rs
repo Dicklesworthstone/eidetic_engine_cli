@@ -84,26 +84,26 @@ fn states(
                 .or_default()
                 .insert(quarantine_workspace.clone());
         }
-        let seal_sql = format!(
-            "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
-        );
-        let mut seal_states = BTreeMap::<String, Option<bool>>::new();
-        for row in connection.query(&seal_sql, &parameters)? {
-            let Some(Value::Text(seal_id)) = row.get(0) else {
-                return Err(DbError::MalformedRow {
-                    operation: DbOperation::Query,
-                    message: "Could not read memory seal identity".to_owned(),
-                });
+        // Effective authority follows validated revision roots. Keep healthy
+        // neighbors when a malformed seal or lineage invalidates the batch;
+        // successful pages remain one bounded metadata query.
+        let seal_states: BTreeMap<String, Option<bool>> =
+            match connection.get_effective_memory_seals_batch(page) {
+                Ok(seals) => seals
+                    .into_iter()
+                    .map(|(id, seal)| (id, Some(seal.is_sealed())))
+                    .collect(),
+                Err(_) => page
+                    .iter()
+                    .map(|id| {
+                        let state = connection
+                            .get_effective_memory_seal(id)
+                            .map(|seal| seal.is_some_and(|seal| seal.is_sealed()))
+                            .ok();
+                        ((*id).to_owned(), state)
+                    })
+                    .collect(),
             };
-            // A textual reveal alone is not authority: the commitment,
-            // timestamps and verified flag must form the same valid state
-            // required by storage and the other live readers. Isolate a
-            // malformed seal to this identity instead of dropping its page.
-            let state = crate::core::memory_lifecycle::decode_admission_seal(&row)
-                .ok()
-                .map(|seal| seal.is_sealed());
-            seal_states.insert(seal_id.clone(), state);
-        }
         // Read the same bounded identity page as the other authority tables.
         // Point-reading every memory makes pre-ranking admission issue one SQL
         // statement per hit, even though no body or per-hit work is required.
@@ -869,6 +869,64 @@ mod seal_tests {
             ids(&reviewed.results).into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([HIDDEN, PUBLIC])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_seals_guard_ranked_hits_and_similarity_seeds_until_verified_reveal() -> TestResult
+    {
+        const REVISION: &str = "mem_00000000000000000000000083";
+        let (_temp, options, db) = fixture()?;
+        db.insert_memory_with_timestamps(REVISION, &input(), TIME, TIME, HIDDEN)
+            .map_err(|error| error.to_string())?;
+        seal(&db, HIDDEN)?;
+        let candidates = vec![hit(REVISION), hit(PUBLIC)];
+        let mut degraded = Vec::new();
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                candidates.clone(),
+                &mut degraded,
+                Some(&db)
+            )),
+            vec![PUBLIC]
+        );
+        assert!(degraded.iter().any(|notice| notice.code == SEALED_FILTERED));
+        assert!(
+            !seed_is_visible(&db, REVISION, instant(TIME)?).map_err(|error| error.to_string())?
+        );
+        assert!(
+            db.mark_memory_seal_revealed(HIDDEN, "2026-02-01T00:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                candidates.clone(),
+                &mut Vec::new(),
+                Some(&db)
+            )),
+            vec![REVISION, PUBLIC]
+        );
+        assert!(seed_is_visible(&db, REVISION, instant(TIME)?).map_err(|error| error.to_string())?);
+
+        db.execute_raw(&format!(
+            "UPDATE memory_seals SET sealed_at = 'invalid-parent-seal' WHERE memory_id = '{HIDDEN}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        let mut unavailable = Vec::new();
+        assert_eq!(
+            ids(&admit_hits(
+                &options,
+                candidates,
+                &mut unavailable,
+                Some(&db)
+            )),
+            vec![PUBLIC],
+            "malformed inherited authority must not suppress healthy neighbors"
+        );
+        assert!(unavailable.iter().any(|notice| notice.code == UNAVAILABLE));
+        assert!(seed_is_visible(&db, REVISION, instant(TIME)?).is_err());
         Ok(())
     }
 
