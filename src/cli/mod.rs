@@ -10431,6 +10431,17 @@ pub struct RememberArgs {
     #[arg(long = "idempotency-key", value_name = "KEY")]
     pub idempotency_key: Option<String>,
 
+    /// Store through the workspace daemon and reuse its warm indexing models.
+    /// Requires an idempotency key so the identical command can be retried
+    /// safely after a lost acknowledgement. This route never falls back to
+    /// another local write; unsupported remember companions are rejected.
+    #[arg(long, action = ArgAction::SetTrue, requires = "idempotency_key")]
+    pub use_daemon: bool,
+
+    /// Workspace daemon socket for --use-daemon.
+    #[arg(long, value_name = "PATH", requires = "use_daemon")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Build memory content from one git commit and dry-run unless --apply is supplied.
     #[arg(long = "from-commit", value_name = "REF")]
     pub from_commit: Option<String>,
@@ -60106,6 +60117,8 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         stdin: false,
         reinforce: false,
         idempotency_key: None,
+        use_daemon: false,
+        daemon_socket: None,
         from_commit: None,
         from_diff: None,
         from_worktree: false,
@@ -60946,8 +60959,462 @@ where
     }
 }
 
-/// `ee remember` entry point: routes between the single-memory path and the
-/// `--batch --stdin` JSONL surface (bd-1pi9m.4).
+/// Validate the daemon's supported write shape before touching its socket.
+/// Keep this separate from Clap so programmatic callers cannot drop a
+/// requested creation companion while routing through the daemon.
+fn validate_remember_daemon_args(args: &RememberArgs) -> Result<&str, DomainError> {
+    let usage = |message: String| DomainError::Usage {
+        message,
+        repair: Some("ee remember --help".to_owned()),
+    };
+    let key = args
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            usage("--use-daemon requires a nonempty --idempotency-key for safe retries".to_owned())
+        })?;
+    let unsupported = [
+        (args.database.is_some(), "--database"),
+        (args.global, "--global"),
+        (args.batch, "--batch"),
+        (args.stdin, "--stdin"),
+        (args.reinforce, "--reinforce"),
+        (!args.typed_field_assignments.is_empty(), "--field"),
+        (!args.sentinels.is_empty(), "--sentinel"),
+        (!args.revive_when.is_empty(), "--revive-when"),
+        (
+            args.sentinel_stale_threshold_seconds.is_some(),
+            "--sentinel-stale-threshold-seconds",
+        ),
+        (args.seal, "--seal"),
+        (args.attempt_family.is_some(), "--family"),
+        (args.attempt_family_of_n.is_some(), "--of-n"),
+        (args.attempt_index.is_some(), "--attempt"),
+        (args.attempt_outcome.is_some(), "--attempt-outcome"),
+        (args.from_commit.is_some(), "--from-commit"),
+        (args.from_diff.is_some(), "--from-diff"),
+        (args.from_worktree, "--from-worktree"),
+        (args.apply, "--apply"),
+        (args.defer_index, "--defer-index"),
+        (args.allow_secret_mention, "--allow-secret-mention"),
+    ]
+    .into_iter()
+    .find_map(|(present, flag)| present.then_some(flag));
+    if let Some(flag) = unsupported {
+        return Err(usage(format!(
+            "--use-daemon does not support {flag}; omit --use-daemon to retain that remember option"
+        )));
+    }
+    if args
+        .content
+        .as_deref()
+        .is_none_or(|content| content.trim().is_empty())
+    {
+        return Err(usage(
+            "daemon remember requires nonempty positional CONTENT".to_owned(),
+        ));
+    }
+    Ok(key)
+}
+
+fn remember_daemon_unavailable(message: impl std::fmt::Display) -> DomainError {
+    DomainError::UnsatisfiedDegradedModeCode {
+        code: "daemon_remember_unavailable",
+        message: format!("Daemon remember unavailable before sending the write: {message}"),
+        repair: Some(
+            "Start or upgrade `ee daemon start --workspace <path>`, check --daemon-socket, then retry the identical command with the same --idempotency-key."
+                .to_owned(),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn remember_daemon_outcome_unknown(message: impl std::fmt::Display) -> DomainError {
+    DomainError::UnsatisfiedDegradedModeCode {
+        code: "daemon_remember_outcome_unknown",
+        message: format!(
+            "The daemon remember acknowledgement could not be confirmed: {message}. The write may already be stored. No local write was attempted."
+        ),
+        repair: Some(
+            "Retry the identical remember command with the same --idempotency-key and workspace; keep the key unchanged to recover the original write."
+                .to_owned(),
+        ),
+    }
+}
+
+fn handle_remember_via_daemon<W: Write, E: Write>(
+    cli: &Cli,
+    args: &RememberArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode {
+    let key = match validate_remember_daemon_args(args) {
+        Ok(key) => key,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    #[cfg(unix)]
+    let result = fs::canonicalize(cli.resolve_workspace())
+        .map_err(remember_daemon_unavailable)
+        .and_then(|workspace| {
+            if !workspace.is_dir() {
+                return Err(remember_daemon_unavailable("workspace is not a directory"));
+            }
+            remember_via_daemon_before(
+                args,
+                &workspace,
+                key,
+                Instant::now() + crate::daemon::DAEMON_DEFAULT_RPC_TIMEOUT,
+            )
+        });
+    #[cfg(not(unix))]
+    let result: Result<(serde_json::Value, String), DomainError> = {
+        let _ = key;
+        Err(remember_daemon_unavailable(
+            "Unix domain sockets are not supported on this platform",
+        ))
+    };
+    match result {
+        Ok((response, human)) => write_daemon_search_renderings(cli, &response, &human, stdout),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
+    }
+}
+
+#[cfg(unix)]
+fn validate_remember_daemon_capabilities(
+    capabilities: &serde_json::Value,
+    workspace: &Path,
+) -> Result<(), String> {
+    use crate::daemon::server::{DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1, METHOD_WRITE};
+    let advertises = |field: &str, value: &str| {
+        capabilities[field]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|item| item.as_str() == Some(value)))
+    };
+    if capabilities["protocol"].as_str() != Some("ee.daemon")
+        || !advertises("request_schemas", crate::daemon::DAEMON_REQUEST_SCHEMA_V1)
+        || !advertises("response_schemas", crate::daemon::DAEMON_RESPONSE_SCHEMA_V1)
+        || !advertises("methods", METHOD_WRITE)
+        || capabilities["authorization"][METHOD_WRITE].as_str() != Some("same_uid_workspace")
+        || capabilities["method_schemas"][METHOD_WRITE]["idempotency"].as_str()
+            != Some(DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1)
+    {
+        return Err("endpoint does not advertise durable keyed remember writes".to_owned());
+    }
+    if !capabilities["workspace_path"]
+        .as_str()
+        .is_some_and(|path| remember_daemon_path_matches(path, workspace))
+    {
+        return Err("endpoint is not bound to the requested workspace".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remember_via_daemon_before(
+    args: &RememberArgs,
+    workspace: &Path,
+    key: &str,
+    deadline: Instant,
+) -> Result<(serde_json::Value, String), DomainError> {
+    use crate::daemon::protocol::DaemonRequest;
+    use crate::daemon::server::{METHOD_CAPABILITIES, METHOD_WRITE, client_round_trip_before};
+    let socket = args
+        .daemon_socket
+        .clone()
+        .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(workspace));
+    let agent_name = crate::core::memory_scope::current_agent_name();
+    let agent_id = agent_name.as_deref().unwrap_or("ee-cli-remember");
+    let request_id = uuid::Uuid::now_v7().simple().to_string();
+    let mut capability_request = DaemonRequest::new(
+        format!("remember-capabilities-{request_id}"),
+        agent_id,
+        METHOD_CAPABILITIES,
+        serde_json::json!({}),
+    );
+    capability_request.workspace_id = Some(workspace.display().to_string());
+    let capabilities = client_round_trip_before(&socket, &capability_request, deadline)
+        .map_err(remember_daemon_unavailable)?;
+    if let Some(error) = capabilities.error {
+        return Err(remember_daemon_unavailable(format!(
+            "capability negotiation failed ({})",
+            error.code
+        )));
+    }
+    validate_remember_daemon_capabilities(
+        &capabilities.result.unwrap_or(serde_json::Value::Null),
+        workspace,
+    )
+    .map_err(remember_daemon_unavailable)?;
+    let params = serde_json::json!({
+        "workspacePath": workspace,
+        "content": args.content,
+        "level": args.level,
+        "kind": args.kind,
+        "tags": args.tags,
+        "confidence": args.confidence,
+        "source": args.source,
+        "workflowId": args.workflow,
+        "agentName": agent_name,
+        "validFrom": args.valid_from,
+        "validTo": args.valid_to,
+        "dryRun": args.dry_run,
+        "autoLink": !args.no_auto_link,
+        "proposeCandidates": !args.no_propose_candidates,
+        "idempotencyKey": key,
+    });
+    let mut request = DaemonRequest::new(
+        format!("remember-{request_id}"),
+        agent_id,
+        METHOD_WRITE,
+        params,
+    );
+    request.workspace_id = Some(workspace.display().to_string());
+    let encoded = serde_json::to_vec(&request).map_err(remember_daemon_unavailable)?;
+    if encoded.len() > crate::daemon::DAEMON_REQUEST_MAX_BYTES {
+        return Err(remember_daemon_unavailable(
+            "request exceeds the daemon frame limit",
+        ));
+    }
+    // Once this call starts, a timeout or invalid reply may follow COMMIT.
+    // Never turn any such error into a second in-process mutation. The durable
+    // key is the only supported retry identity, including after daemon restart.
+    let response = client_round_trip_before(&socket, &request, deadline)
+        .map_err(remember_daemon_outcome_unknown)?;
+    if let Some(error) = response.error {
+        return Err(remember_daemon_outcome_unknown(format!(
+            "daemon rejected the request ({}): {}",
+            error.code, error.message
+        )));
+    }
+    let result = response
+        .result
+        .ok_or_else(|| remember_daemon_outcome_unknown("missing result"))?;
+    if result["schema"].as_str() != Some("ee.daemon.write.v1") {
+        return Err(remember_daemon_outcome_unknown("unexpected result schema"));
+    }
+    if result["success"].as_bool() == Some(false) {
+        return Err(remember_daemon_write_error(&result["error"]));
+    }
+    remember_daemon_renderings(result, workspace, key, args.dry_run)
+        .map_err(remember_daemon_outcome_unknown)
+}
+
+#[cfg(unix)]
+fn remember_daemon_write_error(error: &serde_json::Value) -> DomainError {
+    let code = error["code"].as_str().unwrap_or("unknown");
+    let message = error["message"]
+        .as_str()
+        .unwrap_or("daemon write failed")
+        .to_owned();
+    let repair = Some(
+        "Inspect the reported error, then retry the original request with the same --idempotency-key and workspace."
+            .to_owned(),
+    );
+    match code {
+        crate::core::memory::REMEMBER_IDEMPOTENCY_CONFLICT_CODE => DomainError::UsageCodeWithDetails {
+            code: crate::core::memory::REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+            message,
+            repair: Some("Replay the original request for this key; use a new key only for an intentional separate write.".to_owned()),
+            details_json: "{}".to_owned(),
+        },
+        "usage" => DomainError::Usage { message, repair },
+        "configuration" => DomainError::Configuration { message, repair },
+        "policy_denied" => DomainError::PolicyDenied { message, repair },
+        "storage" => DomainError::Storage { message, repair },
+        _ => remember_daemon_outcome_unknown(format!("{code}: {message}")),
+    }
+}
+
+#[cfg(unix)]
+fn remember_daemon_path_matches(actual: &str, expected: &Path) -> bool {
+    let actual = Path::new(actual);
+    actual.is_absolute()
+        && fs::canonicalize(actual).unwrap_or_else(|_| actual.to_path_buf())
+            == fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf())
+}
+
+#[cfg(unix)]
+fn remember_daemon_renderings(
+    result: serde_json::Value,
+    workspace: &Path,
+    key: &str,
+    dry_run: bool,
+) -> Result<(serde_json::Value, String), String> {
+    use crate::daemon::server::DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1;
+    let string = |field: &str| {
+        result[field]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("missing or invalid daemon remember field {field}"))
+    };
+    if string("schema")? != "ee.daemon.write.v1"
+        || result["success"].as_bool() != Some(true)
+        || string("idempotencySchema")? != DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1
+        || string("idempotencyKey")? != key
+        || result["dryRun"].as_bool() != Some(dry_run)
+        || !remember_daemon_path_matches(string("workspacePath")?, workspace)
+    {
+        return Err("daemon remember acknowledgement does not match the request".to_owned());
+    }
+    let outcome = string("outcome")?;
+    let memory_id = string("entityId")?;
+    let workspace_id = string("workspaceId")?;
+    let index_status = string("indexStatus")?;
+    let report_status = string("reportStatus")?;
+    let created = match outcome {
+        "created" => true,
+        "already_recorded" => false,
+        _ => return Err("unknown daemon remember outcome".to_owned()),
+    };
+    if result["persisted"].as_bool() != Some(created && !dry_run)
+        || crate::models::MemoryId::from_str(memory_id).is_err()
+        || (if dry_run {
+            index_status
+                != if created {
+                    "dry_run_not_queued"
+                } else {
+                    "not_applicable"
+                }
+        } else {
+            !matches!(index_status, "indexed" | "queued" | "failed")
+        })
+    {
+        return Err("daemon remember persistence or index status is inconsistent".to_owned());
+    }
+    let index_job = result
+        .get("indexJobId")
+        .ok_or_else(|| "daemon remember omitted indexJobId".to_owned())?;
+    if created && !dry_run {
+        if index_job.as_str().is_none_or(str::is_empty) {
+            return Err("committed memory acknowledgement has no index job".to_owned());
+        }
+    } else if !index_job.is_null() {
+        return Err("preview or replay acknowledgement invented an index job".to_owned());
+    }
+    let outer_degraded = result["degraded"]
+        .as_array()
+        .ok_or_else(|| "daemon remember degradations are missing".to_owned())?;
+    let mut response = match report_status {
+        "complete" => {
+            let report = result["remember"].clone();
+            let data = &report["data"];
+            if report["schema"].as_str() != Some(crate::models::RESPONSE_SCHEMA_V2)
+                || report["success"].as_bool() != Some(true)
+                || data["command"].as_str() != Some("remember")
+                || data["memoryId"].as_str() != Some(memory_id)
+                || data["persisted"].as_bool() != Some(created && !dry_run)
+                || !report["degraded"].is_array()
+            {
+                return Err("canonical remember report disagrees with acknowledgement".to_owned());
+            }
+            let (workspace_field, database_field, dry_field, index_field) = if created {
+                if data["memory_id"].as_str() != Some(memory_id)
+                    || data["index_job_id"] != *index_job
+                    || data["indexJobId"] != *index_job
+                    || data["indexStatus"].as_str() != Some(index_status)
+                {
+                    return Err(
+                        "created remember report disagrees with committed identity".to_owned()
+                    );
+                }
+                ("workspace_id", "database_path", "dry_run", "index_status")
+            } else {
+                if data["status"].as_str() != Some("already_recorded")
+                    || data["idempotencyKey"].as_str() != Some(key)
+                {
+                    return Err("replay report disagrees with idempotency receipt".to_owned());
+                }
+                ("workspaceId", "databasePath", "dryRun", "indexStatus")
+            };
+            if data[workspace_field].as_str() != Some(workspace_id)
+                || data[dry_field].as_bool() != Some(dry_run)
+                || data[index_field].as_str() != Some(index_status)
+                || !data[database_field].as_str().is_some_and(|path| {
+                    remember_daemon_path_matches(path, &workspace.join(".ee").join("ee.db"))
+                })
+            {
+                return Err(
+                    "canonical remember report has a different workspace or index state".to_owned(),
+                );
+            }
+            report
+        }
+        "unavailable" if result["remember"].is_null() => serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": "remember",
+                "memoryId": memory_id,
+                "workspaceId": workspace_id,
+                "workspacePath": workspace,
+                "persisted": created && !dry_run,
+                "dryRun": dry_run,
+                "indexJobId": index_job,
+                "indexStatus": index_status,
+            },
+            "degraded": [],
+        }),
+        _ => return Err("invalid daemon remember report availability".to_owned()),
+    };
+    let degraded = response["degraded"]
+        .as_array_mut()
+        .ok_or_else(|| "invalid canonical remember degradations".to_owned())?;
+    for entry in outer_degraded {
+        if !entry.is_object()
+            || entry["code"].as_str().is_none()
+            || entry["message"].as_str().is_none()
+        {
+            return Err("invalid daemon remember degradation".to_owned());
+        }
+        if !degraded.contains(entry) {
+            degraded.push(entry.clone());
+        }
+    }
+    response["data"]["servingPath"] = serde_json::json!("daemon");
+    response["data"]["idempotencyKey"] = serde_json::json!(key);
+    response["data"]["outcome"] = serde_json::json!(outcome);
+    response["data"]["reportStatus"] = serde_json::json!(report_status);
+    if !created {
+        response["data"]["status"] = serde_json::json!("already_recorded");
+    }
+    let mut human = result["rememberHuman"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{}: {memory_id}\n",
+                if dry_run {
+                    "DRY RUN"
+                } else if created {
+                    "Stored memory"
+                } else {
+                    "Already recorded"
+                }
+            )
+        });
+    if !human.ends_with('\n') {
+        human.push('\n');
+    }
+    human.push_str(&format!("  Index: {index_status}\n"));
+    if report_status == "unavailable" {
+        human.push_str("  Full report unavailable; the acknowledged identity is retained.\n");
+    }
+    for entry in outer_degraded {
+        if let Some(message) = entry["message"].as_str() {
+            human.push_str(&format!(
+                "  {}: {message}\n",
+                entry["code"].as_str().unwrap_or("degraded")
+            ));
+        }
+    }
+    Ok((response, human))
+}
+
+/// `ee remember` entry point: routes between the single-memory path, explicit
+/// warm daemon writes, and the `--batch --stdin` JSONL surface (bd-1pi9m.4).
 fn handle_remember_command<W, E>(
     cli: &Cli,
     args: &RememberArgs,
@@ -60958,6 +61425,9 @@ where
     W: Write,
     E: Write,
 {
+    if args.use_daemon {
+        return handle_remember_via_daemon(cli, args, stdout, stderr);
+    }
     if args.batch || args.stdin {
         if args.global {
             let error = DomainError::Usage {
@@ -102030,6 +102500,52 @@ demos:
     }
 
     #[test]
+    fn remember_daemon_route_requires_explicit_retry_identity() -> TestResult {
+        for argv in [
+            vec!["ee", "remember", "A fact", "--use-daemon"],
+            vec!["ee", "remember", "A fact", "--daemon-socket", "daemon.sock"],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("daemon routing dependencies");
+            ensure_equal(
+                &error.kind(),
+                &clap::error::ErrorKind::MissingRequiredArgument,
+                "daemon remember cannot silently omit retry identity or opt-in",
+            )?;
+        }
+        let cli = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "A fact",
+            "--use-daemon",
+            "--idempotency-key",
+            "capture-7",
+            "--daemon-socket",
+            "daemon.sock",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(Command::Remember(args)) = cli.command else {
+            return Err("expected Remember command".to_owned());
+        };
+        ensure(args.use_daemon, "daemon route is explicit")?;
+        ensure_equal(
+            &args.idempotency_key.as_deref(),
+            &Some("capture-7"),
+            "retry key",
+        )?;
+        ensure_equal(
+            &args.daemon_socket.as_deref(),
+            &Some(Path::new("daemon.sock")),
+            "selected daemon socket",
+        )?;
+        let local = Cli::try_parse_from(["ee", "remember", "A local fact"])
+            .map_err(|error| error.to_string())?;
+        let Some(Command::Remember(args)) = local.command else {
+            return Err("expected local Remember command".to_owned());
+        };
+        ensure(!args.use_daemon, "default remember remains in process")
+    }
+
+    #[test]
     fn maintenance_history_preserves_unknown_import_mutation() -> TestResult {
         for (details, mutation, possible) in [
             (None, serde_json::json!(false), false),
@@ -102076,6 +102592,734 @@ demos:
                 &row["mutationMayHaveOccurred"],
                 &serde_json::json!(possible),
                 "history preserves import uncertainty",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_daemon_rejects_unsupported_companions_before_transport() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "remember",
+            "A fact with explicit creation controls",
+            "--use-daemon",
+            "--idempotency-key",
+            "capture-controls",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(Command::Remember(ref base)) = cli.command else {
+            return Err("expected Remember command".to_owned());
+        };
+        let cases: [(&str, fn(&mut super::RememberArgs)); 20] = [
+            ("--database", |args| {
+                args.database = Some(PathBuf::from("other.db"))
+            }),
+            ("--global", |args| args.global = true),
+            ("--batch", |args| args.batch = true),
+            ("--stdin", |args| args.stdin = true),
+            ("--reinforce", |args| args.reinforce = true),
+            ("--field", |args| {
+                args.typed_field_assignments
+                    .push("category=release".to_owned())
+            }),
+            ("--sentinel", |args| {
+                args.sentinels.push("path_exists:src/lib.rs".to_owned())
+            }),
+            ("--revive-when", |args| {
+                args.revive_when.push("path_exists:src/lib.rs".to_owned())
+            }),
+            ("--sentinel-stale-threshold-seconds", |args| {
+                args.sentinel_stale_threshold_seconds = Some(60)
+            }),
+            ("--seal", |args| args.seal = true),
+            ("--family", |args| {
+                args.attempt_family = Some("family".to_owned())
+            }),
+            ("--of-n", |args| args.attempt_family_of_n = Some(2)),
+            ("--attempt", |args| args.attempt_index = Some(1)),
+            ("--attempt-outcome", |args| {
+                args.attempt_outcome = Some("selected".to_owned())
+            }),
+            ("--from-commit", |args| {
+                args.from_commit = Some("HEAD".to_owned())
+            }),
+            ("--from-diff", |args| {
+                args.from_diff = Some("HEAD".to_owned())
+            }),
+            ("--from-worktree", |args| args.from_worktree = true),
+            ("--apply", |args| args.apply = true),
+            ("--defer-index", |args| args.defer_index = true),
+            ("--allow-secret-mention", |args| {
+                args.allow_secret_mention = true
+            }),
+        ];
+        for (flag, mutate) in cases {
+            let mut args = base.clone();
+            mutate(&mut args);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::handle_remember_command(&cli, &args, &mut stdout, &mut stderr);
+            ensure_equal(&exit, &ProcessExitCode::Usage, flag)?;
+            let output = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+            ensure_contains(&output, flag, "unsupported option is named")?;
+            ensure(
+                !directory.path().join(".ee").exists(),
+                "unsupported daemon options cannot create a local store",
+            )?;
+        }
+        for key in [None, Some(String::new()), Some(" \t ".to_owned())] {
+            let mut args = base.clone();
+            args.idempotency_key = key;
+            let error = super::validate_remember_daemon_args(&args)
+                .expect_err("programmatic callers must also supply a retry key");
+            ensure_equal(&error.code(), &"usage", "missing key refusal")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn daemon_remember_capabilities_fixture(workspace: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "ee.daemon",
+            "workspace_path": workspace,
+            "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
+            "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
+            "methods": [crate::daemon::server::METHOD_WRITE],
+            "authorization": {"ee.daemon.write": "same_uid_workspace"},
+            "method_schemas": {
+                "ee.daemon.write": {
+                    "idempotency": crate::daemon::server::DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1
+                }
+            },
+        })
+    }
+
+    #[cfg(unix)]
+    fn daemon_remember_result_fixture(
+        workspace: &Path,
+        created: bool,
+        dry_run: bool,
+        index_status: &str,
+        complete: bool,
+    ) -> serde_json::Value {
+        let memory_id = "mem_00000000000000000000000001";
+        // A relocated store retains its registered ID. It need not be the
+        // hash the current canonical path would generate for a new store.
+        let workspace_id = "wsp_registered_before_relocation";
+        let index_job = (created && !dry_run).then_some("sidx_00000000000000000000000001");
+        let canonical_warning = serde_json::json!({
+            "code": "remember_fixture_detail",
+            "severity": "low",
+            "message": "Canonical report detail is retained.",
+        });
+        let data = if created {
+            serde_json::json!({
+                "command": "remember",
+                "memoryId": memory_id,
+                "memory_id": memory_id,
+                "workspace_id": workspace_id,
+                "database_path": workspace.join(".ee/ee.db"),
+                "dry_run": dry_run,
+                "persisted": !dry_run,
+                "index_job_id": index_job,
+                "indexJobId": index_job,
+                "index_status": index_status,
+                "indexStatus": index_status,
+                "content": "Canonical content survives daemon rendering.",
+                "tags": ["release", "checksums"],
+                "producer": {"fixture": "caller identity retained"},
+            })
+        } else {
+            serde_json::json!({
+                "command": "remember",
+                "memoryId": memory_id,
+                "workspaceId": workspace_id,
+                "databasePath": workspace.join(".ee/ee.db"),
+                "dryRun": dry_run,
+                "persisted": false,
+                "indexStatus": index_status,
+                "idempotencyKey": "capture-7",
+                "status": "already_recorded",
+                "mode": "idempotent_replay",
+                "reinforced": false,
+            })
+        };
+        serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": true,
+            "idempotencySchema": crate::daemon::server::DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1,
+            "idempotencyKey": "capture-7",
+            "outcome": if created { "created" } else { "already_recorded" },
+            "dryRun": dry_run,
+            "entityId": memory_id,
+            "workspacePath": workspace,
+            "workspaceId": workspace_id,
+            "persisted": created && !dry_run,
+            "indexJobId": index_job,
+            "indexStatus": index_status,
+            "reportStatus": if complete { "complete" } else { "unavailable" },
+            "remember": complete.then(|| serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+                "degraded": [canonical_warning.clone()],
+            })),
+            "rememberHuman": complete.then_some("Canonical remember rendering\n"),
+            "degraded": [
+                canonical_warning,
+                {
+                    "code": "daemon_write_followup_failed",
+                    "severity": "medium",
+                    "message": "Optional follow-up needs inspection; retain the acknowledged identity.",
+                },
+            ],
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remember_daemon_preserves_full_and_compact_acknowledgements() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        for (created, dry_run, index_status) in [
+            (true, false, "indexed"),
+            (true, false, "queued"),
+            (true, false, "failed"),
+            (false, false, "indexed"),
+            (false, false, "queued"),
+            (false, false, "failed"),
+            (true, true, "dry_run_not_queued"),
+            (false, true, "not_applicable"),
+        ] {
+            for complete in [true, false] {
+                let result = daemon_remember_result_fixture(
+                    &workspace,
+                    created,
+                    dry_run,
+                    index_status,
+                    complete,
+                );
+                let (response, human) =
+                    super::remember_daemon_renderings(result, &workspace, "capture-7", dry_run)?;
+                ensure_equal(
+                    &response["success"],
+                    &serde_json::json!(true),
+                    "acknowledgement",
+                )?;
+                ensure_equal(
+                    &response["data"]["persisted"],
+                    &serde_json::json!(created && !dry_run),
+                    "replay and preview do not claim another persisted row",
+                )?;
+                ensure_equal(
+                    &response["data"]["indexStatus"],
+                    &serde_json::json!(index_status),
+                    "queued or failed publication does not revoke source acknowledgement",
+                )?;
+                ensure_equal(
+                    &response["data"]["servingPath"],
+                    &serde_json::json!("daemon"),
+                    "actual write route",
+                )?;
+                ensure_equal(
+                    &response["degraded"].as_array().map(Vec::len),
+                    &Some(2),
+                    "canonical and outer degradations retained without duplicate objects",
+                )?;
+                ensure_contains(&human, index_status, "human index state")?;
+                ensure_contains(
+                    &human,
+                    "Optional follow-up",
+                    "human post-commit degradation",
+                )?;
+                if complete && created {
+                    ensure_equal(
+                        &response["data"]["producer"],
+                        &serde_json::json!({"fixture": "caller identity retained"}),
+                        "canonical producer report is preserved",
+                    )?;
+                    ensure_contains(
+                        &human,
+                        "Canonical remember rendering",
+                        "canonical human output",
+                    )?;
+                }
+                if !created {
+                    ensure_equal(
+                        &response["data"]["status"],
+                        &serde_json::json!("already_recorded"),
+                        "replay outcome",
+                    )?;
+                }
+                if !complete {
+                    ensure_equal(
+                        &response["data"]["reportStatus"],
+                        &serde_json::json!("unavailable"),
+                        "compact acknowledgement remains explicit",
+                    )?;
+                    ensure_contains(&human, "Full report unavailable", "compact rendering")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remember_daemon_rejects_mismatched_receipts_and_nested_reports() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let original = daemon_remember_result_fixture(&workspace, true, false, "indexed", true);
+        for (pointer, replacement) in [
+            ("/schema", serde_json::json!("ee.daemon.write.future")),
+            ("/idempotencySchema", serde_json::json!("unknown")),
+            ("/idempotencyKey", serde_json::json!("another-key")),
+            ("/outcome", serde_json::json!("reinforced")),
+            (
+                "/entityId",
+                serde_json::json!("mem_00000000000000000000000002"),
+            ),
+            (
+                "/workspacePath",
+                serde_json::json!(workspace.join("different-workspace")),
+            ),
+            ("/workspaceId", serde_json::json!("another-workspace-id")),
+            ("/dryRun", serde_json::json!(true)),
+            ("/persisted", serde_json::json!(false)),
+            ("/indexStatus", serde_json::json!("unknown")),
+            ("/indexJobId", serde_json::Value::Null),
+            ("/remember", serde_json::Value::Null),
+            (
+                "/remember/data/memoryId",
+                serde_json::json!("mem_00000000000000000000000002"),
+            ),
+            (
+                "/remember/data/database_path",
+                serde_json::json!(workspace.join("other.db")),
+            ),
+            ("/remember/data/index_status", serde_json::json!("queued")),
+            (
+                "/remember/data/indexJobId",
+                serde_json::json!("another-job"),
+            ),
+            ("/remember/success", serde_json::json!(false)),
+            ("/degraded", serde_json::Value::Null),
+        ] {
+            let mut changed = original.clone();
+            *changed
+                .pointer_mut(pointer)
+                .ok_or("fixture field missing")? = replacement;
+            ensure(
+                super::remember_daemon_renderings(changed, &workspace, "capture-7", false).is_err(),
+                &format!("reject mismatched acknowledgement at {pointer}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn spawn_daemon_remember_test_peer<F>(
+        listener: std::os::unix::net::UnixListener,
+        exchanges: usize,
+        mut respond: F,
+    ) -> Result<
+        std::thread::JoinHandle<Result<Vec<crate::daemon::protocol::DaemonRequest>, String>>,
+        String,
+    >
+    where
+        F: FnMut(
+                &crate::daemon::protocol::DaemonRequest,
+            ) -> Result<Option<crate::daemon::protocol::DaemonResponse>, String>
+            + Send
+            + 'static,
+    {
+        use std::io::Read;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        Ok(std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..exchanges {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(
+                                    "timed out waiting for expected daemon request".to_owned()
+                                );
+                            }
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|error| error.to_string())?;
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|error| error.to_string())?;
+                let mut prefix = [0_u8; 4];
+                stream
+                    .read_exact(&mut prefix)
+                    .map_err(|error| error.to_string())?;
+                let length = usize::try_from(u32::from_be_bytes(prefix))
+                    .map_err(|error| error.to_string())?;
+                if length > crate::daemon::DAEMON_REQUEST_MAX_BYTES {
+                    return Err("oversized fixture request".to_owned());
+                }
+                let mut bytes = vec![0; length];
+                stream
+                    .read_exact(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                let request: crate::daemon::protocol::DaemonRequest =
+                    serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                let response = respond(&request)?;
+                requests.push(request);
+                if let Some(response) = response {
+                    let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+                    let length = u32::try_from(bytes.len()).map_err(|error| error.to_string())?;
+                    stream
+                        .write_all(&length.to_be_bytes())
+                        .map_err(|error| error.to_string())?;
+                    stream
+                        .write_all(&bytes)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(requests)
+        }))
+    }
+
+    #[cfg(unix)]
+    fn daemon_remember_test_cli(
+        workspace: &Path,
+        socket: &Path,
+        content: &str,
+    ) -> Result<Cli, String> {
+        let workspace = workspace.to_string_lossy();
+        let socket = socket.to_string_lossy();
+        Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            workspace.as_ref(),
+            "--json",
+            "remember",
+            content,
+            "--source",
+            "manual://daemon-cli-retry",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--use-daemon",
+            "--daemon-socket",
+            socket.as_ref(),
+            "--idempotency-key",
+            "capture-7",
+        ])
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    fn run_daemon_remember_test_cli(
+        cli: &Cli,
+    ) -> Result<(ProcessExitCode, serde_json::Value), String> {
+        let Some(Command::Remember(ref args)) = cli.command else {
+            return Err("expected Remember command".to_owned());
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = super::handle_remember_command(cli, args, &mut stdout, &mut stderr);
+        ensure(stderr.is_empty(), "JSON daemon write has no human stderr")?;
+        let response = serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
+        Ok((exit, response))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remember_daemon_negotiates_retry_contract_and_workspace_before_writing() -> TestResult {
+        use crate::daemon::protocol::DaemonResponse;
+        for foreign_workspace in [false, true] {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = directory
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let socket = workspace.join("remember.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket)
+                .map_err(|error| error.to_string())?;
+            let mut capabilities = daemon_remember_capabilities_fixture(&workspace);
+            if foreign_workspace {
+                capabilities["workspace_path"] = serde_json::json!(workspace.join("foreign"));
+            } else {
+                capabilities["method_schemas"]["ee.daemon.write"]["idempotency"] =
+                    serde_json::Value::Null;
+            }
+            let peer = spawn_daemon_remember_test_peer(listener, 1, move |request| {
+                Ok(Some(DaemonResponse::ok(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    capabilities.clone(),
+                )))
+            })?;
+            let cli = daemon_remember_test_cli(&workspace, &socket, "Never send this write")?;
+            let outcome = run_daemon_remember_test_cli(&cli);
+            let requests = peer
+                .join()
+                .map_err(|_| "daemon fixture panicked".to_owned())??;
+            let (exit, response) = outcome?;
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::UnsatisfiedDegradedMode,
+                "incompatible daemon cannot accept a write",
+            )?;
+            ensure_equal(
+                &response["error"]["code"],
+                &serde_json::json!("daemon_remember_unavailable"),
+                "failure is before mutation",
+            )?;
+            ensure_equal(&requests.len(), &1, "only capability negotiation occurred")?;
+            ensure_equal(
+                &requests[0].method.as_str(),
+                &crate::daemon::server::METHOD_CAPABILITIES,
+                "no write request was sent",
+            )?;
+            ensure(
+                !workspace.join(".ee").exists(),
+                "no automatic local fallback write",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    fn remember_daemon_lost_ack_retries_original_identity_and_preserves_search_visibility()
+    -> TestResult {
+        use crate::daemon::protocol::DaemonResponse;
+        use crate::daemon::server::{METHOD_CAPABILITIES, METHOD_WRITE};
+        use crate::db::{CreateWorkspaceInput, DbConnection};
+
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("daemon CLI retry fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let socket = workspace.join("remember.sock");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).map_err(|error| error.to_string())?;
+        let capabilities = daemon_remember_capabilities_fixture(&workspace);
+        let mut writes = 0;
+        let peer = spawn_daemon_remember_test_peer(listener, 6, move |request| {
+            if request.method == METHOD_CAPABILITIES {
+                return Ok(Some(DaemonResponse::ok(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    capabilities.clone(),
+                )));
+            }
+            if request.method != METHOD_WRITE {
+                return Err("unexpected fixture method".to_owned());
+            }
+            writes += 1;
+            // This is the real keyed daemon dispatcher and core receipt path.
+            // Only delivery is simulated: the first committed ACK is lost.
+            let response = crate::daemon::server::dispatch(request);
+            if writes == 1 {
+                if response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value["persisted"].as_bool())
+                    != Some(true)
+                {
+                    return Err(format!("first fixture write did not commit: {response:?}"));
+                }
+                Ok(None)
+            } else {
+                Ok(Some(response))
+            }
+        })?;
+
+        let content = "Quasar release verification requires signed artifact checksums.";
+        let cli = daemon_remember_test_cli(&workspace, &socket, content)?;
+        let outcome = (|| -> TestResult {
+            let (first_exit, first) = run_daemon_remember_test_cli(&cli)?;
+            ensure_equal(
+                &first_exit,
+                &ProcessExitCode::UnsatisfiedDegradedMode,
+                "lost ACK is an unknown outcome, not permission for a second write",
+            )?;
+            ensure_equal(
+                &first["error"]["code"],
+                &serde_json::json!("daemon_remember_outcome_unknown"),
+                "retryable unknown outcome",
+            )?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &connection
+                    .count_table_rows("memories")
+                    .map_err(|error| error.to_string())?,
+                &1,
+                "the daemon committed exactly one row before ACK loss",
+            )?;
+            drop(connection);
+
+            let (retry_exit, retried) = run_daemon_remember_test_cli(&cli)?;
+            ensure_equal(
+                &retry_exit,
+                &ProcessExitCode::Success,
+                "same-key recovery succeeds",
+            )?;
+            ensure_equal(
+                &retried["data"]["status"],
+                &serde_json::json!("already_recorded"),
+                "retry acknowledges the original receipt",
+            )?;
+            ensure_equal(
+                &retried["data"]["persisted"],
+                &serde_json::json!(false),
+                "retry does not claim another source write",
+            )?;
+            ensure_equal(
+                &retried["data"]["servingPath"],
+                &serde_json::json!("daemon"),
+                "retry really used the daemon",
+            )?;
+            ensure_equal(
+                &retried["data"]["indexStatus"],
+                &serde_json::json!("indexed"),
+                "publication remains complete after idempotent retry",
+            )?;
+            let memory_id = retried["data"]["memoryId"]
+                .as_str()
+                .ok_or("replayed memory ID")?;
+
+            let changed =
+                daemon_remember_test_cli(&workspace, &socket, "Different content under same key")?;
+            let (conflict_exit, conflict) = run_daemon_remember_test_cli(&changed)?;
+            ensure_equal(
+                &conflict_exit,
+                &ProcessExitCode::Usage,
+                "changed request conflicts",
+            )?;
+            ensure_equal(
+                &conflict["error"]["code"],
+                &serde_json::json!(crate::core::memory::REMEMBER_IDEMPOTENCY_CONFLICT_CODE),
+                "core replay conflict identity survives CLI transport",
+            )?;
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &connection
+                    .count_table_rows("memories")
+                    .map_err(|error| error.to_string())?,
+                &1,
+                "retry and conflict never duplicate the source",
+            )?;
+            let memory = connection
+                .get_memory(memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("original memory remains")?;
+            ensure_equal(
+                &memory.content.as_str(),
+                &content,
+                "original content is unchanged",
+            )?;
+            drop(connection);
+
+            let workspace_arg = workspace.to_string_lossy();
+            let (search_exit, search_json, search_stderr) = invoke(&[
+                "ee",
+                "--workspace",
+                workspace_arg.as_ref(),
+                "--json",
+                "search",
+                "quasar",
+                "--source-mode",
+                "lexical-only",
+            ]);
+            ensure_equal(
+                &search_exit,
+                &ProcessExitCode::Success,
+                "immediate search succeeds",
+            )?;
+            ensure(search_stderr.is_empty(), "search JSON stderr")?;
+            let search: serde_json::Value =
+                serde_json::from_str(&search_json).map_err(|error| error.to_string())?;
+            ensure(
+                search["data"]["results"].as_array().is_some_and(|results| {
+                    results.iter().any(|row| {
+                        row["docId"]
+                            .as_str()
+                            .is_some_and(|id| id.ends_with(memory_id))
+                    })
+                }),
+                "the acknowledged memory is immediately searchable",
+            )?;
+            Ok(())
+        })();
+        let requests = peer
+            .join()
+            .map_err(|_| "daemon fixture panicked".to_owned())?;
+        outcome?;
+        let requests = requests?;
+        ensure_equal(
+            &requests
+                .iter()
+                .filter(|request| request.method == METHOD_WRITE)
+                .count(),
+            &3,
+            "one wire write per invocation; no invisible fallback or transport retry",
+        )?;
+        for request in requests
+            .iter()
+            .filter(|request| request.method == METHOD_WRITE)
+        {
+            ensure_equal(
+                &request.params["idempotencyKey"],
+                &serde_json::json!("capture-7"),
+                "all retries preserve the explicit key",
+            )?;
+            ensure_equal(
+                &request.workspace_id.as_deref(),
+                &workspace.to_str(),
+                "transport identity is the canonical workspace path",
             )?;
         }
         Ok(())
