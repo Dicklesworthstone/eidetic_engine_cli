@@ -29,7 +29,7 @@ use fnx_runtime::CompatibilityMode;
 
 use serde::Serialize;
 
-use crate::db::{DbConnection, MemoryLinkRelation};
+use crate::db::{DbConnection, MemoryLinkRelation, StoredMemoryLink};
 use crate::graph::health::{
     ContradictionCluster, ContradictionClusterPolicy, ContradictionSeverity,
     detect_contradiction_clusters_with_policy,
@@ -316,13 +316,35 @@ pub(crate) const CONFLICT_RESOLUTION_AUDIT_SCHEMA: &str = "ee.conflict.resolutio
 fn load_completed_conflict_pairs(
     connection: &DbConnection,
 ) -> crate::db::Result<BTreeSet<(String, String)>> {
+    load_completed_conflict_pairs_filtered(connection, None)
+}
+
+fn load_completed_conflict_pairs_filtered(
+    connection: &DbConnection,
+    conflict_ids: Option<&[&str]>,
+) -> crate::db::Result<BTreeSet<(String, String)>> {
     use sqlmodel_core::Value;
 
-    let rows = connection.query(
+    if conflict_ids.is_some_and(|ids| ids.is_empty()) {
+        return Ok(BTreeSet::new());
+    }
+    let mut params = vec![
+        Value::Text(CONFLICT_RESOLUTION_AUDIT_ACTION.to_owned()),
+        Value::Text(CONFLICT_RESOLUTION_AUDIT_SCHEMA.to_owned()),
+    ];
+    let filter = conflict_ids.map_or_else(String::new, |ids| {
+        params.extend(ids.iter().map(|id| Value::Text((*id).to_owned())));
+        let slots = (3..3 + ids.len())
+            .map(|slot| format!("?{slot}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND target_id IN ({slots})")
+    });
+    let sql = format!(
         "WITH resolutions AS (\
              SELECT workspace_id, target_id, \
                     CASE WHEN json_valid(details) THEN details ELSE NULL END AS details \
-             FROM audit_log WHERE action = ?1 AND target_type = 'conflict'\
+             FROM audit_log WHERE action = ?1 AND target_type = 'conflict'{filter}\
          ) \
          SELECT first.id, second.id, resolution.target_id \
          FROM resolutions AS resolution \
@@ -346,12 +368,9 @@ fn load_completed_conflict_pairs(
                        WHERE provenance.src_memory_id = decision.id \
                          AND provenance.dst_memory_id = second.id \
                          AND provenance.relation = 'derived_from' AND provenance.directed = 1) \
-         ORDER BY first.id ASC, second.id ASC",
-        &[
-            Value::Text(CONFLICT_RESOLUTION_AUDIT_ACTION.to_owned()),
-            Value::Text(CONFLICT_RESOLUTION_AUDIT_SCHEMA.to_owned()),
-        ],
-    )?;
+         ORDER BY first.id ASC, second.id ASC"
+    );
+    let rows = connection.query(&sql, &params)?;
     let mut resolved = BTreeSet::new();
     for row in rows {
         let (Some(a), Some(b), Some(conflict_id)) = (
@@ -365,6 +384,34 @@ fn load_completed_conflict_pairs(
             resolved.insert((a.to_owned(), b.to_owned()));
         }
     }
+    Ok(resolved)
+}
+
+fn load_completed_candidate_conflict_pairs(
+    connection: &DbConnection,
+    edges: &[ConflictEdge],
+) -> crate::db::Result<BTreeSet<(String, String)>> {
+    let pairs = edges
+        .iter()
+        .filter_map(canonical_pair)
+        .collect::<BTreeSet<_>>();
+    let conflict_ids = pairs
+        .iter()
+        .map(|(a, b)| conflict_pair_id(a, b))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut resolved = BTreeSet::new();
+    for page in conflict_ids.chunks(256) {
+        let ids = page.iter().map(String::as_str).collect::<Vec<_>>();
+        resolved.extend(load_completed_conflict_pairs_filtered(
+            connection,
+            Some(&ids),
+        )?);
+    }
+    // A compact conflict ID locates audits; the complete canonical pair is
+    // still the authority, including in the event of a digest collision.
+    resolved.retain(|pair| pairs.contains(pair));
     Ok(resolved)
 }
 
@@ -406,10 +453,34 @@ const DEFERRED_SIGNAL_KINDS: [ExplicitConflictSignal; 4] = [
 /// [`detect_explicit_contradictions`].
 #[must_use]
 pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConflictEdges {
+    gather_conflict_edges_from_links(connection, connection.list_all_memory_links(None), false)
+}
+
+/// Gather only conflicts that can affect an already-selected context pack.
+/// Both endpoints must belong to the candidate set, and only encountered
+/// pairs consult their resolution audits. The caller owns the source snapshot.
+/// Full-workspace conflict inspection continues to use the complete gather.
+#[must_use]
+pub(crate) fn gather_candidate_conflict_edges(
+    connection: &DbConnection,
+    memory_ids: &[&str],
+) -> GatheredConflictEdges {
+    gather_conflict_edges_from_links(
+        connection,
+        connection.list_conflict_links_for_candidates(memory_ids),
+        true,
+    )
+}
+
+fn gather_conflict_edges_from_links(
+    connection: &DbConnection,
+    links: crate::db::Result<Vec<StoredMemoryLink>>,
+    candidate_scoped: bool,
+) -> GatheredConflictEdges {
     let gathered = GATHERED_SIGNAL_KINDS.to_vec();
     let deferred = DEFERRED_SIGNAL_KINDS.to_vec();
 
-    let links = match connection.list_all_memory_links(None) {
+    let links = match links {
         Ok(links) => links,
         Err(error) => {
             return GatheredConflictEdges {
@@ -438,7 +509,12 @@ pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConf
         ));
     }
 
-    let (resolved_pairs, read_error) = match load_completed_conflict_pairs(connection) {
+    let resolutions = if candidate_scoped {
+        load_completed_candidate_conflict_pairs(connection, &edges)
+    } else {
+        load_completed_conflict_pairs(connection)
+    };
+    let (resolved_pairs, read_error) = match resolutions {
         Ok(resolved) => (resolved, None),
         Err(error) => (
             BTreeSet::new(),
@@ -1500,7 +1576,7 @@ mod tests {
         CONFLICT_SURFACE_SCHEMA_V1, ConflictEdge, ContradictionDetectionConfig,
         ExplicitConflictSignal, assemble_conflict_surface, canonical_pair,
         detect_explicit_contradictions, detect_explicit_contradictions_from_connection,
-        gather_explicit_conflict_edges, trust_class_rank,
+        gather_candidate_conflict_edges, gather_explicit_conflict_edges, trust_class_rank,
     };
     use crate::db::{
         CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
@@ -1911,6 +1987,242 @@ mod tests {
     }
 
     #[test]
+    fn candidate_gather_reads_only_selected_pairs_and_their_resolution_authority() {
+        const OTHER_WS: &str = "wsp_00000000000000000000000073";
+        const OTHER_A: &str = "mem_00000000000000000000000004";
+        const OTHER_B: &str = "mem_00000000000000000000000005";
+        const OTHER_DECISION: &str = "mem_00000000000000000000000006";
+        let (connection, mut audit) = completed_resolution_fixture("both-valid", 2);
+        connection
+            .insert_audit(&generate_audit_id(), &audit)
+            .unwrap();
+        connection
+            .insert_workspace(
+                OTHER_WS,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-unselected-conflict-workspace".to_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        for id in [OTHER_A, OTHER_B, OTHER_DECISION] {
+            seed_memory(&connection, id);
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{OTHER_WS}' WHERE id = '{id}'"
+                ))
+                .unwrap();
+        }
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET kind = 'decision' WHERE id = '{OTHER_DECISION}'"
+            ))
+            .unwrap();
+        for (number, from, to, relation) in [
+            (4, MEM_A, MEM_C, MemoryLinkRelation::Supersedes),
+            (5, OTHER_A, OTHER_B, MemoryLinkRelation::Contradicts),
+            (6, OTHER_DECISION, OTHER_A, MemoryLinkRelation::DerivedFrom),
+            (7, OTHER_DECISION, OTHER_B, MemoryLinkRelation::DerivedFrom),
+        ] {
+            let link_id = format!("link_{number:026}");
+            seed_link(&connection, &link_id, from, to, relation);
+            if relation == MemoryLinkRelation::DerivedFrom {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memory_links SET directed = 1 WHERE id = '{link_id}'"
+                    ))
+                    .unwrap();
+            }
+        }
+        let other_conflict = super::conflict_pair_id(OTHER_A, OTHER_B);
+        audit.workspace_id = Some(OTHER_WS.to_owned());
+        audit.target_id = Some(other_conflict.clone());
+        audit.details = Some(
+            serde_json::json!({
+                "schema": super::CONFLICT_RESOLUTION_AUDIT_SCHEMA,
+                "conflictId": other_conflict,
+                "memoryA": OTHER_A,
+                "memoryB": OTHER_B,
+                "verb": "both-valid",
+                "resolutionDecisionId": OTHER_DECISION,
+            })
+            .to_string(),
+        );
+        connection
+            .insert_audit(&generate_audit_id(), &audit)
+            .unwrap();
+        let full = gather_explicit_conflict_edges(&connection);
+        assert_eq!(full.edges.len(), 3);
+        assert_eq!(full.resolved_pairs.len(), 2);
+
+        let before = connection.logical_table_digests().unwrap();
+        let (selected, queries) = crate::db::capture_query_sql_for_test(|| {
+            gather_candidate_conflict_edges(&connection, &[MEM_B, MEM_A, MEM_A])
+        });
+        assert!(selected.read_error.is_none());
+        assert_eq!(
+            selected.edges,
+            [ConflictEdge::new(
+                MEM_A,
+                MEM_B,
+                ExplicitConflictSignal::ContradictionLink
+            )]
+        );
+        assert_eq!(
+            selected.resolved_pairs,
+            [(MEM_A.to_owned(), MEM_B.to_owned())]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(selected.gathered, full.gathered);
+        assert_eq!(selected.deferred, full.deferred);
+        assert_eq!(queries.len(), 2, "one edge page and one resolution page");
+        assert!(queries[0].contains("src_memory_id IN (?1, ?2) AND dst_memory_id IN (?3, ?4)"));
+        assert!(queries[1].contains("target_type = 'conflict' AND target_id IN (?3)"));
+        assert_eq!(connection.logical_table_digests().unwrap(), before);
+
+        let other = gather_candidate_conflict_edges(&connection, &[OTHER_A, OTHER_B]);
+        assert_eq!(other.edges.len(), 1);
+        assert_eq!(
+            other.resolved_pairs,
+            [(OTHER_A.to_owned(), OTHER_B.to_owned())]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        let (disjoint, queries) = crate::db::capture_query_sql_for_test(|| {
+            gather_candidate_conflict_edges(&connection, &[MEM_A, OTHER_A])
+        });
+        assert!(disjoint.edges.is_empty() && disjoint.resolved_pairs.is_empty());
+        assert_eq!(queries.len(), 1, "no encountered pair needs an audit query");
+
+        connection
+            .execute_raw("UPDATE memory_links SET evidence_count = 4294967296 WHERE id = 'link_00000000000000000000000005'")
+            .unwrap();
+        let selected = gather_candidate_conflict_edges(&connection, &[MEM_A, MEM_B]);
+        assert!(selected.read_error.is_none());
+        assert_eq!(
+            selected.edges.len(),
+            1,
+            "unselected malformed links are not hydrated"
+        );
+        let damaged = gather_candidate_conflict_edges(&connection, &[OTHER_A, OTHER_B]);
+        assert!(damaged.edges.is_empty() && damaged.read_error.is_some());
+    }
+
+    #[test]
+    fn candidate_gather_pages_both_endpoints_without_losing_cross_page_edges() {
+        let connection = open_seeded_db();
+        let ids = (1..=257)
+            .map(|number| format!("mem_{number:026}"))
+            .collect::<Vec<_>>();
+        for id in [&ids[0], &ids[1], &ids[256]] {
+            seed_memory(&connection, id);
+        }
+        for (link, from, to, relation) in [
+            (LINK_1, &ids[0], &ids[256], MemoryLinkRelation::Contradicts),
+            (LINK_2, &ids[256], &ids[1], MemoryLinkRelation::Supersedes),
+            (LINK_3, &ids[0], &ids[1], MemoryLinkRelation::Contradicts),
+        ] {
+            seed_link(&connection, link, from, to, relation);
+        }
+        let full = gather_explicit_conflict_edges(&connection);
+        let refs = ids.iter().rev().map(String::as_str).collect::<Vec<_>>();
+        let (selected, queries) = crate::db::capture_query_sql_for_test(|| {
+            gather_candidate_conflict_edges(&connection, &refs)
+        });
+        assert!(selected.read_error.is_none());
+        assert_eq!(selected.edges, full.edges);
+        assert_eq!(selected.edges.len(), 3);
+        let edge_queries = queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memory_links WHERE src_memory_id IN ("))
+            .collect::<Vec<_>>();
+        assert_eq!(edge_queries.len(), 4, "two endpoint pages on each side");
+        assert!(
+            edge_queries
+                .iter()
+                .all(|sql| sql.contains("AND dst_memory_id IN ("))
+        );
+        assert!(edge_queries.iter().any(|sql| sql.contains("?512)")));
+        assert!(queries.iter().all(|sql| !sql.contains("?513")));
+        assert_eq!(
+            queries.len(),
+            5,
+            "only the three discovered pairs read audits"
+        );
+
+        let (empty, queries) = crate::db::capture_query_sql_for_test(|| {
+            gather_candidate_conflict_edges(&connection, &[])
+        });
+        assert!(empty.edges.is_empty() && empty.read_error.is_none());
+        assert!(queries.is_empty());
+    }
+
+    #[test]
+    fn candidate_resolution_pages_preserve_historical_and_missing_decision_semantics() {
+        let (connection, audit) = completed_resolution_fixture("both-valid", 2);
+        connection
+            .insert_audit(&generate_audit_id(), &audit)
+            .unwrap();
+        let expected = [(MEM_A.to_owned(), MEM_B.to_owned())]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        for historical in [false, true] {
+            if historical {
+                connection
+                    .mark_memory_superseded(MEM_C, "2030-01-01T00:00:00Z")
+                    .unwrap();
+                connection.tombstone_memory(MEM_C).unwrap();
+            }
+            let selected = gather_candidate_conflict_edges(&connection, &[MEM_A, MEM_B]);
+            assert!(selected.read_error.is_none());
+            assert_eq!(selected.resolved_pairs, expected);
+            assert_eq!(
+                selected.resolved_pairs,
+                gather_explicit_conflict_edges(&connection).resolved_pairs,
+                "a retired decision remains the durable historical resolution"
+            );
+        }
+        connection
+            .execute_raw(&format!("DELETE FROM memories WHERE id = '{MEM_C}'"))
+            .unwrap();
+        let selected = gather_candidate_conflict_edges(&connection, &[MEM_A, MEM_B]);
+        assert_eq!(selected.edges.len(), 1);
+        assert!(selected.resolved_pairs.is_empty() && selected.read_error.is_none());
+        assert_eq!(
+            selected.resolved_pairs,
+            gather_explicit_conflict_edges(&connection).resolved_pairs,
+            "missing decision authority cannot settle a pair"
+        );
+
+        // Exercise the audit bind bound independently of endpoint paging.
+        let edges = (10..=266)
+            .map(|number| {
+                ConflictEdge::new(
+                    MEM_A,
+                    &format!("mem_{number:026}"),
+                    ExplicitConflictSignal::ContradictionLink,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+            super::load_completed_candidate_conflict_pairs(&connection, &edges)
+        });
+        assert!(resolved.unwrap().is_empty());
+        assert_eq!(queries.len(), 2, "257 pairs use two resolution pages");
+        assert!(queries.iter().all(|sql| sql.contains("AND target_id IN (")));
+        assert!(queries.iter().any(|sql| sql.contains("?258)")));
+        assert!(queries.iter().all(|sql| !sql.contains("?259")));
+
+        connection
+            .execute_raw("ALTER TABLE audit_log RENAME TO unavailable_conflict_audits")
+            .unwrap();
+        let unavailable = gather_candidate_conflict_edges(&connection, &[MEM_A, MEM_B]);
+        assert_eq!(unavailable.edges.len(), 1);
+        assert!(unavailable.resolved_pairs.is_empty() && unavailable.read_error.is_some());
+    }
+
+    #[test]
     fn trust_class_rank_follows_the_canonical_store_taxonomy() {
         assert!(trust_class_rank("human_explicit") > trust_class_rank("peer_human_attested"));
         assert!(trust_class_rank("peer_human_attested") > trust_class_rank("agent_validated"));
@@ -2171,6 +2483,16 @@ mod tests {
             assert!(
                 surface.degraded.is_empty(),
                 "malformed authority is ignored safely: {defect}"
+            );
+            let selected = gather_candidate_conflict_edges(&connection, &[MEM_B, MEM_A]);
+            assert_eq!(
+                selected.edges.len(),
+                1,
+                "{defect} retains explicit evidence"
+            );
+            assert!(
+                selected.resolved_pairs.is_empty() && selected.read_error.is_none(),
+                "candidate filtering preserves the same authority checks: {defect}"
             );
         }
     }

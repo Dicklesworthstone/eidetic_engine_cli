@@ -18794,7 +18794,16 @@ fn apply_context_pack_contradiction_guard(connection: &DbConnection, draft: &mut
     if draft.items.len() < 2 {
         return;
     }
-    let gathered = crate::core::contradiction_detect::gather_explicit_conflict_edges(connection);
+    let memory_ids = draft
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect::<Vec<_>>();
+    let selected_ids = memory_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let gathered = crate::core::contradiction_detect::gather_candidate_conflict_edges(
+        connection,
+        &selected_ids,
+    );
     if let Some(read_error) = gathered.read_error.as_deref() {
         tracing::warn!(
             target: "ee::pack::contradiction_guard",

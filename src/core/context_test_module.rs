@@ -16619,7 +16619,16 @@ pub fn unrelated_context() -> u64 {{
 
         fn assert_retained(&self, expected: usize) {
             let mut draft = self.draft.clone();
-            super::apply_context_pack_contradiction_guard(&self.db, &mut draft);
+            let (_, queries) = crate::db::capture_query_sql_for_test(|| {
+                super::apply_context_pack_contradiction_guard(&self.db, &mut draft);
+            });
+            assert_eq!(
+                queries.len(),
+                2,
+                "selected pair and its resolution authority"
+            );
+            assert!(queries[0].contains("src_memory_id IN (?1, ?2) AND dst_memory_id IN (?3, ?4)"));
+            assert!(queries[1].contains("target_type = 'conflict' AND target_id IN (?3)"));
             assert_eq!(draft.items.len(), expected);
             assert_eq!(draft.selection_audit.selected_count, expected);
             assert_eq!(draft.omitted.len(), 2 - expected);

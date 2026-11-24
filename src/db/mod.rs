@@ -45,6 +45,7 @@ use crate::models::{
 };
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
+mod conflict_candidates;
 mod evidence_admission_counts;
 mod evidence_lifecycle;
 mod evidence_reader_projection;
