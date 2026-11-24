@@ -91,13 +91,36 @@ impl DbConnection {
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let sql = format!(
-                "{EFFECTIVE_MEMORY_SEAL_SELECT} WHERE candidate.id IN ({placeholders}) ORDER BY candidate.id ASC"
-            );
             let params: Vec<_> = page
                 .iter()
                 .map(|id| Value::Text((*id).to_owned()))
                 .collect();
+            // Ordinary imported corpora have neither seals nor revisions. A
+            // single statement can prove that these candidates need no joined
+            // authority hydration, even without a caller-held read snapshot.
+            // Explicit roots and malformed authority fields still require the
+            // strict decoder below; absence of sidecars alone is not enough.
+            let absence_probe = format!(
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM memory_seals LIMIT 1) \
+                 OR EXISTS (SELECT 1 FROM memories WHERE id IN ({placeholders}) AND (\
+                     typeof(id) != 'text' OR typeof(workspace_id) != 'text' OR (\
+                         logical_id IS NOT NULL AND (\
+                             typeof(logical_id) != 'text' OR logical_id != id\
+                         )\
+                     )\
+                 ) LIMIT 1)"
+            );
+            if self
+                .query_for(DbOperation::Query, &absence_probe, &params)
+                .is_ok_and(|rows| rows.is_empty())
+            {
+                continue;
+            }
+            // Probe failures preserve the original authority read and error;
+            // they must never turn unavailable seal state into disclosure.
+            let sql = format!(
+                "{EFFECTIVE_MEMORY_SEAL_SELECT} WHERE candidate.id IN ({placeholders}) ORDER BY candidate.id ASC"
+            );
             for row in self.query_for(DbOperation::Query, &sql, &params)? {
                 if let Some((memory_id, seal)) = effective_memory_seal_from_row(&row)? {
                     seals.insert(memory_id, seal);
@@ -201,6 +224,159 @@ mod tests {
         )
     }
 
+    fn joined_effective_seals_reference(
+        connection: &DbConnection,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, MemorySeal>> {
+        let ids: Vec<_> = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut seals = BTreeMap::new();
+        for page in ids.chunks(256) {
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "{EFFECTIVE_MEMORY_SEAL_SELECT} WHERE candidate.id IN ({placeholders}) ORDER BY candidate.id ASC"
+            );
+            let params: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in connection.query_for(DbOperation::Query, &sql, &params)? {
+                if let Some((memory_id, seal)) = effective_memory_seal_from_row(&row)? {
+                    seals.insert(memory_id, seal);
+                }
+            }
+        }
+        Ok(seals)
+    }
+
+    #[test]
+    fn effective_seals_skip_joined_hydration_for_unsealed_roots() -> TestResult {
+        let connection = fixture()?;
+        let ids: Vec<_> = (0..257).map(|index| format!("mem_{index:026}")).collect();
+        for index in [0, 1, 256] {
+            memory(&connection, &ids[index], WORKSPACE, &ids[index])?;
+        }
+        connection.execute_raw(&format!(
+            "UPDATE memories SET logical_id = NULL WHERE id = '{}'",
+            ids[1]
+        ))?;
+        // A broken unrequested lineage must not contaminate this candidate batch.
+        memory(
+            &connection,
+            "mem_00000000000000000000000999",
+            FOREIGN_WORKSPACE,
+            "mem_00000000000000000000000998",
+        )?;
+        let mut requested: Vec<_> = ids.iter().rev().map(String::as_str).collect();
+        requested.extend([ids[0].as_str(), ids[256].as_str(), "not-a-memory-id", ""]);
+        let before = connection.logical_table_digests()?;
+        let expected = joined_effective_seals_reference(&connection, &requested)?;
+        let (actual, queries) =
+            capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&requested));
+        assert_eq!(actual?, expected);
+        assert!(expected.is_empty());
+        assert_eq!(queries.len(), 2, "one absence witness per deduplicated page");
+        assert!(queries.iter().all(|sql| {
+            sql.contains("EXISTS")
+                && !sql.contains("JOIN")
+                && !sql.contains("?257")
+                && !sql.contains("content")
+        }));
+        assert_eq!(connection.logical_table_digests()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_seals_validate_unsealed_revision_roots_before_absence() -> TestResult {
+        let connection = fixture()?;
+        let root = "mem_00000000000000000000000300";
+        let child = "mem_00000000000000000000000301";
+        memory(&connection, root, WORKSPACE, root)?;
+        memory(&connection, child, WORKSPACE, root)?;
+        let expected = joined_effective_seals_reference(&connection, &[child])?;
+        let (actual, queries) =
+            capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&[child]));
+        assert_eq!(actual?, expected);
+        assert_eq!(queries.len(), 2);
+        assert!(queries[1].contains("LEFT JOIN memory_seals AS direct_seal"));
+        // NULL is a valid legacy root, but a BLOB or an empty explicit root is not.
+        for logical_id in ["X'61'", "''", "'mem_00000000000000000000000998'"] {
+            connection.execute_raw(&format!(
+                "UPDATE memories SET logical_id = {logical_id} WHERE id = '{child}'"
+            ))?;
+            let expected = joined_effective_seals_reference(&connection, &[child])
+                .expect_err("invalid lineage must fail in the reference loader")
+                .to_string();
+            let (actual, queries) = capture_query_sql_for_test(|| {
+                connection.get_effective_memory_seals_batch(&[child])
+            });
+            assert_eq!(
+                actual
+                    .expect_err("absence witness cannot admit malformed lineage")
+                    .to_string(),
+                expected,
+            );
+            assert_eq!(queries.len(), 2);
+            assert!(queries[1].contains("LEFT JOIN memory_seals AS direct_seal"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn effective_seal_absence_remains_bound_to_the_source_snapshot() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("effective-seal-snapshot.db");
+        let writer = DbConnection::open_file(&path)?;
+        writer.migrate()?;
+        writer.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/seal/snapshot".to_owned(),
+                name: None,
+            },
+        )?;
+        let root = "mem_00000000000000000000000400";
+        memory(&writer, root, WORKSPACE, root)?;
+        let reader = DbConnection::open_file_read_only(&path)?;
+        reader.begin_read_snapshot()?;
+        let (before, before_queries) =
+            capture_query_sql_for_test(|| reader.get_effective_memory_seal(root));
+        assert!(before?.is_none());
+        assert_eq!(before_queries.len(), 1);
+        assert!(!before_queries[0].contains("JOIN"));
+        seal(&writer, root)?;
+        let generation = writer.get_workspace_generation(WORKSPACE)?;
+        let (pinned, pinned_queries) =
+            capture_query_sql_for_test(|| reader.get_effective_memory_seal(root));
+        assert!(
+            pinned?.is_none(),
+            "later seal stays outside the held source view"
+        );
+        assert_eq!(pinned_queries.len(), 1);
+        assert!(!pinned_queries[0].contains("JOIN"));
+        reader.rollback_read_snapshot()?;
+        reader.begin_read_snapshot()?;
+        let (fresh, fresh_queries) =
+            capture_query_sql_for_test(|| reader.get_effective_memory_seal(root));
+        assert!(fresh?.ok_or("new snapshot lost the seal")?.is_sealed());
+        assert_eq!(fresh_queries.len(), 2);
+        assert!(fresh_queries[1].contains("LEFT JOIN memory_seals AS direct_seal"));
+        assert!(
+            reader.begin_read_snapshot().is_err(),
+            "reader still owns its transaction"
+        );
+        reader.rollback_read_snapshot()?;
+        assert_eq!(writer.get_workspace_generation(WORKSPACE)?, generation);
+        Ok(())
+    }
+
     #[test]
     fn effective_seals_preserve_candidate_keys_root_identity_and_direct_null_fields() -> TestResult
     {
@@ -264,11 +440,19 @@ mod tests {
         let (seals, queries) =
             capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&requested));
         let seals = seals?;
-        assert_eq!(queries.len(), 2);
+        assert_eq!(queries.len(), 4);
+        let joined_queries = queries
+            .iter()
+            .filter(|sql| sql.contains("LEFT JOIN memory_seals AS direct_seal"))
+            .collect::<Vec<_>>();
+        assert_eq!(joined_queries.len(), 2);
+        assert!(
+            joined_queries
+                .iter()
+                .all(|sql| sql.contains("WHERE candidate.id IN ("))
+        );
         assert!(queries.iter().all(|sql| {
-            sql.contains("WHERE candidate.id IN (")
-                && sql.contains("LEFT JOIN memory_seals AS direct_seal")
-                && !sql.contains("?257")
+            !sql.contains("?257")
                 && !sql.contains("candidate.content")
                 && !sql.contains("root.content")
         }));
@@ -279,7 +463,7 @@ mod tests {
         let (point, point_queries) =
             capture_query_sql_for_test(|| connection.get_effective_memory_seal(&ids[1]));
         assert_eq!(point?, seals.get(&ids[1]).cloned());
-        assert_eq!(point_queries.len(), 1);
+        assert_eq!(point_queries.len(), 2);
         let (empty, empty_queries) =
             capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&[]));
         assert!(empty?.is_empty() && empty_queries.is_empty());
@@ -348,7 +532,15 @@ mod tests {
         assert!(!error.to_string().contains("PRIVATE_INVALID_AUTHORITY"));
         assert!(connection.list_effective_memory_seals(WORKSPACE).is_err());
         connection.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_effective_seals")?;
-        assert!(connection.get_effective_memory_seal(child).is_err());
+        let (unavailable, queries) =
+            capture_query_sql_for_test(|| connection.get_effective_memory_seal(child));
+        assert!(unavailable.is_err());
+        assert_eq!(
+            queries.len(),
+            2,
+            "failed absence probe retains the strict loader"
+        );
+        assert!(queries[1].contains("LEFT JOIN memory_seals AS direct_seal"));
         assert!(connection.list_effective_memory_seals(WORKSPACE).is_err());
         let (empty, queries) =
             capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&[]));

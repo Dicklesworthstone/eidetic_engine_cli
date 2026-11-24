@@ -325,7 +325,9 @@ fn bounded_batches_preserve_candidate_order_and_defer_unknown_store_identities()
     );
     let revision_reads: Vec<_> = queries
         .iter()
-        .filter(|sql| sql.contains("FROM memories WHERE"))
+        .filter(|sql| {
+            sql.starts_with("SELECT id, workspace_id, superseded_at FROM memories WHERE")
+        })
         .collect();
     assert_eq!(
         revision_reads.len(),
@@ -339,7 +341,7 @@ fn bounded_batches_preserve_candidate_order_and_defer_unknown_store_identities()
     assert_eq!(
         queries.len(),
         9,
-        "each identity page needs only revision, seal and quarantine authority reads"
+        "ordinary self-root pages need only revision, seal-absence and quarantine authority reads"
     );
     assert!(queries.iter().all(|sql| !sql.contains("?257")));
     assert!(queries.iter().all(|sql| !sql.contains(&unknown)));
@@ -360,9 +362,18 @@ fn local_memory_admission_rejects_missing_rows_and_keeps_the_callers_snapshot() 
     });
     assert_eq!(admitted, BTreeSet::from([HEAD.to_owned()]));
     assert_eq!(
-        queries.len(),
-        3,
-        "one bounded authority page, not one read per candidate",
+        queries
+            .iter()
+            .filter(|sql| {
+                sql.starts_with("SELECT id, workspace_id, superseded_at FROM memories WHERE")
+            })
+            .count(),
+        1,
+        "one revision read covers the prior, head and missing identity"
+    );
+    assert!(
+        queries.len() <= 4,
+        "one bounded authority page, including a seal-absence probe and lineage read"
     );
     assert!(degraded.iter().any(|entry| entry.code == FILTERED));
     assert!(degraded.iter().any(|entry| entry.code == UNAVAILABLE));

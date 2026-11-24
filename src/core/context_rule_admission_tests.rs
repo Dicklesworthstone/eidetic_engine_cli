@@ -1630,12 +1630,22 @@ fn invalid_seal_lineage_isolated_fallback_keeps_unrelated_candidates() {
     assert_eq!(
         queries
             .iter()
+            .filter(|sql| {
+                sql.starts_with("SELECT 1 WHERE EXISTS (SELECT 1 FROM memory_seals LIMIT 1)")
+            })
+            .count(),
+        3,
+        "the batch and each unique fallback source still verify seal authority"
+    );
+    assert_eq!(
+        queries
+            .iter()
             .filter(|sql| sql.contains("FROM memories AS candidate")
                 && sql.contains("LEFT JOIN memory_seals AS direct_seal")
                 && sql.contains("candidate.id IN ("))
             .count(),
-        3,
-        "failed batch falls back once per unique source, shared by memory and rule hits"
+        2,
+        "the failed batch and broken source retain strict lineage reads; the healthy source proves absence"
     );
     let memory = f.db.get_memory(&broken.memory).unwrap().unwrap();
     let mut degraded = Vec::new();
@@ -1882,10 +1892,14 @@ fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
     assert_eq!(
         queries
             .iter()
-            .filter(|sql| sql.contains("FROM memories WHERE id IN ("))
+            .filter(|sql| {
+                sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                    && (sql.contains("FROM memories WHERE id =")
+                        || sql.contains("FROM memories WHERE id IN ("))
+            })
             .count(),
-        1,
-        "all required parents share one candidate-memory batch"
+        5,
+        "the five unique parents are hydrated once each by primary-key seeks"
     );
     assert_eq!(
         queries

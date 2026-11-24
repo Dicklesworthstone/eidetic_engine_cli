@@ -4827,16 +4827,34 @@ pub fn unrelated_context() -> u64 {{
                 assert_eq!(metrics.memory_batch_reads, expected_memory_reads);
                 let memory_reads = queries
                     .iter()
-                    .filter(|sql| sql.contains("FROM memories WHERE id IN ("))
+                    .filter(|sql| {
+                        sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                            && (sql.contains("FROM memories WHERE id =")
+                                || sql.contains("FROM memories WHERE id IN ("))
+                    })
                     .collect::<Vec<_>>();
                 assert_eq!(
                     memory_reads.len(),
                     expected_memory_reads,
-                    "all evidence links, duplicates and the ordinary hit must share one memory batch: {queries:?}"
+                    "all evidence links, duplicates and the ordinary hit must share one memory body read: {queries:?}"
                 );
                 assert!(
-                    memory_reads.iter().all(|sql| sql.contains("id IN (?1)")),
+                    memory_reads.iter().all(|sql| {
+                        sql.contains("id = ?1") || sql.contains("id IN (?1)")
+                    }),
                     "shared links must be deduplicated before memory hydration: {memory_reads:?}"
+                );
+                assert_eq!(
+                    queries
+                        .iter()
+                        .filter(|sql| {
+                            sql.starts_with(
+                                "SELECT 1 WHERE EXISTS (SELECT 1 FROM memory_seals LIMIT 1)",
+                            )
+                        })
+                        .count(),
+                    usize::from(count > 0),
+                    "all linked hits share one body-free seal absence witness"
                 );
                 assert_eq!(
                     queries
@@ -4847,11 +4865,10 @@ pub fn unrelated_context() -> u64 {{
                 );
                 assert!(
                     !queries.iter().any(|sql| {
-                        sql.contains("FROM memories WHERE id =")
-                            || sql.contains("FROM evidence_spans WHERE id =")
+                        sql.contains("FROM evidence_spans WHERE id =")
                             || sql.contains("FROM sessions WHERE id =")
                     }),
-                    "linked source admission must not perform per-hit body reads: {queries:?}"
+                    "linked source admission must not perform per-hit evidence or session reads: {queries:?}"
                 );
             }
         }
@@ -5331,8 +5348,9 @@ pub fn unrelated_context() -> u64 {{
             assert_eq!(rejected_metrics.memory_batch_reads, 0);
             assert!(
                 !rejected_queries.iter().any(|sql| {
-                    sql.contains("FROM memories WHERE id =")
-                        || sql.contains("FROM memories WHERE id IN (")
+                    sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                        && (sql.contains("FROM memories WHERE id =")
+                            || sql.contains("FROM memories WHERE id IN ("))
                 }),
                 "a preloaded linked source must not be replaced by another memory body read"
             );
