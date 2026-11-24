@@ -34,15 +34,15 @@ use super::{build_info, duration_millis_saturating};
 use crate::core::memory::{EvidenceFreshnessStatus, assess_memory_evidence_freshness};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateAuditInput, CreateCurationCandidateInput, DbConnection, PROVENANCE_STATUS_MISMATCH,
-    PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED, PROVENANCE_STATUS_VERIFIED,
-    audit_actions, generate_audit_id,
+    CreateAuditInput, CreateCurationCandidateInput, CreateSearchIndexJobInput, DbConnection,
+    PROVENANCE_STATUS_MISMATCH, PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED,
+    PROVENANCE_STATUS_VERIFIED, SearchIndexJobType, audit_actions, generate_audit_id,
 };
 use crate::models::{
-    CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RCH_VERIFY_SCHEMA_V1,
-    RESPONSE_SCHEMA_V2, TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance,
-    VerificationEvidenceRecord, VerificationGateRequirement, VerificationStatus,
-    rch_cargo_closure_requirements, verification_closure_guidance,
+    CandidateId, DomainError, LineSpan, MemoryId, ProducerMetadata, ProvenanceUri,
+    RCH_VERIFY_SCHEMA_V1, RESPONSE_SCHEMA_V2, TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
+    VerificationStatus, rch_cargo_closure_requirements, verification_closure_guidance,
     verification_evidence_beads_summary,
 };
 
@@ -1135,11 +1135,14 @@ pub fn verify_bounded_provenance(
 ) -> Result<VerifyProvenanceReport, DomainError> {
     let memories = match options.memory_id {
         Some(memory_id) => match options.database.get_memory(memory_id) {
-            Ok(Some(memory)) => vec![memory],
-            Ok(None) => {
+            Ok(Some(memory)) if memory.workspace_id == options.workspace_id => vec![memory],
+            Ok(_) => {
                 return Err(DomainError::Usage {
-                    message: format!("Memory {memory_id} was not found."),
-                    repair: Some("Pass an existing memory ID or omit --memory-id.".to_owned()),
+                    message: format!("Memory {memory_id} was not found in the selected workspace."),
+                    repair: Some(
+                        "Pass a memory ID from the selected workspace or omit --memory-id."
+                            .to_owned(),
+                    ),
                 });
             }
             Err(error) => {
@@ -1255,7 +1258,16 @@ fn apply_provenance_reverify_action(
         else {
             return Ok(None);
         };
-        if current_memory.tombstoned_at.is_some() {
+        if !provenance_reverify_observation_is_current(
+            database,
+            workspace_id,
+            memory,
+            &current_memory,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect memory before provenance dry run: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })? {
             return Ok(None);
         }
 
@@ -1294,7 +1306,12 @@ fn apply_provenance_reverify_action(
             let Some(current_memory) = database.get_memory(&memory.id)? else {
                 return Ok(None);
             };
-            if current_memory.tombstoned_at.is_some() {
+            if !provenance_reverify_observation_is_current(
+                database,
+                workspace_id,
+                memory,
+                &current_memory,
+            )? {
                 return Ok(None);
             }
 
@@ -1348,12 +1365,43 @@ fn apply_provenance_reverify_action(
                 None
             };
 
-            let verification_status_updated = database.update_memory_provenance_verification(
-                &current_memory.id,
-                &new_verification_status,
-                checked_at,
-                &verification_note,
-            )?;
+            // A trust transition clears verification metadata. Restore the observed
+            // verdict even when it matched the row before that transition.
+            let verification_status_updated = if trust_class_updated
+                || previous_verification_status != new_verification_status
+                || previous_verified_at.as_deref() != Some(checked_at)
+                || current_memory.provenance_verification_note.as_deref()
+                    != Some(verification_note.as_str())
+            {
+                database.update_memory_provenance_verification(
+                    &current_memory.id,
+                    &new_verification_status,
+                    checked_at,
+                    &verification_note,
+                )?
+            } else {
+                false
+            };
+
+            if trust_class_updated || verification_status_updated {
+                // Every memory UPDATE advances the source generation. Queue the
+                // derived publication with the source, trust audit, and candidate
+                // so an interruption cannot strand the search index as stale.
+                let index_job_id = format!(
+                    "sidx_{}",
+                    MemoryId::now().to_string().trim_start_matches("mem_")
+                );
+                database.insert_search_index_job(
+                    &index_job_id,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: current_memory.workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(current_memory.id.clone()),
+                        documents_total: 1,
+                    },
+                )?;
+            }
 
             if !action.demotes() {
                 return Ok(Some(VerifyProvenanceMutationReport {
@@ -1454,6 +1502,25 @@ fn apply_provenance_reverify_action(
             message: format!("Failed to persist provenance revalidation action: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })
+}
+
+fn provenance_reverify_observation_is_current(
+    database: &DbConnection,
+    workspace_id: &str,
+    observed: &crate::db::StoredMemory,
+    current: &crate::db::StoredMemory,
+) -> crate::db::Result<bool> {
+    // The external verdict belongs to the exact row that was inspected, not a
+    // refreshed source or trust decision that committed while it was resolved.
+    if observed.workspace_id != workspace_id
+        || current.workspace_id != workspace_id
+        || current.tombstoned_at.is_some()
+        || current != observed
+    {
+        return Ok(false);
+    }
+    // Supersession is intentionally outside StoredMemory's projection.
+    Ok(database.get_memory_superseded_at(&current.id)?.is_none())
 }
 
 fn provenance_reverify_memory_status(status: VerifyProvenanceReferentStatus) -> &'static str {
@@ -4855,6 +4922,597 @@ mod tests {
             mutation.is_none(),
             "dry run does not plan tombstoned memory mutation",
         )
+    }
+
+    #[test]
+    fn provenance_reverify_queues_changed_verdicts_and_skips_identical_replays() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture0";
+        let checked_at = "2026-06-07T12:00:00Z";
+        for (ordinal, (status, expected_status)) in [
+            (
+                VerifyProvenanceReferentStatus::Verified,
+                PROVENANCE_STATUS_VERIFIED,
+            ),
+            (
+                VerifyProvenanceReferentStatus::EvidenceMissing,
+                PROVENANCE_STATUS_MISSING,
+            ),
+            (
+                VerifyProvenanceReferentStatus::EvidenceDrift,
+                PROVENANCE_STATUS_MISMATCH,
+            ),
+            (
+                VerifyProvenanceReferentStatus::Unverifiable,
+                PROVENANCE_STATUS_SKIPPED,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let memory_id = format!("mem_{:026}", 9120 + ordinal);
+            insert_provenance_fixture_memory_with_content(
+                &connection,
+                workspace_id,
+                &memory_id,
+                "original cited evidence",
+                "file://source.md#L1",
+            )?;
+            let referent = provenance_referent_report(
+                "file://source.md#L1",
+                "file",
+                status,
+                "fixture_referent".to_owned(),
+                None,
+                None,
+            );
+            if matches!(
+                status,
+                VerifyProvenanceReferentStatus::EvidenceMissing
+                    | VerifyProvenanceReferentStatus::EvidenceDrift
+            ) {
+                // A demotion resets these fields even if the verdict was already
+                // recorded. Its final write must restore the observed metadata.
+                connection
+                    .update_memory_provenance_verification(
+                        &memory_id,
+                        expected_status,
+                        checked_at,
+                        &provenance_reverify_verification_note(&referent),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            let observed = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fixture memory missing".to_owned())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &observed,
+                &referent,
+                checked_at,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "preview must not change source, generation, audit, or jobs"
+            );
+            let generation_before = connection
+                .get_workspace_generation(workspace_id)
+                .map_err(|error| error.to_string())?;
+            let mutation = apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &observed,
+                &referent,
+                checked_at,
+                false,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected persisted verdict".to_owned())?;
+            assert!(mutation.persisted && mutation.verification_status_updated);
+            let current = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fixture memory missing".to_owned())?;
+            assert_eq!(current.provenance_verification_status, expected_status);
+            assert_eq!(current.provenance_verified_at.as_deref(), Some(checked_at));
+            assert_eq!(
+                current.provenance_verification_note.as_deref(),
+                Some(provenance_reverify_verification_note(&referent).as_str())
+            );
+            assert!(
+                connection
+                    .get_workspace_generation(workspace_id)
+                    .map_err(|error| error.to_string())?
+                    > generation_before
+            );
+            let jobs: Vec<_> = connection
+                .list_pending_search_index_jobs(workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|job| job.document_id.as_deref() == Some(memory_id.as_str()))
+                .collect();
+            assert_eq!(jobs.len(), 1, "one durable job for the whole verdict");
+            assert_eq!(
+                jobs[0].job_type_enum(),
+                Some(SearchIndexJobType::SingleDocument)
+            );
+            assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+            assert_eq!(jobs[0].workspace_id, workspace_id);
+            assert_eq!(jobs[0].documents_total, 1);
+            assert!(jobs[0].id.starts_with("sidx_"));
+            assert_eq!(jobs[0].id.len(), 31);
+
+            let published_source = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let repeated = apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &current,
+                &referent,
+                checked_at,
+                false,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected unchanged verdict report".to_owned())?;
+            assert!(!repeated.persisted && !repeated.verification_status_updated);
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                published_source,
+                "an exact replay must not advance source generation or duplicate work"
+            );
+
+            let later = apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &current,
+                &referent,
+                "2026-06-07T12:05:00Z",
+                false,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected refreshed verification timestamp".to_owned())?;
+            assert!(later.persisted && later.verification_status_updated);
+            let later_jobs: Vec<_> = connection
+                .list_pending_search_index_jobs(workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|job| job.document_id.as_deref() == Some(memory_id.as_str()))
+                .collect();
+            assert_eq!(
+                later_jobs.len(),
+                2,
+                "timestamp changes also require publication"
+            );
+            assert_ne!(later_jobs[0].id, later_jobs[1].id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_reverify_rolls_back_source_audits_candidates_and_jobs_on_failure() -> TestResult {
+        for stage in ["index", "candidate_audit"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let connection = provenance_fixture_connection(temp.path())?;
+            let workspace_id = "wsp_verify_provenance_fixture0";
+            let memory_id = "mem_00000000000000000000009130";
+            insert_provenance_fixture_memory_with_content(
+                &connection,
+                workspace_id,
+                memory_id,
+                "original cited evidence",
+                "file://source.md#L1",
+            )?;
+            let observed = connection
+                .get_memory(memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fixture memory missing".to_owned())?;
+            let referent = provenance_referent_report(
+                "file://source.md#L1",
+                "file",
+                VerifyProvenanceReferentStatus::EvidenceDrift,
+                "file_referent_content_drift".to_owned(),
+                None,
+                None,
+            );
+            connection
+                .execute_raw(
+                    "CREATE TABLE provenance_reverify_failpoint (enabled INTEGER NOT NULL)",
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw("INSERT INTO provenance_reverify_failpoint VALUES (1)")
+                .map_err(|error| error.to_string())?;
+            let trigger = if stage == "index" {
+                "CREATE TRIGGER reject_provenance_reverify_index \
+                 BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'memory' \
+                 AND (SELECT enabled FROM provenance_reverify_failpoint) = 1 \
+                 BEGIN SELECT RAISE(ABORT, 'provenance index blocked'); END"
+                    .to_owned()
+            } else {
+                format!(
+                    "CREATE TRIGGER reject_provenance_reverify_audit BEFORE INSERT ON audit_log \
+                     WHEN NEW.action = '{}' \
+                     AND (SELECT enabled FROM provenance_reverify_failpoint) = 1 \
+                     BEGIN SELECT RAISE(ABORT, 'provenance candidate audit blocked'); END",
+                    audit_actions::CURATION_CANDIDATE_CREATE
+                )
+            };
+            connection
+                .execute_raw(&trigger)
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let failed = apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &observed,
+                &referent,
+                "2026-06-07T12:00:00Z",
+                false,
+            );
+            assert!(
+                matches!(failed, Err(DomainError::Storage { .. })),
+                "{stage}"
+            );
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "{stage} failure must roll back every durable table, including generation"
+            );
+            connection
+                .execute_raw("UPDATE provenance_reverify_failpoint SET enabled = 0")
+                .map_err(|error| error.to_string())?;
+            let retried = apply_provenance_reverify_action(
+                &connection,
+                workspace_id,
+                &observed,
+                &referent,
+                "2026-06-07T12:00:00Z",
+                false,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "retry must retain the original source observation".to_owned())?;
+            assert!(retried.persisted && retried.trust_class_updated);
+            assert!(retried.trust_audit_id.is_some() && retried.candidate_audit_id.is_some());
+            assert_eq!(retried.candidate_status.as_deref(), Some("created"));
+            let jobs = connection
+                .list_pending_search_index_jobs(workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(jobs.len(), 1, "retry publishes once after {stage} failure");
+            assert_eq!(jobs[0].document_id.as_deref(), Some(memory_id));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_reverify_skips_foreign_changed_and_superseded_observations() -> TestResult {
+        for (case, update) in [
+            ("scope", None),
+            ("content", Some("content = 'refreshed evidence'")),
+            ("uri", Some("provenance_uri = 'file://refreshed.md#L1'")),
+            ("trust", Some("trust_class = 'agent_validated'")),
+            (
+                "verification",
+                Some(
+                    "provenance_verification_status = 'verified', \
+                     provenance_verified_at = '2026-06-07T12:05:00Z'",
+                ),
+            ),
+            ("superseded", Some("superseded_at = '2026-06-07T12:05:00Z'")),
+        ] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let connection = provenance_fixture_connection(temp.path())?;
+            let workspace_id = "wsp_verify_provenance_fixture0";
+            let memory_id = "mem_00000000000000000000009131";
+            insert_provenance_fixture_memory_with_content(
+                &connection,
+                workspace_id,
+                memory_id,
+                "original cited evidence",
+                "file://source.md#L1",
+            )?;
+            let observed = connection
+                .get_memory(memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fixture memory missing".to_owned())?;
+            if let Some(update) = update {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET {update} WHERE id = '{memory_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            if case == "superseded" {
+                assert_eq!(
+                    connection
+                        .get_memory(memory_id)
+                        .map_err(|error| error.to_string())?,
+                    Some(observed.clone()),
+                    "supersession is not projected in StoredMemory"
+                );
+            }
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let referent = provenance_referent_report(
+                "file://source.md#L1",
+                "file",
+                VerifyProvenanceReferentStatus::EvidenceDrift,
+                "file_referent_content_drift".to_owned(),
+                None,
+                None,
+            );
+            for dry_run in [true, false] {
+                let mutation = apply_provenance_reverify_action(
+                    &connection,
+                    if case == "scope" {
+                        "wsp_other"
+                    } else {
+                        workspace_id
+                    },
+                    &observed,
+                    &referent,
+                    "2026-06-07T12:00:00Z",
+                    dry_run,
+                )
+                .map_err(|error| error.to_string())?;
+                assert!(mutation.is_none(), "{case}, dry_run={dry_run}");
+                assert_eq!(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?,
+                    before,
+                    "{case}, dry_run={dry_run} must preserve every durable table"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_provenance_rejects_foreign_memory_without_disclosing_its_source() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = provenance_fixture_connection(temp.path())?;
+        let workspace_id = "wsp_verify_provenance_fixture0";
+        let foreign_workspace = "wsp_verify_foreign_fixture0";
+        let memory_id = "mem_00000000000000000000009132";
+        connection
+            .insert_workspace(
+                foreign_workspace,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().join("foreign").to_string_lossy().into_owned(),
+                    name: Some("foreign provenance fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            foreign_workspace,
+            memory_id,
+            "private foreign evidence",
+            "file://private-foreign-evidence.md#L1",
+        )?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        for dry_run in [true, false] {
+            let error = verify_bounded_provenance(VerifyProvenanceOptions {
+                workspace_path: temp.path(),
+                database: &connection,
+                workspace_id,
+                memory_id: Some(memory_id),
+                stale_after_days: 7,
+                limit: 10,
+                allow_network: false,
+                dry_run,
+                now,
+            })
+            .expect_err("explicit memory IDs must belong to the selected workspace");
+            assert!(matches!(&error, DomainError::Usage { .. }));
+            let message = error.to_string();
+            assert!(!message.contains("private foreign evidence"));
+            assert!(!message.contains("private-foreign-evidence"));
+            assert!(!message.contains(foreign_workspace));
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "a foreign ID must not change either workspace"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_reverify_job_republishes_a_previously_ready_index() -> TestResult {
+        use crate::core::index::{
+            IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexRebuildOptions,
+            IndexRebuildStatus, IndexStatusOptions, get_index_status,
+            install_test_hash_workspace_embedder, process_index_jobs_coalesced, rebuild_index,
+        };
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(workspace.join("source.md"), "original cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(workspace.join("surviving.md"), "surviving cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee/ee.db");
+        let workspace_id = "wsp_provenance_index_recovery";
+        let memory_id = "mem_00000000000000000000009133";
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("provenance publication recovery".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            memory_id,
+            "original cited evidence",
+            "file://source.md#L1",
+        )?;
+        insert_provenance_fixture_memory_with_content(
+            &connection,
+            workspace_id,
+            "mem_00000000000000000000009134",
+            "surviving cited evidence",
+            "file://surviving.md#L1",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let _embedder = install_test_hash_workspace_embedder(workspace_id);
+        let index_dir = workspace.join(".ee/index");
+        let initial = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(initial.status, IndexRebuildStatus::Success, "{initial:?}");
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        let before = get_index_status(&status_options).map_err(|error| error.to_string())?;
+        assert_eq!(before.health, IndexHealth::Ready);
+
+        std::fs::write(workspace.join("source.md"), "changed cited evidence\n")
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before_job_ids: std::collections::BTreeSet<_> = connection
+            .list_search_index_jobs(workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|job| job.id)
+            .collect();
+        let now = DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let report = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: &workspace,
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.evidence_drift_count, 1);
+        assert_eq!(report.trust_demotion_count, 1);
+        let queued: Vec<_> = connection
+            .list_pending_search_index_jobs(workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| {
+                !before_job_ids.contains(&job.id)
+                    && job.document_source.as_deref() == Some("memory")
+                    && job.document_id.as_deref() == Some(memory_id)
+            })
+            .collect();
+        assert_eq!(queued.len(), 1, "one new job for the changed memory");
+        connection.close().map_err(|error| error.to_string())?;
+        let stale = get_index_status(&status_options).map_err(|error| error.to_string())?;
+        assert_eq!(stale.health, IndexHealth::Stale);
+        assert_eq!(stale.index_generation, before.index_generation);
+        assert_ne!(stale.db_generation, before.db_generation);
+
+        let repaired = process_index_jobs_coalesced(&IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir),
+            dry_run: false,
+            job_limit: None,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            repaired.status,
+            IndexProcessingStatus::Success,
+            "{repaired:?}"
+        );
+        assert!(repaired.completed_jobs >= 1);
+        assert!(repaired.jobs.iter().any(|job| job.job_id == queued[0].id));
+        let ready = get_index_status(&status_options).map_err(|error| error.to_string())?;
+        assert_eq!(ready.health, IndexHealth::Ready);
+        assert_eq!(ready.index_generation, ready.db_generation);
+        assert_eq!(ready.db_generation, stale.db_generation);
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let completed = connection
+            .get_search_index_job(&queued[0].id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "provenance job history missing".to_owned())?;
+        assert_eq!(completed.status, "completed");
+        let published_source = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let replay = verify_bounded_provenance(VerifyProvenanceOptions {
+            workspace_path: &workspace,
+            database: &connection,
+            workspace_id,
+            memory_id: Some(memory_id),
+            stale_after_days: 7,
+            limit: 10,
+            allow_network: false,
+            dry_run: false,
+            now,
+        })
+        .map_err(|error| error.to_string())?;
+        let mutation = replay.records[0]
+            .mutation
+            .as_ref()
+            .ok_or_else(|| "expected unchanged verdict report".to_owned())?;
+        assert!(!mutation.persisted);
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            published_source,
+            "replaying the same check must preserve the ready generation"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        assert_eq!(
+            get_index_status(&status_options)
+                .map_err(|error| error.to_string())?
+                .health,
+            IndexHealth::Ready
+        );
+        Ok(())
     }
 
     fn provenance_fixture_connection(workspace_path: &Path) -> Result<DbConnection, String> {
