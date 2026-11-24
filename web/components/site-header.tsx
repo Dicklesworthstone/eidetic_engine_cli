@@ -1,9 +1,20 @@
 "use client";
 
-import { BrainCircuit, ExternalLink, Hourglass, type LucideIcon, Network, PackageOpen, Scale, ShieldCheck } from "lucide-react";
+import {
+  Bot,
+  BrainCircuit,
+  ExternalLink,
+  Hourglass,
+  type LucideIcon,
+  Network,
+  PackageOpen,
+  Scale,
+  ShieldCheck,
+  TrendingUp,
+} from "lucide-react";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 
-import { chapters, siteConfig } from "@/lib/content";
+import { type Chapter, chapters, siteConfig } from "@/lib/content";
 import { cn } from "@/lib/utils";
 
 const ICONS: Record<string, LucideIcon> = {
@@ -11,6 +22,8 @@ const ICONS: Record<string, LucideIcon> = {
   memory: Hourglass,
   pack: PackageOpen,
   learn: Scale,
+  campaigns: TrendingUp,
+  agents: Bot,
   graph: Network,
   proof: ShieldCheck,
 };
@@ -19,10 +32,15 @@ const ICONS: Record<string, LucideIcon> = {
  * The page's chrome. Wide screens: a floating pill with the chapters, the one in view marked, and a
  * hairline that fills as the page is read. Phones: the name and the code at the top, and the chapters in a
  * dock at the bottom, where a thumb reaches them.
+ *
+ * On the home page the chapters are anchors and the one in view is marked. On a chapter's own page
+ * (`current`), they are links to the other chapters' pages, and the current one stays marked.
  */
-export function SiteHeader() {
+export function SiteHeader({ current }: { current?: string } = {}) {
   const [scrolled, setScrolled] = useState(false);
-  const [active, setActive] = useState<string | null>(null);
+  const [spied, setActive] = useState<string | null>(null);
+  const active = current ?? spied;
+  const href = (chapter: Chapter) => (current ? `/${chapter.slug}` : `#ch-${chapter.id}`);
   const progress = useRef<HTMLSpanElement>(null);
 
   // Scrolled state and reading progress: the progress bar is written directly, never through React.
@@ -93,7 +111,7 @@ export function SiteHeader() {
           )}
         >
           <div className="flex h-10 items-center gap-3">
-            <a href="#top" className="flex shrink-0 items-center gap-2.5 rounded-lg">
+            <a href={current ? "/" : "#top"} className="flex shrink-0 items-center gap-2.5 rounded-lg">
               <span
                 aria-hidden="true"
                 className="relative h-6 w-6 rounded-full bg-[radial-gradient(circle_at_35%_35%,#f5d0fe,#a78bfa_42%,#1e1147_78%)] shadow-[0_0_18px_rgba(139,92,246,0.6)]"
@@ -105,18 +123,18 @@ export function SiteHeader() {
                 <span className="ml-1.5 hidden font-mono text-[11px] font-medium text-violet-300/80 sm:inline">ee</span>
               </span>
             </a>
-            <nav aria-label="Chapters" className="hidden min-w-0 flex-1 justify-center md:flex">
-              <ul className="flex items-center gap-0.5 lg:gap-1">
+            <nav aria-label="Chapters" className="hidden min-w-0 flex-1 justify-center lg:flex">
+              <ul className="flex items-center gap-0.5">
                 {chapters.map((chapter, index) => {
                   const on = active === chapter.id;
                   return (
                     <li key={chapter.id}>
                       <a
-                        href={`#ch-${chapter.id}`}
-                        aria-current={on ? "location" : undefined}
+                        href={href(chapter)}
+                        aria-current={on ? (current ? "page" : "location") : undefined}
                         style={{ "--sphere": chapter.colour } as CSSProperties}
                         className={cn(
-                          "group flex items-center gap-2 rounded-xl px-2.5 py-2 text-[13px] font-semibold whitespace-nowrap transition-colors lg:px-3",
+                          "group flex items-center gap-1.5 rounded-xl px-2 py-2 text-[12.5px] font-semibold whitespace-nowrap transition-colors xl:gap-2 xl:px-2.5 xl:text-[13px]",
                           on ? "bg-white/[0.06] text-white" : "text-slate-400 hover:bg-white/[0.04] hover:text-white",
                         )}
                       >
@@ -127,7 +145,7 @@ export function SiteHeader() {
                             on ? "scale-125 opacity-100" : "opacity-40 group-hover:opacity-80",
                           )}
                         />
-                        <span className="hidden font-mono text-[11px] text-slate-500 xl:inline">{String(index + 1).padStart(2, "0")}</span>
+                        <span className="hidden font-mono text-[11px] text-slate-500 2xl:inline">{String(index + 1).padStart(2, "0")}</span>
                         {chapter.label}
                       </a>
                     </li>
@@ -137,7 +155,7 @@ export function SiteHeader() {
             </nav>
             <a
               href={siteConfig.github}
-              className="ml-auto inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-violet-400 px-3.5 text-[13px] font-extrabold text-black transition-colors hover:bg-violet-300 md:ml-0"
+              className="ml-auto inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-violet-400 px-3.5 text-[13px] font-extrabold text-black transition-colors hover:bg-violet-300 lg:ml-0"
             >
               GitHub <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
             </a>
@@ -162,10 +180,10 @@ export function SiteHeader() {
       {/* Phones: the chapters in a dock at the bottom of the screen. */}
       <nav
         aria-label="Chapters"
-        className="fixed inset-x-0 bottom-0 z-50 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:hidden"
+        className="fixed inset-x-0 bottom-0 z-50 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:hidden"
       >
         <ul
-          className="glass-modern mx-auto grid max-w-md rounded-2xl p-1"
+          className="glass-modern mx-auto grid max-w-xl rounded-2xl p-1"
           style={{ gridTemplateColumns: `repeat(${chapters.length}, minmax(0, 1fr))` }}
         >
           {chapters.map((chapter) => {
@@ -174,11 +192,11 @@ export function SiteHeader() {
             return (
               <li key={chapter.id}>
                 <a
-                  href={`#ch-${chapter.id}`}
-                  aria-current={on ? "location" : undefined}
+                  href={href(chapter)}
+                  aria-current={on ? (current ? "page" : "location") : undefined}
                   style={{ "--sphere": chapter.colour } as CSSProperties}
                   className={cn(
-                    "flex min-h-[3.25rem] flex-col items-center justify-center gap-1 rounded-xl text-[10px] font-bold tracking-wide transition-colors",
+                    "flex min-h-[3.25rem] flex-col items-center justify-center gap-1 rounded-xl text-[10px] font-bold transition-colors",
                     on ? "bg-white/[0.07] text-white" : "text-slate-400 active:bg-white/[0.06]",
                   )}
                 >

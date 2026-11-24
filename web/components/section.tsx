@@ -1,3 +1,4 @@
+import { BookOpen, Link as LinkIcon } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
 import { MicroLabel, RecallTitle } from "@/components/instrument";
@@ -11,9 +12,19 @@ import { cn } from "@/lib/utils";
  * carries the chapter's colour as `--chapter` and `data-chapter` for the
  * header's scroll spy.
  */
-export function ChapterBlock({ chapter, children }: { chapter: Chapter; children: ReactNode }) {
+export function ChapterBlock({
+  chapter,
+  children,
+  mode = "home",
+}: {
+  chapter: Chapter;
+  children: ReactNode;
+  /** `home`: one of eight on the home page, linking out to its own page. `page`: alone on that page, as its h1. */
+  mode?: "home" | "page";
+}) {
   const style = { "--chapter": chapter.colour } as CSSProperties;
   const headingId = `ch-${chapter.id}-heading`;
+  const Heading = mode === "page" ? "h1" : "h2";
   return (
     <div data-chapter={chapter.id} style={style} className="relative">
       <section aria-labelledby={headingId} className="relative overflow-hidden pt-24 md:pt-32 lg:pt-40">
@@ -34,10 +45,30 @@ export function ChapterBlock({ chapter, children }: { chapter: Chapter; children
                   Chapter {chapter.number} · {chapter.label}
                 </span>
               </div>
-              <h2 id={headingId} className="display-2 mt-6 text-white">
+              <Heading id={headingId} className="display-2 mt-6 text-white">
                 <RecallTitle text={chapter.title} />
-              </h2>
+              </Heading>
               <p className="lede mt-6 max-w-3xl">{chapter.thesis}</p>
+              <p className="mt-6">
+                {mode === "home" ? (
+                  <a
+                    href={`/${chapter.slug}`}
+                    className="group inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] text-slate-500 uppercase transition-colors hover:text-[color:var(--chapter)]"
+                  >
+                    <LinkIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                    This chapter on its own page
+                    <span className="text-slate-600 normal-case group-hover:text-[color:var(--chapter)]">/{chapter.slug}</span>
+                  </a>
+                ) : (
+                  <a
+                    href={`/#ch-${chapter.id}`}
+                    className="inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.14em] text-slate-500 uppercase transition-colors hover:text-[color:var(--chapter)]"
+                  >
+                    <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+                    Read all eight chapters on one page
+                  </a>
+                )}
+              </p>
             </div>
             <div className="relative hidden lg:col-span-4 lg:block">
               <span aria-hidden="true" className="chapter-numeral absolute -top-44 right-0 text-[13rem] select-none">

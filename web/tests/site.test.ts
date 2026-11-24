@@ -6,8 +6,34 @@ import { describe, expect, test } from "bun:test";
 
 import { assemble } from "@/components/explain/pack-builder";
 import { BALANCED_BPS, BUDGETS, CANDIDATE_FLOOR, pack, STORE_SIZE, TASKS, toyHash } from "@/components/hero";
+import { chapters } from "@/lib/content";
 import { SHARE_IMAGE_PATHS, SHARE_IMAGE_TYPE } from "@/lib/share";
 import worker from "../worker";
+
+describe("the chapters", () => {
+  test("every chapter has its own slug, colour and number, in order", () => {
+    expect(new Set(chapters.map((chapter) => chapter.slug)).size).toBe(chapters.length);
+    expect(new Set(chapters.map((chapter) => chapter.id)).size).toBe(chapters.length);
+    chapters.forEach((chapter, at) => {
+      expect(chapter.number).toBe(String(at + 1).padStart(2, "0"));
+      expect(chapter.slug).toMatch(/^[a-z]+$/);
+      expect(chapter.colour).toMatch(/^#[0-9a-f]{6}$/);
+    });
+  });
+
+  test("no two sections on the home page share an anchor, and none shadows a chapter's", () => {
+    const anchors = chapters.flatMap((chapter) => [`ch-${chapter.id}`, ...chapter.sections.map((section) => section.id)]);
+    expect(new Set(anchors).size).toBe(anchors.length);
+  });
+
+  test("every chapter page has both share images", () => {
+    for (const chapter of chapters) {
+      expect(SHARE_IMAGE_PATHS).toContain(`/${chapter.slug}/opengraph-image`);
+      expect(SHARE_IMAGE_PATHS).toContain(`/${chapter.slug}/twitter-image`);
+    }
+    expect(SHARE_IMAGE_PATHS).toHaveLength(2 + chapters.length * 2);
+  });
+});
 
 type Env = Parameters<typeof worker.fetch>[1];
 
@@ -47,6 +73,12 @@ describe("worker", () => {
     const { env } = assets(404);
     const response = await worker.fetch(new Request(`https://eidetic-engine.org${SHARE_IMAGE_PATHS[0]}`), env);
     expect(response.status).toBe(404);
+    expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
+  });
+
+  test("a path that only ends like a share image is not one", async () => {
+    const { env } = assets();
+    const response = await worker.fetch(new Request("https://eidetic-engine.org/nowhere/opengraph-image"), env);
     expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
   });
 

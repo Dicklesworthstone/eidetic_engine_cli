@@ -256,7 +256,7 @@ body::before {
 }
 
 /* The mobile dock keeps the page's last lines clear of itself. */
-@media (max-width: 767px) {
+@media (max-width: 1023px) {
   .dock-clearance {
     padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
   }

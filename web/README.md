@@ -36,10 +36,16 @@ from the README's own "Limitations" section and the ADRs it cites.
 The design follows FrankenLife's page (`~/projects/frankenlife/web`). It borrows the boxed eyebrow and
 the reader-driven hero strip from FrankenRobotics.
 
-`chapters` in `lib/content.ts` defines the page's six chapters: amnesia, memory, the pack, learning,
-the graph and proof. Three things come from that list: the header's chapter links (a bottom dock on
-phones), each chapter's index, and every section's number ("03.2"). So adding a section there is
-enough to number and link it.
+`chapters` in `lib/content.ts` defines the site's eight chapters: amnesia, memory, the pack, learning,
+campaigns, for agents, the graph and proof. Four things come from that list:
+- the header's chapter links (a bottom dock below 1024 px);
+- each chapter's index, and every section's number ("03.2");
+- each chapter's own page, `/<slug>/`, built by `app/[chapter]/page.tsx`;
+- each chapter's share card words (`share`).
+
+So adding a section there is enough to number and link it. `components/chapters.tsx` holds every
+chapter's sections. The home page renders all eight in order; a chapter page renders one, with links to
+its neighbours, and its header links to the other chapter pages instead of to anchors.
 
 `components/section.tsx` has the two section layouts:
 - `wide`: an explainer takes the full width under its heading.
@@ -76,13 +82,44 @@ come from `src/pack/mod.rs` and `src/models/context_profile.rs`.
 
 | Badge | Meaning | Figures |
 |---|---|---|
-| ee's rule, computed here | ee's own rule and constants, recomputed in the browser on hand-sized inputs | `decay.tsx`, `pack-builder.tsx`, `hash-prefix.tsx`, `trust.tsx`, the recall step of `incident-card.tsx` |
-| From the record | What ee's code and failure-mode fixtures say it reports | `degradation.tsx` |
-| Diagram · not program output | How the software is organised | `loop.tsx`, `pipeline.tsx`, `incident-card.tsx` |
-| A toy in your browser · not ee | A small model written for the page; nothing it shows is a measurement | `amnesia.tsx`, `graph-lens.tsx`, the session in `incident-card.tsx`, the hero |
+| ee's rule, computed here | ee's own rule and constants, recomputed in the browser on hand-sized inputs | `decay.tsx`, `pack-builder.tsx`, `hash-prefix.tsx`, `trust.tsx`, the recall step of `incident-card.tsx`, the risk-class table in `agent-contract.tsx` |
+| Derived · arithmetic, not a benchmark | Arithmetic from assumptions the caption states | `scale.tsx` (a notes file, a vector store and ee's pack over a year) |
+| From the record | What ee's code, goldens and failure-mode fixtures say it reports | `degradation.tsx`, `agent-contract.tsx` (six pinned or source-built error records) |
+| Diagram · not program output | How the software is organised | `loop.tsx`, `pipeline.tsx`, `incident-card.tsx`, `session-loop.tsx`, `scale-lanes.tsx` |
+| A toy in your browser · not ee | A small model written for the page; nothing it shows is a measurement | `amnesia.tsx`, `graph-lens.tsx`, `campaign.tsx`, `ledger.tsx`, the session in `incident-card.tsx`, the hero |
+
+The newer figures keep their models apart from their drawings (`scale-model.ts`, `campaign-model.ts`,
+`ledger-model.ts`, `agent-contract-data.ts`, `session-loop-data.ts`), and `tests/` checks each model's
+invariants. Three of those tests also read the repository: `scale.test.ts`, `session-loop.test.ts`
+and `agent-contract.test.ts` check that the constants, JSON keys and error records their figures cite
+still read the same in the Rust source, the schemas and the goldens. So a rename in ee turns them red.
+The campaign, ledger and scale-ladder tests check their models only.
 
 Each figure's caption names the source files and constants it follows. Animations stop when off
 screen, and never run for a reader who asks for reduced motion.
+
+## The share cards
+
+Every page has its own Open Graph card (1200 × 630) and X card (1200 × 600): the home page's in
+`app/opengraph-image.tsx` and `app/twitter-image.tsx`, and each chapter's in `app/[chapter]/`. All of
+them come from `shareCard()` in `lib/og-card.tsx`. Each card has the chapter's colour, its headline,
+its line and a rail of the eight chapters, next to a drawing of what the chapter is about:
+- the notes file against the pack (amnesia);
+- the five half-lives (memory);
+- candidates beamed into a budgeted pack (the pack);
+- moving posteriors and the trust ladder (learning);
+- a search space pruned family by family (campaigns);
+- an `ee.error.v2` envelope and the exit codes (for agents);
+- communities, a hub and an articulation point (graph);
+- the counted figures (proof).
+
+next/og draws with Satori, not a browser. So the drawings in `lib/og-art.ts` are SVG strings embedded
+as images, which resvg draws in full, and their words are laid over them as text, because resvg has
+no fonts there. Two Satori rules bit here: a fragment held in a variable is dropped without an error,
+and a span's trailing space is trimmed.
+
+To look at the cards without a full build, render them with a throwaway Bun script that calls
+`shareCard(1200, 630, id)` and writes the response's bytes to a PNG.
 
 ## The stylesheet and the fleet guard
 
@@ -108,7 +145,7 @@ cd web
 bun install
 bun run dev          # http://localhost:3000, with the stylesheet rebuilt on change
 bun run typecheck
-bun test             # the Worker's routing, and the budget, quota and determinism invariants of both pack builders
+bun test             # the Worker's routing, the chapters, and every explainer's model and citations
 bun run build        # the token check, the stylesheet, then the static export into out/
 bun run preview      # build, then serve out/ through the Worker locally (wrangler dev)
 bun run deploy       # build, then `wrangler deploy` (needs `wrangler login`)
@@ -127,8 +164,8 @@ removed first, or the custom domain will not attach.
 
 `worker.ts` does three things:
 - It redirects `www` to the apex with a 301, keeping the path and query.
-- It serves the two share images (`/opengraph-image`, `/twitter-image`) as PNG. The static export
-  writes them without an extension.
+- It serves the share images (`SHARE_IMAGE_PATHS` in `lib/share.ts`: the home page's two and each
+  chapter page's two) as PNG. The static export writes them without an extension.
 - It hands everything else to the static assets unchanged.
 
 `public/_headers` caches `/_next/static/*` immutably, and sets `nosniff` and a referrer policy on every

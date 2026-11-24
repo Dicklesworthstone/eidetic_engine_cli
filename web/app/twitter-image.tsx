@@ -1,9 +1,9 @@
-// The X (Twitter) share image, made at build time (lib/og-card.tsx).
+// The home page's X (Twitter) share image, made at build time (lib/og-card.tsx).
 import { shareAlt, shareCard } from "@/lib/og-card";
 import { SHARE_IMAGE_TYPE } from "@/lib/share";
 
 export const dynamic = "force-static";
-export const alt = shareAlt;
+export const alt = shareAlt();
 export const size = { width: 1200, height: 600 };
 export const contentType = SHARE_IMAGE_TYPE;
 

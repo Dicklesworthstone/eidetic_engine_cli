@@ -33,6 +33,8 @@ export type Section = { id: string; label: string };
 
 export type Chapter = {
   id: string;
+  /** Its own page, /<slug>/, which carries the chapter's own share images. */
+  slug: string;
   number: string;
   /** The nav's name for it. */
   label: string;
@@ -41,27 +43,41 @@ export type Chapter = {
   title: string;
   thesis: string;
   colour: string;
+  /** The chapter page's title and description, and its share card's words. */
+  share: { title: string; description: string; kicker: string; headline: string; accent: string; line: string };
   sections: Section[];
 };
 
 export const chapters: Chapter[] = [
   {
     id: "forget",
+    slug: "amnesia",
     number: "01",
     label: "Amnesia",
     short: "Why",
     title: "Every session starts [from zero].",
     thesis:
-      "A fresh agent re-learns the project's conventions, re-reads the files it read yesterday, and walks into the trap another session already hit. Not because it is careless: because nothing it learned had anywhere durable to go.",
+      "A fresh agent re-learns the project's conventions, re-reads the files it read yesterday, and walks into the trap another session already hit. Not because it is careless: because nothing it learned had anywhere durable to go. And the usual fix, one notes file loaded into every session, stops working long before the project does.",
     colour: "#fb7185",
+    share: {
+      title: "Why agents forget, and why a notes file doesn't fix it",
+      description:
+        "Every agent session starts from zero. A CLAUDE.md or AGENTS.md file helps for a week, then grows, goes stale and eats the context window. ee hands each session a budgeted, ranked, explained pack instead.",
+      kicker: "Chapter 01 · Amnesia",
+      headline: "Every session starts",
+      accent: "from zero.",
+      line: "A notes file grows until nobody can afford to read it. ee hands each session a budgeted pack of what still matters.",
+    },
     sections: [
       { id: "amnesia", label: "The cost of forgetting" },
+      { id: "scale", label: "A file vs a memory" },
       { id: "layer", label: "Push in, pull out" },
       { id: "first", label: "Five commands" },
     ],
   },
   {
     id: "memory",
+    slug: "memory",
     number: "02",
     label: "Memory",
     short: "Memory",
@@ -69,6 +85,15 @@ export const chapters: Chapter[] = [
     thesis:
       "A scratch note should fade by tomorrow; a procedural rule should last a year. ee stores typed memories at four levels, each with its own half-life, and forgets on purpose: stale memories are demoted, then tombstoned with an audit entry, never silently deleted.",
     colour: "#fbbf24",
+    share: {
+      title: "Memory that ages like knowledge",
+      description:
+        "ee stores typed memories at four levels, each with its own half-life. Stale memories are demoted, then tombstoned with an audit entry, never silently deleted.",
+      kicker: "Chapter 02 · Memory",
+      headline: "Memory that ages",
+      accent: "like knowledge.",
+      line: "Working notes fade in a day; procedural rules last a year. Forgetting is on purpose, and every forgetting is audited.",
+    },
     sections: [
       { id: "decay", label: "Half-lives" },
       { id: "kinds", label: "Typed memories" },
@@ -76,6 +101,7 @@ export const chapters: Chapter[] = [
   },
   {
     id: "pack",
+    slug: "pack",
     number: "03",
     label: "The pack",
     short: "Pack",
@@ -83,6 +109,15 @@ export const chapters: Chapter[] = [
     thesis:
       "The pack is what your agent actually reads: a token-budgeted selection of memories, assembled by a fixed pipeline, diversified so near-duplicates do not crowd each other out, and hashed so the same inputs give the same pack. Every line carries its provenance and its score.",
     colour: "#a78bfa",
+    share: {
+      title: "The context pack: context with receipts",
+      description:
+        "A token-budgeted selection of memories, assembled by a fixed twelve-stage pipeline, diversified by MMR and hashed so the same inputs give the same pack. Build one in your browser.",
+      kicker: "Chapter 03 · The pack",
+      headline: "Context with",
+      accent: "receipts.",
+      line: "A fixed budget, section quotas, no near-duplicates, and a hash you can replay. Every line says where it came from.",
+    },
     sections: [
       { id: "pipeline", label: "The pipeline" },
       { id: "builder", label: "Build a pack" },
@@ -92,6 +127,7 @@ export const chapters: Chapter[] = [
   },
   {
     id: "learn",
+    slug: "learning",
     number: "04",
     label: "Learning",
     short: "Learn",
@@ -99,6 +135,15 @@ export const chapters: Chapter[] = [
     thesis:
       "When a memory helps, say so; when it misleads, say so louder. ee keeps a Bayesian posterior for every memory, promotes it only on evidence, demotes it faster than it promotes, and never lets an agent's say-so stand in for a human's.",
     colour: "#38bdf8",
+    share: {
+      title: "It learns from outcomes",
+      description:
+        "ee keeps a Bayesian posterior for every memory. Harmful outcomes count two and a half times as much as helpful ones, fixes are recalled by the error's fingerprint, and nothing is rewritten without an audit entry.",
+      kicker: "Chapter 04 · Learning",
+      headline: "It learns from",
+      accent: "outcomes.",
+      line: "A posterior for every memory. Harmful counts 2.5 times helpful. An agent's say-so never outranks a human's.",
+    },
     sections: [
       { id: "trust", label: "Earned trust" },
       { id: "fixes", label: "Fixes, recalled" },
@@ -107,14 +152,75 @@ export const chapters: Chapter[] = [
     ],
   },
   {
-    id: "graph",
+    id: "campaigns",
+    slug: "campaigns",
     number: "05",
+    label: "Campaigns",
+    short: "Scale",
+    title: "Memory that [compounds].",
+    thesis:
+      "The work that matters most rarely fits in one session: a performance hunt that runs for a month, an incident that keeps recurring, a research question you come back to every week. ee is built for those campaigns. Every attempt leaves evidence, a family of failures becomes a rule, stale material decays out, and the pack each session reads keeps to the same budget while what is in it keeps getting better.",
+    colour: "#fb923c",
+    share: {
+      title: "Built for campaigns: memory that compounds",
+      description:
+        "For work that runs for weeks: every failed attempt becomes evidence, repeated failures become rules that prune the search, and every session's pack stays the same size while it gets better. In code, research, security, law and more.",
+      kicker: "Chapter 05 · Campaigns",
+      headline: "Memory that",
+      accent: "compounds.",
+      line: "Every dead end recorded once. Every family of failures distilled into a rule. Week 26's pack is no bigger than week 1's.",
+    },
+    sections: [
+      { id: "campaign", label: "A campaign, compounding" },
+      { id: "ledger", label: "What didn't work" },
+      { id: "domains", label: "Beyond code" },
+      { id: "team", label: "One agent to a team" },
+    ],
+  },
+  {
+    id: "agents",
+    slug: "agents",
+    number: "06",
+    label: "For agents",
+    short: "Agents",
+    title: "Made for the [agent] reading it.",
+    thesis:
+      "ee's main user is an agent, so its surface is shaped for one: a handful of commands, one versioned JSON envelope, typed exit codes, a machine-readable list of anything degraded, errors that carry a ranked repair plan, and documentation an agent can query instead of read. An agent can tell what happened, how far to trust it and what to do next, without guessing.",
+    colour: "#a3e635",
+    share: {
+      title: "Made for the agent reading it",
+      description:
+        "One versioned JSON envelope, typed exit codes, degraded states listed by code, errors with a ranked recovery plan, and 32 agent recipes with jq selectors. An agent knows what happened and what to do next without guessing.",
+      kicker: "Chapter 06 · For agents",
+      headline: "Made for the agent",
+      accent: "reading it.",
+      line: "One envelope. Typed exit codes. Errors that carry a ranked repair plan, with a risk class and a yes or no on human approval.",
+    },
+    sections: [
+      { id: "session", label: "A session, end to end" },
+      { id: "recovery", label: "Errors that say what to do" },
+      { id: "discover", label: "Self-describing" },
+    ],
+  },
+  {
+    id: "graph",
+    slug: "graph",
+    number: "07",
     label: "Graph",
     short: "Graph",
     title: "Memories form a [graph].",
     thesis:
       "Rules support decisions, failures derive from sessions, one fact contradicts another. ee links them and runs real graph algorithms over the links: which memories everything leans on, which ones bridge two topics, which ones fall apart if one is wrong.",
     colour: "#34d399",
+    share: {
+      title: "Memories form a graph",
+      description:
+        "ee links memories and runs real graph algorithms over the links: PageRank, HITS, articulation points, Louvain communities and Gomory-Hu proximity, each one a CLI command with deterministic JSON.",
+      kicker: "Chapter 07 · Graph",
+      headline: "Memories form a",
+      accent: "graph.",
+      line: "The rule twelve decisions rest on. The one fact bridging two topics. The memory that, if wrong, cuts a topic loose.",
+    },
     sections: [
       { id: "lenses", label: "Five lenses" },
       { id: "toolbox", label: "The toolbox" },
@@ -122,13 +228,23 @@ export const chapters: Chapter[] = [
   },
   {
     id: "proof",
-    number: "06",
+    slug: "proof",
+    number: "08",
     label: "Proof",
     short: "Proof",
     title: "Built to be [trusted].",
     thesis:
       "Memory is infrastructure: if it lies, every session after it inherits the lie. So ee is built the slow way: forbidden shortcuts, a documented failure mode for every degraded state, versioned contracts for every command, and a public list of what is not done yet.",
     colour: "#e879f9",
+    share: {
+      title: "Built to be trusted",
+      description:
+        "Forbidden shortcuts, a documented failure mode for every degraded state, versioned JSON contracts for every command, and a public list of what is not done yet. Plus install in one minute.",
+      kicker: "Chapter 08 · Proof",
+      headline: "Built to be",
+      accent: "trusted.",
+      line: "20,700+ tests, 630 failure-mode fixtures, 280 JSON schemas, 91 decision records, and an honest list of what isn't done.",
+    },
     sections: [
       { id: "compare", label: "Compared" },
       { id: "degrade", label: "Pull a plug" },
@@ -138,6 +254,21 @@ export const chapters: Chapter[] = [
     ],
   },
 ];
+
+/** The chapter with this id; a typo is a build failure, not a missing section. */
+export function chapterById(id: string): Chapter {
+  const found = chapters.find((item) => item.id === id);
+  if (!found) throw new Error(`no chapter ${id}`);
+  return found;
+}
+
+/** A section's number within its chapter: "03.2". */
+export function sectionIndex(chapterId: string, sectionId: string): string {
+  const owner = chapterById(chapterId);
+  const at = owner.sections.findIndex((section) => section.id === sectionId);
+  if (at < 0) throw new Error(`chapter ${chapterId} has no section ${sectionId}`);
+  return `${owner.number}.${at + 1}`;
+}
 
 export const heroStats = [
   {
@@ -360,3 +491,51 @@ export const graphTools = [
   { name: "Pack DNA", answers: "Why does this pack look the way it does: dominators, communities, ego graphs.", command: 'ee pack "<task>" --explain --json' },
   { name: "Knowledge skyline", answers: "The store's posture across layers, communities, trust, age and support.", command: "ee insights --section knowledgeSkyline --json" },
 ] as const;
+
+/**
+ * README "Beyond Coding": the same memory model outside software. The source URIs are the
+ * README's own examples of what to pass to `ee remember --source`; ee does not fetch them.
+ */
+export const domains = [
+  { name: "Investment research", unit: "a position", memories: "Thesis revisions, valuation methods, failed screens, peer sets", uris: ["sec-filing://", "earnings-call://", "analyst-note://"], workspace: "./positions/AAPL-long" },
+  { name: "Legal work", unit: "a matter", memories: "Case rules, drafting conventions, negotiation outcomes, due-diligence steps", uris: ["case://", "pacer://", "westlaw://"], workspace: "./matters/smith-v-jones" },
+  { name: "Security and incident response", unit: "an incident", memories: "IOCs, TTPs, response playbooks, detection-rule outcomes", uris: ["cve://", "mitre://", "incident://"], workspace: "./incidents/2026-11-phish" },
+  { name: "Marketing analysis", unit: "a programme", memories: "Campaign retrospectives, A/B results, channel rules, segmentation methods", uris: ["ga4://", "mixpanel://", "campaign://"], workspace: "./growth/q4-launch" },
+  { name: "Product management", unit: "a product line", memories: "User research, launch retrospectives, personas, prioritization rules", uris: ["interview://", "linear://", "notion://"], workspace: "./product/onboarding" },
+  { name: "Medicine or clinical operations", unit: "a protocol", memories: "Guideline facts, near misses, differential-diagnosis procedures", uris: ["pubmed://", "guideline://", "emr://"], workspace: "./clinic/sepsis-pathway" },
+  { name: "Sales and account work", unit: "an account", memories: "Call notes, objection patterns, account maps, qualification playbooks", uris: ["crm://", "salesforce://", "gong://"], workspace: "./deals/2026-q3-acme" },
+] as const;
+
+/**
+ * The surfaces an agent uses to learn ee without a human: the `ee --help` prelude
+ * (src/cli/mod.rs), AgentDocsTopic and AGENT_DOC_RECIPES (src/core/agent_docs.rs),
+ * SchemaCommand, and the Introspect command.
+ */
+export const agentSurfaces = [
+  { command: "ee --agent-docs", answers: "A machine-readable overview of ee and the index of every documentation topic." },
+  { command: "ee agent-docs recipes", answers: "32 workflows, each with its command, a jq selector for the answer, a success check and its failure branches." },
+  { command: "ee agent-docs <topic>", answers: "Twelve focused topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples, recipes." },
+  { command: "ee --help-json", answers: "The whole command tree as JSON, so a harness can build its own tool list." },
+  { command: "ee schema list", answers: "Every public JSON Schema by id; ee schema export <id> prints one to validate against." },
+  { command: "ee introspect", answers: "ee's command, schema and error maps in one response." },
+  { command: "ee capabilities", answers: "What this build can do: feature flags, the binaries it found, the environment overrides in force." },
+] as const;
+
+/** ProcessExitCode in src/models/mod.rs: each failure class has its own code. */
+export const exitCodes = [
+  { code: 0, name: "success", act: "read data" },
+  { code: 1, name: "usage", act: "fix the call" },
+  { code: 2, name: "configuration", act: "fix the config" },
+  { code: 3, name: "storage", act: "follow repair" },
+  { code: 4, name: "search index", act: "rebuild the index" },
+  { code: 5, name: "import", act: "check the source" },
+  { code: 6, name: "degraded, required mode unmet", act: "relax or repair" },
+  { code: 7, name: "policy denied", act: "ask a human" },
+  { code: 8, name: "migration required", act: "ee migrate run" },
+  { code: 9, name: "eval found regressions", act: "read the report" },
+  { code: 10, name: "workspace store missing", act: "check the path; don't init blindly" },
+  { code: 130, name: "cancelled", act: "retry with more budget" },
+] as const;
+
+/** The five states of `posture` in ee status and ee doctor (src/models/posture.rs), mildest first. */
+export const postures = ["ok", "initializing", "degraded_recoverable", "degraded_required", "blocked"] as const;
