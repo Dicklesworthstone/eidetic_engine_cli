@@ -1239,7 +1239,7 @@ fn backflow_target_is_current(
         }
         _ => return Err(global_mutation_error("Invalid feedback revision metadata")),
     };
-    let seal = connection.get_memory_seal(&memory.id)?;
+    let seal = connection.get_effective_memory_seal(&memory.id)?;
     if let Some(raw) = seal.as_ref().and_then(|seal| seal.revealed_at.as_deref()) {
         parse(raw)?;
     }

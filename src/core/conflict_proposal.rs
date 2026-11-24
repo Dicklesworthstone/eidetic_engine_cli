@@ -131,11 +131,10 @@ fn source_hash(
     let seals =
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)
             .map_err(storage_error)?;
-    let source_seals: Vec<_> = seals.iter().filter(|seal| seal.memory_id == id).collect();
     let held =
         crate::core::memory_lifecycle::pending_memory_review_ids(connection, workspace_id, &[id])
             .map_err(storage_error)?;
-    if source_seals.iter().any(|seal| seal.is_sealed()) || !held.is_empty() {
+    if seals.get(id).is_some_and(|seal| seal.is_sealed()) || !held.is_empty() {
         return Err(refusal(
             STALE_CODE,
             "A conflict source is sealed or awaiting memory review.",

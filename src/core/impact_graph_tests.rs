@@ -292,6 +292,7 @@ fn public_exact_impact_admits_live_sources_before_filling_the_limit() {
         "expired",
         "future",
         "sealed",
+        "inherited_seal",
         "held",
         "placeholder",
         "foreign",
@@ -321,6 +322,17 @@ fn public_exact_impact_admits_live_sources_before_filling_the_limit() {
             "sealed" => db
                 .insert_memory_seal(&hidden, &format!("blake3:{}", "a".repeat(64)), BASE)
                 .unwrap(),
+            "inherited_seal" => {
+                let ancestor = seed(&db, WS, 3, "PRIVATE-IMPACT sealed original.");
+                db.execute_raw(&format!(
+                    "UPDATE memories SET logical_id = '{ancestor}' WHERE id = '{hidden}'"
+                ))
+                .unwrap();
+                assert!(db.mark_memory_superseded(&ancestor, BASE).unwrap());
+                db.insert_memory_seal(&ancestor, &format!("blake3:{}", "a".repeat(64)), BASE)
+                    .unwrap();
+                assert!(db.get_memory_seal(&hidden).unwrap().is_none());
+            }
             "held" => hold_memory(&db, &hidden),
             "placeholder" => db
                 .execute_raw(&format!(

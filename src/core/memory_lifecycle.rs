@@ -91,24 +91,17 @@ fn review_admission_error() -> crate::db::DbError {
 /// seal with the same model validator as storage and attestation. Invalid
 /// metadata fails the read; inconsistent body bytes never grant visibility.
 ///
-/// One bound query loads the workspace's seals, including retired history. The
-/// caller owns the surrounding body/authority snapshot; this function neither
-/// opens a store nor starts, commits, or releases any transaction.
+/// One bound query resolves the workspace's direct and inherited seals,
+/// including retired history. Map keys identify candidate memories; a value's
+/// memory ID retains the actual seal owner. The caller owns the surrounding
+/// body/authority snapshot; this function never releases that transaction.
 pub(crate) fn load_memory_seals_for_admission(
     connection: &crate::db::DbConnection,
     workspace_id: &str,
-) -> crate::db::Result<Vec<crate::models::MemorySeal>> {
-    use sqlmodel_core::Value;
-
+) -> crate::db::Result<std::collections::BTreeMap<String, crate::models::MemorySeal>> {
     connection
-        .query(
-            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
-            &[Value::Text(workspace_id.to_owned())],
-        )
-        .map_err(|_| seal_admission_error())?
-        .iter()
-        .map(decode_admission_seal)
-        .collect()
+        .list_effective_memory_seals(workspace_id)
+        .map_err(|_| seal_admission_error())
 }
 
 fn seal_admission_error() -> crate::db::DbError {
@@ -120,8 +113,9 @@ fn seal_admission_error() -> crate::db::DbError {
 
 /// Decode a body-free seal projection in canonical column order:
 /// `memory_id`, `content_commitment`, `sealed_at`, `revealed_at`, `reveal_verified`.
-/// Shared by workspace readers and bounded search/seed admission so an invalid
-/// reveal cannot gain authority at a less strict retrieval boundary.
+/// Test projection for the shared seal model's chronological and nullable-field
+/// contract. Production readers use the database's effective-lineage resolver.
+#[cfg(test)]
 pub(crate) fn decode_admission_seal(
     row: &sqlmodel_core::Row,
 ) -> crate::db::Result<crate::models::MemorySeal> {
@@ -559,14 +553,21 @@ mod seal_admission_tests {
         let before = db.get_memory(MEMORY).unwrap();
         let audits = db.count_table_rows("audit_log").unwrap();
         let seals = load_memory_seals_for_admission(&db, WORKSPACE).unwrap();
-        assert_eq!(seals, vec![db.get_memory_seal(MEMORY).unwrap().unwrap()]);
-        assert!(seals[0].is_sealed());
+        assert_eq!(seals.len(), 1);
+        assert_eq!(
+            seals.get(MEMORY),
+            db.get_memory_seal(MEMORY).unwrap().as_ref()
+        );
+        assert!(seals[MEMORY].is_sealed());
         assert!(db.list_memory_seals_for_recovery(WORKSPACE).is_err());
         assert_eq!(db.get_memory(MEMORY).unwrap(), before);
         assert_eq!(db.count_table_rows("audit_log").unwrap(), audits);
         assert!(db.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
         assert_eq!(
-            load_memory_seals_for_admission(&db, WORKSPACE).unwrap(),
+            load_memory_seals_for_admission(&db, WORKSPACE)
+                .unwrap()
+                .into_values()
+                .collect::<Vec<_>>(),
             db.list_memory_seals_for_recovery(WORKSPACE).unwrap()
         );
     }
@@ -597,13 +598,13 @@ mod seal_admission_tests {
         seed(&writer, WORKSPACE, MEMORY);
         let reader = DbConnection::open_file_read_only(&root.path().join("seal.db")).unwrap();
         reader.begin_read_snapshot().unwrap();
-        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[MEMORY].is_sealed());
         assert!(writer.mark_memory_seal_revealed(MEMORY, TIME).unwrap());
-        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+        assert!(load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[MEMORY].is_sealed());
         reader
             .commit_read_snapshot()
             .expect("reader still owns its transaction");
-        assert!(!load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[0].is_sealed());
+        assert!(!load_memory_seals_for_admission(&reader, WORKSPACE).unwrap()[MEMORY].is_sealed());
     }
 
     #[test]

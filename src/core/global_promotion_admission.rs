@@ -90,7 +90,7 @@ fn load_source_with_boundary(
     // Always consult the sidecar. A populated body is not proof of reveal;
     // conversely, an explicitly revealed literal placeholder is public text.
     let seal = db
-        .get_memory_seal(&memory.id)
+        .get_effective_memory_seal(&memory.id)
         .map_err(|_| "Could not verify memory seal sidecar for promotion".to_owned())?;
     if let Some(raw) = seal.as_ref().and_then(|seal| seal.revealed_at.as_deref()) {
         timestamp(raw)
@@ -234,7 +234,7 @@ pub(super) fn find_twin(
     let source_start = source.valid_from.as_deref().map(timestamp).transpose()?;
     let source_end = source.valid_to.as_deref().map(timestamp).transpose()?;
     let rows = db.query(
-        "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified, m.id, m.valid_from, m.valid_to, m.superseded_at, m.typed_fields_json FROM memories m LEFT JOIN memory_seals s ON s.memory_id = m.id WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
+        "SELECT m.id, m.valid_from, m.valid_to, m.superseded_at, m.typed_fields_json FROM memories m WHERE m.workspace_id = ?1 AND m.content = ?2 AND m.level = ?3 AND m.kind = ?4 AND m.tombstoned_at IS NULL AND m.trust_class = ?5 AND m.trust_subclass IS ?6 ORDER BY m.id ASC",
         &[
             Value::Text(workspace.to_owned()),
             Value::Text(source.content.clone()),
@@ -247,40 +247,36 @@ pub(super) fn find_twin(
                 .map_or(Value::Null, Value::Text),
         ],
     )?;
-    for row in rows {
-        let Some(Value::Text(id)) = row.get(5) else {
+    let candidate_ids = rows
+        .iter()
+        .map(|row| match row.get(0) {
+            Some(Value::Text(id)) => Ok(id.as_str()),
+            _ => Err(invalid_authority()),
+        })
+        .collect::<DbResult<Vec<_>>>()?;
+    let seals = db
+        .get_effective_memory_seals_batch(&candidate_ids)
+        .map_err(|_| invalid_authority())?;
+    for row in &rows {
+        let Some(Value::Text(id)) = row.get(0) else {
             return Err(invalid_authority());
         };
         if id.parse::<crate::models::MemoryId>().is_err() {
             return Err(invalid_authority());
         }
-        let from = optional_text(row.get(6))?;
-        let to = optional_text(row.get(7))?;
-        let superseded = optional_text(row.get(8))?;
-        // An absent left join is unsealed only when the whole sidecar is
-        // absent. A present reveal needs the same validated commitment,
-        // timestamps and verification state as every other live reader.
-        let sealed = match row.get(0) {
-            Some(Value::Null) => {
-                if (1..5).any(|index| !matches!(row.get(index), Some(Value::Null))) {
-                    return Err(invalid_authority());
-                }
-                false
-            }
-            Some(Value::Text(seal_id)) if seal_id == id => {
-                crate::core::memory_lifecycle::decode_admission_seal(&row)
-                    .map_err(|_| invalid_authority())?
-                    .is_sealed()
-            }
-            _ => return Err(invalid_authority()),
-        };
+        let from = optional_text(row.get(1))?;
+        let to = optional_text(row.get(2))?;
+        let superseded = optional_text(row.get(3))?;
+        // A live exact twin may inherit authority from its retired original.
+        // The batch validates that lineage before classifying either seal.
+        let sealed = seals.get(id).is_some_and(|seal| seal.is_sealed());
         let lifecycle = lifecycle_refusal(from, to, superseded, reference)?;
         if lifecycle.is_some() || sealed {
             continue;
         }
         let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(9))?)? {
+        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(4))?)? {
             continue;
         }
         if start != source_start {
@@ -590,6 +586,35 @@ mod duplicate_compatibility_tests {
         assert_eq!(f.matched(&f.memory), Some(id.clone()));
         f.update(&id, "superseded_at = '2098-01-01T00:00:00Z'");
         assert_eq!(f.matched(&f.memory), None);
+    }
+
+    #[test]
+    fn exact_twin_inherits_a_closed_seal_from_its_retired_root() {
+        let f = Fixture::new();
+        let root = f.publish();
+        f.update(&root, "superseded_at = '2020-01-01T00:00:00Z'");
+        let child = f.publish();
+        assert_ne!(root, child);
+        f.update(&child, &format!("logical_id = '{root}'"));
+        f.db.insert_memory_seal(
+            &root,
+            &crate::models::memory_seal_commitment(f.memory.content.as_bytes()),
+            FROM,
+        )
+        .unwrap();
+        assert!(f.db.get_memory_seal(&child).unwrap().is_none());
+        let (matched, queries) = crate::db::capture_query_sql_for_test(|| f.matched(&f.memory));
+        assert_eq!(matched, None);
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("WHERE candidate.id IN ("))
+                .count(),
+            1,
+            "exact twins share one bounded lineage authority read"
+        );
+        assert!(f.db.mark_memory_seal_revealed(&root, FROM).unwrap());
+        assert_eq!(f.matched(&f.memory), Some(child));
     }
 
     #[test]

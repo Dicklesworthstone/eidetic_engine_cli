@@ -16,7 +16,7 @@ use super::{
 use crate::graph::anchor_projection::{
     AnchorProjectionRelation, anchor_surface_key, project_memory_anchor_graph,
 };
-use crate::models::{MemoryAnchorFreshnessState, MemoryId, validate_attestation_seal_fields};
+use crate::models::{MemoryAnchorFreshnessState, MemoryId};
 
 const SOURCE_LIMIT: usize = 4096;
 const PATH_LIMIT: usize = 8192;
@@ -186,27 +186,12 @@ impl<'a> MemoryAdmission<'a> {
         {
             return Ok(None);
         }
-        let seals = self.db.query(
-            "SELECT content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id = ?1", &params,
-        )?;
-        if !seals.is_empty() {
-            if seals.len() != 1 {
-                return Err(unavailable());
-            }
-            let seal = &seals[0];
-            let revealed = seal.get(2).and_then(Value::as_str);
-            if revealed.is_none()
-                || seal.get(3).and_then(Value::as_i64) != Some(1)
-                || validate_attestation_seal_fields(
-                    text(seal, 0)?,
-                    text(seal, 1)?,
-                    revealed,
-                    Some(true),
-                )
-                .is_err()
-            {
-                return Ok(None);
-            }
+        if self
+            .db
+            .get_effective_memory_seal(id)?
+            .is_some_and(|seal| seal.is_sealed())
+        {
+            return Ok(None);
         }
         let Some(memory) = self.db.get_memory(id)? else {
             return Err(unavailable());

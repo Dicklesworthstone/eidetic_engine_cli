@@ -922,8 +922,8 @@ fn assemble_conflict_surface_in_snapshot(
         };
         let sealed: BTreeSet<_> = seals
             .iter()
-            .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id.as_str())
+            .filter(|(_, seal)| seal.is_sealed())
+            .map(|(memory_id, _)| memory_id.as_str())
             .collect();
         for id in ids {
             if sealed.contains(id.as_str()) || held.contains(&id) {

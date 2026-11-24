@@ -93,8 +93,8 @@ fn load_with_boundary(
             repair: Some("ee doctor --workspace . --json".to_owned()),
         })?
         .into_iter()
-        .filter(|seal| seal.is_sealed())
-        .map(|seal| seal.memory_id)
+        .filter(|(_, seal)| seal.is_sealed())
+        .map(|(memory_id, _)| memory_id)
         .collect();
         current_memories.retain(|memory| !closed.contains(&memory.id));
     }

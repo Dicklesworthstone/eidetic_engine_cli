@@ -5539,6 +5539,49 @@ mod tests {
             .collect()
     }
 
+    fn seed_rule_source_revision(
+        connection: &DbConnection,
+        root_id: &str,
+        seed: u128,
+    ) -> Result<String, String> {
+        let root = connection
+            .get_memory(root_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing revision root".to_owned())?;
+        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+        let now = Utc::now();
+        connection
+            .insert_memory_revision_at(
+                &id,
+                root_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: root.workspace_id,
+                    level: root.level,
+                    kind: root.kind,
+                    content: root.content,
+                    workflow_id: root.workflow_id,
+                    confidence: root.confidence,
+                    utility: root.utility,
+                    importance: root.importance,
+                    provenance_uri: root.provenance_uri,
+                    trust_class: root.trust_class,
+                    trust_subclass: root.trust_subclass,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+                now,
+            )
+            .map_err(|error| error.to_string())?;
+        if !connection
+            .mark_memory_superseded(root_id, &now.to_rfc3339())
+            .map_err(|error| error.to_string())?
+        {
+            return Err("could not supersede revision root".to_owned());
+        }
+        Ok(id)
+    }
+
     fn hold_rule_source(
         connection: &DbConnection,
         workspace_id: &str,
@@ -5579,7 +5622,7 @@ mod tests {
         let public = seed_rule_source_group(&connection, &workspace_id, 100, PUBLIC)?;
         let sealed = seed_rule_source_group(&connection, &workspace_id, 200, SEALED)?;
         let held = seed_rule_source_group(&connection, &workspace_id, 300, HELD)?;
-        for id in &sealed {
+        for (index, id) in sealed.iter().enumerate() {
             connection
                 .insert_memory_seal(
                     id,
@@ -5587,6 +5630,15 @@ mod tests {
                     "2026-05-24T00:05:00Z",
                 )
                 .map_err(|error| error.to_string())?;
+            // Legacy successors have ordinary body text and no direct seal.
+            // Their closed original seal still controls source admission.
+            let successor = seed_rule_source_revision(&connection, id, 400 + index as u128)?;
+            assert!(
+                connection
+                    .get_memory_seal(&successor)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
         }
         // Two public repetitions cannot borrow a third vote from a held row.
         hold_rule_source(&connection, &workspace_id, &held[2], "memory", 1)?;
@@ -5611,7 +5663,10 @@ mod tests {
         assert_eq!(
             queries
                 .iter()
-                .filter(|sql| sql.contains("FROM memory_seals WHERE memory_id IN ("))
+                .filter(|sql| {
+                    sql.contains("LEFT JOIN memory_seals AS root_seal")
+                        && sql.contains("WHERE candidate.id IN (")
+                })
                 .count(),
             1,
             "a bounded source window must not issue one seal read per memory"
@@ -5762,7 +5817,12 @@ mod tests {
             let (directory, database, workspace_id) = rule_source_fixture()?;
             let connection =
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
-            let sources = seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?;
+            let mut sources = seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?;
+            let seal_root = sources[0].clone();
+            if sealed {
+                sources[0] = seed_rule_source_revision(&connection, &seal_root, 200)?;
+                sources.sort();
+            }
             let rule_id = RuleId::now().to_string();
             connection
                 .insert_procedural_rule(
@@ -5786,7 +5846,7 @@ mod tests {
             if sealed {
                 connection
                     .insert_memory_seal(
-                        &sources[0],
+                        &seal_root,
                         &crate::models::memory_seal_commitment(SOURCE.as_bytes()),
                         "2026-05-24T00:05:00Z",
                     )

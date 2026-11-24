@@ -920,8 +920,8 @@ fn read_global_rows_in_snapshot(
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, &workspace.id)
             .map_err(global_read_error)?
             .into_iter()
-            .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id)
+            .filter(|(_, seal)| seal.is_sealed())
+            .map(|(memory_id, _)| memory_id)
             .collect::<std::collections::BTreeSet<_>>();
     let candidate_ids = memories
         .iter()

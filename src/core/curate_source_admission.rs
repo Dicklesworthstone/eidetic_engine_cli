@@ -65,7 +65,7 @@ pub(crate) fn validate_memory_authority(
     memory: &StoredMemory,
 ) -> Result<(), CurateValidationIssue> {
     let seal = connection
-        .get_memory_seal(&memory.id)
+        .get_effective_memory_seal(&memory.id)
         .map_err(|_| unavailable_issue())?;
     if seal.as_ref().is_some_and(|seal| seal.is_sealed()) {
         return Err(validation_issue(
@@ -114,7 +114,7 @@ pub(crate) fn withheld_memory_ids(
     memory_ids: &[&str],
 ) -> Result<std::collections::BTreeSet<String>, CurateValidationIssue> {
     let seals = connection
-        .get_memory_seals_batch(memory_ids)
+        .get_effective_memory_seals_batch(memory_ids)
         .map_err(|_| unavailable_issue())?;
     let mut withheld = crate::core::memory_lifecycle::pending_memory_review_ids(
         connection,
@@ -124,9 +124,9 @@ pub(crate) fn withheld_memory_ids(
     .map_err(|_| unavailable_issue())?;
     withheld.extend(
         seals
-            .into_values()
-            .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id),
+            .into_iter()
+            .filter(|(_, seal)| seal.is_sealed())
+            .map(|(memory_id, _)| memory_id),
     );
     Ok(withheld)
 }

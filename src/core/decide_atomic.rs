@@ -450,7 +450,7 @@ fn validate_conflict_resolution(
             .map_err(|_| decide_storage_error("Could not verify conflict source authority"))?;
     if seals
         .iter()
-        .any(|seal| seal.is_sealed() && ids.contains(&seal.memory_id.as_str()))
+        .any(|(memory_id, seal)| seal.is_sealed() && ids.contains(&memory_id.as_str()))
         || !held.is_empty()
     {
         return Err(conflict_authority_error().into());

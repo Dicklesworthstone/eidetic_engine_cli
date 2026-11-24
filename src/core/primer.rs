@@ -964,8 +964,8 @@ fn primer_seal_admission(
                         .to_owned(),
             })?
             .into_iter()
-            .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id)
+            .filter(|(_, seal)| seal.is_sealed())
+            .map(|(memory_id, _)| memory_id)
             .collect::<BTreeSet<_>>();
     let mut hash = blake3::Hasher::new();
     hash.update(b"ee.primer.seal_admission.v1\0");

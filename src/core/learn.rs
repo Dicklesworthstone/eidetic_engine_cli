@@ -4175,8 +4175,8 @@ fn admit_learning_memory_rows(
     let closed_seals: BTreeSet<_> =
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)?
             .into_iter()
-            .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id)
+            .filter(|(_, seal)| seal.is_sealed())
+            .map(|(memory_id, _)| memory_id)
             .collect();
     // Share curation's pending-quarantine disqualifier: a held memory cannot
     // cover demand or acquire a new rule proposal while its review is pending.
@@ -5057,6 +5057,98 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn learning_and_derivation_admission_follow_a_sealed_revision_root() -> TestResult {
+        const ROOT: &str = "mem_00000000000000000000000801";
+        const CHILD: &str = "mem_00000000000000000000000802";
+        const PUBLIC: &str = "mem_00000000000000000000000803";
+        const BODY: &str = "WITHHELD_LINEAGE docking instructions";
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-lineage")?;
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(&db, &workspace_id, ROOT, "docking", BODY)?;
+        seed_memory(
+            &db,
+            &workspace_id,
+            PUBLIC,
+            "public",
+            "Independent public guidance",
+        )?;
+        let now = Utc::now();
+        db.insert_memory_revision_at(
+            CHILD,
+            ROOT,
+            &CreateMemoryInput {
+                workspace_id: workspace_id.clone(),
+                level: "episodic".to_owned(),
+                kind: "procedure".to_owned(),
+                content: BODY.to_owned(),
+                workflow_id: None,
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: vec!["docking".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            db.mark_memory_superseded(ROOT, &now.to_rfc3339())
+                .map_err(|error| error.to_string())?
+        );
+        db.insert_memory_seal(
+            ROOT,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            "2020-01-01T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            db.get_memory_seal(CHILD)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let authorities =
+            crate::core::memory_lifecycle::load_memory_seals_for_admission(&db, &workspace_id)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(authorities[CHILD].memory_id, ROOT);
+        let child = db
+            .get_memory(CHILD)
+            .map_err(|error| error.to_string())?
+            .ok_or("missing child")?;
+        let issue = crate::core::curate::source_admission::validate_memory_authority(&db, &child)
+            .expect_err("a live descendant cannot borrow authority from a closed root");
+        assert_eq!(issue.code, "derived_source_memory_sealed");
+        let withheld = crate::core::curate::source_admission::withheld_memory_ids(
+            &db,
+            &workspace_id,
+            &[CHILD, PUBLIC],
+        )
+        .map_err(|issue| issue.message)?;
+        assert_eq!(withheld, BTreeSet::from([CHILD.to_owned()]));
+
+        let snapshot =
+            load_learning_snapshot(workspace.path()).map_err(|error| error.to_string())?;
+        assert!(!snapshot.memories.contains_key(ROOT));
+        assert!(!snapshot.memories.contains_key(CHILD));
+        assert!(snapshot.memories.contains_key(PUBLIC));
+        assert!(
+            db.mark_memory_seal_revealed(ROOT, "2020-01-01T00:01:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        crate::core::curate::source_admission::validate_memory_authority(&db, &child)
+            .map_err(|issue| issue.message)?;
+        let revealed =
+            load_learning_snapshot(workspace.path()).map_err(|error| error.to_string())?;
+        assert!(revealed.memories.contains_key(CHILD));
+        assert!(revealed.memories.contains_key(PUBLIC));
+        assert!(!revealed.memories.contains_key(ROOT));
+        db.close().map_err(|error| error.to_string())
     }
 
     #[test]

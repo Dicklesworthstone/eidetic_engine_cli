@@ -86,7 +86,7 @@ fn target_snapshot(
         Some(DbValue::Text(value)) => Some(value.as_str()),
         _ => return Err(invalid_snapshot()),
     };
-    let seal = db.get_memory_seal(&memory.id)?;
+    let seal = db.get_effective_memory_seal(&memory.id)?;
     let typed_fields = db.get_memory_typed_fields_json(&memory.id)?;
     let mut tags = db.get_memory_tags(&memory.id)?;
     tags.sort_unstable();

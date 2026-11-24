@@ -156,8 +156,8 @@ fn read_current_snapshot(
                 )
                 .map_err(|_| read_error())?
                 .into_iter()
-                .filter(|seal| seal.is_sealed())
-                .map(|seal| seal.memory_id)
+                .filter(|(_, seal)| seal.is_sealed())
+                .map(|(memory_id, _)| memory_id)
                 .collect::<BTreeSet<_>>(),
             );
         }

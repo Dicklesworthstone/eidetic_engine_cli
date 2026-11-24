@@ -176,6 +176,42 @@ fn assert_review_refusal(report: &PromotionReport, observed_twin: Option<&str>) 
 }
 
 #[test]
+fn inherited_closed_source_seal_refuses_global_copy_without_mutation() {
+    let fixture = Fixture::new();
+    fixture
+        .db
+        .insert_memory_revision_at(OTHER, MEMORY, &memory_input(WORKSPACE, BODY), Utc::now())
+        .unwrap();
+    assert!(fixture.db.mark_memory_superseded(MEMORY, FROM).unwrap());
+    fixture.seal();
+    assert!(fixture.db.get_memory_seal(OTHER).unwrap().is_none());
+    let before = fixture.db.logical_table_digests().unwrap();
+    for dry_run in [true, false] {
+        let report = promote_global(&PromoteGlobalOptions {
+            memory_id: OTHER,
+            ..fixture.options(dry_run)
+        })
+        .unwrap();
+        assert!(matches!(
+            report.plan.verdict,
+            PromotionVerdict::Refuse {
+                refusal: PromotionRefusal::SealedPlaceholder
+            }
+        ));
+        assert!(!report.executed);
+        assert!(!fixture.global.root.exists());
+        assert_eq!(fixture.db.logical_table_digests().unwrap(), before);
+    }
+    assert!(fixture.db.mark_memory_seal_revealed(MEMORY, FROM).unwrap());
+    let revealed = promote_global(&PromoteGlobalOptions {
+        memory_id: OTHER,
+        ..fixture.options(true)
+    })
+    .unwrap();
+    assert!(revealed.plan.allowed());
+}
+
+#[test]
 fn pending_source_review_cannot_escape_into_a_new_global_identity() {
     let fixture = Fixture::new();
     review_hold(&fixture.db, 1, WORKSPACE, "memory", MEMORY);
