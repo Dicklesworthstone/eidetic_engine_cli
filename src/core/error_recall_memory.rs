@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use sqlmodel_core::{Row, Value};
 
 use crate::db::{DbConnection, DbError, DbOperation, Result};
-use crate::models::{MemoryId, validate_attestation_seal_fields};
+use crate::models::MemoryId;
 
 use super::{PACK_RECALL_EXCERPT_BYTES, PACK_RECALL_TARGET_LIMIT, bounded_pack_recall_text};
 
@@ -93,33 +93,6 @@ fn current_header(row: &Row, at: DateTime<Utc>) -> bool {
             .get(6)
             .and_then(Value::as_i64)
             .is_some_and(|bytes| (1..=MAX_MEMORY_SOURCE_BYTES as i64).contains(&bytes))
-}
-
-fn optional_text(value: Option<&Value>) -> std::result::Result<Option<&str>, ()> {
-    match value {
-        Some(Value::Null) => Ok(None),
-        Some(Value::Text(value)) => Ok(Some(value.as_str())),
-        _ => Err(()),
-    }
-}
-
-fn revealed_seal(row: &Row) -> bool {
-    let (Some(Value::Text(commitment)), Some(Value::Text(sealed)), Ok(revealed)) =
-        (row.get(1), row.get(2), optional_text(row.get(3)))
-    else {
-        return false;
-    };
-    let verified = match row.get(4) {
-        Some(Value::Null) => None,
-        Some(value) => match value.as_i64() {
-            Some(0) => Some(false),
-            Some(1) => Some(true),
-            _ => return false,
-        },
-        None => return false,
-    };
-    revealed.is_some()
-        && validate_attestation_seal_fields(commitment, sealed, revealed, verified).is_ok()
 }
 
 fn placeholders(ids: &[&str], first: usize) -> String {
@@ -225,27 +198,33 @@ fn withheld_ids(
     if ids.is_empty() {
         return Ok(withheld);
     }
-    // Separate primary-key reads avoid a join over the complete seal table.
-    // Missing seals mean unsealed; malformed or closed seals mean withheld.
-    let sql = format!(
-        "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id IN ({}) ORDER BY memory_id ASC",
-        placeholders(ids, 1)
-    );
-    let mut seen = BTreeSet::new();
-    let rows = connection
-        .query(&sql, &parameters(ids))
-        .map_err(|_| storage_error())?;
-    for row in rows {
-        let id = row
-            .get(0)
-            .and_then(Value::as_str)
-            .ok_or_else(storage_error)?;
-        if !ids.contains(&id) || !seen.insert(id.to_owned()) {
-            return Err(storage_error());
+    // Resolve selected revisions and their roots before loading any body.
+    // Isolate malformed rows as before, but storage failure still rejects
+    // the entire expansion rather than returning a misleading partial query.
+    match connection.get_effective_memory_seals_batch(ids) {
+        Ok(seals) => {
+            withheld.extend(
+                seals
+                    .into_iter()
+                    .filter(|(_, seal)| seal.is_sealed())
+                    .map(|(memory_id, _)| memory_id),
+            );
         }
-        if !revealed_seal(&row) {
-            withheld.insert(id.to_owned());
+        Err(DbError::MalformedRow { .. }) => {
+            for id in ids {
+                match connection.get_effective_memory_seal(id) {
+                    Ok(Some(seal)) if seal.is_sealed() => {
+                        withheld.insert((*id).to_owned());
+                    }
+                    Ok(_) => {}
+                    Err(DbError::MalformedRow { .. }) => {
+                        withheld.insert((*id).to_owned());
+                    }
+                    Err(_) => return Err(storage_error()),
+                }
+            }
         }
+        Err(_) => return Err(storage_error()),
     }
     let sql = format!(
         "SELECT DISTINCT target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND status = 'pending' AND target_id IN ({}) ORDER BY target_id ASC",
@@ -484,18 +463,106 @@ mod tests {
 
     #[test]
     fn malformed_or_unverified_seal_metadata_never_authorizes_a_body() -> TestResult {
-        let db = DbConnection::open_memory()?;
+        let db = fixture()?;
+        let invalid = memory(&db, WS, 1, BODY)?;
+        let healthy = memory(&db, WS, 2, BODY)?;
         let commitment = format!("blake3:{}", "a".repeat(64));
-        for sql in [
-            format!("SELECT 'id', '{commitment}', '{BASE}', '{BASE}', 0"),
-            format!("SELECT 'id', '{commitment}', '{BASE}', '{BASE}', NULL"),
-            format!("SELECT 'id', 'not-a-commitment', '{BASE}', '{BASE}', 1"),
-            format!("SELECT 'id', '{commitment}', '{NOW}', '{BASE}', 1"),
-            format!("SELECT 'id', '{commitment}', '{BASE}', NULL, 1"),
+        let invalid_commitment = format!("blake3:{}", "Q".repeat(64));
+        db.insert_memory_seal(&invalid, &commitment, BASE)?;
+        for (digest, sealed, revealed, verified) in [
+            (commitment.as_str(), BASE, Some(BASE), "0"),
+            (invalid_commitment.as_str(), BASE, Some(BASE), "1"),
+            (commitment.as_str(), NOW, Some(BASE), "1"),
+            (
+                commitment.as_str(),
+                "PRIVATE_INVALID_SEAL_TIME",
+                Some(BASE),
+                "1",
+            ),
+            (
+                commitment.as_str(),
+                BASE,
+                Some("PRIVATE_INVALID_REVEAL_TIME"),
+                "1",
+            ),
         ] {
-            let rows = db.query(&sql, &[])?;
-            assert!(!revealed_seal(&rows[0]));
+            let revealed = revealed.map_or_else(|| "NULL".to_owned(), |at| format!("'{at}'"));
+            db.execute_raw(&format!(
+                "UPDATE memory_seals SET content_commitment = '{digest}', sealed_at = '{sealed}', revealed_at = {revealed}, reveal_verified = {verified} WHERE memory_id = '{invalid}'"
+            ))?;
+            let before = db.logical_table_digests()?;
+            let result = read_observed(&db, WS, &[&invalid, &healthy], at(NOW), |ids| {
+                assert_eq!(ids, [healthy.as_str()]);
+            })?;
+            assert_eq!(result, [(healthy.clone(), BODY.to_owned())]);
+            assert_eq!(db.logical_table_digests()?, before);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_seals_and_invalid_roots_are_checked_before_repair_body_hydration() -> TestResult {
+        let db = fixture()?;
+        let root = memory(&db, WS, 1, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)?;
+        let child = memory(&db, WS, 2, BODY)?;
+        let healthy = memory(&db, WS, 3, BODY)?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET logical_id = '{root}' WHERE id = '{child}'"
+        ))?;
+        db.insert_memory_seal(
+            &root,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            BASE,
+        )?;
+        let before = db.logical_table_digests()?;
+        let (closed, queries) = crate::db::capture_query_sql_for_test(|| {
+            read_observed(&db, WS, &[&child, &healthy], at(NOW), |ids| {
+                assert_eq!(ids, [healthy.as_str()]);
+            })
+        });
+        assert_eq!(closed?, [(healthy.clone(), BODY.to_owned())]);
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("LEFT JOIN memory_seals AS root_seal"))
+                .count(),
+            1
+        );
+        assert_eq!(db.logical_table_digests()?, before);
+        assert!(db.mark_memory_seal_revealed(&root, BASE)?);
+        let revealed = read(&db, WS, &[&child, &healthy], at(NOW))?;
+        assert_eq!(revealed.len(), 2);
+        assert!(
+            revealed
+                .iter()
+                .any(|(id, body)| id == &child && body == BODY)
+        );
+
+        let missing_root = MemoryId::from_uuid(uuid::Uuid::from_u128(4)).to_string();
+        db.execute_raw(&format!(
+            "UPDATE memories SET logical_id = '{missing_root}' WHERE id = '{child}'"
+        ))?;
+        db.insert_memory_seal(
+            &child,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            BASE,
+        )?;
+        assert!(db.mark_memory_seal_revealed(&child, BASE)?);
+        let before = db.logical_table_digests()?;
+        let (broken, queries) = crate::db::capture_query_sql_for_test(|| {
+            read_observed(&db, WS, &[&child, &healthy], at(NOW), |ids| {
+                assert_eq!(ids, [healthy.as_str()]);
+            })
+        });
+        assert_eq!(broken?, [(healthy, BODY.to_owned())]);
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("LEFT JOIN memory_seals AS root_seal"))
+                .count(),
+            3
+        );
+        assert_eq!(db.logical_table_digests()?, before);
         Ok(())
     }
 

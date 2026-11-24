@@ -27,6 +27,104 @@ fn seal_commitment() -> String {
     crate::models::memory_seal_commitment(SEALED_RECALL_BODY.as_bytes())
 }
 
+#[test]
+fn inherited_seals_precede_recall_ranking_and_share_authority_across_selectors() {
+    let db = fixture();
+    let root = seed(
+        &db,
+        900,
+        crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+        0.5,
+    );
+    let hidden = seed(&db, 1, SEALED_RECALL_BODY, 0.99);
+    let public = seed(&db, 2, PUBLIC_RECALL_BODY, 0.1);
+    db.execute_raw(&format!(
+        "UPDATE memories SET logical_id = '{root}' WHERE id = '{hidden}'"
+    ))
+    .unwrap();
+    db.insert_memory_seal(&root, &seal_commitment(), BASE)
+        .unwrap();
+    assert!(db.get_memory_seal(&hidden).unwrap().is_none());
+    let before = db.logical_table_digests().unwrap();
+    for query in seal_queries() {
+        let result = scan(&db, &query, 100, 1);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].memory_id, public);
+        assert!(result.degraded.iter().any(|notice| {
+            notice.code == "recall_source_filtered" && notice.message.contains("sealed=1")
+        }));
+        let report = super::super::run_recall(&db, WORKSPACE, &query).unwrap();
+        let rendered =
+            super::super::recall_data_json(&report, &super::super::RecallQueryEcho::default())
+                .to_string();
+        assert!(!rendered.contains(&hidden));
+        assert!(!rendered.contains("SEALED-RECALL-CANARY"));
+        assert!(!rendered.contains(&seal_commitment()));
+    }
+    let query = RecallQuery {
+        paths: vec!["src/*".to_owned()],
+        symbols: vec!["Release::publish".to_owned()],
+        ..RecallQuery::default()
+    };
+    let (_, queries) = crate::db::capture_query_sql_for_test(|| scan(&db, &query, 100, 1));
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memories AS candidate")
+                && sql.contains("LEFT JOIN memory_seals AS direct_seal")
+                && sql.contains("candidate.id IN ("))
+            .count(),
+        1,
+        "path and symbol streams share one bounded effective-seal read"
+    );
+    assert_eq!(db.logical_table_digests().unwrap(), before);
+
+    assert!(db.mark_memory_seal_revealed(&root, BASE).unwrap());
+    for query in seal_queries() {
+        let result = scan(&db, &query, 100, 1);
+        assert_eq!(result.rows[0].memory_id, hidden);
+        assert_eq!(result.rows[0].content, SEALED_RECALL_BODY);
+    }
+}
+
+#[test]
+fn invalid_inherited_authority_isolated_before_recall_caps_and_body_hydration() {
+    let db = fixture();
+    let hidden = seed(&db, 1, SEALED_RECALL_BODY, 0.99);
+    let public = seed(&db, 2, PUBLIC_RECALL_BODY, 0.1);
+    let missing_root = format!("mem_{:026}", 900);
+    db.execute_raw(&format!(
+        "UPDATE memories SET logical_id = '{missing_root}' WHERE id = '{hidden}'"
+    ))
+    .unwrap();
+    for direct_reveal in [false, true] {
+        if direct_reveal {
+            db.insert_memory_seal(&hidden, &seal_commitment(), BASE)
+                .unwrap();
+            assert!(db.mark_memory_seal_revealed(&hidden, BASE).unwrap());
+        }
+        let before = db.logical_table_digests().unwrap();
+        for query in seal_queries() {
+            let result = scan(&db, &query, 100, 1);
+            assert_eq!(result.rows.len(), 1);
+            assert_eq!(result.rows[0].memory_id, public);
+            assert!(result.degraded.iter().any(|notice| {
+                notice.code == "recall_source_filtered"
+                    && notice.severity == "medium"
+                    && notice.message.contains("malformed=1")
+            }));
+            assert!(!format!("{:?}", result.rows).contains("SEALED-RECALL-CANARY"));
+            assert!(!format!("{:?}", result.degraded).contains(&missing_root));
+        }
+        assert_eq!(db.logical_table_digests().unwrap(), before);
+    }
+    db.execute_raw("ALTER TABLE memories RENAME COLUMN logical_id TO unavailable_seal_root")
+        .unwrap();
+    let error = super::super::run_recall(&db, WORKSPACE, &seal_queries()[0]).unwrap_err();
+    assert!(error.to_string().contains("no partial result"));
+    assert!(!error.to_string().contains("SEALED-RECALL-CANARY"));
+}
+
 // Only the temporary test store loses its write-time constraints. This models
 // legacy/corrupt durable metadata without weakening production migrations or
 // replacing the database, source reader or canonical model validator.

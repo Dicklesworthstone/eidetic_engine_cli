@@ -164,6 +164,49 @@ fn streams(query: &RecallQuery) -> Vec<Stream> {
     streams
 }
 
+fn load_seal_admissions(
+    db: &DbConnection,
+    ids: &[&str],
+    cache: &mut BTreeMap<String, Option<&'static str>>,
+) -> crate::db::Result<()> {
+    let pending = ids
+        .iter()
+        .copied()
+        .filter(|id| !cache.contains_key(*id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    match db.get_effective_memory_seals_batch(&pending) {
+        Ok(seals) => {
+            for id in pending {
+                let denial = seals
+                    .get(id)
+                    .is_some_and(crate::models::MemorySeal::is_sealed)
+                    .then_some("sealed");
+                cache.insert(id.to_owned(), denial);
+            }
+        }
+        Err(DbError::MalformedRow { .. }) => {
+            // Preserve isolated malformed-source filtering. A damaged root
+            // must not suppress unrelated candidates or consume their slots.
+            for id in pending {
+                let denial = match db.get_effective_memory_seal(id) {
+                    Ok(Some(seal)) if seal.is_sealed() => Some("sealed"),
+                    Ok(_) => None,
+                    Err(DbError::MalformedRow { .. }) => Some("malformed"),
+                    Err(_) => return Err(error()),
+                };
+                cache.insert(id.to_owned(), denial);
+            }
+        }
+        Err(_) => return Err(error()),
+    }
+    Ok(())
+}
+
 pub(super) fn load(
     db: &DbConnection,
     workspace: &str,
@@ -207,6 +250,7 @@ fn load_bounded(
     let mut scanned = 0;
     let mut best = BTreeMap::<String, RecallCandidateRow>::new();
     let mut denied = BTreeMap::<String, &'static str>::new();
+    let mut seal_admissions = BTreeMap::new();
     let mut surface_matches = BTreeSet::new();
     let mut invalid_anchors = 0;
     while scanned < max_rows && streams.iter().any(|stream| !stream.done) {
@@ -224,15 +268,17 @@ fn load_bounded(
             // review. Resolve the page's native memory holds in this same
             // snapshot before scoring, candidate caps, body hydration or hints.
             // The shared reader deduplicates IDs and never reads feedback text.
-            let held = crate::core::memory_lifecycle::pending_memory_review_ids(
-                db,
-                workspace,
-                &page
-                    .iter()
-                    .filter_map(|row| row.get(0).and_then(Value::as_str))
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|_| error())?;
+            let page_ids = page
+                .iter()
+                .filter_map(|row| row.get(0).and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            let held =
+                crate::core::memory_lifecycle::pending_memory_review_ids(db, workspace, &page_ids)
+                    .map_err(|_| error())?;
+            // The inline projection validates the leaf sidecar. Resolve any
+            // inherited authority before ranking; cache across anchor streams
+            // so path/symbol duplicates do not cause per-anchor seal queries.
+            load_seal_admissions(db, &page_ids, &mut seal_admissions)?;
             for row in page {
                 let key = (
                     text(&row, 10)?.to_owned(),
@@ -263,6 +309,10 @@ fn load_bounded(
                 }
                 if let Some(reason) = super::admission::denial(&row, &key.0, workspace, at) {
                     denied.insert(key.0, reason);
+                    continue;
+                }
+                if let Some(reason) = seal_admissions.get(&key.0).ok_or_else(error)? {
+                    denied.insert(key.0, *reason);
                     continue;
                 }
                 if held.contains(&key.0) {
