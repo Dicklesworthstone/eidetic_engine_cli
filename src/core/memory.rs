@@ -19,13 +19,13 @@ use super::audit_lane::{
 };
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config, merged_workspace_config};
-#[cfg(test)]
-use super::index::{get_index_status_with_connection, process_pending_index_jobs_coalesced};
 use super::index::{
     IndexHealth, IndexProcessingJobReport, IndexRebuildError, IndexStatusOptions,
     get_index_status_in_current_snapshot, process_index_job_for_connection,
     process_pending_index_jobs_coalesced_before,
 };
+#[cfg(test)]
+use super::index::{get_index_status_with_connection, process_pending_index_jobs_coalesced};
 use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
     LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE, MemoryLifecycleState, transition_for,
@@ -294,8 +294,23 @@ pub struct RememberMemoryReport {
     pub near_duplicates: Vec<RememberNearDuplicate>,
 }
 
-fn remember_producer_metadata() -> ProducerMetadata {
-    remember_producer_metadata_for_agent(super::memory_scope::current_agent_name().as_deref())
+#[derive(Clone, Copy)]
+enum RememberAgentIdentity<'a> {
+    Ambient,
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    Explicit(Option<&'a str>),
+}
+
+impl RememberAgentIdentity<'_> {
+    fn resolve(self) -> Option<String> {
+        match self {
+            Self::Ambient => super::memory_scope::current_agent_name(),
+            Self::Explicit(agent_name) => agent_name
+                .map(str::trim)
+                .filter(|agent| !agent.is_empty())
+                .map(str::to_owned),
+        }
+    }
 }
 
 /// Build the same producer metadata for local and explicitly attributed writes.
@@ -1627,6 +1642,7 @@ fn remember_memory_outcome_inner_with_store(
         creation_companions,
         origin,
         None,
+        RememberAgentIdentity::Ambient,
     )
 }
 
@@ -1646,7 +1662,12 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
     creation_companions: RememberCreationCompanions<'_>,
     origin: RememberWriteOrigin,
     batch_session: Option<&mut Option<RememberBatchStoreSession>>,
+    agent_identity: RememberAgentIdentity<'_>,
 ) -> Result<RememberOutcome, DomainError> {
+    // Capture attribution once: the durable trust/source fields and both
+    // preview and committed reports must identify the same caller.
+    let agent_name = agent_identity.resolve();
+    let producer = remember_producer_metadata_for_agent(agent_name.as_deref());
     let mut prepared = prepare_remember_memory_with_store(
         options,
         id_source.next_memory_id(),
@@ -1673,7 +1694,7 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
-            producer: remember_producer_metadata(),
+            producer,
             created_at: None,
             valid_from: prepared.valid_from,
             valid_to: prepared.valid_to,
@@ -1747,7 +1768,6 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         .as_ref()
         .map(|_| id_source.next_audit_id());
     let index_job_id = id_source.next_search_index_job_id();
-    let agent_name = super::memory_scope::current_agent_name();
     // External artifacts always enter as assertions. Existing manual writes
     // retain ADR 0009's human_explicit posture; registered-agent attempt-family
     // writes keep their existing multiplicity-aware assertion posture.
@@ -1769,10 +1789,13 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
         trust_class: trust_class.as_str().to_owned(),
-        trust_subclass: super::memory_scope::remember_trust_subclass(match origin {
-            RememberWriteOrigin::Manual => "ee remember",
-            RememberWriteOrigin::SandboxImport => "ee sandbox import; external",
-        }),
+        trust_subclass: super::memory_scope::remember_trust_subclass_for_agent(
+            match origin {
+                RememberWriteOrigin::Manual => "ee remember",
+                RememberWriteOrigin::SandboxImport => "ee sandbox import; external",
+            },
+            agent_name.as_deref(),
+        ),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
         valid_to: prepared.valid_to.clone(),
@@ -2132,7 +2155,7 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
-        producer: remember_producer_metadata(),
+        producer,
         created_at,
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
@@ -6933,12 +6956,13 @@ fn remember_candidate_cluster(
     // Small get_memories_batch calls are individual primary-key seeks. Read
     // them lazily so a full cluster never fetches the unused tail of a page.
     for candidate_id in candidate_ids {
-        let Some(memory) = connection
-            .get_memory(&candidate_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load curation neighbor memory: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?
+        let Some(memory) =
+            connection
+                .get_memory(&candidate_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation neighbor memory: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
         else {
             continue;
         };
@@ -6952,12 +6976,13 @@ fn remember_candidate_cluster(
         if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id {
             continue;
         }
-        let candidate_tags = connection.get_memory_tags(&memory.id).map_err(|error| {
-            DomainError::Storage {
-                message: format!("Failed to load curation neighbor tags: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            }
-        })?;
+        let candidate_tags =
+            connection
+                .get_memory_tags(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation neighbor tags: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
         if !required_tags.is_empty()
             && !candidate_tags
                 .iter()
@@ -8247,7 +8272,7 @@ fn remember_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
         .map_or(REMEMBER_DEFAULT_DUPLICATE_SIMILARITY, |value| value as f32)
 }
 
-fn validate_remember_idempotency_key(raw: &str) -> Result<String, DomainError> {
+pub(crate) fn validate_remember_idempotency_key(raw: &str) -> Result<String, DomainError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(remember_usage_error(
@@ -8400,7 +8425,10 @@ fn current_remember_reinforce_target(
             memory.workspace_id == context.workspace_id && memory.tombstoned_at.is_none()
         })
         .ok_or_else(stale)?;
-    if connection.get_memory_superseded_at(context.target_memory_id)?.is_some() {
+    if connection
+        .get_memory_superseded_at(context.target_memory_id)?
+        .is_some()
+    {
         return Err(stale());
     }
     Ok(memory)
@@ -8410,7 +8438,9 @@ fn remember_reinforce_evidence_denied() -> DomainError {
     DomainError::PolicyDenied {
         message: "Reinforcement evidence requires quarantine review; no memory was strengthened."
             .to_owned(),
-        repair: Some("Review the observation and reinforce only with admissible evidence.".to_owned()),
+        repair: Some(
+            "Review the observation and reinforce only with admissible evidence.".to_owned(),
+        ),
     }
 }
 
@@ -8765,8 +8795,8 @@ fn ensure_remember_reinforce_replay_index_job(
         return Err(malformed());
     }
     let mut index_job_id = None;
-    for audit in connection
-        .list_memory_reinforcement_audits(&recorded.workspace_id, &recorded.memory_id)?
+    for audit in
+        connection.list_memory_reinforcement_audits(&recorded.workspace_id, &recorded.memory_id)?
     {
         if audit.action != audit_actions::MEMORY_REINFORCE
             || audit.workspace_id.as_deref() != Some(recorded.workspace_id.as_str())
@@ -8984,11 +9014,8 @@ fn reconcile_remember_replay_index(
     if !controls.defer_index_processing {
         match open_remember_database_with_retry(&database_path) {
             Ok(connection) => {
-                match reconcile_pending_remember_index_jobs(
-                    &connection,
-                    &workspace_id,
-                    &index_dir,
-                ) {
+                match reconcile_pending_remember_index_jobs(&connection, &workspace_id, &index_dir)
+                {
                     Ok(None) => provisional_status = "indexed".to_owned(),
                     Ok(Some(index_report)) => {
                         provisional_status = remember_index_status(&index_report);
@@ -9047,6 +9074,30 @@ pub fn remember_memory_with_controls(
     remember_memory_with_controls_and_typed_fields(options, controls, &[])
 }
 
+/// Controlled remember for an explicitly attributed caller, such as a daemon
+/// client. An absent caller stays anonymous rather than inheriting the daemon
+/// process's environment. Durable idempotency and replay publication are the
+/// same as for a local controlled write.
+#[cfg(any(unix, test))]
+pub(crate) fn remember_memory_with_controls_for_agent(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    agent_name: Option<&str>,
+) -> Result<RememberOutcome, DomainError> {
+    let outcome = remember_memory_with_creation_companions_and_batch_session(
+        options,
+        controls,
+        &[],
+        None,
+        RememberCreationCompanions::default(),
+        None,
+        RememberAgentIdentity::Explicit(agent_name),
+    )?;
+    Ok(reconcile_remember_replay_index(
+        outcome, options, controls, None,
+    ))
+}
+
 /// Controlled remember write with explicit registry-backed typed fields.
 pub fn remember_memory_with_controls_and_typed_fields(
     options: &RememberMemoryOptions<'_>,
@@ -9093,6 +9144,7 @@ pub(crate) fn remember_memory_with_creation_companions(
         attempt_family,
         creation_companions,
         None,
+        RememberAgentIdentity::Ambient,
     )?;
     Ok(reconcile_remember_replay_index(
         outcome, options, controls, None,
@@ -9106,6 +9158,7 @@ fn remember_memory_with_creation_companions_and_batch_session(
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     creation_companions: RememberCreationCompanions<'_>,
     mut batch_session: Option<&mut Option<RememberBatchStoreSession>>,
+    agent_identity: RememberAgentIdentity<'_>,
 ) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     creation_companions.validate_for_write(options, controls)?;
@@ -9186,8 +9239,18 @@ fn remember_memory_with_creation_companions_and_batch_session(
                 };
                 (&session.connection, session.workspace_id.clone())
             } else {
-                owned_connection = open_remember_database_with_retry(&database_path)?;
-                migrate_remember_database_with_retry(&owned_connection)?;
+                owned_connection = if options.dry_run {
+                    DbConnection::open_file_read_only(&database_path).map_err(|error| {
+                        DomainError::Storage {
+                            message: format!("Failed to inspect remember preview: {error}"),
+                            repair: Some("ee doctor --json".to_owned()),
+                        }
+                    })?
+                } else {
+                    let connection = open_remember_database_with_retry(&database_path)?;
+                    migrate_remember_database_with_retry(&connection)?;
+                    connection
+                };
                 let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
                     &owned_connection,
                     &stable_workspace_id(&canonical),
@@ -9249,7 +9312,11 @@ fn remember_memory_with_creation_companions_and_batch_session(
         }
     }
 
-    if idempotency_key.is_none() && creation_companions.is_empty() && batch_session.is_none() {
+    if idempotency_key.is_none()
+        && creation_companions.is_empty()
+        && batch_session.is_none()
+        && matches!(agent_identity, RememberAgentIdentity::Ambient)
+    {
         return remember_memory_with_index_mode(
             options,
             controls.defer_index_processing,
@@ -9271,6 +9338,7 @@ fn remember_memory_with_creation_companions_and_batch_session(
         creation_companions,
         RememberWriteOrigin::Manual,
         batch_session,
+        agent_identity,
     )
 }
 
@@ -10188,6 +10256,7 @@ where
             None,
             RememberCreationCompanions::default(),
             Some(&mut batch_session),
+            RememberAgentIdentity::Ambient,
         ) {
             Ok(RememberOutcome::Created(report)) => {
                 stored_count += 1;
@@ -18792,7 +18861,10 @@ mod tests {
         let workspace_id = "wsp_01234567890123456789012345";
         for (id, path) in [
             (workspace_id, "/tmp/remember-curation-growth"),
-            ("wsp_01234567890123456789012346", "/tmp/remember-curation-other"),
+            (
+                "wsp_01234567890123456789012346",
+                "/tmp/remember-curation-other",
+            ),
         ] {
             connection
                 .insert_workspace(
@@ -18895,7 +18967,10 @@ mod tests {
             let report = report.map_err(|error| error.message())?;
             ensure(report.status, "skipped_too_few_neighbors", "small cluster")?;
             assert!(report.candidate.is_none());
-            assert!(report.degradations.is_empty(), "unused search must not fail");
+            assert!(
+                report.degradations.is_empty(),
+                "unused search must not fail"
+            );
             assert_eq!(queries.len(), input.tags.len(), "only tag IDs are read");
         }
 
@@ -18913,9 +18988,12 @@ mod tests {
         .map_err(|error| error.message())?;
         // The missing search database is a negative control: once a cluster
         // is possible, the existing semantic lookup and its failure report run.
-        assert!(report.degradations.iter().any(|entry| {
-            entry.code == "auto_propose_search_neighbor_lookup_failed"
-        }));
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|entry| { entry.code == "auto_propose_search_neighbor_lookup_failed" })
+        );
         Ok(())
     }
 
@@ -18931,7 +19009,9 @@ mod tests {
             .map_err(|error| error.message())?;
         ensure(
             tagged.clone(),
-            (0..=64).map(remember_curation_growth_id).collect::<Vec<_>>(),
+            (0..=64)
+                .map(remember_curation_growth_id)
+                .collect::<Vec<_>>(),
             "tag ties retain canonical ID order",
         )?;
         let mut members = vec![remember_curation_growth_id(64); 2];
@@ -18956,7 +19036,10 @@ mod tests {
         );
         sort_by_ulid_payload_or_lexical(&mut expected, String::as_str);
         ensure(
-            cluster.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
+            cluster
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<Vec<_>>(),
             expected,
             "first-seen search ranking survives overlap and duplicate IDs",
         )?;
@@ -18996,8 +19079,14 @@ mod tests {
         )
         .map_err(|error| error.message())?;
         ensure(
-            cluster.into_iter().map(|memory| memory.id).collect::<Vec<_>>(),
-            [0, 6, 7].into_iter().map(remember_curation_growth_id).collect(),
+            cluster
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<Vec<_>>(),
+            [0, 6, 7]
+                .into_iter()
+                .map(remember_curation_growth_id)
+                .collect(),
             "missing, foreign, tombstoned, wrong-kind, wrong-level and unrelated rows stay out",
         )
     }
@@ -20471,8 +20560,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_lineage_blocks_revision_and_attestation_despite_a_verified_leaf_seal()
-    -> TestResult {
+    fn invalid_lineage_blocks_revision_and_attestation_despite_a_verified_leaf_seal() -> TestResult
+    {
         let (_temp, database_path, seal) = sealed_revision_fixture("Committed protocol bytes.")?;
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -24586,6 +24675,124 @@ mod tests {
         }
     }
 
+    #[test]
+    fn controlled_remember_uses_caller_attribution_and_retains_receipt_on_replay() -> TestResult {
+        for caller in [Some("remote-remember-caller"), None] {
+            let temp = upgrade_test_workspace()?;
+            let content = "A daemon retry keeps the first durable memory and caller.";
+            let controls = RememberWriteControls {
+                idempotency_key: Some("caller-receipt"),
+                defer_index_processing: true,
+                ..RememberWriteControls::default()
+            };
+            let options = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+            let created = upgrade_created_report(
+                remember_memory_with_controls_for_agent(&options, &controls, caller)
+                    .map_err(|error| error.message())?,
+                "explicit caller",
+            )?;
+            assert_eq!(created.producer.identity.agent_name.as_deref(), caller);
+            let connection = open_upgrade_test_db(temp.path())?;
+            let memory_id = assert_single_keyed_remember(
+                &connection,
+                &created.workspace_id,
+                "caller-receipt",
+                &remember_content_hash(content),
+            )?;
+            let stored = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "attributed memory missing".to_owned())?;
+            assert_eq!(
+                stored.trust_subclass,
+                super::super::memory_scope::remember_trust_subclass_for_agent(
+                    "ee remember",
+                    caller
+                )
+            );
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let replay = remember_memory_with_controls_for_agent(
+                &options,
+                &controls,
+                Some("different-retry-caller"),
+            )
+            .map_err(|error| error.message())?;
+            let RememberOutcome::AlreadyRecorded(replayed) = replay else {
+                return Err("same key must return the original receipt".to_owned());
+            };
+            assert_eq!(replayed.memory_id, memory_id);
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "a retry must not change attribution, source, audit, key, or queued publication"
+            );
+            let preview = remember_memory_with_controls_for_agent(
+                &RememberMemoryOptions {
+                    dry_run: true,
+                    ..options
+                },
+                &controls,
+                None,
+            )
+            .map_err(|error| error.message())?;
+            let RememberOutcome::AlreadyRecorded(preview) = preview else {
+                return Err("preview must recognize the existing receipt".to_owned());
+            };
+            assert!(preview.dry_run);
+            assert_eq!(preview.memory_id, memory_id);
+            assert_eq!(preview.index_status, "not_applicable");
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn keyed_remember_preview_never_migrates_an_existing_database() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let database = temp.path().join(".ee/ee.db");
+        DbConnection::open_file(&database)
+            .map_err(|error| error.to_string())?
+            .close()
+            .map_err(|error| error.to_string())?;
+        let before = fs::read(&database).map_err(|error| error.to_string())?;
+        let preview = remember_memory_with_controls_for_agent(
+            &upgrade_remember_options(
+                temp.path(),
+                "Preview may inspect but never initialize the source schema.",
+                0.8,
+                None,
+                true,
+            ),
+            &RememberWriteControls {
+                idempotency_key: Some("no-preview-migration"),
+                ..RememberWriteControls::default()
+            },
+            Some("preview-caller"),
+        );
+        assert!(
+            preview.is_err(),
+            "a schema-less database must not be migrated by preview"
+        );
+        assert_eq!(
+            fs::read(&database).map_err(|error| error.to_string())?,
+            before,
+            "a dry run must preserve the exact existing database bytes"
+        );
+        assert!(!temp.path().join(".ee/audit.jsonl").exists());
+        assert!(!temp.path().join(".ee/index").exists());
+        Ok(())
+    }
+
     fn assert_single_keyed_remember(
         connection: &DbConnection,
         workspace_id: &str,
@@ -25749,7 +25956,11 @@ mod tests {
         let original_jobs = connection
             .list_search_index_jobs(&seed.workspace_id, None)
             .map_err(|error| error.to_string())?;
-        assert_eq!(original_jobs.len(), 1, "only the ordinary create owns a job");
+        assert_eq!(
+            original_jobs.len(),
+            1,
+            "only the ordinary create owns a job"
+        );
         assert!(
             connection
                 .get_derivation_admitted_evidence_span(&evidence_id, &seed.workspace_id)
@@ -25848,9 +26059,16 @@ mod tests {
                 .find(|job| job.id != original_jobs[0].id)
                 .ok_or_else(|| "legacy publication job missing".to_owned())?;
             assert!(repair.id.starts_with("sidx_"));
-            assert_eq!(repair.id.len(), 31, "repair identity meets the actual schema");
+            assert_eq!(
+                repair.id.len(),
+                31,
+                "repair identity meets the actual schema"
+            );
             assert_eq!(repair.workspace_id, seed.workspace_id);
-            assert_eq!(repair.job_type_enum(), Some(SearchIndexJobType::SingleDocument));
+            assert_eq!(
+                repair.job_type_enum(),
+                Some(SearchIndexJobType::SingleDocument)
+            );
             assert_eq!(repair.document_source.as_deref(), Some("memory"));
             assert_eq!(repair.document_id.as_deref(), Some(memory_id.as_str()));
             assert_eq!(repair.documents_total, 1);
@@ -25870,7 +26088,8 @@ mod tests {
     }
 
     #[test]
-    fn remember_reinforce_queue_failure_rolls_back_learning_evidence_audits_and_key() -> TestResult {
+    fn remember_reinforce_queue_failure_rolls_back_learning_evidence_audits_and_key() -> TestResult
+    {
         let temp = upgrade_test_workspace()?;
         let content = "Document redacted sample API_KEY=sk-FAKEabc123def456ghi789jkl012.";
         let seed = reinforcement_test_seed(temp.path(), content, true)?;
@@ -25990,7 +26209,10 @@ mod tests {
                 )
                 .err()
                 .ok_or_else(|| "inadmissible reinforcement must be refused".to_owned())?;
-                assert_eq!(matches!(error, DomainError::PolicyDenied { .. }), quarantine);
+                assert_eq!(
+                    matches!(error, DomainError::PolicyDenied { .. }),
+                    quarantine
+                );
                 if !quarantine {
                     assert!(matches!(error, DomainError::PolicyDeniedWithDetails { .. }));
                 }
@@ -26098,7 +26320,8 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
-    fn remember_reinforce_replay_publishes_original_pending_failed_and_cancelled_jobs() -> TestResult {
+    fn remember_reinforce_replay_publishes_original_pending_failed_and_cancelled_jobs() -> TestResult
+    {
         let temp = upgrade_test_workspace()?;
         let workspace = temp
             .path()
@@ -26118,7 +26341,8 @@ mod tests {
                 defer_index_processing: true,
             };
             let report = upgrade_reinforced_report(
-                remember_memory_with_controls(&options, &controls).map_err(|error| error.message())?,
+                remember_memory_with_controls(&options, &controls)
+                    .map_err(|error| error.message())?,
                 "deferred reinforcement",
             )?;
             assert_eq!(report.index_status, "queued");
@@ -26161,7 +26385,9 @@ mod tests {
             )
             .map_err(|error| error.message())?;
             match replay {
-                RememberOutcome::AlreadyRecorded(report) => assert_eq!(report.index_status, "indexed"),
+                RememberOutcome::AlreadyRecorded(report) => {
+                    assert_eq!(report.index_status, "indexed")
+                }
                 other => return Err(format!("expected original receipt, got {other:?}")),
             }
             let connection = open_upgrade_test_db(&workspace)?;
@@ -26170,7 +26396,9 @@ mod tests {
                 .list_search_index_jobs(&workspace_id, None)
                 .map_err(|error| error.to_string())?;
             assert_eq!(
-                jobs.iter().map(|job| job.id.clone()).collect::<BTreeSet<_>>(),
+                jobs.iter()
+                    .map(|job| job.id.clone())
+                    .collect::<BTreeSet<_>>(),
                 jobs_before
             );
             let job = connection
@@ -26220,8 +26448,10 @@ mod tests {
         let workspace_id = stable_workspace_id(&workspace);
         let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
         let content = "Batch corroboration publishes every committed observation together.";
-        let seed = remember_memory(&upgrade_remember_options(&workspace, content, 0.6, None, false))
-            .map_err(|error| error.message())?;
+        let seed = remember_memory(&upgrade_remember_options(
+            &workspace, content, 0.6, None, false,
+        ))
+        .map_err(|error| error.message())?;
         assert_eq!(seed.index_status, "indexed");
         let input = ["batch-reinforce-a", "batch-reinforce-b"]
             .into_iter()
@@ -26233,10 +26463,8 @@ mod tests {
             ..upgrade_batch_options(&workspace, false)
         };
         let mut pending_ids = BTreeSet::new();
-        let report = remember_memory_batch_stdin_with_reconcile_hook(
-            &options,
-            &input,
-            |connection, id| {
+        let report =
+            remember_memory_batch_stdin_with_reconcile_hook(&options, &input, |connection, id| {
                 let pending = connection
                     .list_pending_search_index_jobs(id, None)
                     .map_err(|error| DomainError::Storage {
@@ -26244,17 +26472,21 @@ mod tests {
                         repair: None,
                     })?;
                 assert_eq!(
-                    pending.len(), 2,
+                    pending.len(),
+                    2,
                     "every observation is queued before any batch publication"
                 );
                 pending_ids = pending.into_iter().map(|job| job.id).collect();
                 assert_eq!(pending_ids.len(), 2);
                 Ok(())
-            },
-        )
-        .map_err(|error| error.message())?;
+            })
+            .map_err(|error| error.message())?;
         assert_eq!(
-            (report.stored_count, report.reinforced_count, report.failed_count),
+            (
+                report.stored_count,
+                report.reinforced_count,
+                report.failed_count
+            ),
             (0, 2, 0)
         );
         assert_eq!(report.index_status, "indexed");
@@ -26277,7 +26509,8 @@ mod tests {
             .list_search_index_jobs(&workspace_id, None)
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
-        let replay = remember_memory_batch_stdin(&options, &input).map_err(|error| error.message())?;
+        let replay =
+            remember_memory_batch_stdin(&options, &input).map_err(|error| error.message())?;
         assert_eq!(
             (replay.reinforced_count, replay.already_recorded_count),
             (0, 2)

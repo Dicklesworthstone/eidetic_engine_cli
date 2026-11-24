@@ -1211,6 +1211,9 @@ pub enum WriteResult {
     /// The memory and its audit/index job committed. Derived work may still
     /// need repair; callers must not retry the source write in that case.
     MemoryCommitted { memory: Box<CommittedMemoryWrite> },
+    /// A controlled remember returned its canonical created or replay result.
+    /// Replays retain their original identity without claiming a new commit.
+    MemoryRemembered { memory: Box<RememberedMemoryWrite> },
     /// Operation failed with domain error.
     Failed { error: DomainError },
     /// Write owner is shutting down.
@@ -1221,7 +1224,10 @@ impl WriteResult {
     /// Returns true if the operation succeeded.
     #[must_use]
     pub const fn is_success(&self) -> bool {
-        matches!(self, Self::Success { .. } | Self::MemoryCommitted { .. })
+        matches!(
+            self,
+            Self::Success { .. } | Self::MemoryCommitted { .. } | Self::MemoryRemembered { .. }
+        )
     }
 
     /// Returns the entity ID if present.
@@ -1230,6 +1236,7 @@ impl WriteResult {
         match self {
             Self::Success { entity_id } => entity_id.as_deref(),
             Self::MemoryCommitted { memory } => Some(&memory.memory_id),
+            Self::MemoryRemembered { memory } => Some(&memory.memory_id),
             _ => None,
         }
     }
@@ -1251,6 +1258,16 @@ pub struct CommittedMemoryWrite {
     /// invent a report about work that may not have run.
     pub report: Option<Box<super::memory::RememberMemoryReport>>,
     pub degraded: Vec<super::memory::RememberSuggestedLinkDegradation>,
+}
+
+/// The original controlled result and the request's stable retry identity.
+/// A replay deliberately has no fabricated index job or created-memory report.
+#[derive(Clone, Debug)]
+pub struct RememberedMemoryWrite {
+    pub memory_id: String,
+    pub workspace_path: PathBuf,
+    pub idempotency_key: String,
+    pub outcome: super::memory::RememberOutcome,
 }
 
 /// Breakdown of group-commit fallback reasons.

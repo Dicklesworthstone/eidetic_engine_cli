@@ -203,6 +203,10 @@ pub const DAEMON_TELEMETRY_ENCODE_FAILED_CODE: &str = "daemon_telemetry_encode_f
 /// `ee.daemon.context`, because a write mutates one specific workspace.
 pub const METHOD_WRITE: &str = "ee.daemon.write";
 
+/// Capability contract for durable, caller-keyed remember retries. Transport
+/// request IDs remain correlation IDs and do not provide this guarantee.
+pub const DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1: &str = "ee.daemon.remember.idempotency.v1";
+
 /// Error code returned when `ee.daemon.write` params cannot be mapped to a
 /// remember request shape (missing content, bad workspace path, etc.).
 pub const DAEMON_WRITE_PARAMS_INVALID_CODE: &str = "daemon_write_params_invalid";
@@ -1619,16 +1623,7 @@ fn start_server_with_dispatch_policy(
                         ..crate::core::write_owner::WriteHotPathConfig::default()
                     };
                     let _ = owner
-                        .run_group_commit(&cx, write_config, |operations| {
-                            if batch_is_daemon_txn_coalescible(operations) {
-                                execute_daemon_txn_batch(operations)
-                            } else {
-                                Ok(operations
-                                    .iter()
-                                    .map(execute_write_operation)
-                                    .collect::<Vec<_>>())
-                            }
-                        })
+                        .run_group_commit(&cx, write_config, execute_daemon_write_batch)
                         .await;
                 })
                 .map_err(|error| DaemonStartError::Bind {
@@ -5061,6 +5056,8 @@ struct DaemonWriteParams {
     #[serde(default)]
     agent_name: Option<String>,
     #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
     valid_from: Option<String>,
     #[serde(default)]
     valid_to: Option<String>,
@@ -5090,6 +5087,8 @@ impl DaemonWriteParams {
             "workflow_id",
             "agentName",
             "agent_name",
+            "idempotencyKey",
+            "idempotency_key",
             "validFrom",
             "valid_from",
             "validTo",
@@ -5133,6 +5132,10 @@ impl DaemonWriteParams {
                 object,
                 &["agentName", "agent_name"],
             )?)?,
+            idempotency_key: Self::normalize_idempotency_key(optional_string_any(
+                object,
+                &["idempotencyKey", "idempotency_key"],
+            )?)?,
             valid_from: optional_string_any(object, &["validFrom", "valid_from"])?,
             valid_to: optional_string_any(object, &["validTo", "valid_to"])?,
             dry_run: optional_bool_any(object, &["dryRun", "dry_run"])?.unwrap_or(false),
@@ -5143,6 +5146,13 @@ impl DaemonWriteParams {
             )?
             .unwrap_or(true),
         })
+    }
+
+    fn normalize_idempotency_key(key: Option<String>) -> Result<Option<String>, String> {
+        key.as_deref()
+            .map(crate::core::memory::validate_remember_idempotency_key)
+            .transpose()
+            .map_err(|error| error.message())
     }
 
     fn normalize_agent_name(agent_name: Option<String>) -> Result<Option<String>, String> {
@@ -5211,6 +5221,7 @@ impl DaemonWriteParams {
             return Err("field `confidence` must be a number between 0 and 1".to_owned());
         }
         params.agent_name = Self::normalize_agent_name(params.agent_name)?;
+        params.idempotency_key = Self::normalize_idempotency_key(params.idempotency_key)?;
         Ok(params)
     }
 }
@@ -5335,29 +5346,32 @@ fn dispatch_write(
 /// Preview through the canonical validation path without submitting an actor
 /// operation, opening a writable store, or claiming a committed memory/job.
 fn dispatch_write_preview(request: &DaemonRequest, params: &DaemonWriteParams) -> DaemonResponse {
-    let result =
-        crate::core::memory::remember_memory(&params.options()).and_then(|mut report| {
-            report.producer = crate::core::memory::remember_producer_metadata_for_agent(
-                params.agent_name.as_deref(),
-            );
-            let remember = serde_json::from_str::<serde_json::Value>(&report.json_output())
-                .map_err(|error| crate::models::DomainError::Storage {
+    if params.idempotency_key.is_some() {
+        return daemon_write_response(request, execute_keyed_daemon_remember(params));
+    }
+    let result = crate::core::memory::remember_memory(&params.options()).and_then(|mut report| {
+        report.producer =
+            crate::core::memory::remember_producer_metadata_for_agent(params.agent_name.as_deref());
+        let remember =
+            serde_json::from_str::<serde_json::Value>(&report.json_output()).map_err(|error| {
+                crate::models::DomainError::Storage {
                     message: format!("Could not encode remember preview: {error}"),
                     repair: None,
-                })?;
-            Ok(serde_json::json!({
-                "schema": "ee.daemon.write.v1",
-                "success": true,
-                "workspaceId": report.workspace_id,
-                "workspacePath": report.workspace_path,
-                "persisted": false,
-                "dryRun": true,
-                "indexStatus": report.index_status,
-                "reportStatus": "complete",
-                "remember": remember,
-                "degraded": [],
-            }))
-        });
+                }
+            })?;
+        Ok(serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": true,
+            "workspaceId": report.workspace_id,
+            "workspacePath": report.workspace_path,
+            "persisted": false,
+            "dryRun": true,
+            "indexStatus": report.index_status,
+            "reportStatus": "complete",
+            "remember": remember,
+            "degraded": [],
+        }))
+    });
     let result = result.unwrap_or_else(|error| {
         serde_json::json!({
             "schema": "ee.daemon.write.v1",
@@ -5450,6 +5464,9 @@ fn daemon_write_response(
                 &memory.index_status,
             ))
         }
+        crate::core::write_owner::WriteResult::MemoryRemembered { memory } => {
+            Some(daemon_remembered_memory_json(memory, true))
+        }
         _ => None,
     };
     let mut response = DaemonResponse::ok(
@@ -5513,6 +5530,7 @@ fn daemon_write_result_json(result: crate::core::write_owner::WriteResult) -> se
             "entityId": entity_id,
         }),
         WriteResult::MemoryCommitted { memory } => daemon_committed_memory_json(*memory),
+        WriteResult::MemoryRemembered { memory } => daemon_remembered_memory_json(&memory, false),
         WriteResult::Failed { error } => serde_json::json!({
             "schema": "ee.daemon.write.v1",
             "success": false,
@@ -5598,6 +5616,280 @@ fn daemon_write_degradation_json(
     })
 }
 
+struct DaemonKeyedMemoryAck<'a> {
+    memory_id: &'a str,
+    workspace_id: &'a str,
+    workspace_path: &'a Path,
+    idempotency_key: &'a str,
+    index_job_id: Option<&'a str>,
+    index_status: &'a str,
+    outcome: &'a str,
+    persisted: bool,
+    dry_run: bool,
+}
+
+fn daemon_keyed_memory_ack_json(
+    ack: &DaemonKeyedMemoryAck<'_>,
+    remember: Option<serde_json::Value>,
+    human: Option<String>,
+) -> serde_json::Value {
+    let complete = remember.is_some();
+    let degraded = remember
+        .as_ref()
+        .and_then(|report| report.get("degraded"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut value = serde_json::json!({
+        "schema": "ee.daemon.write.v1",
+        "success": true,
+        "idempotencySchema": DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1,
+        "idempotencyKey": ack.idempotency_key,
+        "outcome": ack.outcome,
+        "entityId": ack.memory_id,
+        "workspaceId": ack.workspace_id,
+        "workspacePath": ack.workspace_path,
+        "persisted": ack.persisted,
+        "dryRun": ack.dry_run,
+        "indexStatus": ack.index_status,
+        "indexJobId": ack.index_job_id,
+        "reportStatus": if complete { "complete" } else { "unavailable" },
+        "remember": remember,
+        "rememberHuman": human,
+        "degraded": degraded,
+    });
+    if !complete {
+        value["degraded"] = serde_json::json!([{
+            "code": "daemon_write_followup_failed",
+            "severity": "medium",
+            "message": "The complete remember report is unavailable. This acknowledgement retains the exact outcome and retry key; use that same key and content for any retry.",
+        }]);
+    }
+    value
+}
+
+fn daemon_remembered_memory_json(
+    memory: &crate::core::write_owner::RememberedMemoryWrite,
+    compact: bool,
+) -> serde_json::Value {
+    use crate::core::memory::RememberOutcome;
+    let (workspace_id, index_job_id, index_status, outcome, persisted, dry_run) =
+        match &memory.outcome {
+            RememberOutcome::Created(report) => (
+                report.workspace_id.as_str(),
+                report.index_job_id.as_deref(),
+                report.index_status.as_str(),
+                "created",
+                report.persisted,
+                report.dry_run,
+            ),
+            RememberOutcome::AlreadyRecorded(report) => (
+                report.workspace_id.as_str(),
+                None,
+                report.index_status.as_str(),
+                "already_recorded",
+                false,
+                report.dry_run,
+            ),
+            RememberOutcome::Reinforced(report) => (
+                report.workspace_id.as_str(),
+                report.index_job_id.as_deref(),
+                report.index_status.as_str(),
+                "reinforced",
+                report.persisted,
+                report.dry_run,
+            ),
+        };
+    let (report, human) = if compact {
+        (None, None)
+    } else {
+        match &memory.outcome {
+            RememberOutcome::Created(report) => (
+                serde_json::from_str(&report.json_output()).ok(),
+                Some(report.human_output()),
+            ),
+            RememberOutcome::AlreadyRecorded(report) => (
+                Some(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": report.data_json(),
+                    "error": null,
+                    "degraded": [],
+                })),
+                Some(report.human_summary()),
+            ),
+            RememberOutcome::Reinforced(report) => (
+                Some(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": report.data_json(),
+                    "error": null,
+                    "degraded": [],
+                })),
+                Some(report.human_summary()),
+            ),
+        }
+    };
+    daemon_keyed_memory_ack_json(
+        &DaemonKeyedMemoryAck {
+            memory_id: &memory.memory_id,
+            workspace_id,
+            workspace_path: &memory.workspace_path,
+            idempotency_key: &memory.idempotency_key,
+            index_job_id,
+            index_status,
+            outcome,
+            persisted,
+            dry_run,
+        },
+        report,
+        human,
+    )
+}
+
+fn preflight_keyed_daemon_remember_ack(
+    params: &DaemonWriteParams,
+    workspace_path: &Path,
+    idempotency_key: &str,
+) -> Result<(), crate::models::DomainError> {
+    let database_path = params.database_path();
+    let connection = if params.dry_run && !database_path.exists() {
+        None
+    } else {
+        if !params.dry_run {
+            crate::core::ensure_addressed_database_exists(&database_path)?;
+        }
+        let connection = if params.dry_run {
+            crate::db::DbConnection::open_file_read_only(&database_path)
+        } else {
+            crate::db::DbConnection::open_file(&database_path)
+        }
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Could not inspect keyed remember acknowledgement: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+        if !params.dry_run {
+            connection
+                .migrate()
+                .map_err(|error| crate::models::DomainError::Storage {
+                    message: format!("Could not prepare keyed remember store: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+        }
+        Some(connection)
+    };
+    let fallback_workspace_id = crate::core::workspace::stable_workspace_id(workspace_path);
+    let workspace_id = if let Some(connection) = connection.as_ref() {
+        crate::core::workspace::bound_workspace_id_or_hash(
+            connection,
+            &fallback_workspace_id,
+            &[params.workspace_path.as_path(), workspace_path],
+        )?
+    } else {
+        fallback_workspace_id
+    };
+    let existing = connection
+        .as_ref()
+        .map(|connection| connection.get_remember_idempotency_key(&workspace_id, idempotency_key))
+        .transpose()
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Could not inspect keyed remember receipt: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .flatten();
+    // New IDs have fixed encoded lengths. Inspect a stored replay ID exactly,
+    // and reserve slack for generated fields and future status labels.
+    let memory_id = existing
+        .as_ref()
+        .map_or("mem_00000000000000000000000000", |receipt| {
+            receipt.memory_id.as_str()
+        });
+    let compact = daemon_keyed_memory_ack_json(
+        &DaemonKeyedMemoryAck {
+            memory_id,
+            workspace_id: &workspace_id,
+            workspace_path,
+            idempotency_key,
+            index_job_id: Some("sidx_00000000000000000000000000"),
+            index_status: "not_applicable",
+            outcome: "already_recorded",
+            persisted: false,
+            dry_run: false,
+        },
+        None,
+        None,
+    );
+    if !serde_json::to_vec(&compact)
+        .is_ok_and(|encoded| encoded.len() <= DAEMON_COMMITTED_MEMORY_ACK_MAX_BYTES - 512)
+    {
+        return Err(crate::models::DomainError::Storage {
+            message: "Write rejected before commit: its memory/workspace/key acknowledgement exceeds the daemon response budget.".to_owned(),
+            repair: Some("inspect the workspace identity with ee doctor --json".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn execute_keyed_daemon_remember(
+    params: &DaemonWriteParams,
+) -> crate::core::write_owner::WriteResult {
+    use crate::core::memory::{RememberOutcome, RememberWriteControls};
+    use crate::core::write_owner::{RememberedMemoryWrite, WriteResult};
+    let result = (|| {
+        let idempotency_key = params.idempotency_key.as_deref().ok_or_else(|| {
+            crate::models::DomainError::Storage {
+                message: "Keyed remember request has no idempotency key".to_owned(),
+                repair: None,
+            }
+        })?;
+        if !params.dry_run {
+            crate::core::ensure_addressed_database_exists(&params.database_path())?;
+        }
+        let workspace_path = canonical_workspace_path(&params.workspace_path, "workspacePath")
+            .map_err(|message| crate::models::DomainError::Storage {
+                message,
+                repair: None,
+            })?;
+        preflight_keyed_daemon_remember_ack(params, &workspace_path, idempotency_key)?;
+        // The daemon authorizes an exact local store. Do not let the ordinary
+        // CLI workspace search redirect a child preview into an ancestor's
+        // database or reveal an ancestor's idempotency receipt.
+        let database_path = params.database_path();
+        let options = crate::core::memory::RememberMemoryOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&database_path),
+            ..params.options()
+        };
+        let outcome = crate::core::memory::remember_memory_with_controls_for_agent(
+            &options,
+            &RememberWriteControls {
+                idempotency_key: Some(idempotency_key),
+                ..RememberWriteControls::default()
+            },
+            params.agent_name.as_deref(),
+        )?;
+        let memory_id = match &outcome {
+            RememberOutcome::Created(report) => report.memory_id.to_string(),
+            RememberOutcome::AlreadyRecorded(report) => report.memory_id.clone(),
+            RememberOutcome::Reinforced(report) => report.memory_id.clone(),
+        };
+        Ok(RememberedMemoryWrite {
+            memory_id,
+            workspace_path,
+            idempotency_key: idempotency_key.to_owned(),
+            outcome,
+        })
+    })();
+    match result {
+        Ok(memory) => WriteResult::MemoryRemembered {
+            memory: Box::new(memory),
+        },
+        // A post-commit audit-file error may arrive here. Do not claim
+        // persisted=false: the same explicit key recovers the durable receipt.
+        Err(error) => WriteResult::Failed { error },
+    }
+}
+
 fn daemon_write_repair_command(workspace_path: &Path, command: &str) -> String {
     let quoted_workspace = workspace_path.display().to_string().replace('\'', "'\\''");
     format!("ee --workspace '{quoted_workspace}' {command}")
@@ -5671,35 +5963,19 @@ fn dispatch_journal(
     )
 }
 
-/// Execute one `WriteOperation` inside the write-owner actor's `process_batch`
-/// (Inc 2, bd-wx6ou.3). Only the `ee.daemon.remember` Custom op is supported —
-/// the daemon write path carries `DaemonWriteParams` in the payload and runs
-/// the same transaction boundary the grouped path uses. Unsupported ops fail that single request
-/// (the actor maps a per-op error onto its `WriteResult`).
+/// Execute a non-coalescible request independently. Keyed remembers retain
+/// the canonical receipt transaction; journal/outcome neighbors still execute
+/// through their existing source transaction rather than being rejected.
 fn execute_write_operation(
     operation: &crate::core::write_owner::WriteOperation,
 ) -> crate::core::write_owner::WriteResult {
-    use crate::core::write_owner::{WriteOperation, WriteResult};
-    let WriteOperation::Custom { operation_type, .. } = operation else {
-        return WriteResult::Failed {
-            error: crate::models::DomainError::Storage {
-                message: format!(
-                    "write-owner actor received an unsupported operation: {}",
-                    operation.operation_type()
-                ),
-                repair: Some("only ee.daemon.remember is wired in this build".to_string()),
-            },
-        };
-    };
-    if operation_type != DaemonWriteParams::ACTOR_OPERATION_TYPE {
-        return WriteResult::Failed {
-            error: crate::models::DomainError::Storage {
-                message: format!(
-                    "write-owner actor received an unsupported custom op: {operation_type}"
-                ),
-                repair: Some("only ee.daemon.remember is wired in this build".to_string()),
-            },
-        };
+    use crate::core::write_owner::WriteResult;
+    match parse_daemon_txn_batch_entry(operation) {
+        Ok(DaemonTxnBatchEntry::Remember(params)) if params.idempotency_key.is_some() => {
+            return execute_keyed_daemon_remember(&params);
+        }
+        Ok(_) => {}
+        Err(error) => return WriteResult::Failed { error },
     }
     match execute_daemon_txn_batch(std::slice::from_ref(operation)) {
         Ok(mut results) => results.pop().unwrap_or_else(|| WriteResult::Failed {
@@ -5844,20 +6120,39 @@ impl DaemonTxnBatchEntry {
     }
 }
 
+/// A keyed boundary uses per-operation results. Never return a batch-wide
+/// error after an earlier independent operation has already committed.
+fn execute_daemon_write_batch(
+    operations: &[crate::core::write_owner::WriteOperation],
+) -> Result<Vec<crate::core::write_owner::WriteResult>, crate::models::DomainError> {
+    if batch_is_daemon_txn_coalescible(operations) {
+        execute_daemon_txn_batch(operations)
+    } else {
+        Ok(operations.iter().map(execute_write_operation).collect())
+    }
+}
+
 /// True when every op in the batch can share one daemon transaction.
 fn batch_is_daemon_txn_coalescible(
     operations: &[crate::core::write_owner::WriteOperation],
 ) -> bool {
     use crate::core::write_owner::WriteOperation;
     !operations.is_empty()
-        && operations.iter().all(|operation| {
-            matches!(
-                operation,
-                WriteOperation::Custom { operation_type, .. }
-                    if operation_type == DaemonJournalParams::ACTOR_OPERATION_TYPE
-                        || operation_type == DaemonOutcomeParams::ACTOR_OPERATION_TYPE
-                        || operation_type == DaemonWriteParams::ACTOR_OPERATION_TYPE
-            )
+        && operations.iter().all(|operation| match operation {
+            WriteOperation::Custom { operation_type, .. }
+                if operation_type == DaemonJournalParams::ACTOR_OPERATION_TYPE
+                    || operation_type == DaemonOutcomeParams::ACTOR_OPERATION_TYPE =>
+            {
+                true
+            }
+            WriteOperation::Custom {
+                operation_type,
+                payload,
+            } if operation_type == DaemonWriteParams::ACTOR_OPERATION_TYPE => {
+                DaemonWriteParams::from_payload(payload)
+                    .is_ok_and(|params| params.idempotency_key.is_none())
+            }
+            _ => false,
         })
 }
 
@@ -5925,7 +6220,17 @@ fn execute_daemon_txn_batch(
     use crate::core::write_owner::WriteResult;
     let mut entries = Vec::with_capacity(operations.len());
     for operation in operations {
-        entries.push(parse_daemon_txn_batch_entry(operation)?);
+        let entry = parse_daemon_txn_batch_entry(operation)?;
+        if matches!(&entry, DaemonTxnBatchEntry::Remember(params) if params.idempotency_key.is_some())
+        {
+            return Err(crate::models::DomainError::Storage {
+                message: "Keyed remembers require the controlled receipt transaction".to_owned(),
+                repair: Some(
+                    "submit keyed remembers through the daemon write dispatcher".to_owned(),
+                ),
+            });
+        }
+        entries.push(entry);
     }
     let Some(first) = entries.first() else {
         return Ok(Vec::new());
@@ -5971,12 +6276,13 @@ fn execute_daemon_txn_batch(
                 prepared_entries.push(PreparedDaemonTxnBatchEntry::Outcome(entry));
             }
             DaemonTxnBatchEntry::Remember(entry) => {
-                let write = crate::core::memory::prepare_remember_txn_write_for_connection_with_agent(
-                    &connection,
-                    &entry.options(),
-                    true,
-                    entry.agent_name.as_deref(),
-                )?;
+                let write =
+                    crate::core::memory::prepare_remember_txn_write_for_connection_with_agent(
+                        &connection,
+                        &entry.options(),
+                        true,
+                        entry.agent_name.as_deref(),
+                    )?;
                 // Use the longest reachable status so successful publication
                 // cannot grow a boundary-sized acknowledgement after COMMIT.
                 let compact = daemon_compact_committed_memory_json(
@@ -7439,6 +7745,10 @@ fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Valu
             "ee.daemon.write_journal": daemon_method_authority(METHOD_WRITE_JOURNAL).expect("registered method").as_wire_label()
         },
         "method_schemas": {
+            "ee.daemon.write": {
+                "response": "ee.daemon.write.v1",
+                "idempotency": DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1
+            },
             "ee.daemon.orient_hook": {
                 "request": DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
                 "response": DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1
@@ -11982,7 +12292,13 @@ mod tests {
         assert!(params.options().valid_to.is_none());
         let mut legacy_payload = params.to_payload();
         assert!(params.agent_name.is_none());
-        for field in ["dry_run", "valid_from", "valid_to", "agent_name"] {
+        for field in [
+            "dry_run",
+            "valid_from",
+            "valid_to",
+            "agent_name",
+            "idempotency_key",
+        ] {
             legacy_payload
                 .as_object_mut()
                 .expect("payload")
@@ -12021,7 +12337,7 @@ mod tests {
 
     #[test]
     fn daemon_write_params_nullable_strings_round_trip_through_rpc_and_actor() {
-        for present in 0_u8..64 {
+        for present in 0_u8..128 {
             let expected = DaemonWriteParams {
                 workspace_path: PathBuf::from("/tmp/daemon-write-roundtrip"),
                 content: "Preserve every optional write string.".to_owned(),
@@ -12032,6 +12348,7 @@ mod tests {
                 source: (present & 2 != 0).then(|| "manual://roundtrip".to_owned()),
                 workflow_id: (present & 4 != 0).then(|| "workflow-roundtrip".to_owned()),
                 agent_name: (present & 32 != 0).then(|| "caller-roundtrip".to_owned()),
+                idempotency_key: (present & 64 != 0).then(|| "retry-roundtrip".to_owned()),
                 valid_from: (present & 8 != 0).then(|| "2020-01-01T00:00:00Z".to_owned()),
                 valid_to: (present & 16 != 0).then(|| "2120-01-01T00:00:00Z".to_owned()),
                 dry_run: false,
@@ -12045,6 +12362,7 @@ mod tests {
                 ("source", expected.source.as_deref()),
                 ("workflow_id", expected.workflow_id.as_deref()),
                 ("agent_name", expected.agent_name.as_deref()),
+                ("idempotency_key", expected.idempotency_key.as_deref()),
                 ("valid_from", expected.valid_from.as_deref()),
                 ("valid_to", expected.valid_to.as_deref()),
             ] {
@@ -12183,12 +12501,8 @@ mod tests {
                 payload: payload.clone(),
             };
             assert!(execute_daemon_txn_batch(&[operation]).is_err());
-            let mut request = DaemonRequest::new(
-                "req-invalid-agent",
-                TEST_AGENT_ID,
-                METHOD_WRITE,
-                payload,
-            );
+            let mut request =
+                DaemonRequest::new("req-invalid-agent", TEST_AGENT_ID, METHOD_WRITE, payload);
             request.workspace_id = Some(fixture.workspace_path.display().to_string());
             let response = dispatch_write(&request, None);
             assert_eq!(
@@ -12271,6 +12585,8 @@ mod tests {
             ("workflow_id", None),
             ("agentName", Some("agent_name")),
             ("agent_name", None),
+            ("idempotencyKey", Some("idempotency_key")),
+            ("idempotency_key", None),
             ("validFrom", Some("valid_from")),
             ("valid_from", None),
             ("validTo", Some("valid_to")),
@@ -12355,7 +12671,10 @@ mod tests {
     fn daemon_write_rejects_unknown_controls_and_malformed_confidence_before_routing() {
         let fixture = DaemonRememberReportFixture::new();
         let mut invalid_fields = vec![
-            ("idempotencyKey", serde_json::json!("must-not-be-ignored")),
+            (
+                "idempotencyKeyTypo",
+                serde_json::json!("must-not-be-ignored"),
+            ),
             ("allowSecretMention", serde_json::json!(true)),
             ("dry_run_typo", serde_json::json!(true)),
         ];
@@ -13034,6 +13353,7 @@ mod tests {
                     source: Some("manual://daemon-invalid-remember-batch".to_string()),
                     workflow_id: None,
                     agent_name: None,
+                    idempotency_key: None,
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
@@ -13082,6 +13402,7 @@ mod tests {
                 source: Some("manual://daemon-storeless-remember-batch".to_string()),
                 workflow_id: None,
                 agent_name: None,
+                idempotency_key: None,
                 valid_from: None,
                 valid_to: None,
                 dry_run: false,
@@ -13142,6 +13463,7 @@ mod tests {
                     source: Some("manual://daemon-remember-batch".to_string()),
                     workflow_id: None,
                     agent_name: agent_name.map(str::to_owned),
+                    idempotency_key: None,
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
@@ -13283,6 +13605,460 @@ mod tests {
         );
     }
 
+    #[test]
+    fn daemon_keyed_remember_advertises_and_normalizes_the_retry_contract() {
+        let capabilities = daemon_capabilities_result(&DaemonDispatchPolicy::default());
+        assert_eq!(
+            capabilities["method_schemas"][METHOD_WRITE]["idempotency"],
+            DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1
+        );
+        let mut value = serde_json::json!({
+            "workspacePath": "/tmp/keyed-daemon-contract",
+            "content": "The explicit retry key is separate from request correlation.",
+            "idempotencyKey": "  durable-retry  ",
+            "idempotency_key": 42,
+        });
+        let params = DaemonWriteParams::from_value(&value).expect("first key alias wins");
+        assert_eq!(params.idempotency_key.as_deref(), Some("durable-retry"));
+        assert_eq!(
+            DaemonWriteParams::from_payload(&params.to_payload()).expect("actor key roundtrip"),
+            params
+        );
+        value["idempotencyKey"] = serde_json::Value::Null;
+        assert!(
+            DaemonWriteParams::from_value(&value)
+                .expect("null first alias stays absent")
+                .idempotency_key
+                .is_none()
+        );
+        for invalid in [
+            String::new(),
+            "   ".to_owned(),
+            "retry\nkey".to_owned(),
+            "k".repeat(129),
+        ] {
+            value["idempotencyKey"] = serde_json::json!(invalid);
+            assert!(DaemonWriteParams::from_value(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn daemon_keyed_remember_returns_original_receipt_without_repeating_source_writes() {
+        let fixture = DaemonRememberReportFixture::new();
+        let content = "A lost daemon acknowledgement must not duplicate this memory.";
+        let mut params = fixture.params(content);
+        params.agent_name = Some("socket-caller".to_owned());
+        params.idempotency_key = Some("durable-daemon-retry".to_owned());
+        let mut request = DaemonRequest::new(
+            "first-correlation",
+            "transport-agent",
+            METHOD_WRITE,
+            params.to_payload(),
+        );
+        request.workspace_id = Some(fixture.workspace_path.display().to_string());
+        let first = dispatch_write(&request, None)
+            .result
+            .expect("created acknowledgement");
+        fixture.assert_committed(&first, content);
+        assert_eq!(
+            first["idempotencySchema"],
+            DAEMON_REMEMBER_IDEMPOTENCY_SCHEMA_V1
+        );
+        assert_eq!(first["idempotencyKey"], "durable-daemon-retry");
+        assert_eq!(first["outcome"], "created");
+        assert_eq!(first["dryRun"], false);
+        assert_eq!(
+            first["remember"]["schema"],
+            crate::models::RESPONSE_SCHEMA_V2
+        );
+        assert_eq!(
+            first["remember"]["data"]["producer"]["identity"]["agentName"],
+            "socket-caller"
+        );
+        let memory_id = first["entityId"]
+            .as_str()
+            .expect("created memory")
+            .to_owned();
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect first commit");
+        let before = connection
+            .logical_table_digests()
+            .expect("source after first commit");
+        let audit_bytes =
+            fs::read(fixture.workspace_path.join(".ee/audit.jsonl")).expect("first audit append");
+        request.request_id = "new-correlation-for-the-same-key".to_owned();
+        let replay = dispatch_write(&request, None)
+            .result
+            .expect("replay acknowledgement");
+        assert_eq!(replay["success"], true);
+        assert_eq!(replay["outcome"], "already_recorded");
+        assert_eq!(replay["persisted"], false);
+        assert_eq!(replay["entityId"], memory_id);
+        assert_eq!(replay["workspaceId"], fixture.workspace_id);
+        assert_eq!(
+            replay["workspacePath"],
+            fixture.workspace_path.display().to_string()
+        );
+        assert!(replay["indexJobId"].is_null());
+        assert_eq!(replay["remember"]["data"]["status"], "already_recorded");
+        assert_eq!(replay["remember"]["data"]["memoryId"], memory_id);
+        assert_eq!(
+            replay["remember"]["data"]["idempotencyKey"],
+            "durable-daemon-retry"
+        );
+        assert_eq!(replay["remember"]["data"]["persisted"], false);
+        assert_eq!(
+            connection.logical_table_digests().expect("replay source"),
+            before
+        );
+        assert_eq!(
+            fs::read(fixture.workspace_path.join(".ee/audit.jsonl")).expect("audit after replay"),
+            audit_bytes
+        );
+
+        params.content = "Different content must not consume the old retry identity.".to_owned();
+        request.params = params.to_payload();
+        let conflict = dispatch_write(&request, None)
+            .result
+            .expect("conflict result");
+        assert_eq!(conflict["success"], false);
+        assert_eq!(
+            conflict["error"]["code"],
+            crate::core::memory::REMEMBER_IDEMPOTENCY_CONFLICT_CODE
+        );
+        assert_eq!(
+            connection.logical_table_digests().expect("conflict source"),
+            before
+        );
+    }
+
+    #[test]
+    fn daemon_keyed_preview_preserves_receipts_and_queued_publication() {
+        let fixture = DaemonRememberReportFixture::new();
+        let mut params = fixture.params("A keyed preview reserves no memory or retry receipt.");
+        params.idempotency_key = Some("daemon-preview-key".to_owned());
+        params.dry_run = true;
+        let preview = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        assert_eq!(preview["success"], true);
+        assert_eq!(preview["outcome"], "created");
+        assert_eq!(preview["persisted"], false);
+        assert_eq!(preview["dryRun"], true);
+        assert!(preview["indexJobId"].is_null());
+        assert_eq!(preview["indexStatus"], "dry_run_not_queued");
+        fixture.assert_no_source_write();
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect preview");
+        assert!(
+            connection
+                .get_remember_idempotency_key(&fixture.workspace_id, "daemon-preview-key")
+                .expect("preview receipt lookup")
+                .is_none()
+        );
+        params.dry_run = false;
+        let created = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        fixture.assert_committed(&created, &params.content);
+        let before = connection.logical_table_digests().expect("created state");
+        params.dry_run = true;
+        let replay = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        assert_eq!(replay["outcome"], "already_recorded");
+        assert_eq!(replay["entityId"], created["entityId"]);
+        assert_eq!(replay["persisted"], false);
+        assert_eq!(replay["dryRun"], true);
+        assert!(replay["indexJobId"].is_null());
+        assert_eq!(replay["indexStatus"], "not_applicable");
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .expect("replay preview state"),
+            before
+        );
+    }
+
+    #[test]
+    fn daemon_keyed_retry_recovers_a_receipt_after_post_commit_audit_failure() {
+        let fixture = DaemonRememberReportFixture::new();
+        fs::create_dir(fixture.workspace_path.join(".ee/audit.jsonl"))
+            .expect("block optional audit file append");
+        let mut params = fixture.params("The durable source survives an audit stream failure.");
+        params.idempotency_key = Some("audit-stream-retry".to_owned());
+        let failed = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        assert_eq!(failed["success"], false);
+        assert!(
+            failed.get("persisted").is_none(),
+            "an error must not deny a possible commit"
+        );
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect committed receipt");
+        let receipt = connection
+            .get_remember_idempotency_key(&fixture.workspace_id, "audit-stream-retry")
+            .expect("receipt query")
+            .expect("the source and receipt committed before the audit append");
+        let memories = connection
+            .list_memories(&fixture.workspace_id, None, true)
+            .expect("committed source");
+        let audits = connection
+            .list_audit_entries(Some(&fixture.workspace_id), None)
+            .expect("committed audit");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, receipt.memory_id);
+        let generation = connection
+            .get_workspace_generation(&fixture.workspace_id)
+            .expect("committed generation");
+        let replay = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        assert_eq!(replay["success"], true);
+        assert_eq!(replay["outcome"], "already_recorded");
+        assert_eq!(replay["entityId"], receipt.memory_id);
+        assert_eq!(replay["persisted"], false);
+        assert_eq!(
+            connection
+                .list_memories(&fixture.workspace_id, None, true)
+                .expect("replayed source"),
+            memories
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(&fixture.workspace_id), None)
+                .expect("replayed audit"),
+            audits
+        );
+        assert_eq!(
+            connection
+                .get_workspace_generation(&fixture.workspace_id)
+                .expect("replayed generation"),
+            generation
+        );
+        assert_eq!(
+            connection
+                .list_search_index_jobs(&fixture.workspace_id, None)
+                .expect("one publication")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn daemon_keyed_child_preview_cannot_replay_an_ancestor_receipt() {
+        let fixture = DaemonRememberReportFixture::new();
+        let mut params =
+            fixture.params("A receipt belongs only to its explicitly addressed store.");
+        params.idempotency_key = Some("ancestor-only-key".to_owned());
+        let parent = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        fixture.assert_committed(&parent, &params.content);
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect ancestor");
+        let before = connection.logical_table_digests().expect("ancestor source");
+        let child = fixture.workspace_path.join("uninitialized-child");
+        fs::create_dir(&child).expect("child directory without a store");
+        params.workspace_path = child.clone();
+        params.dry_run = true;
+        let preview = daemon_write_result_json(execute_keyed_daemon_remember(&params));
+        assert_eq!(preview["success"], true);
+        assert_eq!(preview["outcome"], "created");
+        assert_eq!(preview["dryRun"], true);
+        assert_eq!(preview["persisted"], false);
+        assert_eq!(preview["workspacePath"], child.display().to_string());
+        assert_ne!(preview["workspaceId"], parent["workspaceId"]);
+        assert_ne!(preview["entityId"], parent["entityId"]);
+        assert_eq!(
+            preview["remember"]["data"]["database_path"],
+            child.join(".ee/ee.db").display().to_string()
+        );
+        assert!(!child.join(".ee").exists());
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .expect("unchanged ancestor"),
+            before
+        );
+    }
+
+    #[test]
+    fn daemon_keyed_remember_preserves_compact_acknowledgements_and_store_admission() {
+        use crate::core::memory::RememberOutcome;
+        use crate::core::write_owner::WriteResult;
+        let fixture = DaemonRememberReportFixture::new();
+        let mut params =
+            fixture.params("An oversized optional report cannot hide a committed key.");
+        params.idempotency_key = Some("compact-keyed-receipt".to_owned());
+        let WriteResult::MemoryRemembered { mut memory } = execute_keyed_daemon_remember(&params)
+        else {
+            panic!("expected controlled remember acknowledgement");
+        };
+        let RememberOutcome::Created(report) = &mut memory.outcome else {
+            panic!("first key must create");
+        };
+        report.content = "r".repeat(crate::daemon::DAEMON_RESPONSE_MAX_BYTES);
+        let memory_id = memory.memory_id.clone();
+        let mut request = DaemonRequest::new(
+            "compact-keyed",
+            "transport",
+            METHOD_WRITE,
+            params.to_payload(),
+        );
+        request.workspace_id = Some(fixture.workspace_path.display().to_string());
+        let response = daemon_write_response(&request, WriteResult::MemoryRemembered { memory });
+        assert!(daemon_response_fits(
+            &response,
+            crate::daemon::DAEMON_RESPONSE_MAX_BYTES
+        ));
+        let result = response.result.expect("compact acknowledgement");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["persisted"], true);
+        assert_eq!(result["outcome"], "created");
+        assert_eq!(result["idempotencyKey"], "compact-keyed-receipt");
+        assert_eq!(result["entityId"], memory_id);
+        assert_eq!(result["workspaceId"], fixture.workspace_id);
+        assert_eq!(result["reportStatus"], "unavailable");
+        assert!(result["remember"].is_null());
+        assert!(result["rememberHuman"].is_null());
+        assert!(
+            result["indexJobId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let absent = fixture.workspace_path.join("never-initialized");
+        params.workspace_path = absent.clone();
+        params.idempotency_key = Some("missing-store-key".to_owned());
+        let rejected = execute_keyed_daemon_remember(&params);
+        assert!(matches!(
+            rejected,
+            WriteResult::Failed {
+                error: crate::models::DomainError::WorkspaceStoreMissing { .. }
+            }
+        ));
+        assert!(
+            !absent.exists(),
+            "the daemon must not create an addressed store"
+        );
+    }
+
+    #[test]
+    fn daemon_keyed_boundaries_preserve_mixed_batch_successes_and_failures() {
+        use crate::core::write_owner::{WriteOperation, WriteResult};
+        let fixture = DaemonRememberReportFixture::new();
+        let mut original =
+            fixture.params("The original keyed memory is a durable feedback target.");
+        original.idempotency_key = Some("mixed-original-key".to_owned());
+        let initial = daemon_write_result_json(execute_keyed_daemon_remember(&original));
+        let target_id = initial["entityId"]
+            .as_str()
+            .expect("original memory")
+            .to_owned();
+        let operation = |params: &DaemonWriteParams| WriteOperation::Custom {
+            operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: params.to_payload(),
+        };
+        let mut conflict = original.clone();
+        conflict.content =
+            "This different content conflicts with the existing retry key.".to_owned();
+        let mut fresh = fixture.params("A later independent keyed memory still commits.");
+        fresh.idempotency_key = Some("mixed-next-key".to_owned());
+        let journal_id = crate::core::journal::generate_journal_entry_id();
+        let journal = WriteOperation::Custom {
+            operation_type: DaemonJournalParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: serde_json::to_value(DaemonJournalParams {
+                workspace_path: fixture.workspace_path.clone(),
+                workspace_id: fixture.workspace_id.clone(),
+                entry_id: Some(journal_id.clone()),
+                agent_name: Some("mixed-caller".to_owned()),
+                session_key: None,
+                kind: "note".to_owned(),
+                source: "manual".to_owned(),
+                body: "Journal success precedes a conflicting keyed request.".to_owned(),
+                structured: None,
+                redaction_report: "{}".to_owned(),
+                instruction_risk: "none".to_owned(),
+            })
+            .expect("journal payload"),
+        };
+        let mut feedback_uuid = uuid::Uuid::now_v7().simple().to_string();
+        feedback_uuid.truncate(26);
+        let feedback_id = format!("fb_{feedback_uuid}");
+        let outcome = WriteOperation::Custom {
+            operation_type: DaemonOutcomeParams::ACTOR_OPERATION_TYPE.to_owned(),
+            payload: serde_json::to_value(DaemonOutcomeParams {
+                workspace_path: fixture.workspace_path.clone(),
+                event_id: feedback_id.clone(),
+                workspace_id: fixture.workspace_id.clone(),
+                target_type: "memory".to_owned(),
+                target_id: target_id.clone(),
+                signal: "helpful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: Some("mixed-caller".to_owned()),
+                reason: Some("Feedback succeeds after the keyed conflict.".to_owned()),
+                evidence_json: None,
+                session_id: None,
+                actor: Some("mixed-caller".to_owned()),
+                audit_id: crate::db::generate_audit_id(),
+                details: None,
+            })
+            .expect("outcome payload"),
+        };
+        let operations = [
+            journal,
+            operation(&conflict),
+            outcome,
+            operation(&original),
+            operation(&fresh),
+        ];
+        assert!(!batch_is_daemon_txn_coalescible(&operations));
+        assert!(batch_is_daemon_txn_coalescible(&[
+            fixture.operation("An unkeyed write stays coalescible.")
+        ]));
+        let results = execute_daemon_write_batch(&operations)
+            .expect("an independent keyed failure must not fail already-committed neighbors");
+        assert_eq!(results.len(), operations.len());
+        assert_eq!(
+            results
+                .iter()
+                .map(WriteResult::is_success)
+                .collect::<Vec<_>>(),
+            [true, false, true, true, true]
+        );
+        assert_eq!(results[0].entity_id(), Some(journal_id.as_str()));
+        assert_eq!(results[2].entity_id(), Some(feedback_id.as_str()));
+        assert_eq!(results[3].entity_id(), Some(target_id.as_str()));
+        let replay = daemon_write_result_json(results[3].clone());
+        assert_eq!(replay["outcome"], "already_recorded");
+        assert_eq!(replay["persisted"], false);
+        let fresh = daemon_write_result_json(results[4].clone());
+        assert_eq!(fresh["outcome"], "created");
+        assert_eq!(fresh["persisted"], true);
+        let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+            .expect("inspect mixed outcomes");
+        assert_eq!(
+            connection
+                .list_memories(&fixture.workspace_id, None, true)
+                .expect("mixed memories")
+                .len(),
+            2
+        );
+        let journals = connection
+            .list_journal_entries(
+                &fixture.workspace_id,
+                &crate::db::JournalEntryListFilter {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .expect("mixed journals");
+        assert_eq!(journals.len(), 1);
+        assert!(
+            connection
+                .get_feedback_event(&feedback_id)
+                .expect("mixed feedback")
+                .is_some()
+        );
+        assert!(
+            connection
+                .get_remember_idempotency_key(&fixture.workspace_id, "mixed-next-key")
+                .expect("later receipt")
+                .is_some()
+        );
+    }
+
     struct DaemonRememberReportFixture {
         _directory: tempfile::TempDir,
         _embedder_guard: crate::core::index::TestWorkspaceEmbedderStackGuard,
@@ -13336,6 +14112,7 @@ mod tests {
                 source: Some("manual://daemon-report".to_owned()),
                 workflow_id: None,
                 agent_name: None,
+                idempotency_key: None,
                 valid_from: None,
                 valid_to: None,
                 dry_run: false,
@@ -13449,7 +14226,11 @@ mod tests {
             assert_eq!(producer["identity"]["agentName"], serde_json::json!(caller));
             assert_eq!(
                 producer["identity"]["status"],
-                if caller.is_some() { "known" } else { "unobserved" }
+                if caller.is_some() {
+                    "known"
+                } else {
+                    "unobserved"
+                }
             );
             if ordinal == 0 {
                 fixture.assert_no_source_write();
@@ -13473,7 +14254,8 @@ mod tests {
             .list_memories(&fixture.workspace_id, None, false)
             .expect("memories");
         assert_eq!(
-            memories.len(), callers.len(),
+            memories.len(),
+            callers.len(),
             "each caller retains its source write"
         );
         let audits = connection
