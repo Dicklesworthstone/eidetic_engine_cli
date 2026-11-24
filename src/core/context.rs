@@ -11792,10 +11792,19 @@ fn candidates_from_search_for_task_paths(
 
     // Phase 2: Batch load all memories and tags.
     let batch_load_start = Instant::now();
+    let preloaded_local_hit_ids = hit_resolutions.iter().filter_map(|(hit, resolution, _)| {
+        resolution
+            .as_ref()
+            .filter(|(_, artifact_id)| {
+                artifact_id.is_none() && !search_hit_is_global_store_lane(hit)
+            })
+            .map(|_| hit.doc_id.as_str())
+    });
     let (memories, tags_map, used_preloaded_memories) = load_candidate_batch_maps_with_preloaded(
         connection,
         &memory_ids_refs,
         preloaded_memories,
+        preloaded_local_hit_ids,
         degraded,
     );
     metrics.subspans.memory_tag_batch_load = batch_load_start.elapsed();
@@ -15456,8 +15465,13 @@ fn load_candidate_batch_maps(
     BTreeMap<String, StoredMemory>,
     BTreeMap<String, Vec<String>>,
 ) {
-    let (memories, tags_map, _) =
-        load_candidate_batch_maps_with_preloaded(connection, memory_ids, None, degraded);
+    let (memories, tags_map, _) = load_candidate_batch_maps_with_preloaded(
+        connection,
+        memory_ids,
+        None,
+        std::iter::empty(),
+        degraded,
+    );
     (memories.into_owned(), tags_map)
 }
 
@@ -15504,6 +15518,11 @@ fn context_memory_seal_admission(
 enum CandidateMemoryBatch<'a> {
     Owned(BTreeMap<String, StoredMemory>),
     Borrowed(&'a BTreeMap<String, StoredMemory>),
+    Mixed {
+        preloaded: &'a BTreeMap<String, StoredMemory>,
+        reused_ids: BTreeSet<String>,
+        fetched: BTreeMap<String, StoredMemory>,
+    },
     Unavailable,
 }
 
@@ -15512,6 +15531,15 @@ impl CandidateMemoryBatch<'_> {
         match self {
             Self::Owned(memories) => memories.get(memory_id),
             Self::Borrowed(memories) => memories.get(memory_id),
+            Self::Mixed {
+                preloaded,
+                reused_ids,
+                fetched,
+            } => fetched.get(memory_id).or_else(|| {
+                preloaded
+                    .get(memory_id)
+                    .filter(|_| reused_ids.contains(memory_id))
+            }),
             Self::Unavailable => None,
         }
     }
@@ -15520,15 +15548,28 @@ impl CandidateMemoryBatch<'_> {
         match self {
             Self::Owned(memories) => memories,
             Self::Borrowed(memories) => memories.clone(),
+            Self::Mixed {
+                preloaded,
+                reused_ids,
+                fetched,
+            } => {
+                let mut memories = reused_ids
+                    .into_iter()
+                    .filter_map(|id| preloaded.get(&id).cloned().map(|memory| (id, memory)))
+                    .collect::<BTreeMap<_, _>>();
+                memories.extend(fetched);
+                memories
+            }
             Self::Unavailable => BTreeMap::new(),
         }
     }
 }
 
-fn load_candidate_batch_maps_with_preloaded<'a>(
+fn load_candidate_batch_maps_with_preloaded<'a, 'hit>(
     connection: &DbConnection,
     memory_ids: &[&str],
     preloaded_memories: Option<&'a BTreeMap<String, StoredMemory>>,
+    preloaded_local_hit_ids: impl Iterator<Item = &'hit str>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (
     CandidateMemoryBatch<'a>,
@@ -15555,8 +15596,28 @@ fn load_candidate_batch_maps_with_preloaded<'a>(
     let memories = if let Some(preloaded) = preloaded_memories.filter(|_| preloaded_covers_all) {
         CandidateMemoryBatch::Borrowed(preloaded)
     } else {
-        match connection.get_memories_batch(memory_ids) {
-            Ok(memories) => CandidateMemoryBatch::Owned(memories),
+        // A partial search preload can retain global rows whose hits were
+        // filtered before local source admission. Reuse only returned local
+        // memory hits, whose body and local precedence have been checked in
+        // this snapshot. Every other required ID keeps the original local
+        // read, even when a global preload shares a native parent's ID.
+        let reused_ids = preloaded_local_hit_ids
+            .filter(|id| preloaded_memories.is_some_and(|preloaded| preloaded.contains_key(*id)))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let local_ids = unique_memory_ids
+            .into_iter()
+            .filter(|id| !reused_ids.contains(*id))
+            .collect::<Vec<_>>();
+        match connection.get_memories_batch(&local_ids) {
+            Ok(fetched) => match preloaded_memories {
+                Some(preloaded) => CandidateMemoryBatch::Mixed {
+                    preloaded,
+                    reused_ids,
+                    fetched,
+                },
+                None => CandidateMemoryBatch::Owned(fetched),
+            },
             Err(error) => {
                 push_degradation(
                     degraded,

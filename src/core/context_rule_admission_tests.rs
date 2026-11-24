@@ -422,6 +422,270 @@ fn native_rule_pack_hydration_batches_bodies_and_relations_without_changing_item
 }
 
 #[test]
+fn mixed_pack_hydration_reads_only_missing_rule_parents_and_preserves_pack() {
+    let f = Fixture::new();
+    let matched = (1..=100)
+        .map(|seed| f.add(seed, |_| {}, |_| {}))
+        .collect::<Vec<_>>();
+    let additional = f.add(101, |_| {}, |_| {});
+    let derived = f.add(
+        102,
+        |_| {},
+        |rule| {
+            rule.source_memory_ids =
+                vec![matched[0].memory.clone(), additional.memory.clone()];
+        },
+    );
+    let matched_ids = matched
+        .iter()
+        .map(|pair| pair.memory.as_str())
+        .collect::<Vec<_>>();
+    let preloaded = f.db.get_memories_batch(&matched_ids).unwrap();
+    assert_eq!(preloaded.len(), 100);
+    let ids = matched_ids
+        .iter()
+        .copied()
+        .chain(std::iter::once(derived.rule.as_str()))
+        .collect::<Vec<_>>();
+    let filters = QueryFilters {
+        temporal: QueryTemporalFilters {
+            validity: Some(QueryTemporalValidity {
+                posture: QueryTemporalValidityPosture::Strict,
+                reference_time: Some(timestamp(BOUND)),
+            }),
+            ..QueryTemporalFilters::default()
+        },
+        ..QueryFilters::default()
+    };
+    let (cold, cold_queries) =
+        crate::db::capture_query_sql_for_test(|| f.resolve(&ids, &filters));
+    let (warm, warm_queries) = crate::db::capture_query_sql_for_test(|| {
+        f.resolve_with_admission(report(&ids), &filters, false, Some(&preloaded))
+    });
+    let body_reads = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| {
+                sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                    && (sql.contains("FROM memories WHERE id =")
+                        || sql.contains("FROM memories WHERE id IN ("))
+            })
+            .count()
+    };
+    assert_eq!(body_reads(&cold_queries), 101);
+    assert_eq!(
+        body_reads(&warm_queries),
+        1,
+        "one uncached parent must not rehydrate the hundred admitted search rows"
+    );
+    assert_eq!(warm.metrics.unique_memory_ids, 101);
+    assert_eq!(warm.metrics.memory_batch_reads, 1);
+    assert_eq!(warm.memories.len(), 100);
+    assert_eq!(warm.candidates.len(), 1);
+    assert_eq!(warm.memories, cold.memories);
+    assert_eq!(warm.candidates, cold.candidates);
+    assert_eq!(warm.degraded, cold.degraded);
+
+    let mut request = ContextRequest::from_query("prepare release").unwrap();
+    request.budget = crate::pack::TokenBudget::new(16_384).unwrap();
+    request.reference_time = Some(timestamp(BOUND));
+    let assemble = |mut resolved: Resolution| {
+        let mut draft =
+            crate::pack::assemble_draft(&request.query, request.budget, resolved.memories)
+                .unwrap();
+        append_ranked_native_pack_items(
+            resolved.candidates,
+            Vec::new(),
+            &request,
+            None,
+            &mut draft,
+            &mut resolved.degraded,
+        );
+        draft.hash = Some(compute_pack_hash(&request, &draft, &resolved.degraded));
+        draft
+    };
+    assert_eq!(
+        assemble(warm),
+        assemble(cold),
+        "partial source reuse must preserve ordered items, content, provenance, and pack hash"
+    );
+}
+
+#[test]
+fn mixed_pack_hydration_failure_withholds_preloaded_memories_and_rules() {
+    let f = Fixture::new();
+    let cached = f.add(1, |_| {}, |_| {});
+    let missing = f.add(2, |_| {}, |_| {});
+    let derived = f.add(
+        3,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![cached.memory.clone(), missing.memory.clone()],
+    );
+    let preloaded = f.db.get_memories_batch(&[&cached.memory]).unwrap();
+    f.db.execute_raw("ALTER TABLE memories RENAME COLUMN content TO unavailable_content")
+        .unwrap();
+    let resolved = f.resolve_with_admission(
+        report(&[&cached.memory, &cached.rule, &derived.rule]),
+        &QueryFilters::default(),
+        false,
+        Some(&preloaded),
+    );
+    assert!(
+        resolved.memories.is_empty(),
+        "a failed missing-row read must not become success for the cached subset"
+    );
+    assert!(resolved.candidates.is_empty());
+    assert_eq!(resolved.metrics.memory_batch_reads, 1);
+    assert!(resolved.degraded.iter().any(|entry| {
+        entry.code == "context_candidate_memory_batch_unavailable"
+            && entry
+                .message
+                .contains("Context candidate memories could not be batch-loaded")
+    }));
+}
+
+#[test]
+fn mixed_pack_hydration_uses_local_parent_authority_over_global_preloads() {
+    let local = Fixture::new();
+    let global = Fixture::new();
+    let cached = local.add(1, |_| {}, |_| {});
+    let parent = local.add(2, |_| {}, |_| {});
+    let additional = local.add(3, |_| {}, |_| {});
+    let derived = local.add(
+        4,
+        |_| {},
+        |rule| rule.source_memory_ids = vec![parent.memory.clone(), additional.memory.clone()],
+    );
+    let global_pair = global.add(
+        2,
+        |memory| memory.content = "Unrelated global body must not supply a local parent.".to_owned(),
+        |_| {},
+    );
+    let global_row = global
+        .db
+        .get_memory(&global_pair.memory)
+        .unwrap()
+        .unwrap();
+    for returned_global_hit in [false, true] {
+        for copied_workspace in [false, true] {
+            let mut preloaded = local.db.get_memories_batch(&[&cached.memory]).unwrap();
+            let mut global_row = global_row.clone();
+            if copied_workspace {
+                global_row.workspace_id = local.workspace_id.clone();
+            }
+            global_row.tombstoned_at = Some(OLD.to_owned());
+            preloaded.insert(parent.memory.clone(), global_row);
+            let mut search = report(&[&cached.memory, &derived.rule]);
+            if returned_global_hit {
+                let mut hit = report(&[&parent.memory]).results.remove(0);
+                hit.metadata = Some(serde_json::json!({
+                    "storeLane": crate::core::global_store::GLOBAL_PROVENANCE_LANE
+                }));
+                search.results.push(hit);
+            }
+            let cold = local.resolve_report(search.clone(), &QueryFilters::default());
+            let (warm, queries) = crate::db::capture_query_sql_for_test(|| {
+                local.resolve_with_admission(
+                    search,
+                    &QueryFilters::default(),
+                    false,
+                    Some(&preloaded),
+                )
+            });
+            assert_eq!(warm.metrics.unique_memory_ids, 3);
+            assert_eq!(warm.metrics.memory_batch_reads, 1);
+            assert_eq!(
+                sources(&warm.candidates),
+                BTreeSet::from([derived.rule.clone()]),
+                "a foreign or copied-workspace preload must not replace the live local parent"
+            );
+            assert_eq!(warm.memories, cold.memories);
+            assert_eq!(warm.candidates, cold.candidates);
+            assert_eq!(warm.degraded, cold.degraded);
+            assert_eq!(
+                queries
+                    .iter()
+                    .filter(|sql| {
+                        sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                            && (sql.contains("FROM memories WHERE id =")
+                                || sql.contains("FROM memories WHERE id IN ("))
+                    })
+                    .count(),
+                2,
+                "reuse the admitted local hit, but locally hydrate both native parents"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_pack_hydration_local_absence_cannot_fall_back_to_a_global_parent() {
+    let local = Fixture::new();
+    let global = Fixture::new();
+    let cached = local.add(1, |_| {}, |_| {});
+    let additional = local.add(3, |_| {}, |_| {});
+    let global_pair = global.add(2, |_| {}, |_| {});
+    let mut global_row = global.db.get_memory(&global_pair.memory).unwrap().unwrap();
+    // Namespace equality is not proof that a separately admitted global row
+    // exists in the local source database.
+    global_row.workspace_id = local.workspace_id.clone();
+    let mut preloaded = local.db.get_memories_batch(&[&cached.memory]).unwrap();
+    preloaded.insert(global_pair.memory.clone(), global_row);
+    let ids = [
+        cached.memory.as_str(),
+        global_pair.memory.as_str(),
+        additional.memory.as_str(),
+    ];
+    let mut degraded = Vec::new();
+    let (memories, _, used_full_preload) = load_candidate_batch_maps_with_preloaded(
+        &local.db,
+        &ids,
+        Some(&preloaded),
+        std::iter::once(cached.memory.as_str()),
+        &mut degraded,
+    );
+    assert!(!used_full_preload);
+    assert!(memories.get(&cached.memory).is_some());
+    assert!(memories.get(&additional.memory).is_some());
+    assert!(memories.get(&global_pair.memory).is_none());
+    assert!(degraded.is_empty());
+
+    // A stale native projection still names the missing local row. Neither
+    // native parent gate may turn the global cache's same-ID bytes into proof.
+    let original = local.projection(&additional);
+    let projection = RuleIndexProjection::new(
+        original.rule().clone(),
+        &local.workspace,
+        original.tags().to_vec(),
+        vec![global_pair.memory.clone()],
+    );
+    assert!(
+        rule_sources_admission(
+            &local.db,
+            &projection,
+            &memories,
+            &QueryTemporalFilters::default(),
+            false,
+            &mut BTreeMap::new(),
+            &mut degraded,
+        )
+        .is_none()
+    );
+    assert!(!linked_evidence_memory_admitted(
+        &memories,
+        &global_pair.memory,
+        &local.workspace_id,
+        "ev_missing_local_parent",
+        &mut degraded,
+    ));
+    assert_eq!(
+        memories.into_owned(),
+        local.db.get_memories_batch(&ids).unwrap(),
+        "successful local absence must have exactly the cold source-read result"
+    );
+}
+
+#[test]
 fn cached_rule_hits_cannot_bypass_current_native_review_holds() {
     let f = Fixture::new();
     let admitted = f.add(1, |_| {}, |_| {});
@@ -2051,18 +2315,32 @@ fn native_rule_later_sources_cannot_hide_behind_partial_preloads_or_unreadable_s
         |rule| rule.source_memory_ids = vec![live.memory.clone(), sealed.memory.clone()],
     );
     let preloaded = f.db.get_memories_batch(&[&live.memory]).unwrap();
-    let resolved = f.resolve_with_admission(
-        report(&[&derived.rule, &live.rule, &live.memory]),
-        &QueryFilters::default(),
-        false,
-        Some(&preloaded),
-    );
+    let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+        f.resolve_with_admission(
+            report(&[&derived.rule, &live.rule, &live.memory]),
+            &QueryFilters::default(),
+            false,
+            Some(&preloaded),
+        )
+    });
     assert_eq!(
         sources(&resolved.candidates),
         BTreeSet::from([live.rule.clone()])
     );
     assert_eq!(resolved.metrics.unique_memory_ids, 2);
     assert_eq!(resolved.metrics.memory_batch_reads, 1);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                sql.starts_with("SELECT id, workspace_id, level, kind, content,")
+                    && (sql.contains("FROM memories WHERE id =")
+                        || sql.contains("FROM memories WHERE id IN ("))
+            })
+            .count(),
+        1,
+        "only the uncached parent body is read; its seal still denies the derived rule"
+    );
     assert_eq!(resolved.memories.len(), 1);
     assert!(
         resolved
