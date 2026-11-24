@@ -6,6 +6,8 @@ use crate::db::{
     CreateWorkspaceInput, EvidenceProducerKind,
 };
 use crate::models::{EvidenceId, RuleId, SessionId};
+#[cfg(unix)]
+use crate::search::{Embedder, EmbedderStack};
 use sqlmodel_core::Value;
 
 const WORD: &str = "unpublishedquasar";
@@ -1423,6 +1425,244 @@ fn queued_writes_are_searchable_before_publication_without_consuming_their_jobs(
     assert_eq!(report.results[0].doc_id, memory);
     assert_eq!(fixture.state(), before);
     assert!(!fixture.root.join(".ee/index").exists());
+}
+
+// Deterministic vectors exercise semantic dispatch and publication without a
+// model download. Cancellation belongs to the publishing child context, so a
+// later ordinary search can prove the durable job remains recoverable.
+#[cfg(unix)]
+struct FirstPublicationEmbedder {
+    hash: HashEmbedder,
+    calls: AtomicUsize,
+    cancel_next: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(unix)]
+impl FirstPublicationEmbedder {
+    fn new(cancel_next: bool) -> Self {
+        Self {
+            hash: HashEmbedder::default_256(),
+            calls: AtomicUsize::new(0),
+            cancel_next: std::sync::atomic::AtomicBool::new(cancel_next),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Embedder for FirstPublicationEmbedder {
+    fn embed<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.cancel_next.swap(false, Ordering::Relaxed) {
+            cx.cancel_with(
+                asupersync::CancelKind::User,
+                Some("first-publication fixture cancellation"),
+            );
+        }
+        self.hash.embed(cx, text)
+    }
+
+    fn identity(
+        &self,
+    ) -> frankensearch::SearchResult<&frankensearch::core::generation::EmbeddingIdentityBundleV1>
+    {
+        self.hash.identity()
+    }
+
+    fn id(&self) -> &str {
+        self.hash.id()
+    }
+
+    fn model_name(&self) -> &str {
+        self.hash.model_name()
+    }
+
+    fn dimension(&self) -> usize {
+        self.hash.dimension()
+    }
+
+    fn is_semantic(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> frankensearch::core::traits::ModelCategory {
+        self.hash.category()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn embedding_search_publishes_first_generation_from_deferred_remember() {
+    with_test_search_timeouts(Duration::from_secs(300), || {
+        for (empty_directory, documents, mode) in [
+            (false, 1, SearchSourceMode::Hybrid),
+            (true, 1, SearchSourceMode::SemanticOnly),
+            (false, 64, SearchSourceMode::SemanticOnly),
+        ] {
+            let fixture = Fixture::new();
+            let index_dir = fixture.root.join(".ee/index");
+            if empty_directory {
+                std::fs::create_dir(&index_dir).unwrap();
+            }
+            for number in 1..documents {
+                fixture.memory(u128::from(number), &format!("Earlier deployment note {number}."));
+            }
+            let remembered = fixture.remember_deferred(BODY);
+            let embedder = Arc::new(FirstPublicationEmbedder::new(false));
+            let _selection = crate::core::index::install_test_workspace_embedder(
+                &fixture.workspace,
+                EmbedderStack::from_parts(embedder.clone(), None),
+            );
+            let mut options = fixture.options();
+            options.query = BODY.to_owned();
+            options.source_mode = mode;
+            options.strict_source_mode = true;
+
+            let run = run_search_with_performance(&options).unwrap();
+            assert_eq!(run.report.results[0].doc_id, remembered.memory_id.to_string());
+            assert!(run.report.results[0].fast_score.is_some());
+            assert_eq!(run.report.source_mode_applied, mode);
+            assert!(!run.report.source_mode_fallback);
+            assert!(run.report.index_freshness.is_none());
+            assert!(!run.report.degraded.iter().any(|entry| matches!(
+                entry.code.as_str(),
+                "index_missing" | "search_index_stale" | "search_live_snapshot_lexical"
+            )));
+            assert!(embedder.calls.load(Ordering::Relaxed) > 0);
+            let status = crate::core::index::get_index_status(&IndexStatusOptions {
+                workspace_path: fixture.root.clone(),
+                database_path: Some(fixture.root.join(".ee/ee.db")),
+                index_dir: Some(index_dir),
+            })
+            .unwrap();
+            assert_eq!(status.health, IndexHealth::Ready);
+            assert_eq!(status.index_generation, status.db_generation);
+            assert_eq!(status.index_document_count, Some(documents));
+            let jobs = fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap();
+            assert_eq!(jobs.len(), 1, "search must only consume the remembered job");
+            assert_eq!(Some(&jobs[0].id), remembered.index_job_id.as_ref());
+            assert_eq!(jobs[0].status, "completed");
+        }
+    });
+}
+
+#[test]
+fn first_publication_without_durable_jobs_keeps_the_source_only_fallback() {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(850, BODY);
+    let _selection = crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace);
+    let source_generation = fixture.db.get_workspace_generation(&fixture.workspace).unwrap();
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::Hybrid;
+    let run = run_search_with_performance(&options).unwrap();
+    complete_lexical(&run.report);
+    assert_eq!(run.report.results[0].doc_id, memory);
+    assert!(fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap().is_empty());
+    assert_eq!(fixture.db.get_workspace_generation(&fixture.workspace).unwrap(), source_generation);
+    assert!(!fixture.root.join(".ee/index").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn first_publication_refuses_a_corpus_above_the_interactive_limit() {
+    let fixture = Fixture::new();
+    for number in 1..=SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS {
+        fixture.memory(u128::from(number), &format!("Earlier deployment note {number}."));
+    }
+    let remembered = fixture.remember_deferred(BODY);
+    let jobs = fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap();
+    let embedder = Arc::new(FirstPublicationEmbedder::new(false));
+    let _selection = crate::core::index::install_test_workspace_embedder(
+        &fixture.workspace,
+        EmbedderStack::from_parts(embedder.clone(), None),
+    );
+    let mut options = fixture.options();
+    options.source_mode = SearchSourceMode::SemanticOnly;
+    options.strict_source_mode = true;
+    assert!(matches!(run_search_with_performance(&options), Err(SearchError::NoIndex)));
+    assert_eq!(fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap(), jobs);
+    assert_eq!(Some(&jobs[0].id), remembered.index_job_id.as_ref());
+    assert_eq!(jobs[0].status, "pending");
+    assert_eq!(embedder.calls.load(Ordering::Relaxed), 0);
+    assert!(!fixture.root.join(".ee/index").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelled_first_publication_preserves_the_job_for_the_next_search() {
+    with_test_search_timeouts(Duration::from_secs(300), || {
+        let fixture = Fixture::new();
+        let remembered = fixture.remember_deferred(BODY);
+        let embedder = Arc::new(FirstPublicationEmbedder::new(true));
+        let _selection = crate::core::index::install_test_workspace_embedder(
+            &fixture.workspace,
+            EmbedderStack::from_parts(embedder.clone(), None),
+        );
+        let mut options = fixture.options();
+        options.query = BODY.to_owned();
+        options.source_mode = SearchSourceMode::SemanticOnly;
+        options.strict_source_mode = true;
+
+        assert!(matches!(run_search_with_performance(&options), Err(SearchError::NoIndex)));
+        assert!(embedder.calls.load(Ordering::Relaxed) > 0, "cancel inside actual publication");
+        let index_dir = fixture.root.join(".ee/index");
+        assert!(!index_dir.exists() || index_dir_is_plain_empty(&index_dir));
+        let interrupted = fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(Some(&interrupted[0].id), remembered.index_job_id.as_ref());
+        assert!(!matches!(interrupted[0].status.as_str(), "running" | "completed"));
+
+        let retried = run_search_with_performance(&options).unwrap();
+        assert_eq!(retried.report.results[0].doc_id, remembered.memory_id.to_string());
+        assert_eq!(retried.report.source_mode_applied, SearchSourceMode::SemanticOnly);
+        assert!(!retried.report.source_mode_fallback);
+        assert!(retried.report.index_freshness.is_none());
+        let completed = fixture.db.list_search_index_jobs(&fixture.workspace, None).unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(Some(&completed[0].id), remembered.index_job_id.as_ref());
+        assert_eq!(completed[0].status, "completed");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn first_publication_never_reclassifies_rejected_or_retained_index_bytes() {
+    for layout in ["orphaned", "corrupt", "nested", "retained"] {
+        let fixture = Fixture::new();
+        fixture.remember_deferred(BODY);
+        let _selection = crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace);
+        let index_dir = fixture.root.join(".ee/index");
+        let inspected = if layout == "retained" {
+            fixture.root.join(".ee/index.previous")
+        } else {
+            index_dir.clone()
+        };
+        std::fs::create_dir(&inspected).unwrap();
+        match layout {
+            "orphaned" => std::fs::write(inspected.join("fast.idx"), b"unadmitted-vector").unwrap(),
+            "nested" => {
+                std::fs::create_dir(inspected.join("lexical")).unwrap();
+                std::fs::write(inspected.join("lexical/fragment"), b"unadmitted-lexical").unwrap();
+            }
+            _ => std::fs::write(inspected.join("meta.json"), b"unadmitted-metadata").unwrap(),
+        }
+        let before = fixture.state();
+        let bytes = index_file_hashes(&inspected);
+        let mut options = fixture.options();
+        options.source_mode = SearchSourceMode::Hybrid;
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            reconcile_search_index_before_read_with_cx(&cx, &options, false).await;
+        })
+        .unwrap();
+        assert_eq!(fixture.state(), before, "{layout} must preserve queued jobs and source state");
+        assert_eq!(index_file_hashes(&inspected), bytes, "{layout} must preserve derived bytes");
+        if layout == "retained" {
+            assert!(!index_dir.exists());
+        }
+    }
 }
 
 #[cfg(unix)]

@@ -128,7 +128,7 @@ const SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS: u64 = 64;
 const SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS: u32 = 4096;
 #[cfg(feature = "lexical-bm25")]
 const SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
-/// Wall-clock budget for repairing a small stale corpus before retrieval.
+/// Wall-clock budget for publishing a small queued corpus before retrieval.
 ///
 /// Reconciliation publishes complete vector and lexical tiers even for a
 /// one-generation gap. A 500 ms budget was shorter than a cold open plus
@@ -14027,9 +14027,9 @@ async fn reconcile_search_index_within_budget(
         }
         return;
     }
-    // A previous persisting pack can request repair even when no usable index
-    // generation exists. Only the pack caller authorizes this extra mutation;
-    // ordinary search, daemon retrieval and read-only packs leave it pending.
+    // A previous persisting pack can request a rebuild without queued source
+    // jobs. Only the pack caller authorizes consuming that request; ordinary
+    // search can drain existing jobs but must never manufacture repair work.
     if allow_requested_repair
         && (status.health != IndexHealth::Ready
             || status.last_check_error.is_some()
@@ -14074,16 +14074,28 @@ async fn reconcile_search_index_within_budget(
             ),
         }
     }
-    let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
-    else {
-        return;
+    let generation_gap = status
+        .db_generation
+        .zip(status.index_generation)
+        .map(|(source, indexed)| source.saturating_sub(indexed));
+    let job_limit = match (status.health, status.db_generation, status.index_generation) {
+        (IndexHealth::Stale, Some(source), Some(indexed))
+            if search_index_gap_is_auto_reconcilable(source, indexed) =>
+        {
+            source.saturating_sub(indexed)
+        }
+        (IndexHealth::Missing, Some(_), None)
+            if status.last_check_error.is_none()
+                && search_index_is_unpublished(cx, &index_dir) =>
+        {
+            // A deferred first write has no published watermark to subtract.
+            // The same complete-corpus ceiling bounds its publication, while
+            // the ordinary drain cap bounds queue intake. With no durable jobs
+            // the processor returns without creating an index or a rebuild job.
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD
+        }
+        _ => return,
     };
-    let generation_gap = db_generation.saturating_sub(index_generation);
-    if status.health != IndexHealth::Stale
-        || !search_index_gap_is_auto_reconcilable(db_generation, index_generation)
-    {
-        return;
-    }
     if cx.checkpoint().is_err() {
         return;
     }
@@ -14094,7 +14106,7 @@ async fn reconcile_search_index_within_budget(
         index_dir: Some(index_dir.clone()),
         dry_run: false,
         job_limit: Some(
-            u32::try_from(generation_gap)
+            u32::try_from(job_limit)
                 .unwrap_or(u32::MAX)
                 .min(u32::try_from(SEARCH_INDEX_LARGE_GAP_THRESHOLD).unwrap_or(u32::MAX)),
         ),
@@ -14114,7 +14126,7 @@ async fn reconcile_search_index_within_budget(
         {
             tracing::info!(
                 target: "ee::search::index_freshness",
-                generation_gap,
+                generation_gap = ?generation_gap,
                 completed_jobs = report.completed_jobs,
                 "reconciled queued search-index work before retrieval"
             );
@@ -14122,7 +14134,7 @@ async fn reconcile_search_index_within_budget(
         Ok(report) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
-                generation_gap,
+                generation_gap = ?generation_gap,
                 status = report.status.as_str(),
                 failed_jobs = report.failed_jobs,
                 "pre-retrieval search-index reconciliation did not converge"
@@ -14131,11 +14143,51 @@ async fn reconcile_search_index_within_budget(
         Err(error) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
-                generation_gap,
+                generation_gap = ?generation_gap,
                 error = %error,
                 "pre-retrieval search-index reconciliation failed; continuing with truthful stale-index reporting"
             );
         }
+    }
+}
+
+/// Missing metadata alone is not first publication: rejected bytes, retained
+/// generations and unreadable paths keep their normal admission/repair path.
+/// This is an eligibility hint; the publisher still fences and captures the
+/// authoritative source with the same document ceiling. Drop the shared lease
+/// before entering that publisher's exclusive generation fence.
+fn search_index_is_unpublished(cx: &asupersync::Cx, index_dir: &Path) -> bool {
+    if cx.checkpoint().is_err()
+        || crate::core::index::ensure_index_path_has_no_symlinks(
+            index_dir,
+            "inspect first search-index publication",
+        )
+        .is_err()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    let lease = match crate::core::index::IndexGenerationLease::try_read_for_inspection(index_dir) {
+        Ok(Some(lease)) => lease,
+        // Preserve the pinned observation: a missing parent cannot contain a
+        // retained generation. Do not inspect a later-created path unleased.
+        Ok(None) => return cx.checkpoint().is_ok(),
+        Err(_) => return false,
+    };
+    let empty = match std::fs::symlink_metadata(index_dir) {
+        Ok(metadata) => metadata.is_dir() && index_dir_is_plain_empty(index_dir),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !empty {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        matches!(lease.has_retained_generation_directory(cx, index_dir), Ok(false))
+    }
+    #[cfg(not(unix))]
+    {
+        cx.checkpoint().is_ok()
     }
 }
 
