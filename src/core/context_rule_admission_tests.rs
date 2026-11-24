@@ -1509,6 +1509,151 @@ fn populated_closed_seals_block_memories_and_rules_but_revealed_placeholders_are
 }
 
 #[test]
+fn inherited_seals_guard_memory_rule_and_graph_candidates_until_root_reveal() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let root = f.add(
+        2,
+        |memory| memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+        |_| {},
+    );
+    let revision = f.add(
+        3,
+        |memory| memory.content = "Unrevealed release revision.".to_owned(),
+        |_| {},
+    );
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET logical_id = '{}' WHERE id = '{}'",
+        root.memory, revision.memory
+    ))
+    .unwrap();
+    f.db.insert_memory_seal(
+        &root.memory,
+        &crate::models::memory_seal_commitment(b"Unrevealed release revision."),
+        OLD,
+    )
+    .unwrap();
+    assert!(f.db.get_memory_seal(&revision.memory).unwrap().is_none());
+
+    for revealed in [false, true] {
+        if revealed {
+            assert!(f.db.mark_memory_seal_revealed(&root.memory, NEW).unwrap());
+        }
+        let before = f.db.logical_table_digests().unwrap();
+        let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+            f.resolve(
+                &[&revision.rule, &live.rule, &revision.memory, &live.memory],
+                &QueryFilters::default(),
+            )
+        });
+        let mut expected_rules = BTreeSet::from([live.rule.clone()]);
+        let mut expected_memories = BTreeSet::from([live.memory.clone()]);
+        if revealed {
+            expected_rules.insert(revision.rule.clone());
+            expected_memories.insert(revision.memory.clone());
+        }
+        assert_eq!(sources(&resolved.candidates), expected_rules);
+        assert_eq!(
+            resolved
+                .memories
+                .iter()
+                .map(|candidate| candidate.memory_id.to_string())
+                .collect::<BTreeSet<_>>(),
+            expected_memories
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("FROM memories AS candidate")
+                    && sql.contains("LEFT JOIN memory_seals AS direct_seal")
+                    && sql.contains("candidate.id IN ("))
+                .count(),
+            1,
+            "one effective-seal batch covers memories and their rule dependents"
+        );
+
+        let hints = crate::models::QueryGraphHints {
+            enabled: true,
+            seed_memories: vec![revision.memory.clone(), live.memory.clone()],
+            ..crate::models::QueryGraphHints::default()
+        };
+        let mut degraded = Vec::new();
+        let (nodes, _, _) = graph_hint_nodes(
+            &f.db,
+            &hints,
+            &BTreeSet::from([f.workspace_id.clone()]),
+            false,
+            &mut degraded,
+        );
+        assert_eq!(
+            nodes.into_keys().collect::<BTreeSet<_>>(),
+            expected_memories
+        );
+        assert_eq!(f.db.logical_table_digests().unwrap(), before);
+    }
+    assert_eq!(
+        f.db.get_memory(&revision.memory).unwrap().unwrap().content,
+        "Unrevealed release revision.",
+        "admission never rewrites revision content"
+    );
+}
+
+#[test]
+fn invalid_seal_lineage_isolated_fallback_keeps_unrelated_candidates() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let broken = f.add(
+        2,
+        |memory| memory.content = "Unverified release revision.".to_owned(),
+        |_| {},
+    );
+    let missing_root = MemoryId::from_uuid(uuid::Uuid::from_u128(99)).to_string();
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET logical_id = '{missing_root}' WHERE id = '{}'",
+        broken.memory
+    ))
+    .unwrap();
+    let before = f.db.logical_table_digests().unwrap();
+    let (resolved, queries) = crate::db::capture_query_sql_for_test(|| {
+        f.resolve(
+            &[&broken.rule, &live.rule, &broken.memory, &live.memory],
+            &QueryFilters::default(),
+        )
+    });
+    assert_eq!(sources(&resolved.candidates), BTreeSet::from([live.rule]));
+    assert_eq!(resolved.memories.len(), 1);
+    assert_eq!(resolved.memories[0].memory_id.to_string(), live.memory);
+    assert!(resolved.degraded.iter().any(|entry| {
+        entry.code == "context_candidate_memory_batch_unavailable"
+            && entry.message.contains("excluded fail closed")
+    }));
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memories AS candidate")
+                && sql.contains("LEFT JOIN memory_seals AS direct_seal")
+                && sql.contains("candidate.id IN ("))
+            .count(),
+        3,
+        "failed batch falls back once per unique source, shared by memory and rule hits"
+    );
+    let memory = f.db.get_memory(&broken.memory).unwrap().unwrap();
+    let mut degraded = Vec::new();
+    assert_eq!(
+        context_memory_seal_admission(
+            &f.db,
+            &memory,
+            &mut degraded,
+            "context_candidate_memory_batch_unavailable",
+            ContextResponseSeverity::Medium,
+            "Test revision admission",
+        ),
+        ContextMemorySealAdmission::LookupUnavailable
+    );
+    assert_eq!(f.db.logical_table_digests().unwrap(), before);
+}
+
+#[test]
 fn graph_seed_admission_checks_seals_independent_of_body_and_lexical_fallback_agrees() {
     let f = Fixture::new();
     let live = f.add(1, |_| {}, |_| {});
@@ -1745,10 +1890,12 @@ fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
     assert_eq!(
         queries
             .iter()
-            .filter(|sql| sql.contains("FROM memory_seals WHERE"))
+            .filter(|sql| sql.contains("FROM memories AS candidate")
+                && sql.contains("LEFT JOIN memory_seals AS direct_seal")
+                && sql.contains("candidate.id IN ("))
             .count(),
         1,
-        "all memory hits and shared rule parents use one seal batch"
+        "all memory hits and shared rule parents use one effective-seal batch"
     );
     assert!(
         resolved

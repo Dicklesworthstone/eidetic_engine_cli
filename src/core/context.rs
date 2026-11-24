@@ -11747,11 +11747,12 @@ fn candidates_from_search_for_task_paths(
     }
     let mut candidates = Vec::new();
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
-    // Ordinary memory hits and shared rule parents need the same seal
-    // authority. Batch it once; malformed rows fall back to isolated reads
-    // so one invalid sidecar cannot suppress unrelated eligible memories.
+    // Ordinary memory hits and shared rule parents need the same effective
+    // seal authority, including their revision roots. Batch it once; malformed
+    // rows fall back to isolated reads so one invalid lineage or sidecar cannot
+    // suppress unrelated eligible memories.
     let mut candidate_seals = connection
-        .get_memory_seals_batch(&memory_ids_refs)
+        .get_effective_memory_seals_batch(&memory_ids_refs)
         .map(|seals| {
             memory_ids
                 .iter()
@@ -15382,7 +15383,8 @@ enum ContextMemorySealAdmission {
 ///
 /// Body spelling cannot prove that a seal is open: damaged or stale rows may
 /// retain real text behind a closed seal, while revealed content may itself be
-/// the placeholder string. An unreadable sidecar withholds the candidate.
+/// the placeholder string. Closed inherited seals and unreadable lineage or
+/// sidecar state withhold the candidate.
 fn context_memory_seal_admission(
     connection: &DbConnection,
     memory: &StoredMemory,
@@ -15391,7 +15393,7 @@ fn context_memory_seal_admission(
     lookup_degradation_severity: ContextResponseSeverity,
     lookup_surface: &str,
 ) -> ContextMemorySealAdmission {
-    match connection.get_memory_seal(&memory.id) {
+    match connection.get_effective_memory_seal(&memory.id) {
         Ok(Some(seal)) if seal.is_sealed() => ContextMemorySealAdmission::Sealed,
         Ok(_) => ContextMemorySealAdmission::Admit,
         Err(error) => {

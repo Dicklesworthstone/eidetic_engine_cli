@@ -2202,7 +2202,7 @@ pub fn close_workflow(
                     .iter()
                     .map(|memory| memory.id.as_str())
                     .collect::<Vec<_>>();
-                let seals = connection.get_memory_seals_batch(&ids)?;
+                let seals = connection.get_effective_memory_seals_batch(&ids)?;
                 let held = super::memory_lifecycle::pending_memory_review_ids(
                     &connection,
                     &workspace_id,
@@ -16569,6 +16569,100 @@ mod tests {
         }
         conn.close().map_err(|error| error.to_string())?;
         Ok((temp, database_path, workspace_id))
+    }
+
+    #[test]
+    fn workflow_close_requires_valid_lineage_and_inherited_seal_reveal() -> TestResult {
+        const BODY: &str = "A preregistered workflow release experiment.";
+        const CREATED: &str = "2020-01-01T00:00:00Z";
+        let (temp, database_path, workspace_id) = memory_maintenance_fixture()?;
+        let root_id = MemoryId::from_uuid(uuid::Uuid::from_u128(993)).to_string();
+        let revision_id = MemoryId::from_uuid(uuid::Uuid::from_u128(994)).to_string();
+        let workflow_id = "wf-inherited-seal";
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let mut input = remember_test_memory_input(&workspace_id, BODY);
+        input.level = "working".to_owned();
+        input.kind = "fact".to_owned();
+        input.workflow_id = Some(workflow_id.to_owned());
+        input.importance = 0.8;
+        connection
+            .insert_memory_with_timestamps(&revision_id, &input, CREATED, CREATED, &root_id)
+            .map_err(|error| error.to_string())?;
+        let before_invalid = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let options = WorkflowCloseOptions {
+            workspace_path: temp.path(),
+            database_path: Some(&database_path),
+            workflow_id,
+        };
+        assert!(close_workflow(&options).is_err());
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before_invalid,
+            "an invalid revision root must leave workflow rows, audits and jobs unchanged"
+        );
+        let mut root_input = remember_test_memory_input(
+            &workspace_id,
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+        );
+        root_input.level = "semantic".to_owned();
+        root_input.kind = "fact".to_owned();
+        connection
+            .insert_memory_with_timestamps(&root_id, &root_input, CREATED, CREATED, &root_id)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                &root_id,
+                &crate::models::memory_seal_commitment(BODY.as_bytes()),
+                CREATED,
+            )
+            .map_err(|error| error.to_string())?;
+        let before_closed = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let closed = close_workflow(&options).map_err(|error| error.message())?;
+        assert_eq!(closed.promoted_count, 0);
+        assert_eq!(closed.expired_count, 0);
+        assert!(closed.audit_ids.is_empty());
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before_closed,
+            "closed inherited seals must preserve working memory lifecycle"
+        );
+        assert!(
+            connection
+                .mark_memory_seal_revealed(&root_id, "2025-01-01T00:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        let revealed = close_workflow(&options).map_err(|error| error.message())?;
+        assert_eq!(revealed.promoted_count, 1);
+        assert_eq!(revealed.expired_count, 0);
+        assert_eq!(revealed.promoted_memory_ids, vec![revision_id.clone()]);
+        assert_eq!(revealed.audit_ids.len(), 1);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory(&revision_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workflow revision disappeared".to_owned())?;
+        assert_eq!(stored.level, "episodic");
+        assert_eq!(stored.content, BODY);
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
