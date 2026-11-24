@@ -20,10 +20,10 @@ use super::audit_lane::{
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config, merged_workspace_config};
 #[cfg(test)]
-use super::index::process_pending_index_jobs_coalesced;
+use super::index::{get_index_status_with_connection, process_pending_index_jobs_coalesced};
 use super::index::{
     IndexHealth, IndexProcessingJobReport, IndexRebuildError, IndexStatusOptions,
-    get_index_status_with_connection, process_index_job_for_connection,
+    get_index_status_in_current_snapshot, process_index_job_for_connection,
     process_pending_index_jobs_coalesced_before,
 };
 use super::memory_lifecycle::{
@@ -48,9 +48,9 @@ use crate::db::{
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
     CreateSessionInput, DbConnection, DbOperation, EvidenceProducerKind, MemoryContentSimHash,
-    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, StoredRememberIdempotencyKey, audit_actions, generate_audit_id,
-    generate_audit_id_seeded,
+    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobPosture, SearchIndexJobStatus,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink, StoredRememberIdempotencyKey,
+    audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
@@ -2396,72 +2396,79 @@ pub(crate) fn authoritative_remember_index_status(
             return "queued".to_owned();
         }
     };
-    let jobs = match verification_connection.list_search_index_jobs(workspace_id, None) {
-        Ok(jobs) => jobs,
-        Err(error) => {
-            tracing::warn!(
-                target: "ee::memory",
-                workspace_id,
-                error = %error,
-                "could not verify durable index jobs after remember; reporting queued"
-            );
-            return "queued".to_owned();
-        }
-    };
-    let jobs_by_id = jobs
-        .iter()
-        .map(|job| (job.id.as_str(), job))
-        .collect::<BTreeMap<_, _>>();
-    if required_job_ids
-        .iter()
-        .any(|job_id| !jobs_by_id.contains_key(job_id.as_str()))
-    {
+    if let Err(error) = verification_connection.begin_read_snapshot() {
+        tracing::warn!(
+            target: "ee::memory",
+            workspace_id,
+            error = %error,
+            "could not pin the final remember index view; reporting queued"
+        );
         return "queued".to_owned();
     }
 
-    let mut incomplete = false;
-    for job in &jobs {
-        match job.status_enum() {
-            Some(SearchIndexJobStatus::Completed) => {}
-            Some(SearchIndexJobStatus::Failed) => return "failed".to_owned(),
-            Some(
-                SearchIndexJobStatus::Pending
-                | SearchIndexJobStatus::Running
-                | SearchIndexJobStatus::Cancelled,
-            )
-            | None => incomplete = true,
-        }
-    }
-    if incomplete {
-        return "queued".to_owned();
-    }
-
-    match get_index_status_with_connection(
-        &IndexStatusOptions {
-            workspace_path: workspace_path.to_path_buf(),
-            database_path: Some(database_path.to_path_buf()),
-            index_dir: Some(index_dir.to_path_buf()),
-        },
-        Some(&verification_connection),
-    ) {
-        Ok(status)
-            if status.health == IndexHealth::Ready
-                && status.db_generation.is_some()
-                && status.db_generation == status.index_generation =>
+    // Jobs and source generation must describe the same fresh snapshot. When
+    // the index is current, its published counts already describe that corpus;
+    // reuse them instead of hydrating all source bodies after publication.
+    let status = (|| {
+        let required = required_job_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        match verification_connection
+            .search_index_job_posture_in_current_snapshot(workspace_id, &required)
         {
-            "indexed".to_owned()
+            Ok(SearchIndexJobPosture::Complete) => {}
+            Ok(SearchIndexJobPosture::Incomplete) => return "queued".to_owned(),
+            Ok(SearchIndexJobPosture::Failed) => return "failed".to_owned(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id,
+                    error = %error,
+                    "could not verify durable index jobs after remember; reporting queued"
+                );
+                return "queued".to_owned();
+            }
         }
-        Ok(_) => "queued".to_owned(),
-        Err(error) => {
-            tracing::warn!(
-                target: "ee::memory",
-                workspace_id,
-                error = %error,
-                "could not verify final remember index generation; reporting queued"
-            );
-            "queued".to_owned()
+
+        match get_index_status_in_current_snapshot(
+            &IndexStatusOptions {
+                workspace_path: workspace_path.to_path_buf(),
+                database_path: Some(database_path.to_path_buf()),
+                index_dir: Some(index_dir.to_path_buf()),
+            },
+            &verification_connection,
+        ) {
+            Ok(status)
+                if status.health == IndexHealth::Ready
+                    && status.db_generation.is_some()
+                    && status.db_generation == status.index_generation =>
+            {
+                "indexed".to_owned()
+            }
+            Ok(_) => "queued".to_owned(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id,
+                    error = %error,
+                    "could not verify final remember index generation; reporting queued"
+                );
+                "queued".to_owned()
+            }
         }
+    })();
+    if let Err(error) = verification_connection.commit_read_snapshot() {
+        let _ = verification_connection.rollback_read_snapshot();
+        tracing::warn!(
+            target: "ee::memory",
+            workspace_id,
+            error = %error,
+            "could not finish final remember index verification; reporting queued"
+        );
+        return "queued".to_owned();
     }
+    status
 }
 
 /// Reconcile an already-committed memory index job without rewriting the

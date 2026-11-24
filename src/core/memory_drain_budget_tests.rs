@@ -393,3 +393,195 @@ fn real_remember_drain_honors_parent_cancellation_and_releases_leadership() {
     })
     .expect("test request runtime");
 }
+
+#[test]
+fn final_remember_verification_reuses_publication_without_rescanning_source_or_history() {
+    let fixture = Fixture::new();
+    let _embedder = super::super::index::install_test_hash_workspace_embedder(&fixture.workspace);
+    let published = process_index_job_for_connection(&fixture.db, OWN_JOB, &fixture.index)
+        .expect("publish the committed memory");
+    assert_eq!(remember_index_status(&published), "indexed");
+    fixture
+        .db
+        .insert_search_index_job(PEER_JOB, &fixture.job_input())
+        .expect("historical job");
+    assert!(fixture.db.start_search_index_job(PEER_JOB).unwrap());
+    assert!(fixture.db.complete_search_index_job(PEER_JOB, 1).unwrap());
+    fixture
+        .db
+        .execute(
+            "UPDATE search_index_jobs SET error_message = ?1 WHERE id = ?2",
+            &[
+                sqlmodel_core::Value::Text(
+                    "Unused historical publication diagnostic. ".repeat(4096),
+                ),
+                sqlmodel_core::Value::Text(PEER_JOB.to_owned()),
+            ],
+        )
+        .expect("large completed-job diagnostic");
+    let source_before = fixture.db.logical_table_digests().unwrap();
+    let metadata_path = fixture.index.join("meta.json");
+    let metadata_before = fs::read(&metadata_path).unwrap();
+    let (status, queries) = crate::db::capture_query_sql_for_test(|| {
+        authoritative_remember_index_status(
+            &fixture.workspace,
+            &fixture.root,
+            &fixture.database,
+            &fixture.index,
+            &[OWN_JOB.to_owned()],
+            "indexed",
+        )
+    });
+    assert_eq!(status, "indexed");
+    let job_reads = queries
+        .iter()
+        .filter(|sql| sql.contains("FROM search_index_jobs"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        job_reads.len(),
+        2,
+        "required membership and workspace posture"
+    );
+    assert!(job_reads.iter().all(|sql| {
+        !sql.contains("error_message") && !sql.contains("document_id") && !sql.contains("ORDER BY")
+    }));
+    for sql in &queries {
+        let normalized = sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        for table in [
+            "memories",
+            "sessions",
+            "artifacts",
+            "procedural_rules",
+            "evidence_spans",
+        ] {
+            assert!(
+                !normalized.contains(&format!("from {table} "))
+                    && !normalized.ends_with(&format!("from {table}"))
+                    && !normalized.contains(&format!("join {table} ")),
+                "a current publication must verify without rehydrating {table}: {sql}"
+            );
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let pack_search = crate::core::search::run_pack_search(&SearchOptions {
+            workspace_path: fixture.root.clone(),
+            database_path: Some(fixture.database.clone()),
+            index_dir: Some(fixture.index.clone()),
+            query: "indigo memory publication deadlines".to_owned(),
+            limit: 5,
+            speed: crate::search::SpeedMode::Instant,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: crate::models::MemoryScope::Workspace,
+            strict_scope: false,
+        })
+        .expect("fresh read-only pack search");
+        assert_eq!(
+            pack_search
+                .report
+                .results
+                .first()
+                .map(|hit| hit.doc_id.as_str()),
+            Some(fixture.memory.as_str()),
+            "immediate read-only retrieval sees the synchronously published memory"
+        );
+    }
+    assert_eq!(fixture.db.logical_table_digests().unwrap(), source_before);
+    assert_eq!(fs::read(metadata_path).unwrap(), metadata_before);
+}
+
+#[test]
+fn final_remember_verification_keeps_live_job_and_generation_failures_authoritative() {
+    let fixture = Fixture::new();
+    let _embedder = super::super::index::install_test_hash_workspace_embedder(&fixture.workspace);
+    let published = process_index_job_for_connection(&fixture.db, OWN_JOB, &fixture.index)
+        .expect("publish source");
+    assert_eq!(remember_index_status(&published), "indexed");
+    let verify = |required: &[String], provisional| {
+        authoritative_remember_index_status(
+            &fixture.workspace,
+            &fixture.root,
+            &fixture.database,
+            &fixture.index,
+            required,
+            provisional,
+        )
+    };
+    let required = [OWN_JOB.to_owned()];
+    assert_eq!(verify(&required, "indexed"), "indexed");
+    assert_eq!(verify(&required, "failed"), "failed");
+    fixture
+        .db
+        .insert_search_index_job(PEER_JOB, &fixture.job_input())
+        .unwrap();
+    for (status, expected) in [
+        ("pending", "queued"),
+        ("running", "queued"),
+        ("cancelled", "queued"),
+        ("failed", "failed"),
+        ("completed", "indexed"),
+    ] {
+        fixture
+            .db
+            .execute(
+                "UPDATE search_index_jobs SET status = ?1 WHERE id = ?2",
+                &[
+                    sqlmodel_core::Value::Text(status.to_owned()),
+                    sqlmodel_core::Value::Text(PEER_JOB.to_owned()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            verify(&required, "indexed"),
+            expected,
+            "each call must observe the fresh durable peer state {status}"
+        );
+        assert_eq!(
+            verify(&["sidx_00000000000000000000000999".to_owned()], "indexed"),
+            "queued",
+            "missing required membership takes precedence even over failed peers"
+        );
+    }
+
+    let metadata_path = fixture.index.join("meta.json");
+    let metadata = fs::read(&metadata_path).unwrap();
+    fs::write(&metadata_path, b"{ malformed publication metadata").unwrap();
+    assert_eq!(verify(&required, "indexed"), "queued");
+    fs::write(&metadata_path, &metadata).unwrap();
+    assert_eq!(verify(&required, "indexed"), "indexed");
+    fixture
+        .db
+        .execute(
+            "UPDATE memories SET content = ?1 WHERE id = ?2",
+            &[
+                sqlmodel_core::Value::Text("A later source commit needs publication.".to_owned()),
+                sqlmodel_core::Value::Text(fixture.memory.clone()),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        verify(&required, "indexed"),
+        "queued",
+        "completed jobs cannot certify metadata from an older source generation"
+    );
+    fixture
+        .db
+        .execute_raw("ALTER TABLE search_index_jobs RENAME TO unavailable_index_jobs")
+        .unwrap();
+    assert_eq!(verify(&required, "indexed"), "queued");
+    assert_eq!(fs::read(metadata_path).unwrap(), metadata);
+}

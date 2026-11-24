@@ -53,10 +53,12 @@ mod memory_seal_authority;
 mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
+mod search_index_job_posture;
 pub mod shard;
 
 pub(crate) use evidence_lifecycle::{CassEvidenceWithdrawal, CassEvidenceWithdrawalError};
 pub use evidence_reader_projection::EvidenceReaderProjection;
+pub(crate) use search_index_job_posture::SearchIndexJobPosture;
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
