@@ -1440,6 +1440,161 @@ fn path_scoped_and_retired_rules_cannot_hydrate_an_unscoped_pack() {
 }
 
 #[test]
+fn populated_closed_seals_block_memories_and_rules_but_revealed_placeholders_are_admitted() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let sealed = f.add(
+        2,
+        |memory| memory.content = "Unrevealed release experiment.".to_owned(),
+        |_| {},
+    );
+    f.db.insert_memory_seal(
+        &sealed.memory,
+        &crate::models::memory_seal_commitment(b"Unrevealed release experiment."),
+        OLD,
+    )
+    .unwrap();
+    let revealed = f.add(
+        3,
+        |memory| memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned(),
+        |_| {},
+    );
+    f.db.insert_memory_seal(
+        &revealed.memory,
+        &crate::models::memory_seal_commitment(
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.as_bytes(),
+        ),
+        OLD,
+    )
+    .unwrap();
+    assert!(
+        f.db.mark_memory_seal_revealed(&revealed.memory, NEW)
+            .unwrap()
+    );
+
+    let resolved = f.resolve(
+        &[
+            &sealed.rule,
+            &live.rule,
+            &revealed.rule,
+            &sealed.memory,
+            &live.memory,
+            &revealed.memory,
+        ],
+        &QueryFilters::default(),
+    );
+    assert_eq!(
+        sources(&resolved.candidates),
+        BTreeSet::from([live.rule, revealed.rule])
+    );
+    assert_eq!(
+        resolved
+            .memories
+            .iter()
+            .map(|candidate| candidate.memory_id.to_string())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([live.memory, revealed.memory])
+    );
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_candidate_sealed")
+    );
+    assert_eq!(
+        f.db.get_memory(&sealed.memory).unwrap().unwrap().content,
+        "Unrevealed release experiment.",
+        "admission withholds the stored bytes without rewriting them"
+    );
+}
+
+#[test]
+fn graph_seed_admission_checks_seals_independent_of_body_and_lexical_fallback_agrees() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let sealed = f.add(
+        2,
+        |memory| memory.content = "Unrevealed release experiment.".to_owned(),
+        |_| {},
+    );
+    f.db.insert_memory_seal(
+        &sealed.memory,
+        &crate::models::memory_seal_commitment(b"Unrevealed release experiment."),
+        OLD,
+    )
+    .unwrap();
+    let hints = crate::models::QueryGraphHints {
+        enabled: true,
+        seed_memories: vec![sealed.memory.clone(), live.memory.clone()],
+        ..crate::models::QueryGraphHints::default()
+    };
+    let mut degraded = Vec::new();
+    let (nodes, _, _) = graph_hint_nodes(
+        &f.db,
+        &hints,
+        &BTreeSet::from([f.workspace_id.clone()]),
+        false,
+        &mut degraded,
+    );
+    assert_eq!(
+        nodes.into_keys().collect::<BTreeSet<_>>(),
+        BTreeSet::from([live.memory.clone()])
+    );
+    let fallback = lexical_memory_fallback_hits(
+        &f.db,
+        &f.workspace,
+        "release",
+        20,
+        FallbackMemorySelection::NotTombstoned,
+        Some(timestamp(BOUND)),
+        false,
+        false,
+        false,
+        Vec::new(),
+        &mut degraded,
+    );
+    assert_eq!(
+        fallback
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([live.memory])
+    );
+}
+
+#[test]
+fn malformed_seal_batches_fall_back_without_admitting_affected_bodies_or_rules() {
+    let f = Fixture::new();
+    let live = f.add(1, |_| {}, |_| {});
+    let malformed = f.add(2, |_| {}, |_| {});
+    f.db.insert_memory_seal(
+        &malformed.memory,
+        &crate::models::memory_seal_commitment(b"private experiment"),
+        OLD,
+    )
+    .unwrap();
+    f.db.execute_raw(&format!(
+        "UPDATE memory_seals SET sealed_at = 'invalid-seal-time' WHERE memory_id = '{}'",
+        malformed.memory
+    ))
+    .unwrap();
+    assert!(f.db.get_memory_seal(&malformed.memory).is_err());
+    let resolved = f.resolve(
+        &[&malformed.rule, &live.rule, &malformed.memory, &live.memory],
+        &QueryFilters::default(),
+    );
+    assert_eq!(sources(&resolved.candidates), BTreeSet::from([live.rule]));
+    assert_eq!(resolved.memories.len(), 1);
+    assert_eq!(resolved.memories[0].memory_id.to_string(), live.memory);
+    assert!(
+        resolved
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "context_candidate_memory_batch_unavailable")
+    );
+}
+
+#[test]
 fn source_lifecycle_and_seal_requirements_still_guard_rule_hydration() {
     let f = Fixture::new();
     let live = f.add(1, |_| {}, |_| {});
@@ -1592,8 +1747,8 @@ fn native_rule_sources_enforce_lifecycle_and_seals_in_either_source_position() {
             .iter()
             .filter(|sql| sql.contains("FROM memory_seals WHERE"))
             .count(),
-        2,
-        "each shared placeholder source needs one sidecar lookup"
+        1,
+        "all memory hits and shared rule parents use one seal batch"
     );
     assert!(
         resolved
@@ -1761,12 +1916,8 @@ fn native_rule_later_sources_cannot_hide_behind_partial_preloads_or_unreadable_s
         &[&derived.rule, &live.rule, &live.memory],
         &QueryFilters::default(),
     );
-    assert_eq!(
-        sources(&unresolved.candidates),
-        BTreeSet::from([live.rule.clone()])
-    );
-    assert_eq!(unresolved.memories.len(), 1);
-    assert_eq!(unresolved.memories[0].memory_id.to_string(), live.memory);
+    assert!(sources(&unresolved.candidates).is_empty());
+    assert!(unresolved.memories.is_empty());
     assert!(
         unresolved
             .degraded

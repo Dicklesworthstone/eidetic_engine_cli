@@ -3371,7 +3371,7 @@ mod tests {
     }
 
     #[test]
-    fn seal_sidecar_admission_is_lazy_truthful_and_fail_closed() -> TestResult {
+    fn seal_sidecar_admission_is_authoritative_and_fail_closed() -> TestResult {
         let unavailable_connection =
             DbConnection::open_memory().map_err(|error| error.to_string())?;
         let ordinary_id = MemoryId::from_uuid(uuid::Uuid::from_u128(931));
@@ -3387,10 +3387,13 @@ mod tests {
         );
         assert_eq!(
             ordinary_admission,
-            super::ContextMemorySealAdmission::Admit,
-            "non-placeholder content must not query the unavailable sidecar"
+            super::ContextMemorySealAdmission::LookupUnavailable,
+            "ordinary body text cannot authorize content when seal storage is unavailable"
         );
-        assert!(degraded.is_empty());
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_candidate_memory_batch_unavailable"
+                && entry.message.contains("excluded fail closed")
+        }));
 
         let mut unresolved_placeholder = ordinary.clone();
         unresolved_placeholder.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();

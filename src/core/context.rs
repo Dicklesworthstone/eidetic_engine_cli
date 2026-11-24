@@ -11747,7 +11747,28 @@ fn candidates_from_search_for_task_paths(
     }
     let mut candidates = Vec::new();
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
-    let mut rule_source_seals = BTreeMap::new();
+    // Ordinary memory hits and shared rule parents need the same seal
+    // authority. Batch it once; malformed rows fall back to isolated reads
+    // so one invalid sidecar cannot suppress unrelated eligible memories.
+    let mut candidate_seals = connection
+        .get_memory_seals_batch(&memory_ids_refs)
+        .map(|seals| {
+            memory_ids
+                .iter()
+                .map(|id| {
+                    let admission = if seals
+                        .get(id)
+                        .is_some_and(crate::models::MemorySeal::is_sealed)
+                    {
+                        ContextMemorySealAdmission::Sealed
+                    } else {
+                        ContextMemorySealAdmission::Admit
+                    };
+                    (id.clone(), admission)
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     for (idx, (hit, resolution, mesh_provenance)) in hit_resolutions.into_iter().enumerate() {
         match resolution {
             Some((memory_id, artifact_id)) => {
@@ -11809,7 +11830,7 @@ fn candidates_from_search_for_task_paths(
                         &memories,
                         &filters.temporal,
                         include_tombstoned,
-                        &mut rule_source_seals,
+                        &mut candidate_seals,
                         degraded,
                     ) else {
                         metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
@@ -11823,14 +11844,19 @@ fn candidates_from_search_for_task_paths(
                 if promoted_rule.is_none()
                     && let Some(memory) = memories.get(&memory_key)
                 {
-                    match context_memory_seal_admission(
-                        connection,
-                        memory,
-                        degraded,
-                        "context_candidate_memory_batch_unavailable",
-                        ContextResponseSeverity::Medium,
-                        "Search-hit candidate admission",
-                    ) {
+                    let seal = *candidate_seals
+                        .entry(memory_key.clone())
+                        .or_insert_with(|| {
+                            context_memory_seal_admission(
+                                connection,
+                                memory,
+                                degraded,
+                                "context_candidate_memory_batch_unavailable",
+                                ContextResponseSeverity::Medium,
+                                "Search-hit candidate admission",
+                            )
+                        });
+                    match seal {
                         ContextMemorySealAdmission::Admit => {}
                         ContextMemorySealAdmission::Sealed => {
                             metrics.skipped_candidates =
@@ -15352,12 +15378,11 @@ enum ContextMemorySealAdmission {
     LookupUnavailable,
 }
 
-/// Resolve placeholder-shaped content against durable seal-sidecar truth.
+/// Admit content only after checking durable seal authority in this snapshot.
 ///
-/// Ordinary candidates avoid the DB lookup entirely. Exact-placeholder
-/// candidates are admitted only when the sidecar query succeeds and proves
-/// that no seal row exists; lookup failure excludes fail closed and emits an
-/// existing context degradation selected by the caller.
+/// Body spelling cannot prove that a seal is open: damaged or stale rows may
+/// retain real text behind a closed seal, while revealed content may itself be
+/// the placeholder string. An unreadable sidecar withholds the candidate.
 fn context_memory_seal_admission(
     connection: &DbConnection,
     memory: &StoredMemory,
@@ -15366,12 +15391,9 @@ fn context_memory_seal_admission(
     lookup_degradation_severity: ContextResponseSeverity,
     lookup_surface: &str,
 ) -> ContextMemorySealAdmission {
-    if memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-        return ContextMemorySealAdmission::Admit;
-    }
     match connection.get_memory_seal(&memory.id) {
-        Ok(Some(_)) => ContextMemorySealAdmission::Sealed,
-        Ok(None) => ContextMemorySealAdmission::Admit,
+        Ok(Some(seal)) if seal.is_sealed() => ContextMemorySealAdmission::Sealed,
+        Ok(_) => ContextMemorySealAdmission::Admit,
         Err(error) => {
             push_degradation(
                 degraded,

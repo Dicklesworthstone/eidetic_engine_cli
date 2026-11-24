@@ -14,8 +14,8 @@ pub const MEMORY_SEAL_COMMITMENT_SCHEMA_V1: &str = "ee.memory_seal.commitment.v1
 
 /// Deterministic placeholder stored as `memories.content` for a sealed,
 /// not-yet-revealed memory. `memories.content` is NOT NULL with a
-/// non-empty CHECK, and this exact byte sequence is what pack/search
-/// exclusion recognizes; never localize or reword it without a schema bump.
+/// non-empty CHECK. Admission checks the durable seal state independently
+/// of these bytes: ordinary or revealed content may have the same spelling.
 pub const MEMORY_SEAL_PLACEHOLDER_CONTENT: &str =
     "[sealed memory: content committed by hash; reveal with ee memory reveal <id>]";
 
