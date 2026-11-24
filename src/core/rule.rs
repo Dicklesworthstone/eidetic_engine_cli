@@ -1814,15 +1814,62 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule mark --help"))?;
     let connection = open_existing_database(&prepared.database_path)?;
     bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
-    let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
-    let previous_detail = load_rule_details(&connection, stored.clone())?;
+    let mark = || mark_rule_in_snapshot(&connection, &prepared, &rule_id, trigger, options);
+    let mut report = if options.dry_run {
+        source_admission::with_snapshot(&connection, mark)?
+    } else {
+        connection
+            .with_transaction_error(|| mark().map_err(RuleWriteError::Domain))
+            .map_err(RuleWriteError::into_domain_error)?
+    };
+    if report.index_job_id.is_some() {
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            options.database_path,
+            &rule_id,
+            &mut report.index_status,
+            &mut report.degraded,
+        );
+    }
+    Ok(report)
+}
+
+/// Lifecycle admission and the resulting audit/job share one source view.
+/// Mutation holds the writer fence before reading the rule, its protection,
+/// its evidence, and its replacement, so a concurrent mark cannot be lost or
+/// authorize a transition from stale state.
+fn mark_rule_in_snapshot(
+    connection: &DbConnection,
+    prepared: &PreparedRuleRead,
+    rule_id: &str,
+    trigger: RuleLifecycleTrigger,
+    options: &RuleMarkOptions<'_>,
+) -> Result<RuleMarkReport, DomainError> {
+    if trigger != RuleLifecycleTrigger::Supersede
+        && options.evidence.superseding_rule_id.is_some()
+    {
+        return Err(rule_read_usage_error(
+            "a superseding replacement is only valid for the supersede trigger".to_owned(),
+            "ee rule mark --help",
+        ));
+    }
+    let stored = load_active_rule(connection, &prepared.workspace_id, rule_id)?;
+    if stored.superseded_by.is_some() && trigger != RuleLifecycleTrigger::Supersede {
+        return Err(DomainError::PolicyDenied {
+            message: "Superseded rules require an explicit supersession transition.".to_owned(),
+            repair: Some(format!("ee rule show {rule_id} --json")),
+        });
+    }
+    let previous_detail = load_rule_details(connection, stored.clone())?;
     let maturity =
         RuleMaturity::from_str(&stored.maturity).map_err(|error| DomainError::Storage {
             message: format!("Stored procedural rule has invalid maturity: {error}"),
             repair: Some(format!("ee rule show {rule_id} --json")),
         })?;
     let evidence =
-        build_rule_lifecycle_evidence(&connection, &prepared.workspace_id, &stored, options)?;
+        build_rule_lifecycle_evidence(connection, &prepared.workspace_id, &stored, options)?;
     let transition = maturity.evaluate_lifecycle_transition(trigger, &evidence);
     if !transition.allowed {
         return Err(DomainError::PolicyDenied {
@@ -1831,6 +1878,19 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
                 "Use `ee rule show {rule_id} --json` and supply the required lifecycle evidence."
             )),
         });
+    }
+    if transition.next_maturity == RuleMaturity::Validated && maturity != RuleMaturity::Validated {
+        if previous_detail.source_memory_ids.is_empty() {
+            return Err(rule_read_usage_error(
+                "validated rules require at least one source-memory evidence ID".to_owned(),
+                "ee rule update --help",
+            ));
+        }
+        verify_source_memories(
+            connection,
+            &prepared.workspace_id,
+            &previous_detail.source_memory_ids,
+        )?;
     }
 
     let marked_at = Utc::now().to_rfc3339();
@@ -1888,8 +1948,8 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
     }
     if options.dry_run {
         return Ok(rule_mark_report(RuleMarkReportInput {
-            prepared: &prepared,
-            rule_id: &rule_id,
+            prepared,
+            rule_id,
             dry_run: true,
             persisted: false,
             changed,
@@ -1922,7 +1982,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         updated_at: marked_at,
     };
     let audit_details = rule_mark_audit_details(
-        &rule_id,
+        rule_id,
         &transition,
         &evidence,
         changed,
@@ -1930,49 +1990,45 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         &dry_rule,
     );
 
-    connection
-        .with_transaction(|| {
-            if changed {
-                connection.update_procedural_rule_lifecycle(&rule_id, &lifecycle_input)?;
-            }
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(prepared.workspace_id.clone()),
-                    actor: options
-                        .actor
-                        .map(str::to_owned)
-                        .or_else(|| Some("ee rule mark".to_owned())),
-                    action: audit_actions::RULE_MARK.to_owned(),
-                    target_type: Some("rule".to_owned()),
-                    target_id: Some(rule_id.clone()),
-                    details: Some(audit_details.clone()),
+    (|| -> Result<(), RuleWriteError> {
+        if changed && !connection.update_procedural_rule_lifecycle(rule_id, &lifecycle_input)? {
+            return Err(RuleWriteError::Domain(rule_not_found(rule_id)));
+        }
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(prepared.workspace_id.clone()),
+                actor: options
+                    .actor
+                    .map(str::to_owned)
+                    .or_else(|| Some("ee rule mark".to_owned())),
+                action: audit_actions::RULE_MARK.to_owned(),
+                target_type: Some("rule".to_owned()),
+                target_id: Some(rule_id.to_owned()),
+                details: Some(audit_details.clone()),
+            },
+        )?;
+        if let Some(index_job_id) = &index_job_id {
+            connection.insert_search_index_job(
+                index_job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: prepared.workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("rule".to_owned()),
+                    document_id: Some(rule_id.to_owned()),
+                    documents_total: 1,
                 },
             )?;
-            if let Some(index_job_id) = &index_job_id {
-                connection.insert_search_index_job(
-                    index_job_id,
-                    &CreateSearchIndexJobInput {
-                        workspace_id: prepared.workspace_id.clone(),
-                        job_type: SearchIndexJobType::SingleDocument,
-                        document_source: Some("rule".to_owned()),
-                        document_id: Some(rule_id.clone()),
-                        documents_total: 1,
-                    },
-                )?;
-            }
-            Ok(())
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to mark procedural rule: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
+        }
+        Ok(())
+    })()
+    .map_err(RuleWriteError::into_domain_error)?;
 
-    let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
-    let updated_detail = load_rule_details(&connection, updated)?;
-    let mut report = rule_mark_report(RuleMarkReportInput {
-        prepared: &prepared,
-        rule_id: &rule_id,
+    let updated = load_active_rule(connection, &prepared.workspace_id, rule_id)?;
+    let updated_detail = load_rule_details(connection, updated)?;
+    Ok(rule_mark_report(RuleMarkReportInput {
+        prepared,
+        rule_id,
         dry_run: false,
         persisted: true,
         changed,
@@ -1982,19 +2038,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         evidence: &evidence,
         previous_rule: previous_detail,
         rule: updated_detail,
-    });
-    if report.index_job_id.is_some() {
-        apply_rule_index_convergence(
-            &connection,
-            &prepared.workspace_id,
-            &prepared.workspace_path,
-            options.database_path,
-            &rule_id,
-            &mut report.index_status,
-            &mut report.degraded,
-        );
-    }
-    Ok(report)
+    }))
 }
 
 /// Update mutable metadata for one procedural rule.
@@ -3902,9 +3946,14 @@ fn build_rule_lifecycle_evidence(
             ));
         }
         let superseding = load_active_rule(connection, workspace_id, &superseding_rule_id)?;
-        if superseding.maturity == RuleMaturity::Deprecated.as_str() {
+        let replacement_maturity =
+            RuleMaturity::from_str(&superseding.maturity).map_err(|error| DomainError::Storage {
+                message: format!("Superseding procedural rule has invalid maturity: {error}"),
+                repair: Some(format!("ee rule show {superseding_rule_id} --json")),
+            })?;
+        if replacement_maturity.is_terminal() || superseding.superseded_by.is_some() {
             return Err(rule_read_usage_error(
-                "a deprecated rule cannot be used as the superseding replacement".to_owned(),
+                "the superseding replacement must be a current, non-terminal rule".to_owned(),
                 "ee rule mark --help",
             ));
         }
@@ -5610,6 +5659,340 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn seed_lifecycle_rule(
+        connection: &DbConnection,
+        workspace_id: &str,
+        source_memory_ids: Vec<String>,
+    ) -> Result<String, String> {
+        let rule_id = RuleId::now().to_string();
+        connection
+            .insert_procedural_rule(
+                &rule_id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.to_owned(),
+                    content: "Review the migration evidence before publishing.".to_owned(),
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "agent_assertion".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: false,
+                    source_memory_ids,
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(rule_id)
+    }
+
+    fn lifecycle_mark_options<'a>(
+        workspace: &'a Path,
+        database: &'a Path,
+        rule_id: &'a str,
+        trigger: &'a str,
+    ) -> RuleMarkOptions<'a> {
+        RuleMarkOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            rule_id,
+            trigger,
+            evidence: RuleMarkEvidenceOptions::default(),
+            dry_run: false,
+            actor: Some("rule-lifecycle-test"),
+        }
+    }
+
+    #[test]
+    fn rule_mark_promotion_refuses_missing_or_withdrawn_sources_without_mutation() -> TestResult {
+        const SOURCE: &str = "A PRIVATE_PROMOTION_SOURCE established the migration procedure.";
+        for state in [
+            "missing",
+            "sealed",
+            "inherited_seal",
+            "review_pending",
+            "tombstoned",
+            "unavailable",
+        ] {
+            let (directory, database, workspace_id) = rule_source_fixture()?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let mut sources = if state == "missing" {
+                Vec::new()
+            } else {
+                seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?
+            };
+            let seal_root = sources.first().cloned();
+            if state == "inherited_seal" {
+                sources[0] = seed_rule_source_revision(
+                    &connection,
+                    seal_root.as_deref().ok_or("missing seal root")?,
+                    200,
+                )?;
+                sources.sort();
+            }
+            let rule_id = seed_lifecycle_rule(&connection, &workspace_id, sources.clone())?;
+            let expected = match state {
+                "sealed" | "inherited_seal" => {
+                    connection
+                        .insert_memory_seal(
+                            seal_root.as_deref().ok_or("missing seal root")?,
+                            &crate::models::memory_seal_commitment(SOURCE.as_bytes()),
+                            "2026-05-24T00:05:00Z",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    "derived_source_memory_sealed"
+                }
+                "review_pending" => {
+                    hold_rule_source(&connection, &workspace_id, &sources[0], "memory", 1)?;
+                    "derived_source_memory_review_pending"
+                }
+                "tombstoned" => {
+                    connection
+                        .execute_raw("UPDATE memories SET tombstoned_at = '2026-05-24T00:05:00Z'")
+                        .map_err(|error| error.to_string())?;
+                    "tombstoned"
+                }
+                "unavailable" => {
+                    connection
+                        .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals")
+                        .map_err(|error| error.to_string())?;
+                    "derived_source_memory_authority_unavailable"
+                }
+                _ => "validated rules require at least one source-memory evidence ID",
+            };
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            for trigger in ["validation_passed", "review_approved"] {
+                for dry_run in [true, false] {
+                    let mut options = lifecycle_mark_options(
+                        directory.path(),
+                        &database,
+                        &rule_id,
+                        trigger,
+                    );
+                    options.evidence.helpful_outcomes = 1;
+                    options.evidence.validation_passes = 1;
+                    options.evidence.review_approved = true;
+                    options.dry_run = dry_run;
+                    let error = mark_rule(&options)
+                        .expect_err("validation promotion must recheck its source evidence");
+                    assert!(
+                        error.message().contains(expected),
+                        "{state}/{trigger}: {error:?}"
+                    );
+                    assert!(!error.message().contains("PRIVATE_PROMOTION_SOURCE"));
+                }
+            }
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "{state}: refusal must preserve rule, counters, audit, jobs and generations"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rule_mark_promotion_rechecks_authority_after_preview() -> TestResult {
+        const SOURCE: &str = "A reviewed migration run supports the release procedure.";
+        let (directory, database, workspace_id) = rule_source_fixture()?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let sources = seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?;
+        let rule_id = seed_lifecycle_rule(&connection, &workspace_id, sources.clone())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let mut options = lifecycle_mark_options(
+            directory.path(),
+            &database,
+            &rule_id,
+            "validation_passed",
+        );
+        options.evidence.helpful_outcomes = 1;
+        options.evidence.validation_passes = 1;
+        options.evidence.review_approved = true;
+        options.dry_run = true;
+        let preview = mark_rule(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.rule.maturity, "validated");
+        assert!(!preview.persisted);
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                &sources[0],
+                &crate::models::memory_seal_commitment(SOURCE.as_bytes()),
+                "2026-05-24T00:05:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        options.dry_run = false;
+        assert!(
+            mark_rule(&options)
+                .expect_err("preview is not lasting authority")
+                .message()
+                .contains("derived_source_memory_sealed")
+        );
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        connection
+            .mark_memory_seal_revealed(&sources[0], "2026-05-24T00:06:00Z")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let applied = mark_rule(&options).map_err(|error| error.message())?;
+        assert!(applied.persisted);
+        assert_eq!(applied.rule.maturity, "validated");
+        assert_eq!(applied.rule.validation_passes, 1);
+        assert_eq!(applied.rule.positive_feedback_count, 0);
+        assert_eq!(applied.rule.source_memory_ids, sources);
+        Ok(())
+    }
+
+    #[test]
+    fn rule_mark_supersession_requires_current_replacement_and_rejects_cycles() -> TestResult {
+        let (directory, database, workspace_id) = rule_source_fixture()?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let first = seed_lifecycle_rule(&connection, &workspace_id, Vec::new())?;
+        let second = seed_lifecycle_rule(&connection, &workspace_id, Vec::new())?;
+        let third = seed_lifecycle_rule(&connection, &workspace_id, Vec::new())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let mut options = lifecycle_mark_options(
+            directory.path(),
+            &database,
+            &first,
+            "outcome_helpful",
+        );
+        options.evidence.superseding_rule_id = Some(&second);
+        for dry_run in [true, false] {
+            options.dry_run = dry_run;
+            assert!(
+                mark_rule(&options)
+                    .expect_err("feedback must not secretly supersede a rule")
+                    .message()
+                    .contains("only valid for the supersede trigger")
+            );
+        }
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        options.trigger = "supersede";
+        options.dry_run = false;
+        let forward = mark_rule(&options).map_err(|error| error.message())?;
+        assert_eq!(
+            forward.rule.superseded_by.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(forward.rule.maturity, "superseded");
+
+        options.rule_id = &second;
+        options.evidence.superseding_rule_id = Some(&first);
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            options.dry_run = dry_run;
+            assert!(
+                mark_rule(&options)
+                    .expect_err("A -> B -> A must not be admitted")
+                    .message()
+                    .contains("current, non-terminal rule")
+            );
+        }
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        options.dry_run = false;
+        options.evidence.superseding_rule_id = Some(&third);
+        mark_rule(&options).map_err(|error| error.message())?;
+        options.rule_id = &first;
+        options.evidence.superseding_rule_id = Some(&second);
+        assert!(
+            mark_rule(&options).is_err(),
+            "an obsolete replacement is not current authority"
+        );
+        options.evidence.superseding_rule_id = Some(&third);
+        let retargeted = mark_rule(&options).map_err(|error| error.message())?;
+        assert_eq!(
+            retargeted.rule.superseded_by.as_deref(),
+            Some(third.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_mark_ignored_update_and_late_audit_failure_leave_no_receipt_or_job() -> TestResult {
+        for ignored in [true, false] {
+            let (directory, database, workspace_id) = rule_source_fixture()?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let rule_id = seed_lifecycle_rule(&connection, &workspace_id, Vec::new())?;
+            let trigger = if ignored {
+                "CREATE TRIGGER ignore_rule_mark BEFORE UPDATE ON procedural_rules BEGIN SELECT RAISE(IGNORE); END"
+            } else {
+                "CREATE TRIGGER fail_rule_mark_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'mark audit refused'); END"
+            };
+            connection
+                .execute_raw(trigger)
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let options = lifecycle_mark_options(
+                directory.path(),
+                &database,
+                &rule_id,
+                "outcome_helpful",
+            );
+            let error =
+                mark_rule(&options).expect_err("failed lifecycle writes must not report success");
+            if ignored {
+                assert!(matches!(error, DomainError::NotFound { .. }));
+            } else {
+                assert!(matches!(error, DomainError::Storage { .. }));
+            }
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "failed update/audit must roll back counters, generation, receipt and index job"
+            );
+        }
+        Ok(())
     }
 
     #[test]
