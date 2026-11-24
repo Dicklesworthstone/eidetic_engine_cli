@@ -39,8 +39,54 @@ fn successor(number: u32) -> io::Result<u32> {
 /// Files and dangling links occupy names just as directories do. A large sparse
 /// sequence does not hide a lower free slot or imply that the space is full.
 pub(super) fn allocate(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    allocate_with_limit(parent, prefix, None)
+}
+
+/// Interactive publication admits only this many parent entries and final
+/// candidate probes combined. A refused scan never reserves or changes a name.
+pub(super) fn allocate_bounded(
+    parent: &Path,
+    prefix: &str,
+    max_entries: usize,
+) -> io::Result<PathBuf> {
+    allocate_with_limit(parent, prefix, Some(max_entries))
+}
+
+#[derive(Debug)]
+struct AllocationBudgetExceeded;
+
+impl std::fmt::Display for AllocationBudgetExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("retained index name allocation exceeded its interactive entry budget")
+    }
+}
+
+impl std::error::Error for AllocationBudgetExceeded {}
+
+/// Keep a resource refusal distinguishable from unreadable or invalid paths.
+pub(super) fn allocation_budget_exhausted(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<AllocationBudgetExceeded>())
+}
+
+fn allocation_checkpoint(remaining: &mut Option<usize>) -> io::Result<()> {
+    if let Some(remaining) = remaining {
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or_else(|| io::Error::other(AllocationBudgetExceeded))?;
+    }
+    Ok(())
+}
+
+fn allocate_with_limit(
+    parent: &Path,
+    prefix: &str,
+    mut remaining: Option<usize>,
+) -> io::Result<PathBuf> {
     let mut occupied = BTreeSet::new();
     for entry in std::fs::read_dir(parent)? {
+        allocation_checkpoint(&mut remaining)?;
         let entry = entry?;
         let name = entry.file_name();
         if let Some(number) = os_sequence(&name, prefix) {
@@ -56,6 +102,7 @@ pub(super) fn allocate(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
         number = successor(number)?;
     }
     loop {
+        allocation_checkpoint(&mut remaining)?;
         let name = if number == 0 {
             prefix.to_owned()
         } else {
@@ -192,6 +239,56 @@ mod tests {
         std::fs::create_dir(root.0.join("index.previous.0002"))?;
         assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(2)));
         assert_eq!(std::fs::read(occupied_file)?, b"not an index");
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_allocation_counts_unrelated_entries_and_preserves_history_on_refusal() -> TestResult
+    {
+        let root = TestDirectory::new()?;
+        let retained = root.0.join(name(0));
+        std::fs::create_dir(&retained)?;
+        std::fs::write(retained.join("keep"), b"published history")?;
+        for number in 0..8 {
+            std::fs::write(root.0.join(format!("unrelated-{number}")), b"source state")?;
+        }
+        let error = allocate_bounded(&root.0, &name(0), 4)
+            .err()
+            .ok_or("a partial parent inventory cannot authorize a name")?;
+        assert!(allocation_budget_exhausted(&error));
+        assert_eq!(std::fs::read_dir(&root.0)?.count(), 9);
+        assert_eq!(std::fs::read(retained.join("keep"))?, b"published history");
+        assert!(!root.0.join(name(1)).try_exists()?);
+        assert_eq!(allocate(&root.0, &name(0))?, root.0.join(name(1)));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_allocation_charges_final_probe_and_preserves_io_error_identity() -> TestResult {
+        let root = TestDirectory::new()?;
+        let empty = allocate_bounded(&root.0, &name(0), 0)
+            .err()
+            .ok_or("even an empty directory requires a candidate probe")?;
+        assert!(allocation_budget_exhausted(&empty));
+        assert_eq!(
+            allocate_bounded(&root.0, &name(0), 1)?,
+            root.0.join(name(0))
+        );
+        std::fs::write(root.0.join(name(0)), b"occupied name")?;
+        let exhausted = allocate_bounded(&root.0, &name(0), 1)
+            .err()
+            .ok_or("enumeration and candidate probing share the allowance")?;
+        assert!(allocation_budget_exhausted(&exhausted));
+        assert_eq!(
+            allocate_bounded(&root.0, &name(0), 2)?,
+            root.0.join(name(1))
+        );
+        assert_eq!(std::fs::read(root.0.join(name(0)))?, b"occupied name");
+        let missing = allocate_bounded(&root.0.join("missing"), &name(0), 2)
+            .err()
+            .ok_or("missing parents are ordinary filesystem failures")?;
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(!allocation_budget_exhausted(&missing));
         Ok(())
     }
 

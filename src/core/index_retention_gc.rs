@@ -51,6 +51,7 @@ const AUTO_RECLAIM_LIMIT: usize = 2;
 // inaccessible candidates must not turn the masked tail into an unbounded scan.
 const AUTO_RECLAIM_INSPECTION_LIMIT: usize = 8;
 const AUTO_TREE_ENTRY_LIMIT: usize = 1024;
+const AUTO_TREE_LOGICAL_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Independent maintenance allowance: the caller masks cancellation to finish
 /// an already-committed publication. That mask must not also admit unbounded
@@ -543,6 +544,14 @@ fn automatic_candidates(
             interrupted = true;
             return None;
         }
+        // Native validation can map and scan every tier, including immutable
+        // files shared with the live generation. Admit their logical bytes and
+        // real directory entries before opening a backend. A refused inventory
+        // is unknown, never proof that this generation is unusable.
+        if measure_automatic_directory(path, budget, true).is_err() {
+            interrupted = true;
+            return None;
+        }
         let generation = recover_generation(path);
         if budget.checkpoint().is_err() {
             interrupted = true;
@@ -586,7 +595,16 @@ fn automatic_directory_bytes(
     path: &Path,
     budget: &mut AutomaticRetentionBudget,
 ) -> Result<u64, IndexRebuildError> {
+    measure_automatic_directory(path, budget, false)
+}
+
+fn measure_automatic_directory(
+    path: &Path,
+    budget: &mut AutomaticRetentionBudget,
+    for_native_validation: bool,
+) -> Result<u64, IndexRebuildError> {
     let mut bytes = ReclaimableFileBytes::default();
+    let mut logical_bytes = 0_u64;
     let mut count = 1_usize;
     let mut pending = vec![path.to_path_buf()];
     while let Some(current) = pending.pop() {
@@ -596,6 +614,11 @@ fn automatic_directory_bytes(
                 "Could not inspect automatic retention tree: {error}"
             ))
         })?;
+        if for_native_validation && current.as_path() == path && !metadata.file_type().is_dir() {
+            return Err(IndexRebuildError::Index(
+                "Automatic retained index validation requires a real directory".to_owned(),
+            ));
+        }
         if metadata.file_type().is_dir() {
             let entries = std::fs::read_dir(&current).map_err(|error| {
                 IndexRebuildError::Index(format!(
@@ -617,7 +640,22 @@ fn automatic_directory_bytes(
                 );
             }
         } else if metadata.file_type().is_file() {
+            if for_native_validation {
+                logical_bytes = logical_bytes
+                    .checked_add(metadata.len())
+                    .filter(|total| *total <= AUTO_TREE_LOGICAL_BYTE_LIMIT)
+                    .ok_or_else(|| {
+                        IndexRebuildError::Index(format!(
+                            "Automatic retained index tree exceeds {AUTO_TREE_LOGICAL_BYTE_LIMIT} logical bytes; candidate is intact; use explicit ee index vacuum"
+                        ))
+                    })?;
+            }
             bytes.record(0, &current, &metadata);
+        } else if for_native_validation {
+            return Err(IndexRebuildError::Index(
+                "Automatic retained index validation refuses symlinks and special entries"
+                    .to_owned(),
+            ));
         }
     }
     budget.checkpoint()?;
@@ -1477,7 +1515,11 @@ mod automatic_tests {
     }
 
     #[test]
-    fn exhausted_validation_drops_every_provisional_disposition() {
+    fn exhausted_validation_drops_every_provisional_disposition() -> TestResult {
+        let root = tempfile::tempdir()?;
+        for number in 1..=3 {
+            std::fs::create_dir(root.path().join(format!("index.previous.{number:03}")))?;
+        }
         for first_valid in [false, true] {
             let mut budget = work_budget();
             budget.validations_remaining = 1;
@@ -1487,7 +1529,13 @@ mod automatic_tests {
                     candidate(1, Some(7)),
                     candidate(2, Some(8)),
                     candidate(3, Some(9)),
-                ],
+                ]
+                .into_iter()
+                .map(|mut candidate| {
+                    candidate.path = root.path().join(candidate.path);
+                    candidate
+                })
+                .collect(),
                 &mut budget,
                 |_| {
                     opens += 1;
@@ -1497,6 +1545,7 @@ mod automatic_tests {
             assert!(result.is_err(), "no partial plan may reach the deleter");
             assert_eq!(opens, 1);
         }
+        Ok(())
     }
 
     #[test]
@@ -1504,10 +1553,19 @@ mod automatic_tests {
     {
         for count in 3..40_u32 {
             for reverse in [false, true] {
+                let root = tempfile::tempdir()?;
+                for number in 0..count {
+                    std::fs::create_dir(root.path().join(format!("index.previous.{number:03}")))?;
+                }
                 let build = || {
                     let mut candidates: Vec<_> = (0..count)
                         .map(|number| {
-                            candidate(number, (number % 7 != 0).then_some(u64::from(number / 3)))
+                            let mut candidate = candidate(
+                                number,
+                                (number % 7 != 0).then_some(u64::from(number / 3)),
+                            );
+                            candidate.path = root.path().join(candidate.path);
+                            candidate
                         })
                         .collect();
                     if reverse {
@@ -1551,6 +1609,114 @@ mod automatic_tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_native_validation_refuses_large_shared_tiers_without_losing_history() -> TestResult
+    {
+        use super::super::{IndexDocumentCounts, write_index_metadata};
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        canary(&index)?;
+        let shared = index.join("shared-large-tier");
+        std::fs::File::create(&shared)?.set_len(AUTO_TREE_LOGICAL_BYTE_LIMIT + 1)?;
+        let mut candidates = Vec::new();
+        let mut metadata_before = Vec::new();
+        for (sequence, generation) in [(1, 7), (2, 8), (3, 9)] {
+            let mut entry = candidate(sequence, Some(generation));
+            entry.path = parent.join(entry.path);
+            canary(&entry.path)?;
+            write_index_metadata(
+                &entry.path,
+                generation,
+                IndexDocumentCounts::memory_only(1),
+                None,
+            )?;
+            metadata_before.push((
+                entry.path.join("meta.json"),
+                std::fs::read(entry.path.join("meta.json"))?,
+            ));
+            candidates.push(entry);
+        }
+        let oversized = candidates[1].path.clone();
+        std::fs::hard_link(&shared, oversized.join("fast.idx"))?;
+        assert_eq!(std::fs::metadata(&shared)?.nlink(), 2);
+        // Reclaimable bytes would omit this shared tier. Native opening still
+        // has to read its complete logical length, so sharing cannot admit it.
+        let first = candidates[2].path.clone();
+        let mut opened = Vec::new();
+        let result = automatic_candidates(candidates, &mut work_budget(), |path| {
+            opened.push(path.to_path_buf());
+            None
+        });
+        assert!(
+            result.is_err(),
+            "unknown history must discard the partial plan"
+        );
+        assert_eq!(
+            opened,
+            vec![first],
+            "the oversized tier must never reach native validation"
+        );
+
+        // The real publication-tail entry point must also preserve the earlier
+        // provisional unusable generation when a later inventory is refused.
+        assert!(reclaim_after_publish_with_budget(&index, &mut work_budget()).is_none());
+        assert_eq!(std::fs::read_dir(&parent)?.count(), 4);
+        assert_eq!(
+            std::fs::metadata(&shared)?.len(),
+            AUTO_TREE_LOGICAL_BYTE_LIMIT + 1
+        );
+        assert_eq!(std::fs::metadata(&shared)?.nlink(), 2);
+        for (path, before) in metadata_before {
+            assert_eq!(std::fs::read(path)?, before);
+        }
+        for number in 1..=3 {
+            assert_eq!(
+                std::fs::read(parent.join(format!("index.previous.{number:03}/canary")))?,
+                b"retained source and publication sentinel"
+            );
+        }
+        // Explicit planning has no automatic tree-byte ceiling. A zero keep
+        // limit also avoids opening deliberately synthetic native tiers here.
+        assert_eq!(plan(&index, 0)?.reclaimable().count(), 3);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_native_validation_refuses_redirected_lexical_tiers() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let outside = parent.join("outside-native-index");
+        canary(&outside)?;
+        let mut candidates = Vec::new();
+        for sequence in 1..=3 {
+            let mut entry = candidate(sequence, Some(u64::from(sequence)));
+            entry.path = parent.join(entry.path);
+            canary(&entry.path)?;
+            candidates.push(entry);
+        }
+        let redirected = candidates[2].path.join("lexical");
+        std::os::unix::fs::symlink(&outside, &redirected)?;
+        let before = inventory(&outside)?;
+        let mut opens = 0;
+        let result = automatic_candidates(candidates, &mut work_budget(), |_| {
+            opens += 1;
+            None
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            opens, 0,
+            "redirected tiers must be refused before native opening"
+        );
+        assert_eq!(std::fs::read_link(redirected)?, outside);
+        assert_eq!(inventory(&outside)?, before);
         Ok(())
     }
 
@@ -1600,6 +1766,35 @@ mod automatic_tests {
                 .ok_or("idempotent bounded cleanup")?
                 .reclaimed
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_deletion_can_still_reclaim_large_obsolete_files_without_native_validation()
+    -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        canary(&index)?;
+        let leftover = parent.join(".index.reclaim-1-000");
+        canary(&leftover)?;
+        std::fs::File::create(leftover.join("large-tier"))?
+            .set_len(AUTO_TREE_LOGICAL_BYTE_LIMIT + 1)?;
+        let outcome = reclaim_after_publish_with_budget(&index, &mut work_budget())
+            .ok_or("already retired files do not need native validation")?;
+        assert_eq!(outcome.reclaimed.len(), 1);
+        assert!(outcome.failures.is_empty());
+        assert_eq!(
+            outcome.reclaimed_bytes(),
+            AUTO_TREE_LOGICAL_BYTE_LIMIT
+                + 1
+                + b"retained source and publication sentinel".len() as u64
+        );
+        assert!(!leftover.exists());
+        assert_eq!(
+            std::fs::read(index.join("canary"))?,
+            b"retained source and publication sentinel"
         );
         Ok(())
     }

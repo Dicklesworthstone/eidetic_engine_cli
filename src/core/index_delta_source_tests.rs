@@ -217,6 +217,372 @@ fn assert_delta(report: &IndexProcessingJobReport) {
     assert_eq!(report.fallback_to_full, None, "{report:?}");
 }
 
+#[cfg(feature = "lexical-bm25")]
+fn process_bounded(
+    fixture: &Fixture,
+    jobs: Vec<StoredSearchIndexJob>,
+) -> Vec<IndexProcessingJobReport> {
+    process_selected_index_jobs_coalesced_bounded(
+        &fixture.db,
+        &fixture.workspace_id,
+        &fixture.index_dir,
+        jobs,
+        64,
+    )
+    .expect("bounded source publication")
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn assert_bounded_deferred(
+    fixture: &Fixture,
+    job: StoredSearchIndexJob,
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+) {
+    let reports = process_bounded(fixture, vec![job.clone()]);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].outcome, "skipped", "{reports:?}");
+    assert_eq!(regular_files(&fixture.index_dir), *before);
+    let stored = fixture
+        .db
+        .get_search_index_job(&job.id)
+        .expect("deferred job lookup")
+        .expect("deferred job");
+    assert_eq!(stored.status_enum(), Some(SearchIndexJobStatus::Pending));
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_streamed_publication_indexes_a_small_change_in_a_large_existing_corpus() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let baseline = vector_rows(&fixture.index_dir);
+    let added = memory_id(128);
+    insert_memory(
+        &fixture.db,
+        &fixture.workspace_id,
+        &added,
+        "New quasar maintenance lesson must be searchable on the next reader.",
+        Vec::new(),
+    )
+    .expect("new committed memory");
+    let job = fixture.queue(1, &added);
+    let reports = process_bounded(&fixture, vec![job]);
+    assert_eq!(reports.len(), 1);
+    assert_delta(&reports[0]);
+    let current = vector_rows(&fixture.index_dir);
+    assert!(current.contains_key(&added));
+    for (id, vector) in baseline {
+        assert_eq!(current.get(&id), Some(&vector), "unchanged vector {id}");
+    }
+    fixture.assert_published(&fixture.snapshot());
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_streamed_publication_reconciles_an_unqueued_global_withdrawal() {
+    let fixture = Fixture::new(128);
+    let foreign = fixture.other_workspace();
+    let global = memory_id(900);
+    insert_memory(
+        &fixture.db,
+        &foreign,
+        &global,
+        "A foreign memory whose global scope will be withdrawn.",
+        vec!["global".to_owned()],
+    )
+    .expect("foreign global memory");
+    fixture.seed_index();
+    assert!(vector_rows(&fixture.index_dir).contains_key(&global));
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memory_tags SET tag = 'private' WHERE memory_id = '{global}'"
+        ))
+        .expect("withdraw global scope without claiming its source job");
+    let added = memory_id(128);
+    insert_memory(
+        &fixture.db,
+        &fixture.workspace_id,
+        &added,
+        "Local change advances source generation and queues read repair.",
+        Vec::new(),
+    )
+    .expect("queued local source mutation");
+    let reports = process_bounded(&fixture, vec![fixture.queue(1, &added)]);
+    assert_delta(&reports[0]);
+    assert!(!vector_rows(&fixture.index_dir).contains_key(&global));
+    fixture.assert_published(&fixture.snapshot());
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_streamed_publication_leaves_a_large_rewrite_pending_and_live_bytes_unchanged() {
+    let fixture = Fixture::new(256);
+    fixture.seed_index();
+    let before = regular_files(&fixture.index_dir);
+    fixture
+        .db
+        .with_transaction(|| {
+            for ordinal in 0..65 {
+                fixture.db.execute_raw(&format!(
+                    "UPDATE memories SET content = content || ' changed input' WHERE id = '{}'",
+                    memory_id(ordinal)
+                ))?;
+            }
+            Ok(())
+        })
+        .expect("65 changed source bodies");
+    assert_bounded_deferred(&fixture, fixture.queue(1, &memory_id(0)), &before);
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_full_fallback_refuses_oversized_bodies_even_below_the_document_ceiling() {
+    let fixture = Fixture::new(8);
+    fixture.seed_index();
+    let before = regular_files(&fixture.index_dir);
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET content = '{}' WHERE id = '{}'",
+            "x".repeat(2 * 1024 * 1024),
+            memory_id(0),
+        ))
+        .expect("oversized source body");
+    assert_bounded_deferred(&fixture, fixture.queue(1, &memory_id(0)), &before);
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_streamed_publication_refuses_oversized_metadata_without_replacing_the_generation() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let metadata_path = fixture.index_dir.join(INDEX_METADATA_FILE);
+    let mut metadata = std::fs::read(&metadata_path).expect("valid metadata");
+    metadata.resize(super::MAX_INTERACTIVE_METADATA_BYTES as usize + 1, b' ');
+    std::fs::write(&metadata_path, metadata).expect("large valid metadata");
+    let before = regular_files(&fixture.index_dir);
+    let added = memory_id(128);
+    insert_memory(
+        &fixture.db,
+        &fixture.workspace_id,
+        &added,
+        "Queued change cannot authorize reading oversized metadata.",
+        Vec::new(),
+    )
+    .expect("new source");
+    assert_bounded_deferred(&fixture, fixture.queue(1, &added), &before);
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_generation_inventory_charges_sparse_files_by_logical_size() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let path = fixture.index_dir.join("oversized-derived-sidecar");
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .expect("sparse test sidecar");
+    file.set_len(super::MAX_INTERACTIVE_GENERATION_BYTES + 1)
+        .expect("large logical sidecar");
+    assert!(
+        !super::bounded_generation_fits(&asupersync::Cx::for_testing(), &fixture.index_dir, None,)
+            .expect("bounded generation inventory")
+    );
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_delta_keeps_its_captured_generation_and_unclaimed_jobs_pending() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let first = memory_id(128);
+    let sibling = memory_id(129);
+    for id in [&first, &sibling] {
+        insert_memory(
+            &fixture.db,
+            &fixture.workspace_id,
+            id,
+            "Committed source before bounded capture.",
+            Vec::new(),
+        )
+        .expect("source before capture");
+    }
+    let claimed = fixture.queue(1, &first);
+    let unclaimed = fixture.queue(2, &sibling);
+    let expected = fixture.snapshot();
+    let late = memory_id(130);
+    let source = &fixture;
+    let late_for_capture = late.clone();
+    let reports = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        process_selected_index_jobs_coalesced_after_snapshot_with_cx(
+            &cx,
+            &source.db,
+            &source.workspace_id,
+            &source.index_dir,
+            vec![claimed],
+            Some(64),
+            None,
+            || {
+                insert_memory(
+                    &source.db,
+                    &source.workspace_id,
+                    &late_for_capture,
+                    "A later write must remain beyond the captured generation.",
+                    Vec::new(),
+                )?;
+                source.queue(3, &late_for_capture);
+                Ok(())
+            },
+        )
+        .await
+    })
+    .expect("bounded capture runtime")
+    .expect("bounded captured publication");
+    assert_eq!(reports.len(), 1);
+    assert_delta(&reports[0]);
+    assert!(
+        reports[0]
+            .processing_mode
+            .contains("_open_sibling_full_rebuild")
+    );
+    fixture.assert_published(&expected);
+    assert!(fixture.snapshot().generation > expected.generation);
+    assert!(!vector_rows(&fixture.index_dir).contains_key(&late));
+    for id in [unclaimed.id, format!("sidx_{:026}", 3)] {
+        assert_eq!(
+            fixture
+                .db
+                .get_search_index_job(&id)
+                .expect("pending lookup")
+                .expect("pending row")
+                .status_enum(),
+            Some(SearchIndexJobStatus::Pending),
+        );
+    }
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_delta_cancellation_preserves_the_active_generation_and_retryable_job() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let before = regular_files(&fixture.index_dir);
+    let added = memory_id(128);
+    insert_memory(
+        &fixture.db,
+        &fixture.workspace_id,
+        &added,
+        "A cancelled staged source must remain retryable.",
+        Vec::new(),
+    )
+    .expect("source before cancellation");
+    let job = fixture.queue(1, &added);
+    let source = &fixture;
+    let selected = job.clone();
+    let cancelled = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        process_selected_index_jobs_coalesced_after_snapshot_with_cx(
+            &cx,
+            &source.db,
+            &source.workspace_id,
+            &source.index_dir,
+            vec![selected],
+            Some(64),
+            None,
+            || {
+                cx.set_cancel_reason(asupersync::CancelReason::user("cancel bounded delta"));
+                Ok(())
+            },
+        )
+        .await
+    })
+    .expect("bounded cancellation runtime");
+    assert!(matches!(cancelled, Err(IndexRebuildError::Cancelled(_))));
+    assert_eq!(regular_files(&fixture.index_dir), before);
+    let stored = fixture
+        .db
+        .get_search_index_job(&job.id)
+        .expect("cancelled job lookup")
+        .expect("cancelled row");
+    assert_eq!(stored.status_enum(), Some(SearchIndexJobStatus::Cancelled));
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
+fn bounded_retained_name_exhaustion_keeps_live_bytes_and_cleans_the_private_stage() {
+    let fixture = Fixture::new(128);
+    fixture.seed_index();
+    let before = regular_files(&fixture.index_dir);
+    let added = memory_id(128);
+    insert_memory(
+        &fixture.db,
+        &fixture.workspace_id,
+        &added,
+        "A committed memory stays retryable when retained-name work is too large.",
+        Vec::new(),
+    )
+    .expect("source before retention refusal");
+    let job = fixture.queue(1, &added);
+    for ordinal in 0..512 {
+        std::fs::write(
+            fixture.root.path().join(format!("unrelated-{ordinal}")),
+            b"x",
+        )
+        .expect("unrelated parent entry");
+    }
+    let parent_names = || {
+        std::fs::read_dir(fixture.root.path())
+            .expect("parent inventory")
+            .map(|entry| entry.expect("parent entry").file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let names_before = parent_names();
+    let refused = process_selected_index_jobs_coalesced_bounded(
+        &fixture.db,
+        &fixture.workspace_id,
+        &fixture.index_dir,
+        vec![job.clone()],
+        64,
+    );
+    assert!(matches!(
+        refused,
+        Err(IndexRebuildError::Cancelled(reason))
+            if reason.kind == asupersync::CancelKind::CostBudget
+    ));
+    assert_eq!(regular_files(&fixture.index_dir), before);
+    assert_eq!(
+        parent_names(),
+        names_before,
+        "refusal must not strand a private stage"
+    );
+    assert!(
+        fixture
+            .db
+            .get_memory(&added)
+            .expect("committed memory lookup")
+            .is_some()
+    );
+    let stored = fixture
+        .db
+        .get_search_index_job(&job.id)
+        .expect("deferred lookup")
+        .expect("deferred job");
+    assert_eq!(stored.status_enum(), Some(SearchIndexJobStatus::Cancelled));
+    requeue_cancelled_search_index_jobs(&fixture.db, &fixture.workspace_id)
+        .expect("retry resource-deferred work");
+    assert_eq!(
+        fixture
+            .db
+            .get_search_index_job(&job.id)
+            .expect("pending lookup")
+            .expect("pending job")
+            .status_enum(),
+        Some(SearchIndexJobStatus::Pending),
+    );
+}
+
 #[test]
 fn streamed_empty_index_keeps_producer_through_first_memory_and_feedback() {
     for legacy in [false, true] {

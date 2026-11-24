@@ -15,12 +15,23 @@ use super::{
     DOC_DIGESTS_SCHEMA_V3, Delta, DocDigests, EmbedderStack, EmbeddingReuse, IncrementalFallback,
     IncrementalFallbackReason, MAX_DELTA_PERCENT, batch, document_digest, embedder_identity,
     embedding_input_digest, incremental_fallback, metadata::document_payload_bytes, read_digests,
+    read_digests_bounded,
 };
 
 #[path = "index_delta_stream_budget.rs"]
 mod budget;
 
 const MAX_STREAM_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Additional interactive limits; background publication retains the existing
+/// ordinary/growth/maintenance admission policy.
+#[derive(Clone, Copy)]
+pub(in super::super) struct SourceReconciliationLimits {
+    pub(in super::super) documents: usize,
+    pub(in super::super) mutations: usize,
+    pub(in super::super) projected_bytes: usize,
+    pub(in super::super) changed_bytes: usize,
+}
 
 pub(in super::super) struct SourceReconciler {
     request: Option<asupersync::Cx>,
@@ -38,6 +49,8 @@ pub(in super::super) struct SourceReconciler {
     inference_inputs: usize,
     new_identities: usize,
     payload_bytes: usize,
+    limits: Option<SourceReconciliationLimits>,
+    projected_bytes: usize,
     refused: Option<IncrementalFallback>,
 }
 
@@ -49,17 +62,43 @@ pub(in super::super) struct ReconciledSource {
 }
 
 impl SourceReconciler {
+    pub(in super::super) fn read_bounded(
+        index_dir: &Path,
+        stack: &EmbedderStack,
+        limits: SourceReconciliationLimits,
+        max_digest_bytes: u64,
+    ) -> Result<Self, IncrementalFallback> {
+        Self::read_with_limits(index_dir, stack, Some(limits), Some(max_digest_bytes))
+    }
+
     pub(in super::super) fn read(
         index_dir: &Path,
         stack: &EmbedderStack,
+    ) -> Result<Self, IncrementalFallback> {
+        Self::read_with_limits(index_dir, stack, None, None)
+    }
+
+    fn read_with_limits(
+        index_dir: &Path,
+        stack: &EmbedderStack,
+        limits: Option<SourceReconciliationLimits>,
+        max_digest_bytes: Option<u64>,
     ) -> Result<Self, IncrementalFallback> {
         let request = asupersync::Cx::current();
         checkpoint(request.as_ref())?;
         let identity = embedder_identity(stack).ok_or_else(|| {
             invalid("streaming source reconciliation requires a complete embedding identity")
         })?;
-        let live = read_digests(index_dir)?;
+        let live = match max_digest_bytes {
+            Some(limit) => read_digests_bounded(index_dir, limit)?,
+            None => read_digests(index_dir)?,
+        };
         checkpoint(request.as_ref())?;
+        if limits.is_some_and(|limit| live.documents.len() > limit.documents) {
+            return Err(over_limit(
+                "published source membership exceeds the interactive document budget",
+            ));
+        }
         if live.schema != DOC_DIGESTS_SCHEMA_V3
             || live.embedder.as_deref() != Some(identity.as_str())
         {
@@ -94,6 +133,8 @@ impl SourceReconciler {
             inference_inputs: 0,
             new_identities: 0,
             payload_bytes: 0,
+            limits,
+            projected_bytes: 0,
             refused: None,
         })
     }
@@ -124,6 +165,20 @@ impl SourceReconciler {
                 "source snapshot contains an empty or duplicate document identity",
             ));
         }
+        if let Some(limits) = self.limits {
+            if self.current_documents.len() >= limits.documents {
+                return Err(over_limit(
+                    "streaming source exceeds the interactive document budget",
+                ));
+            }
+            let bytes = document_payload_bytes(&document);
+            if bytes > limits.projected_bytes.saturating_sub(self.projected_bytes) {
+                return Err(over_limit(
+                    "streaming source exceeds the interactive projected byte budget",
+                ));
+            }
+            self.projected_bytes += bytes;
+        }
         let digest = document_digest(&document);
         checkpoint(self.request.as_ref())?;
         let input = embedding_input_digest(&document);
@@ -138,13 +193,17 @@ impl SourceReconciler {
             ));
         }
         if changed {
-            if self.upserts.len() == budget::MAX_MUTATIONS {
+            let mutation_limit = self
+                .limits
+                .map_or(budget::MAX_MUTATIONS, |limits| limits.mutations)
+                .min(budget::MAX_MUTATIONS);
+            if self.upserts.len() >= mutation_limit {
                 return Err(over_limit(
                     "streaming source delta exceeds the mutation budget",
                 ));
             }
             let bytes = document_payload_bytes(&document);
-            if bytes > MAX_STREAM_PAYLOAD_BYTES.saturating_sub(self.payload_bytes) {
+            if bytes > self.payload_limit().saturating_sub(self.payload_bytes) {
                 return Err(over_limit(
                     "streaming source delta exceeds the payload byte budget",
                 ));
@@ -175,6 +234,13 @@ impl SourceReconciler {
         // Apply the full planner's ordinary/growth/maintenance policy only
         // after the complete source reveals net size and all withdrawals.
         let documents_total = self.current_documents.len();
+        if self.limits.is_some_and(|limits| {
+            self.upserts.len().saturating_add(self.live_documents.len()) > limits.mutations
+        }) {
+            return Err(over_limit(
+                "streaming source delta exceeds the interactive shared mutation budget",
+            ));
+        }
         budget::validate(
             self.live_count,
             documents_total,
@@ -183,10 +249,11 @@ impl SourceReconciler {
             self.inference_inputs,
             self.new_identities,
         )?;
+        let payload_limit = self.payload_limit();
         let mut removals = Vec::with_capacity(self.live_documents.len());
         for id in self.live_documents.into_keys() {
             checkpoint(self.request.as_ref())?;
-            if id.len() > MAX_STREAM_PAYLOAD_BYTES.saturating_sub(self.payload_bytes) {
+            if id.len() > payload_limit.saturating_sub(self.payload_bytes) {
                 return Err(over_limit(
                     "streaming source delta exceeds the payload byte budget",
                 ));
@@ -212,6 +279,12 @@ impl SourceReconciler {
             },
             documents_total,
         })
+    }
+
+    fn payload_limit(&self) -> usize {
+        self.limits
+            .map_or(MAX_STREAM_PAYLOAD_BYTES, |limits| limits.changed_bytes)
+            .min(MAX_STREAM_PAYLOAD_BYTES)
     }
 }
 
@@ -318,6 +391,147 @@ mod tests {
         assert_eq!(actual.digests.embedding_inputs, next.embedding_inputs);
         assert_eq!(actual.digests.embedder, next.embedder);
         assert_eq!(actual.documents_total, current.len());
+        Ok(())
+    }
+
+    fn interactive_limits() -> SourceReconciliationLimits {
+        SourceReconciliationLimits {
+            documents: 4096,
+            mutations: 64,
+            projected_bytes: 16 * 1024 * 1024,
+            changed_bytes: 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn bounded_stream_shares_change_capacity_between_upserts_and_removals() -> TestResult {
+        let stack = test_stack(11);
+        let original = documents(128);
+        let root = generation(&stack, &original)?;
+        for removed in [32, 33] {
+            let mut current = original[..original.len() - removed].to_vec();
+            for document in &mut current[..32] {
+                document.title = Some("Metadata changed without new inference".to_owned());
+            }
+            let mut stream = SourceReconciler::read_bounded(
+                root.path(),
+                &stack,
+                interactive_limits(),
+                2 * 1024 * 1024,
+            )
+            .map_err(|error| error.detail)?;
+            for document in current {
+                stream.observe(document).map_err(|error| error.detail)?;
+            }
+            let result = stream.finish();
+            if removed == 32 {
+                let result = result.map_err(|error| error.detail)?;
+                assert_eq!(result.delta.upserts.len(), 32);
+                assert_eq!(result.delta.removals.len(), 32);
+            } else {
+                let error = result.err().ok_or("65 combined changes must be refused")?;
+                assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_stream_charges_unchanged_projection_and_poisons_over_budget_prefixes() -> TestResult
+    {
+        let stack = test_stack(11);
+        let original = documents(8);
+        let root = generation(&stack, &original)?;
+        let exact_bytes = original.iter().map(document_payload_bytes).sum::<usize>();
+        for projected_bytes in [exact_bytes, exact_bytes - 1] {
+            let mut limits = interactive_limits();
+            limits.projected_bytes = projected_bytes;
+            let mut stream =
+                SourceReconciler::read_bounded(root.path(), &stack, limits, 2 * 1024 * 1024)
+                    .map_err(|error| error.detail)?;
+            let mut refused = false;
+            for document in &original {
+                if stream.observe(document.clone()).is_err() {
+                    refused = true;
+                    break;
+                }
+            }
+            if projected_bytes == exact_bytes {
+                assert!(!refused);
+                let result = stream.finish().map_err(|error| error.detail)?;
+                assert!(result.delta.upserts.is_empty());
+                assert!(result.delta.removals.is_empty());
+            } else {
+                assert!(refused, "unchanged bodies must spend the projection budget");
+                assert!(stream.observe(original[0].clone()).is_err());
+                assert!(
+                    stream.finish().is_err(),
+                    "a prefix cannot authorize removals"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_stream_counts_withdrawal_identity_bytes_after_changed_payload() -> TestResult {
+        let stack = test_stack(11);
+        let original = documents(2);
+        let root = generation(&stack, &original)?;
+        let mut changed = original[0].clone();
+        changed.title = Some("résumé 世界".to_owned());
+        let exact_bytes = document_payload_bytes(&changed) + original[1].id.len();
+        for changed_bytes in [exact_bytes, exact_bytes - 1] {
+            let mut limits = interactive_limits();
+            limits.changed_bytes = changed_bytes;
+            let mut stream =
+                SourceReconciler::read_bounded(root.path(), &stack, limits, 2 * 1024 * 1024)
+                    .map_err(|error| error.detail)?;
+            stream
+                .observe(changed.clone())
+                .map_err(|error| error.detail)?;
+            let result = stream.finish();
+            if changed_bytes == exact_bytes {
+                let result = result.map_err(|error| error.detail)?;
+                assert_eq!(result.delta.upserts.len(), 1);
+                assert_eq!(result.delta.removals, [original[1].id.clone()]);
+            } else {
+                assert_eq!(
+                    result
+                        .err()
+                        .ok_or("withdrawal ID must spend the last byte")?
+                        .reason,
+                    IncrementalFallbackReason::DeltaOverThreshold,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_stream_refuses_old_and_current_membership_above_its_document_ceiling() -> TestResult
+    {
+        let stack = test_stack(11);
+        let original = documents(4);
+        let root = generation(&stack, &original)?;
+        let mut limits = interactive_limits();
+        limits.documents = 3;
+        assert!(
+            SourceReconciler::read_bounded(root.path(), &stack, limits, 2 * 1024 * 1024,).is_err()
+        );
+        limits.documents = 4;
+        let mut stream =
+            SourceReconciler::read_bounded(root.path(), &stack, limits, 2 * 1024 * 1024)
+                .map_err(|error| error.detail)?;
+        for document in original {
+            stream.observe(document).map_err(|error| error.detail)?;
+        }
+        assert!(
+            stream
+                .observe(IndexableDocument::new("new", "new input"))
+                .is_err()
+        );
+        assert!(stream.finish().is_err());
         Ok(())
     }
 

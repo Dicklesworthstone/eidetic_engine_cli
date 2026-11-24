@@ -17,7 +17,7 @@ use super::{
     IndexModelSelection, IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path,
     RuleIndexProjection, RunningIndexJobFinalizer, SearchIndexJobType, StoredSearchIndexJob,
     UnpublishedIndexStage, append_failed_index_job_transition, artifact_to_document,
-    checked_document_counts, complete_running_index_job_in_txn, delta,
+    checked_document_counts, collect_open_index_job_ids, complete_running_index_job_in_txn, delta,
     embedder_fingerprint_for_index_metadata, embedder_reports_pending_model2vec_download,
     evidence_span_to_document, finalize_coalesced_claimed_jobs, index_operation_checkpoint,
     memory_documents_with_anchors_with_cx, path_exists_no_follow,
@@ -31,6 +31,16 @@ use super::{
 #[cfg(test)]
 #[path = "index_delta_source_tests.rs"]
 mod tests;
+
+pub(super) const MAX_INTERACTIVE_SOURCE_DOCUMENTS: u32 = 4096;
+pub(super) const MAX_INTERACTIVE_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INTERACTIVE_MUTATIONS: u32 = 64;
+const MAX_INTERACTIVE_CHANGED_BYTES: usize = 1024 * 1024;
+const MAX_INTERACTIVE_GENERATION_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INTERACTIVE_GENERATION_ENTRIES: usize = 512;
+const MAX_INTERACTIVE_GENERATION_DEPTH: usize = 16;
+const MAX_INTERACTIVE_DIGEST_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_INTERACTIVE_METADATA_BYTES: u64 = 64 * 1024;
 
 struct SourceDeltaSnapshot {
     generation: u64,
@@ -56,6 +66,47 @@ pub(super) async fn prepare(
     workspace_id: &str,
     index_dir: &Path,
 ) -> Result<Option<PreparedDelta>, IndexRebuildError> {
+    prepare_with_limits(publish_lock, db, workspace_id, index_dir, None, None).await
+}
+
+pub(super) async fn prepare_bounded(
+    publish_lock: &IndexPublishLockOwner<'_>,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    max_changed_documents: u32,
+    claimed_job_count: usize,
+) -> Result<Option<PreparedDelta>, IndexRebuildError> {
+    // Shared source-allocation admission is available with the lexical tier.
+    // Other builds retain the existing small complete-source repair path.
+    if !cfg!(feature = "lexical-bm25") {
+        publish_lock.checkpoint()?;
+        return Ok(None);
+    }
+    prepare_with_limits(
+        publish_lock,
+        db,
+        workspace_id,
+        index_dir,
+        Some(delta::SourceReconciliationLimits {
+            documents: MAX_INTERACTIVE_SOURCE_DOCUMENTS as usize,
+            mutations: max_changed_documents.min(MAX_INTERACTIVE_MUTATIONS) as usize,
+            projected_bytes: MAX_INTERACTIVE_SOURCE_BYTES as usize,
+            changed_bytes: MAX_INTERACTIVE_CHANGED_BYTES,
+        }),
+        Some(claimed_job_count.saturating_add(1)),
+    )
+    .await
+}
+
+async fn prepare_with_limits(
+    publish_lock: &IndexPublishLockOwner<'_>,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    limits: Option<delta::SourceReconciliationLimits>,
+    max_open_job_ids: Option<usize>,
+) -> Result<Option<PreparedDelta>, IndexRebuildError> {
     let cx = publish_lock.cx;
     publish_lock.checkpoint()?;
     // Initial builds and recovery of an absent active generation stay on the
@@ -63,17 +114,33 @@ pub(super) async fn prepare(
     if !path_exists_no_follow(&index_dir.join(super::INDEX_METADATA_FILE)) {
         return Ok(None);
     }
+    // A small delta cannot authorize unbounded native validation, copying,
+    // compaction or digest parsing of the previous generation.
+    if limits.is_some() && !bounded_generation_fits(cx, index_dir, publish_lock.control)? {
+        return Ok(None);
+    }
     let generation_hint = db.get_workspace_generation(workspace_id);
     publish_lock.checkpoint()?;
     let generation_hint = generation_hint?.unwrap_or(0);
-    let recovered = publish_lock
-        .with_generation_fence(index_dir, || {
-            recover_interrupted_publish_for_snapshot(index_dir, generation_hint)
-        })
-        .await;
-    publish_lock.checkpoint()?;
-    recovered?;
-    let eligible = validate_incremental_index_metadata(index_dir, generation_hint, u64::MAX);
+    if limits.is_none() {
+        let recovered = publish_lock
+            .with_generation_fence(index_dir, || {
+                recover_interrupted_publish_for_snapshot(index_dir, generation_hint)
+            })
+            .await;
+        publish_lock.checkpoint()?;
+        recovered?;
+    }
+    let eligible = if limits.is_some() {
+        super::validate_incremental_index_metadata_with_limit(
+            index_dir,
+            generation_hint,
+            u64::MAX,
+            MAX_INTERACTIVE_METADATA_BYTES,
+        )
+    } else {
+        validate_incremental_index_metadata(index_dir, generation_hint, u64::MAX)
+    };
     publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
@@ -92,7 +159,15 @@ pub(super) async fn prepare(
     publish_lock.checkpoint()?;
     let stack = prepare_index_embedder_stack(cx, stack).await?;
     publish_lock.checkpoint()?;
-    let reconciler = delta::SourceReconciler::read(index_dir, &stack);
+    let reconciler = match limits {
+        Some(limits) => delta::SourceReconciler::read_bounded(
+            index_dir,
+            &stack,
+            limits,
+            MAX_INTERACTIVE_DIGEST_BYTES,
+        ),
+        None => delta::SourceReconciler::read(index_dir, &stack),
+    };
     publish_lock.checkpoint()?;
     let reconciler = match reconciler {
         Ok(reconciler) => reconciler,
@@ -101,14 +176,30 @@ pub(super) async fn prepare(
             return Ok(None);
         }
     };
-    let Some(snapshot) =
-        capture_with_control(cx, db, workspace_id, reconciler, publish_lock.control)?
+    let Some(snapshot) = capture_with_control(
+        cx,
+        db,
+        workspace_id,
+        reconciler,
+        publish_lock.control,
+        limits,
+        max_open_job_ids,
+    )?
     else {
         return Ok(None);
     };
     // Check the actual captured generation as well as the earlier hint. The
     // complete source set, never a queued job or generation count, owns the diff.
-    let eligible = validate_incremental_index_metadata(index_dir, snapshot.generation, u64::MAX);
+    let eligible = if limits.is_some() {
+        super::validate_incremental_index_metadata_with_limit(
+            index_dir,
+            snapshot.generation,
+            u64::MAX,
+            MAX_INTERACTIVE_METADATA_BYTES,
+        )
+    } else {
+        validate_incremental_index_metadata(index_dir, snapshot.generation, u64::MAX)
+    };
     publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
@@ -121,6 +212,11 @@ pub(super) async fn prepare(
         open_job_ids,
         reconciliation,
     } = snapshot;
+    // The publication lease fences cooperating publishers; reject observed
+    // external growth as well before staging begins.
+    if limits.is_some() && !bounded_generation_fits(cx, index_dir, publish_lock.control)? {
+        return Ok(None);
+    }
     let staged = stage_planned_index_delta(
         publish_lock,
         index_dir,
@@ -169,6 +265,154 @@ pub(super) async fn prepare(
     }
 }
 
+/// Inspect only bounded filesystem metadata before any index deserialization
+/// or native backend opens. Logical bytes bound fallback copies and native
+/// compaction work; they are not an estimate of allocated disk blocks or RSS.
+fn bounded_generation_fits(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    control: Option<&super::IndexOperationControl>,
+) -> Result<bool, IndexRebuildError> {
+    index_operation_checkpoint(cx, control)?;
+    let safe_path = super::ensure_index_path_has_no_symlinks(
+        index_dir,
+        "inspect bounded index delta generation",
+    );
+    index_operation_checkpoint(cx, control)?;
+    if safe_path.is_err() {
+        return Ok(false);
+    }
+    let root = std::fs::symlink_metadata(index_dir);
+    index_operation_checkpoint(cx, control)?;
+    if !root.is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return Ok(false);
+    }
+    let mut pending = vec![(index_dir.to_path_buf(), 0_usize)];
+    let mut entries_seen = 0_usize;
+    let mut total_bytes = 0_u64;
+    while let Some((directory, depth)) = pending.pop() {
+        let entries = std::fs::read_dir(&directory);
+        index_operation_checkpoint(cx, control)?;
+        let Ok(entries) = entries else {
+            return Ok(false);
+        };
+        for entry in entries {
+            index_operation_checkpoint(cx, control)?;
+            let Ok(entry) = entry else {
+                return Ok(false);
+            };
+            entries_seen += 1;
+            if entries_seen > MAX_INTERACTIVE_GENERATION_ENTRIES {
+                return Ok(false);
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Ok(false);
+            };
+            let metadata = std::fs::symlink_metadata(entry.path());
+            index_operation_checkpoint(cx, control)?;
+            let Ok(metadata) = metadata else {
+                return Ok(false);
+            };
+            if metadata.file_type().is_dir() {
+                if depth >= MAX_INTERACTIVE_GENERATION_DEPTH {
+                    return Ok(false);
+                }
+                pending.push((entry.path(), depth + 1));
+            } else if metadata.file_type().is_file() {
+                let Some(bytes) = total_bytes.checked_add(metadata.len()) else {
+                    return Ok(false);
+                };
+                total_bytes = bytes;
+                if total_bytes > MAX_INTERACTIVE_GENERATION_BYTES
+                    || (depth == 0
+                        && name == delta::DOC_DIGESTS_FILE
+                        && metadata.len() > MAX_INTERACTIVE_DIGEST_BYTES)
+                    || (depth == 0
+                        && name == super::INDEX_METADATA_FILE
+                        && metadata.len() > MAX_INTERACTIVE_METADATA_BYTES)
+                {
+                    return Ok(false);
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+    }
+    let parsed = super::parse_index_metadata_with_limit(index_dir, MAX_INTERACTIVE_METADATA_BYTES);
+    index_operation_checkpoint(cx, control)?;
+    let Ok(Some(metadata)) = parsed else {
+        return Ok(false);
+    };
+    Ok(metadata
+        .document_count
+        .is_some_and(|count| count <= MAX_INTERACTIVE_SOURCE_DOCUMENTS)
+        && metadata.generation.is_some()
+        && super::index_metadata_compatibility_error(
+            &index_dir.join(super::INDEX_METADATA_FILE),
+            &metadata,
+        )
+        .is_none())
+}
+
+/// Read-repair hint without validated corpus admission or source hydration.
+/// The publisher repeats its authoritative checks after acquiring the lease.
+pub(super) fn bounded_generation_gap(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    max_generation_gap: u64,
+) -> Result<Option<u64>, IndexRebuildError> {
+    if !cfg!(feature = "lexical-bm25") {
+        index_operation_checkpoint(cx, None)?;
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    let _generation_lease = {
+        let lease = super::IndexGenerationLease::try_read_for_inspection(index_dir);
+        index_operation_checkpoint(cx, None)?;
+        let Some(lease) = lease? else {
+            return Ok(None);
+        };
+        lease
+    };
+    if !bounded_generation_fits(cx, index_dir, None)? {
+        return Ok(None);
+    }
+    let parsed = super::parse_index_metadata_with_limit(index_dir, MAX_INTERACTIVE_METADATA_BYTES);
+    index_operation_checkpoint(cx, None)?;
+    let Ok(Some(metadata)) = parsed else {
+        return Ok(None);
+    };
+    let Some(index_generation) = metadata.generation else {
+        return Ok(None);
+    };
+    source_snapshot::capture(db, || {
+        index_operation_checkpoint(cx, None)?;
+        #[cfg(feature = "lexical-bm25")]
+        let rows_fit = source_snapshot::live_source_rows_fit(
+            cx,
+            db,
+            workspace_id,
+            MAX_INTERACTIVE_SOURCE_DOCUMENTS,
+        )?;
+        #[cfg(not(feature = "lexical-bm25"))]
+        let rows_fit = false;
+        if !rows_fit {
+            return Ok(None);
+        }
+        let generation = db.get_workspace_generation(workspace_id);
+        index_operation_checkpoint(cx, None)?;
+        let Some(generation) = generation? else {
+            return Ok(None);
+        };
+        Ok(generation
+            .checked_sub(index_generation)
+            .filter(|gap| *gap > 0 && *gap <= max_generation_gap))
+    })
+}
+
 #[cfg(test)]
 fn capture(
     cx: &asupersync::Cx,
@@ -176,7 +420,7 @@ fn capture(
     workspace_id: &str,
     reconciler: delta::SourceReconciler,
 ) -> Result<Option<SourceDeltaSnapshot>, IndexRebuildError> {
-    capture_with_control(cx, db, workspace_id, reconciler, None)
+    capture_with_control(cx, db, workspace_id, reconciler, None, None, None)
 }
 
 fn capture_with_control(
@@ -185,10 +429,36 @@ fn capture_with_control(
     workspace_id: &str,
     mut reconciler: delta::SourceReconciler,
     control: Option<&super::IndexOperationControl>,
+    limits: Option<delta::SourceReconciliationLimits>,
+    max_open_job_ids: Option<usize>,
 ) -> Result<Option<SourceDeltaSnapshot>, IndexRebuildError> {
     let mut refused = None;
     let captured = source_snapshot::capture(db, || {
         index_operation_checkpoint(cx, control)?;
+        if limits.is_some() {
+            #[cfg(feature = "lexical-bm25")]
+            let admitted = source_snapshot::live_source_rows_fit(
+                cx,
+                db,
+                workspace_id,
+                MAX_INTERACTIVE_SOURCE_DOCUMENTS,
+            )? && source_snapshot::live_source_allocation_fits(
+                cx,
+                db,
+                workspace_id,
+                MAX_INTERACTIVE_SOURCE_BYTES,
+            )?;
+            #[cfg(not(feature = "lexical-bm25"))]
+            let admitted = false;
+            index_operation_checkpoint(cx, control)?;
+            if !admitted {
+                refused = Some(super::incremental_fallback(
+                    super::IncrementalFallbackReason::DeltaOverThreshold,
+                    "complete source exceeds the interactive row or allocation budget",
+                ));
+                return Err(source_refused().into());
+            }
+        }
         let generation = db.get_workspace_generation(workspace_id)?;
         let mut counts = [0_usize; 5];
         db.visit_index_memory_batches_in_current_snapshot::<IndexRebuildError>(
@@ -264,7 +534,7 @@ fn capture_with_control(
         index_operation_checkpoint(cx, control)?;
         let document_counts =
             checked_document_counts(counts[0], counts[1], counts[2], counts[3], counts[4])?;
-        let open_job_ids = db.open_search_index_job_ids_in_current_snapshot(workspace_id)?;
+        let open_job_ids = collect_open_index_job_ids(db, workspace_id, max_open_job_ids)?;
         let mut reconciliation = match reconciler.finish() {
             Ok(reconciliation) => reconciliation,
             Err(refusal) => {

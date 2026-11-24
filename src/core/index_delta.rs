@@ -53,7 +53,7 @@ mod metadata;
 #[path = "index_delta_stream.rs"]
 mod stream;
 
-pub(super) use stream::{ReconciledSource, SourceReconciler};
+pub(super) use stream::{ReconciledSource, SourceReconciler, SourceReconciliationLimits};
 
 #[path = "index_tier_refresh.rs"]
 mod tier_refresh;
@@ -446,6 +446,20 @@ pub(super) fn verify_native_membership(
 }
 
 fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback> {
+    read_digests_with_limit(generation_dir, None)
+}
+
+fn read_digests_bounded(
+    generation_dir: &Path,
+    max_bytes: u64,
+) -> Result<DocDigests, IncrementalFallback> {
+    read_digests_with_limit(generation_dir, Some(max_bytes))
+}
+
+fn read_digests_with_limit(
+    generation_dir: &Path,
+    max_bytes: Option<u64>,
+) -> Result<DocDigests, IncrementalFallback> {
     let request = asupersync::Cx::current();
     let checkpoint = || {
         if let Some(cx) = &request {
@@ -469,6 +483,12 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             "live document digests are not a regular file",
         ));
     }
+    if max_bytes.is_some_and(|limit| metadata.len() > limit) {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::DeltaOverThreshold,
+            "live document digests exceed the interactive byte budget",
+        ));
+    }
     let file = std::fs::File::open(&path);
     checkpoint()?;
     let file = file.map_err(|error| {
@@ -477,7 +497,31 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             format!("failed to read live document digests: {error}"),
         )
     })?;
-    read_digests_with_checkpoint(file, checkpoint)
+    if let Some(limit) = max_bytes {
+        read_bounded_digests_with_checkpoint(file, limit, checkpoint)
+    } else {
+        read_digests_with_checkpoint(file, checkpoint)
+    }
+}
+
+fn read_bounded_digests_with_checkpoint(
+    reader: impl std::io::Read,
+    limit: u64,
+    mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<DocDigests, IncrementalFallback> {
+    // A stat check alone cannot bound allocation if the file grows before
+    // it is read. The extra byte proves overflow, including trailing JSON
+    // whitespace; an exhausted prefix must never become an accepted file.
+    let mut limited = std::io::Read::take(reader, limit.saturating_add(1));
+    let parsed = read_digests_with_checkpoint(&mut limited, &mut checkpoint);
+    checkpoint()?;
+    if limited.limit() == 0 {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::DeltaOverThreshold,
+            "live document digests exceed the interactive byte budget during read",
+        ));
+    }
+    parsed
 }
 
 /// Check the installed request around each bounded filesystem read. Keep its
@@ -2476,6 +2520,36 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[test]
+    fn bounded_digest_reader_checks_actual_bytes_and_does_not_accept_a_json_prefix() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let expected = DocDigests::new(&stack, &[doc("mem_boundary", "source")]);
+        let bytes = serde_json::to_vec(&expected).map_err(|error| error.to_string())?;
+        let limit = bytes.len() as u64;
+        let accepted = read_bounded_digests_with_checkpoint(bytes.as_slice(), limit, || Ok(()))
+            .map_err(|error| error.detail)?;
+        assert_eq!(accepted.documents, expected.documents);
+        for ceiling in [0, limit - 1] {
+            let error = read_bounded_digests_with_checkpoint(bytes.as_slice(), ceiling, || Ok(()))
+                .expect_err("actual serialized length exceeds the ceiling");
+            assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        }
+        let mut grown = bytes;
+        grown.extend_from_slice(b" \n\t trailing bytes beyond the admitted file");
+        let error = read_bounded_digests_with_checkpoint(grown.as_slice(), limit, || Ok(()))
+            .expect_err("a complete JSON prefix is not the complete admitted file");
+        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        let interrupted = read_bounded_digests_with_checkpoint(grown.as_slice(), limit, || {
+            Err(incremental_fallback(
+                IncrementalFallbackReason::ForcedReindex,
+                "injected request cancellation",
+            ))
+        })
+        .expect_err("cancellation remains the primary refusal");
+        assert_eq!(interrupted.detail, "injected request cancellation");
+        Ok(())
     }
 
     struct ObservedDigestReads<R> {

@@ -558,6 +558,7 @@ struct IndexPublishLockOwner<'a> {
     db: &'a DbConnection,
     workspace_id: &'a str,
     holder_id: String,
+    bounded_publication: bool,
 }
 
 impl<'a> IndexPublishLockOwner<'a> {
@@ -584,6 +585,7 @@ impl<'a> IndexPublishLockOwner<'a> {
             db,
             workspace_id,
             holder_id,
+            bounded_publication: false,
         };
         owner.checkpoint()?;
         Ok(owner)
@@ -2521,10 +2523,12 @@ pub(crate) fn process_index_jobs_coalesced_controlled(
 
 /// Bounded coalesced processor used by interactive read repair.
 ///
-/// The document ceiling is checked again after the publish lock is held and
-/// the authoritative source snapshot has been collected. That closes the
-/// race where a writer enlarges the corpus after the read-side preflight but
-/// before the coalesced rebuild snapshots its actual inputs.
+/// Existing compatible generations may publish a small delta after separate
+/// source, changed-document and active-generation resource checks. The full
+/// rebuild document ceiling remains enforced inside authoritative source
+/// capture after the publish lock is held. Lexical-enabled builds also enforce
+/// a source-allocation ceiling; other builds retain the small full-rebuild
+/// path. Read-side eligibility hints never authorize a larger full rebuild.
 pub(crate) async fn process_index_jobs_coalesced_with_cx_bounded(
     cx: &asupersync::Cx,
     options: &IndexProcessingOptions,
@@ -2539,6 +2543,31 @@ pub(crate) async fn process_index_jobs_coalesced_with_cx_bounded(
         None,
     )
     .await
+}
+
+/// Cheap eligibility hint for bounded delta repair of a larger existing index.
+/// It does not run validated corpus admission, prepare models or mutate jobs.
+pub(crate) fn bounded_index_delta_generation_gap(
+    cx: &asupersync::Cx,
+    options: &IndexStatusOptions,
+    max_generation_gap: u64,
+) -> Result<Option<u64>, IndexRebuildError> {
+    index_checkpoint(cx)?;
+    let opened = DbConnection::open_file_read_only(&options.resolve_database_path());
+    index_checkpoint(cx)?;
+    let db = opened?;
+    let workspace = workspace_id_for_index_status(&db, &options.workspace_path);
+    index_checkpoint(cx)?;
+    let Some(workspace_id) = workspace? else {
+        return Ok(None);
+    };
+    delta_source::bounded_generation_gap(
+        cx,
+        &db,
+        &workspace_id,
+        &options.resolve_index_dir(),
+        max_generation_gap,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2977,7 +3006,9 @@ where
     // `RunningIndexJobFinalizer` mark every selected row failed when another
     // process legitimately held the publish lock, leaving no pending work for
     // the next remember-side drain election to recover.
-    let _publish_lock = IndexPublishLockOwner::acquire_with_control(cx, db, workspace_id, control)?;
+    let mut _publish_lock =
+        IndexPublishLockOwner::acquire_with_control(cx, db, workspace_id, control)?;
+    _publish_lock.bounded_publication = max_corpus_documents.is_some();
     for job in selected {
         _publish_lock.checkpoint()?;
         if db.start_search_index_job(&job.id)? {
@@ -3010,33 +3041,43 @@ where
         return Ok(reports);
     }
 
-    // Small deltas can reconcile the complete source without retaining every
-    // unchanged document body. A refused plan or stage returns here before
-    // the snapshot hook; the existing path then captures a complete new
-    // snapshot, including its generation and counts, for fallback.
-    if max_corpus_documents.is_none() {
-        let prepared = delta_source::prepare(&_publish_lock, db, workspace_id, index_dir).await;
-        match prepared {
-            Ok(Some(prepared)) => {
-                let completed = delta_source::publish(
-                    &_publish_lock,
-                    db,
-                    index_dir,
-                    &claimed,
-                    &mut job_finalizers,
-                    prepared,
-                    COALESCED_MODE,
-                    after_snapshot,
-                )
-                .await?;
-                reports.extend(completed);
-                return Ok(reports);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
-                return Err(error);
-            }
+    // Both paths prove complete source membership. Interactive repair adds
+    // independent bounds on source hydration, mutations and the old generation;
+    // refusal can only reach the existing small complete-source fallback.
+    let prepared = match max_corpus_documents {
+        Some(limit) => {
+            delta_source::prepare_bounded(
+                &_publish_lock,
+                db,
+                workspace_id,
+                index_dir,
+                limit,
+                claimed.len(),
+            )
+            .await
+        }
+        None => delta_source::prepare(&_publish_lock, db, workspace_id, index_dir).await,
+    };
+    match prepared {
+        Ok(Some(prepared)) => {
+            let completed = delta_source::publish(
+                &_publish_lock,
+                db,
+                index_dir,
+                &claimed,
+                &mut job_finalizers,
+                prepared,
+                COALESCED_MODE,
+                after_snapshot,
+            )
+            .await?;
+            reports.extend(completed);
+            return Ok(reports);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
         }
     }
 
@@ -3044,8 +3085,13 @@ where
     // evidence projections are hydrated. The collector checks it in the same
     // database snapshot as generation capture, closing the preflight/write race.
     _publish_lock.checkpoint()?;
-    let captured =
-        collect_workspace_index_source_snapshot_with_limit(db, workspace_id, max_corpus_documents);
+    let captured = collect_workspace_index_source_snapshot_with_limit(
+        db,
+        workspace_id,
+        max_corpus_documents,
+        Some(cx),
+        max_corpus_documents.map(|_| claimed.len().saturating_add(1)),
+    );
     // An interrupted source operation can return a database error. Preserve
     // the caller's cancellation reason before interpreting that result.
     let snapshot = match _publish_lock.checkpoint().and(captured) {
@@ -3074,8 +3120,10 @@ where
             ),
             None => format!(
                 "coalesced index repair deferred because the source-row upper bound is \
-                 above the interactive limit of {limit}; source bodies were not loaded \
-                 and the exact admitted document count was not computed"
+                 above the interactive limit of {limit}, or source allocation exceeds \
+                 the {}-byte interactive budget; source bodies were not loaded and the \
+                 exact admitted document count was not computed",
+                delta_source::MAX_INTERACTIVE_SOURCE_BYTES
             ),
         };
         for job in &claimed {
@@ -3141,41 +3189,43 @@ where
     if uncovered_open_job {
         processing_mode.push_str("_open_sibling_full_rebuild");
     }
-    let fallback_to_full = incremental_batch.as_ref().and_then(|documents| {
-        let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
-        validate_incremental_index_metadata(index_dir, published_generation, max_generation_lag)
-            .err()
-            .map(|fallback| {
-                let reason = fallback.reason;
-                let detail = fallback.detail;
-                tracing::info!(
-                    target: "ee::index",
-                    workspace_id = %workspace_id,
-                    claimed_jobs = claimed.len(),
-                    fallback_to_full = reason.as_str(),
-                    detail = %detail,
-                    "coalesced incremental index intake fell back to full rebuild"
-                );
-                processing_mode.push_str("_fallback_to_full");
-                reason.as_str().to_owned()
-            })
-    });
+    let fallback_to_full = incremental_batch
+        .as_ref()
+        .filter(|_| !_publish_lock.bounded_publication)
+        .and_then(|documents| {
+            let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
+            validate_incremental_index_metadata(index_dir, published_generation, max_generation_lag)
+                .err()
+                .map(|fallback| {
+                    let reason = fallback.reason;
+                    let detail = fallback.detail;
+                    tracing::info!(
+                        target: "ee::index",
+                        workspace_id = %workspace_id,
+                        claimed_jobs = claimed.len(),
+                        fallback_to_full = reason.as_str(),
+                        detail = %detail,
+                        "coalesced incremental index intake fell back to full rebuild"
+                    );
+                    processing_mode.push_str("_fallback_to_full");
+                    reason.as_str().to_owned()
+                })
+        });
     if incremental_batch.is_some() && fallback_to_full.is_none() {
         processing_mode.push_str("_staged_full_rebuild");
     }
 
-    let _recovery_action = match _publish_lock
-        .with_generation_fence(index_dir, || {
-            recover_interrupted_publish_for_snapshot(index_dir, published_generation)
-        })
-        .await
-    {
-        Ok(action) => action,
-        Err(error) => {
+    if !_publish_lock.bounded_publication {
+        if let Err(error) = _publish_lock
+            .with_generation_fence(index_dir, || {
+                recover_interrupted_publish_for_snapshot(index_dir, published_generation)
+            })
+            .await
+        {
             finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
             return Err(error);
         }
-    };
+    }
     let (model_selection, stack) = match IndexModelSelection::resolve_stack(db, workspace_id) {
         Ok(selected) => selected,
         Err(error) => {
@@ -3727,11 +3777,33 @@ where
                     document_counts,
                     embedder_fingerprint,
                 )?;
+                // Resource refusal must occur while the stage is still owned.
+                // Carry the exact no-replace target into exchange instead of
+                // scanning an unbounded parent after ownership is handed off.
+                let retained_target =
+                    if publish_lock.bounded_publication && path_exists_no_follow(index_dir) {
+                        Some(allocate_retained_index_dir_with_budget(
+                            index_dir,
+                            Some(cx),
+                        )?)
+                    } else {
+                        None
+                    };
                 // From the first exchange onward this pathname may hold the
                 // displaced live generation. Rollback/recovery now owns it;
                 // the prepublication guard must never reclaim that evidence.
                 staging.hand_off_to_publication();
-                publish_staged_index_with_commit(index_dir, staging.path(), commit_tail)?;
+                if let Some(retained_target) = retained_target.as_deref() {
+                    publish_staged_index_with_sync_and_retained_target(
+                        index_dir,
+                        staging.path(),
+                        commit_tail,
+                        sync_index_directory,
+                        Some(retained_target),
+                    )?;
+                } else {
+                    publish_staged_index_with_commit(index_dir, staging.path(), commit_tail)?;
+                }
                 // Still inside the exclusive generation fence: no reader lease
                 // can be open, so displaced copies beyond the retention bound
                 // are reclaimed here instead of accumulating one full index
@@ -3797,6 +3869,28 @@ where
         document_counts.total(),
     )?;
     let commit_tail = || commit_tail(registration.as_ref());
+    if publish_lock.bounded_publication {
+        // The bounded streamed planner already refused. Its small, separately
+        // admitted full-source fallback must not retry an unbounded delta or
+        // native tier refresh against the rejected previous generation.
+        let stats = publish_full_index_generation_with_stack(
+            publish_lock,
+            index_dir,
+            stack,
+            indexable_docs,
+            generation,
+            document_counts,
+            commit_tail,
+        )
+        .await?;
+        return Ok((
+            stats,
+            PublishedGenerationKind::Full {
+                delta_refused: "bounded delta unavailable; admitted complete-source fallback"
+                    .to_owned(),
+            },
+        ));
+    }
     match stage_delta_generation(
         publish_lock,
         index_dir,
@@ -4301,6 +4395,20 @@ fn validate_incremental_index_metadata(
     generation: u64,
     max_generation_lag: u64,
 ) -> Result<(), IncrementalFallback> {
+    validate_incremental_index_metadata_with_limit(
+        index_dir,
+        generation,
+        max_generation_lag,
+        INDEX_METADATA_INSPECT_LIMIT,
+    )
+}
+
+fn validate_incremental_index_metadata_with_limit(
+    index_dir: &Path,
+    generation: u64,
+    max_generation_lag: u64,
+    max_metadata_bytes: u64,
+) -> Result<(), IncrementalFallback> {
     ensure_index_path_has_no_symlinks(index_dir, "apply incremental index intake").map_err(
         |error| {
             incremental_fallback(
@@ -4335,12 +4443,13 @@ fn validate_incremental_index_metadata(
     }
 
     let metadata_path = index_dir.join(INDEX_METADATA_FILE);
-    let Some(metadata) = parse_index_metadata(index_dir).map_err(|error| {
-        incremental_fallback(
-            IncrementalFallbackReason::CorpusRevisionMismatch,
-            format!("failed to read index metadata: {error}"),
-        )
-    })?
+    let Some(metadata) =
+        parse_index_metadata_with_limit(index_dir, max_metadata_bytes).map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+                format!("failed to read index metadata: {error}"),
+            )
+        })?
     else {
         return Err(incremental_fallback(
             IncrementalFallbackReason::IndexAbsent,
@@ -4709,15 +4818,54 @@ fn collect_workspace_index_source_snapshot(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<WorkspaceIndexSourceSnapshot, IndexRebuildError> {
-    collect_workspace_index_source_snapshot_with_limit(db, workspace_id, None)?.ok_or_else(|| {
-        IndexRebuildError::Index("unbounded index source collection was deferred".to_owned())
-    })
+    collect_workspace_index_source_snapshot_with_limit(db, workspace_id, None, None, None)?
+        .ok_or_else(|| {
+            IndexRebuildError::Index("unbounded index source collection was deferred".to_owned())
+        })
+}
+
+/// A prefix of claimed-count plus one IDs proves whether an unclaimed sibling
+/// exists without retaining the whole queue. This is diagnostic membership,
+/// never a substitute for the complete authoritative source snapshot.
+fn collect_open_index_job_ids(
+    db: &DbConnection,
+    workspace_id: &str,
+    limit: Option<usize>,
+) -> Result<BTreeSet<String>, IndexRebuildError> {
+    let Some(limit) = limit else {
+        return db
+            .open_search_index_job_ids_in_current_snapshot(workspace_id)
+            .map_err(Into::into);
+    };
+    let limit = i64::try_from(limit)
+        .map_err(|_| IndexRebuildError::Index("invalid bounded open-job limit".to_owned()))?;
+    let rows = db.query(
+        "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND (status = ?2 OR status = ?3) LIMIT ?4",
+        &[
+            sqlmodel_core::Value::Text(workspace_id.to_owned()),
+            sqlmodel_core::Value::Text(SearchIndexJobStatus::Pending.as_str().to_owned()),
+            sqlmodel_core::Value::Text(SearchIndexJobStatus::Running.as_str().to_owned()),
+            sqlmodel_core::Value::BigInt(limit),
+        ],
+    )?;
+    rows.iter()
+        .map(|row| {
+            row.get(0)
+                .and_then(sqlmodel_core::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    IndexRebuildError::Index("invalid bounded open-job identity".to_owned())
+                })
+        })
+        .collect()
 }
 
 fn collect_workspace_index_source_snapshot_with_limit(
     db: &DbConnection,
     workspace_id: &str,
     max_documents: Option<u32>,
+    cx: Option<&asupersync::Cx>,
+    max_open_job_ids: Option<usize>,
 ) -> Result<Option<WorkspaceIndexSourceSnapshot>, IndexRebuildError> {
     source_snapshot::capture(db, || {
         // Enforce the interactive ceiling before hydrating source bodies, in
@@ -4728,6 +4876,26 @@ fn collect_workspace_index_source_snapshot_with_limit(
         {
             return Ok(None);
         }
+        #[cfg(feature = "lexical-bm25")]
+        if max_documents.is_some() {
+            let cx = cx.ok_or_else(|| {
+                IndexRebuildError::Index(
+                    "bounded index capture requires a request context".to_owned(),
+                )
+            })?;
+            let fits = source_snapshot::live_source_allocation_fits(
+                cx,
+                db,
+                workspace_id,
+                delta_source::MAX_INTERACTIVE_SOURCE_BYTES,
+            );
+            index_checkpoint(cx)?;
+            if !fits? {
+                return Ok(None);
+            }
+        }
+        #[cfg(not(feature = "lexical-bm25"))]
+        let _ = cx;
         let captured_generation = db.get_workspace_generation(workspace_id)?;
         let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
         let artifacts = db.list_artifacts(workspace_id, None)?;
@@ -4764,7 +4932,7 @@ fn collect_workspace_index_source_snapshot_with_limit(
             .chain(evidence_docs)
             .map(CanonicalSearchDocument::into_indexable)
             .collect();
-        let open_job_ids = db.open_search_index_job_ids_in_current_snapshot(workspace_id)?;
+        let open_job_ids = collect_open_index_job_ids(db, workspace_id, max_open_job_ids)?;
         Ok(Some(WorkspaceIndexSourceSnapshot {
             generation: captured_generation.unwrap_or_else(|| u64::from(documents_total)),
             memories_indexed,
@@ -5655,12 +5823,32 @@ fn publish_staged_index_with_sync<F>(
     index_dir: &Path,
     staging_dir: &Path,
     commit_tail: F,
-    mut sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+    sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
 ) -> Result<(), IndexRebuildError>
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
-    let retained_dir = publish_staged_index_inner(index_dir, staging_dir, &mut sync_directory)?;
+    publish_staged_index_with_sync_and_retained_target(
+        index_dir,
+        staging_dir,
+        commit_tail,
+        sync_directory,
+        None,
+    )
+}
+
+fn publish_staged_index_with_sync_and_retained_target<F>(
+    index_dir: &Path,
+    staging_dir: &Path,
+    commit_tail: F,
+    mut sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+    retained_target: Option<&Path>,
+) -> Result<(), IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    let retained_dir =
+        publish_staged_index_inner(index_dir, staging_dir, &mut sync_directory, retained_target)?;
     let mut rollback_guard = PublishedIndexRollbackGuard {
         index_dir,
         staging_dir,
@@ -5694,6 +5882,7 @@ fn publish_staged_index_inner(
     index_dir: &Path,
     staging_dir: &Path,
     sync_directory: &mut impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+    retained_target: Option<&Path>,
 ) -> Result<Option<PathBuf>, IndexRebuildError> {
     ensure_index_path_has_no_symlinks(staging_dir, "publish staged index generation")?;
     ensure_index_path_has_no_symlinks(index_dir, "publish staged index generation")?;
@@ -5713,13 +5902,20 @@ fn publish_staged_index_inner(
 
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     if path_exists_no_follow(index_dir) {
-        return publish_index_by_exchange(index_dir, staging_dir, sync_directory, |from, to| {
-            rename_index_dir(from, to, "retain atomically displaced index generation")
-        });
+        return publish_index_by_exchange(
+            index_dir,
+            staging_dir,
+            sync_directory,
+            retained_target,
+            |from, to| rename_index_dir(from, to, "retain atomically displaced index generation"),
+        );
     }
 
     let retained_dir = if path_exists_no_follow(index_dir) {
-        let retained = allocate_retained_index_dir(index_dir)?;
+        let retained = match retained_target {
+            Some(target) => target.to_path_buf(),
+            None => allocate_retained_index_dir(index_dir)?,
+        };
         rename_index_dir(index_dir, &retained, "retain previous index generation")?;
         Some(retained)
     } else {
@@ -5816,6 +6012,7 @@ fn publish_index_by_exchange(
     index_dir: &Path,
     staging_dir: &Path,
     sync_directory: &mut impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+    retained_target: Option<&Path>,
     retain: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
 ) -> Result<Option<PathBuf>, IndexRebuildError> {
     use std::os::unix::fs::MetadataExt;
@@ -5833,7 +6030,10 @@ fn publish_index_by_exchange(
             ));
         }
     }
-    let retained = allocate_retained_index_dir(index_dir)?;
+    let retained = match retained_target {
+        Some(target) => target.to_path_buf(),
+        None => allocate_retained_index_dir(index_dir)?,
+    };
     // Persist the old directory while it is STILL live. A directory fsync in
     // the old retain-then-rename gap would prolong reader-visible absence.
     sync_directory(index_dir)?;
@@ -6292,8 +6492,15 @@ pub(crate) fn published_index_generation(index_dir: &Path) -> Option<u64> {
 }
 
 fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>, String> {
+    parse_index_metadata_with_limit(index_dir, INDEX_METADATA_INSPECT_LIMIT)
+}
+
+fn parse_index_metadata_with_limit(
+    index_dir: &Path,
+    max_bytes: u64,
+) -> Result<Option<ParsedIndexMetadata>, String> {
     let metadata_path = index_dir.join(INDEX_METADATA_FILE);
-    let Some(content) = read_index_metadata_contents(&metadata_path)? else {
+    let Some(content) = read_index_metadata_contents(&metadata_path, max_bytes)? else {
         return Ok(None);
     };
     let parsed: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
@@ -6871,14 +7078,38 @@ fn find_latest_recoverable_retained_dir_for_snapshot(
 }
 
 fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+    allocate_retained_index_dir_with_budget(index_dir, None)
+}
+
+fn allocate_retained_index_dir_with_budget(
+    index_dir: &Path,
+    cx: Option<&asupersync::Cx>,
+) -> Result<PathBuf, IndexRebuildError> {
     let parent = index_parent(index_dir);
     let base = index_base_name(index_dir)?;
     ensure_index_path_has_no_symlinks(parent, "allocate retained index generation")?;
     let prefix = format!("{base}{INDEX_RETAINED_SUFFIX}");
-    retention_names::allocate(parent, &prefix).map_err(|error| {
-        IndexRebuildError::Index(format!(
-            "Failed to allocate retained index generation directory: {error}"
-        ))
+    let allocated = if cx.is_some() {
+        retention_names::allocate_bounded(parent, &prefix, 512)
+    } else {
+        retention_names::allocate(parent, &prefix)
+    };
+    allocated.map_err(|error| {
+        if let Some(cx) = cx
+            && retention_names::allocation_budget_exhausted(&error)
+        {
+            IndexRebuildError::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+                crate::core::outcome::attributed_cancel_reason(
+                    cx,
+                    asupersync::CancelKind::CostBudget,
+                    "interactive retained-name allocation budget exhausted before publication",
+                )
+            }))
+        } else {
+            IndexRebuildError::Index(format!(
+                "Failed to allocate retained index generation directory: {error}"
+            ))
+        }
     })
 }
 
@@ -12513,7 +12744,10 @@ fn read_index_metadata_with_identity(
     }
 }
 
-fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, String> {
+fn read_index_metadata_contents(
+    meta_path: &Path,
+    max_bytes: u64,
+) -> Result<Option<String>, String> {
     if let Some(component) =
         first_existing_index_symlink_component(meta_path).map_err(|error| error.to_string())?
     {
@@ -12550,9 +12784,9 @@ fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, Stri
 
     // Reject an obvious oversize at stat time before opening the file
     // at all — see `INDEX_METADATA_INSPECT_LIMIT` for the threat model.
-    if metadata.len() > INDEX_METADATA_INSPECT_LIMIT {
+    if metadata.len() > max_bytes {
         return Err(format!(
-            "index metadata '{}' exceeds the {INDEX_METADATA_INSPECT_LIMIT} byte cap (size={size})",
+            "index metadata '{}' exceeds the {max_bytes} byte cap (size={size})",
             meta_path.display(),
             size = metadata.len(),
         ));
@@ -12572,7 +12806,7 @@ fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, Stri
         )
     })?;
     let mut bytes = Vec::new();
-    file.take(INDEX_METADATA_INSPECT_LIMIT.saturating_add(1))
+    file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| {
             format!(
@@ -12580,9 +12814,9 @@ fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, Stri
                 meta_path.display()
             )
         })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > INDEX_METADATA_INSPECT_LIMIT {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(format!(
-            "index metadata '{}' exceeds the {INDEX_METADATA_INSPECT_LIMIT} byte cap during read",
+            "index metadata '{}' exceeds the {max_bytes} byte cap during read",
             meta_path.display(),
         ));
     }
@@ -13025,6 +13259,8 @@ pub(crate) async fn repair_requested_index_with_cx_bounded_and_stack(
         &db,
         &workspace_id,
         Some(max_documents),
+        Some(cx),
+        None,
     )?
     else {
         return Ok(false);
@@ -20153,20 +20389,26 @@ mod tests {
                 // The parent kills this process while this real OS lease and
                 // exchange rollback guard are held. No Rust Drop runs.
                 let _lease = IndexGenerationLease::publish(&cx, &live).await?;
-                publish_index_by_exchange(&live, &staged, &mut sync_index_directory, |from, _| {
-                    if validated_index_generation(&live).ok() != Some(9)
-                        || validated_index_generation(from).ok() != Some(8)
-                    {
-                        return Err(IndexRebuildError::Index(
-                            "child did not exchange real generations".to_owned(),
-                        ));
-                    }
-                    std::fs::write(parent.join("exchanged"), b"ready")
-                        .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
-                    loop {
-                        std::thread::park_timeout(Duration::from_secs(1));
-                    }
-                })
+                publish_index_by_exchange(
+                    &live,
+                    &staged,
+                    &mut sync_index_directory,
+                    None,
+                    |from, _| {
+                        if validated_index_generation(&live).ok() != Some(9)
+                            || validated_index_generation(from).ok() != Some(8)
+                        {
+                            return Err(IndexRebuildError::Index(
+                                "child did not exchange real generations".to_owned(),
+                            ));
+                        }
+                        std::fs::write(parent.join("exchanged"), b"ready")
+                            .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+                        loop {
+                            std::thread::park_timeout(Duration::from_secs(1));
+                        }
+                    },
+                )
                 .map(|_| ())
             })
             .map_err(|error| error.to_string())?
@@ -27285,24 +27527,30 @@ mod tests {
             let before = index_regular_file_snapshot(&active)?;
             let attempted = std::cell::Cell::new(false);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                publish_index_by_exchange(&active, &staged, &mut sync_index_directory, |from, _| {
-                    // This seam runs AFTER a real kernel exchange, not instead
-                    // of it. Both actual directory trees are inspected here.
-                    if read_marker(&active, "generation").ok().as_deref() != Some("new")
-                        || read_marker(from, "generation").ok().as_deref() != Some("old")
-                    {
-                        return Err(IndexRebuildError::Index(
-                            "kernel exchange did not take place".to_owned(),
-                        ));
-                    }
-                    attempted.set(true);
-                    if panic_after_swap {
-                        panic!("injected retention unwind after atomic exchange");
-                    }
-                    Err(IndexRebuildError::Index(
-                        "injected retention failure after atomic exchange".to_owned(),
-                    ))
-                })
+                publish_index_by_exchange(
+                    &active,
+                    &staged,
+                    &mut sync_index_directory,
+                    None,
+                    |from, _| {
+                        // This seam runs AFTER a real kernel exchange, not instead
+                        // of it. Both actual directory trees are inspected here.
+                        if read_marker(&active, "generation").ok().as_deref() != Some("new")
+                            || read_marker(from, "generation").ok().as_deref() != Some("old")
+                        {
+                            return Err(IndexRebuildError::Index(
+                                "kernel exchange did not take place".to_owned(),
+                            ));
+                        }
+                        attempted.set(true);
+                        if panic_after_swap {
+                            panic!("injected retention unwind after atomic exchange");
+                        }
+                        Err(IndexRebuildError::Index(
+                            "injected retention failure after atomic exchange".to_owned(),
+                        ))
+                    },
+                )
             }));
             ensure(
                 attempted.get(),

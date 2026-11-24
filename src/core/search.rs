@@ -128,7 +128,7 @@ const SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS: u64 = 64;
 const SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS: u32 = 4096;
 #[cfg(feature = "lexical-bm25")]
 const SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
-/// Wall-clock budget for publishing a small queued corpus before retrieval.
+/// Cooperative deadline for publishing bounded queued work before retrieval.
 ///
 /// Reconciliation publishes complete vector and lexical tiers even for a
 /// one-generation gap. A 500 ms budget was shorter than a cold open plus
@@ -13843,7 +13843,10 @@ async fn stale_index_live_snapshot_retrieval(
     }
 }
 
-/// Reconcile a small, known generation gap before opening a read snapshot.
+/// Reconcile bounded queued work before opening a read snapshot.
+///
+/// Small stores can publish their first generation; larger stores must fit
+/// the separate source, active-generation and changed-document delta bounds.
 ///
 /// The status read intentionally bypasses the one-second hot-path cache so a
 /// newly queued writer cannot inherit an earlier `Ready` observation. A failed
@@ -13962,21 +13965,48 @@ async fn reconcile_search_index_within_budget(
     // here adds failure/latency without protecting the publish decision.
     //
     // Ask the cheap question first: a store whose body-free row upper bound
-    // already exceeds the ceiling can never be repaired here, so it must not
-    // pay a full validated admission scan to find that out
+    // exceeds the full rebuild ceiling can only use a bounded delta, so it
+    // must not pay a full validated admission scan to determine eligibility
     // (bd-reality-core-convergence-1azkt.64).
     match crate::core::index::index_source_upper_bound_fits(
         &status_options,
         u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
     ) {
         Ok(Some(false)) => {
+            // A large source cannot use the full rebuild path on an
+            // interactive read. Inspect only bounded generation metadata here;
+            // the publisher separately bounds the complete source scan,
+            // retained index assets and actual delta under its lease.
+            match crate::core::index::bounded_index_delta_generation_gap(
+                cx,
+                &status_options,
+                SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+            ) {
+                Ok(Some(generation_gap)) => {
+                    reconcile_queued_search_index_within_budget(
+                        cx,
+                        options,
+                        &index_dir,
+                        Some(generation_gap),
+                        generation_gap,
+                    )
+                    .await;
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    target: "ee::search::index_freshness",
+                    error = %error,
+                    "could not inspect bounded search-index delta eligibility"
+                ),
+            }
             static LOGGED_BOUND_SKIP: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !LOGGED_BOUND_SKIP.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 tracing::info!(
                     target: "ee::search::index_freshness",
                     corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
-                    "skipped synchronous search-index repair because the corpus upper bound exceeds the interactive read bound"
+                    "skipped synchronous search-index repair because the source exceeds the full rebuild bound and has no eligible bounded delta"
                 );
             }
             return;
@@ -14085,8 +14115,7 @@ async fn reconcile_search_index_within_budget(
             source.saturating_sub(indexed)
         }
         (IndexHealth::Missing, Some(_), None)
-            if status.last_check_error.is_none()
-                && search_index_is_unpublished(cx, &index_dir) =>
+            if status.last_check_error.is_none() && search_index_is_unpublished(cx, &index_dir) =>
         {
             // A deferred first write has no published watermark to subtract.
             // The same complete-corpus ceiling bounds its publication, while
@@ -14096,6 +14125,17 @@ async fn reconcile_search_index_within_budget(
         }
         _ => return,
     };
+    reconcile_queued_search_index_within_budget(cx, options, &index_dir, generation_gap, job_limit)
+        .await;
+}
+
+async fn reconcile_queued_search_index_within_budget(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    index_dir: &Path,
+    generation_gap: Option<u64>,
+    job_limit: u64,
+) {
     if cx.checkpoint().is_err() {
         return;
     }
@@ -14103,7 +14143,7 @@ async fn reconcile_search_index_within_budget(
     let processing_options = IndexProcessingOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
-        index_dir: Some(index_dir.clone()),
+        index_dir: Some(index_dir.to_path_buf()),
         dry_run: false,
         job_limit: Some(
             u32::try_from(job_limit)
@@ -14183,7 +14223,10 @@ fn search_index_is_unpublished(cx: &asupersync::Cx, index_dir: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        matches!(lease.has_retained_generation_directory(cx, index_dir), Ok(false))
+        matches!(
+            lease.has_retained_generation_directory(cx, index_dir),
+            Ok(false)
+        )
     }
     #[cfg(not(unix))]
     {

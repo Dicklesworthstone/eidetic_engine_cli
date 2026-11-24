@@ -120,7 +120,7 @@ pub(crate) fn read_only_documents_in_current_snapshot(
 /// the aggregate's input and the remaining allowance is shared by all sources.
 /// This is not an exact admission count or a bound on scanning nonmatching rows.
 #[cfg(feature = "lexical-bm25")]
-fn live_source_rows_fit(
+pub(super) fn live_source_rows_fit(
     cx: &asupersync::Cx,
     db: &DbConnection,
     workspace_id: &str,
@@ -201,7 +201,7 @@ fn live_source_rows_fit_with(
 /// with a capped body-free count first, then UTF-8 lengths, and only then the
 /// repeated structural-character scans. Row/byte refusals need no structure scan.
 #[cfg(feature = "lexical-bm25")]
-fn live_source_allocation_fits(
+pub(super) fn live_source_allocation_fits(
     cx: &asupersync::Cx,
     db: &DbConnection,
     workspace_id: &str,
