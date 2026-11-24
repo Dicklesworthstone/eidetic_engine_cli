@@ -3502,12 +3502,20 @@ fn handoff_rejects_new_or_mutated_feedback_and_changed_reference_time() {
 }
 
 #[test]
-fn handoff_revalidation_keeps_the_captured_validity_instant() {
+fn handoff_revalidation_keeps_the_captured_source_admission_instant() {
     let fixture = Fixture::new();
     let captured = Utc::now() - chrono::Duration::days(2);
     let created = captured - chrono::Duration::hours(1);
     let expired_since_capture = fixture.memory(1, 1.0, 1.0, created);
     let future_at_capture = fixture.memory(2, 0.9, 1.0, created);
+    let superseded_since_capture = fixture.memory(3, 0.8, 1.0, created);
+    let superseded_before_capture = fixture.memory(4, 0.7, 1.0, created);
+    // The fixture backdates bookkeeping after insertion. Set applicability
+    // explicitly too; ordinary insertion otherwise starts it at wall time.
+    fixture
+        .db
+        .execute_raw("UPDATE memories SET valid_from = created_at")
+        .unwrap();
     let boundary = (captured + chrono::Duration::hours(1)).to_rfc3339();
     fixture
         .db
@@ -3521,6 +3529,23 @@ fn handoff_revalidation_keeps_the_captured_validity_instant() {
             "UPDATE memories SET valid_from = '{boundary}' WHERE id = '{future_at_capture}'"
         ))
         .unwrap();
+    for (id, superseded_at) in [
+        (
+            superseded_since_capture.as_str(),
+            captured + chrono::Duration::hours(1),
+        ),
+        (
+            superseded_before_capture.as_str(),
+            captured - chrono::Duration::minutes(1),
+        ),
+    ] {
+        assert!(
+            fixture
+                .db
+                .restore_imported_memory_supersession(id, &superseded_at.to_rfc3339())
+                .unwrap()
+        );
+    }
     let _embedder = fixture.publish_index();
     let reader =
         DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
@@ -3540,6 +3565,20 @@ fn handoff_revalidation_keeps_the_captured_validity_instant() {
                 .iter()
                 .any(|hit| hit.doc_id == expired_since_capture)
         );
+        assert!(
+            original
+                .report
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == superseded_since_capture)
+        );
+        assert!(
+            original
+                .report
+                .results
+                .iter()
+                .all(|hit| hit.doc_id != superseded_before_capture)
+        );
         let future = original
             .report
             .results
@@ -3555,7 +3594,7 @@ fn handoff_revalidation_keeps_the_captured_validity_instant() {
             let mut handoff = original.clone();
             let mut client_options = options.clone();
             if !explicit_as_of {
-                // Model a default-clock request delivered after its validity
+                // Model a default-clock request delivered after its temporal
                 // boundary without sleeps or changing the source snapshot.
                 // The original retrieval above supplies the past decision;
                 // only the caller's explicit-clock/request witnesses differ.
@@ -3571,11 +3610,82 @@ fn handoff_revalidation_keeps_the_captured_validity_instant() {
             assert_eq!(
                 serde_json::to_value(&handoff.report.results).unwrap(),
                 expected,
-                "delivery must preserve validity and ranking; explicit_as_of={explicit_as_of}, include_future={include_future}"
+                "delivery must preserve source admission and ranking; explicit_as_of={explicit_as_of}, include_future={include_future}"
             );
         }
     }
     reader.rollback_read_snapshot().unwrap();
+}
+
+#[test]
+fn query_assistance_preserves_captured_applicability_and_source_content() {
+    let fixture = Fixture::new();
+    let captured = Utc::now() - chrono::Duration::days(2);
+    let created = captured - chrono::Duration::hours(1);
+    let expired_since_capture = fixture.memory(1, 1.0, 1.0, created);
+    let future_at_capture = fixture.memory(2, 1.0, 1.0, created);
+    let boundary = (captured + chrono::Duration::hours(1)).to_rfc3339();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_from = created_at, valid_to = '{boundary}' WHERE id = '{expired_since_capture}'"
+        ))
+        .unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_from = '{boundary}' WHERE id = '{future_at_capture}'"
+        ))
+        .unwrap();
+    let hits = [&expired_since_capture, &future_at_capture]
+        .into_iter()
+        .map(|id| SearchHit {
+            doc_id: id.clone(),
+            score: 0.01,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.01),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        })
+        .collect::<Vec<_>>();
+
+    for include_future in [false, true] {
+        let mut options = fixture.options();
+        options.as_of = Some(captured);
+        options.include_future = include_future;
+        let visible = query_assist_visible_candidates(
+            &options,
+            &hits,
+            &mut Vec::new(),
+            Some(&fixture.db),
+        );
+        assert!(visible.iter().any(|hit| hit.doc_id == expired_since_capture));
+        let future = visible.iter().find(|hit| hit.doc_id == future_at_capture);
+        assert_eq!(future.is_some(), include_future);
+        if let Some(future) = future {
+            assert_eq!(hit_indexed_validity_status(future), Some("future"));
+        }
+        for hit in &visible {
+            let suggestion =
+                query_assist_did_you_mean_json(hit, true, SearchContentPreview::Truncated);
+            assert_eq!(suggestion["content"].as_str(), Some(BODY));
+        }
+    }
+
+    // Reading the wall clock at delivery would reverse eligibility even
+    // though neither the candidate set nor the source rows changed.
+    let delivered = query_assist_visible_candidates(
+        &fixture.options(),
+        &hits,
+        &mut Vec::new(),
+        Some(&fixture.db),
+    );
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].doc_id, future_at_capture);
+    assert_eq!(hit_indexed_validity_status(&delivered[0]), Some("current"));
 }
 
 #[test]

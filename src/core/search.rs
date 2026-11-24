@@ -2090,14 +2090,15 @@ impl PackSearchHandoff {
             .iter()
             .filter_map(|id| memories.remove(id).map(|memory| (id.clone(), memory)))
             .collect::<BTreeMap<_, _>>();
+        // Author validity and revision supersession share the handoff's
+        // decision instant. Keep the original request for quality scoring:
+        // an explicit historical query has different native-rule inputs.
+        let admission_options = SearchOptions {
+            as_of: Some(self.snapshot.scoring_reference_time),
+            ..options.clone()
+        };
         let mut hits = apply_tombstone_visibility_with_connection(
-            // Retrieval and assembly share the handoff's decision instant.
-            // Reading the wall clock again here can expire an admitted memory
-            // (or relabel a future one) solely because delivery took time.
-            &SearchOptions {
-                as_of: Some(self.snapshot.scoring_reference_time),
-                ..options.clone()
-            },
+            &admission_options,
             hits,
             &mut self.report.degraded,
             connection,
@@ -2112,8 +2113,12 @@ impl PackSearchHandoff {
             &mut self.report.degraded,
             Some(connection),
         );
-        self.report.results =
-            rule_admission::admit_hits(options, hits, &mut self.report.degraded, Some(connection));
+        self.report.results = rule_admission::admit_hits(
+            &admission_options,
+            hits,
+            &mut self.report.degraded,
+            Some(connection),
+        );
         if let Some(validated) = validated {
             // Native admission replaces every indexed metadata field. Restore
             // the calibration already validated against this source snapshot:
@@ -11929,8 +11934,15 @@ async fn run_search_inner_with_performance(
             let evidence_visibility_start = Instant::now();
             let raw_hits =
                 apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
-            let raw_hits =
-                rule_admission::admit_hits(options, raw_hits, &mut degraded, read_connection);
+            let raw_hits = rule_admission::admit_hits(
+                &SearchOptions {
+                    as_of: Some(scoring_reference_time),
+                    ..options.clone()
+                },
+                raw_hits,
+                &mut degraded,
+                read_connection,
+            );
             trace.record_elapsed(
                 "search::evidenceLiveAdmissionVisibility",
                 evidence_visibility_start,
@@ -12049,7 +12061,10 @@ async fn run_search_inner_with_performance(
             let kept = above_floor.len();
             let query_assist_visibility_start = Instant::now();
             let query_assist_candidates = query_assist_visible_candidates(
-                options,
+                &SearchOptions {
+                    as_of: Some(scoring_reference_time),
+                    ..options.clone()
+                },
                 &below_floor,
                 &mut degraded,
                 read_connection,
