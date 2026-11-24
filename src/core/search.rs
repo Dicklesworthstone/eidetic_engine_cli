@@ -2091,7 +2091,13 @@ impl PackSearchHandoff {
             .filter_map(|id| memories.remove(id).map(|memory| (id.clone(), memory)))
             .collect::<BTreeMap<_, _>>();
         let mut hits = apply_tombstone_visibility_with_connection(
-            options,
+            // Retrieval and assembly share the handoff's decision instant.
+            // Reading the wall clock again here can expire an admitted memory
+            // (or relabel a future one) solely because delivery took time.
+            &SearchOptions {
+                as_of: Some(self.snapshot.scoring_reference_time),
+                ..options.clone()
+            },
             hits,
             &mut self.report.degraded,
             connection,

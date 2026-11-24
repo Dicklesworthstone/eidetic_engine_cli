@@ -3502,6 +3502,83 @@ fn handoff_rejects_new_or_mutated_feedback_and_changed_reference_time() {
 }
 
 #[test]
+fn handoff_revalidation_keeps_the_captured_validity_instant() {
+    let fixture = Fixture::new();
+    let captured = Utc::now() - chrono::Duration::days(2);
+    let created = captured - chrono::Duration::hours(1);
+    let expired_since_capture = fixture.memory(1, 1.0, 1.0, created);
+    let future_at_capture = fixture.memory(2, 0.9, 1.0, created);
+    let boundary = (captured + chrono::Duration::hours(1)).to_rfc3339();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_to = '{boundary}' WHERE id = '{expired_since_capture}'"
+        ))
+        .unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_from = '{boundary}' WHERE id = '{future_at_capture}'"
+        ))
+        .unwrap();
+    let _embedder = fixture.publish_index();
+    let reader =
+        DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
+    reader.begin_read_snapshot().unwrap();
+
+    for include_future in [false, true] {
+        let mut options = fixture.options();
+        options.as_of = Some(captured);
+        options.include_future = include_future;
+        let original = run_pack_search(&options).unwrap();
+        assert!(original.can_reuse_for_pack());
+        assert_eq!(original.scoring_reference_time(), captured);
+        assert!(
+            original
+                .report
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == expired_since_capture)
+        );
+        let future = original
+            .report
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == future_at_capture);
+        assert_eq!(future.is_some(), include_future);
+        if let Some(future) = future {
+            assert_eq!(hit_indexed_validity_status(future), Some("future"));
+        }
+        let expected = serde_json::to_value(&original.report.results).unwrap();
+
+        for explicit_as_of in [true, false] {
+            let mut handoff = original.clone();
+            let mut client_options = options.clone();
+            if !explicit_as_of {
+                // Model a default-clock request delivered after its validity
+                // boundary without sleeps or changing the source snapshot.
+                // The original retrieval above supplies the past decision;
+                // only the caller's explicit-clock/request witnesses differ.
+                client_options.as_of = None;
+                handoff.quality_reference_time = None;
+                handoff.snapshot.request_identity =
+                    global_handoff::request_identity(&client_options);
+            }
+            let validated = handoff
+                .validate_snapshot(&client_options, &reader)
+                .expect("unchanged source and feedback admit the captured decision");
+            handoff.revalidate_with_feedback(&client_options, &reader, Some(&validated));
+            assert_eq!(
+                serde_json::to_value(&handoff.report.results).unwrap(),
+                expected,
+                "delivery must preserve validity and ranking; explicit_as_of={explicit_as_of}, include_future={include_future}"
+            );
+        }
+    }
+    reader.rollback_read_snapshot().unwrap();
+}
+
+#[test]
 fn handoff_rejects_config_only_fusion_changes_with_unchanged_source_and_feedback() {
     let fixture = Fixture::new();
     let memory = fixture.memory(1, 1.0, 1.0, Utc::now());
