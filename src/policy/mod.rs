@@ -17,6 +17,7 @@ pub mod swarm_slo_attribution;
 pub mod trust_decay;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 pub use memory_decay::{
     DEFAULT_DECAY_DEMOTE_THRESHOLD, DEFAULT_DECAY_FORGET_THRESHOLD, MEMORY_DECAY_SOURCE,
@@ -57,6 +58,41 @@ pub const SUBSYSTEM: &str = "policy";
 /// without treating zero-padded public identifiers such as SEC CIKs and
 /// accession prefixes as phone numbers.
 pub(crate) const PHONE_NUMBER_PATTERN: &str = r"\b[2-9]\d{2}[-.]?[2-9]\d{2}[-.]?\d{4}\b";
+
+struct PiiPattern {
+    pattern: &'static str,
+    reason: &'static str,
+    compiled: OnceLock<regex_lite::Regex>,
+}
+
+impl PiiPattern {
+    #[allow(clippy::expect_used)]
+    fn regex(&self) -> &regex_lite::Regex {
+        self.compiled.get_or_init(|| {
+            regex_lite::Regex::new(self.pattern).expect("built-in PII pattern must compile")
+        })
+    }
+}
+
+// Detection and replacement share each compiled expression. Keep initialization
+// behind the cheap prefilter so ordinary prose never pays regex compilation.
+static PII_PATTERNS: [PiiPattern; 3] = [
+    PiiPattern {
+        pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        reason: "email_address",
+        compiled: OnceLock::new(),
+    },
+    PiiPattern {
+        pattern: r"\b\d{3}-\d{2}-\d{4}\b",
+        reason: "ssn",
+        compiled: OnceLock::new(),
+    },
+    PiiPattern {
+        pattern: PHONE_NUMBER_PATTERN,
+        reason: "phone_number",
+        compiled: OnceLock::new(),
+    },
+];
 
 /// Constant-time byte-slice equality comparison.
 ///
@@ -2655,22 +2691,12 @@ fn detect_high_entropy_secret_matches(input: &str, matches: &mut Vec<SecretRedac
 }
 
 fn detect_pii_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
-    for (pattern, reason) in [
-        (
-            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-            "email_address",
-        ),
-        (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),
-        (PHONE_NUMBER_PATTERN, "phone_number"),
-    ] {
-        if !pii_pattern_may_match(input, pattern) {
+    for pattern in &PII_PATTERNS {
+        if !pii_pattern_may_match(input, pattern.pattern) {
             continue;
         }
-        let Ok(regex) = regex_lite::Regex::new(pattern) else {
-            continue;
-        };
-        for matched in regex.find_iter(input) {
-            push_secret_match(matches, reason, matched.start(), matched.end());
+        for matched in pattern.regex().find_iter(input) {
+            push_secret_match(matches, pattern.reason, matched.start(), matched.end());
         }
     }
 }
@@ -4007,56 +4033,43 @@ fn is_phrase_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
 }
 
 fn redact_pii_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
-    let (without_emails, email_redacted) = redact_regex_matches(
-        input,
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-        "email_address",
-        reasons,
-    );
-    let (without_ssns, ssn_redacted) =
-        redact_regex_matches(&without_emails, r"\b\d{3}-\d{2}-\d{4}\b", "ssn", reasons);
-    let (without_phones, phone_redacted) =
-        redact_regex_matches(&without_ssns, PHONE_NUMBER_PATTERN, "phone_number", reasons);
-    (
-        without_phones,
-        email_redacted || ssn_redacted || phone_redacted,
-    )
+    let mut output: Option<String> = None;
+    for pattern in &PII_PATTERNS {
+        if let Some(redacted) =
+            redact_regex_matches(output.as_deref().unwrap_or(input), pattern, reasons)
+        {
+            output = Some(redacted);
+        }
+    }
+    match output {
+        Some(redacted) => (redacted, true),
+        None => (input.to_owned(), false),
+    }
 }
 
 fn redact_regex_matches(
     input: &str,
-    pattern: &str,
-    reason: &'static str,
+    pattern: &PiiPattern,
     reasons: &mut Vec<&'static str>,
-) -> (String, bool) {
-    if !pii_pattern_may_match(input, pattern) {
-        return (input.to_owned(), false);
+) -> Option<String> {
+    if !pii_pattern_may_match(input, pattern.pattern) {
+        return None;
     }
-    let Ok(regex) = regex_lite::Regex::new(pattern) else {
-        return (input.to_owned(), false);
-    };
+    let mut matches = pattern.regex().find_iter(input).peekable();
+    matches.peek()?;
 
-    let placeholder = redaction_placeholder(reason);
-    let mut output = String::new();
+    let placeholder = redaction_placeholder(pattern.reason);
+    let mut output = String::with_capacity(input.len());
     let mut emit_start = 0;
-    let mut changed = false;
-    for matched in regex.find_iter(input) {
-        if !changed {
-            output = String::with_capacity(input.len());
-        }
+    for matched in matches {
         output.push_str(&input[emit_start..matched.start()]);
         output.push_str(&placeholder);
         emit_start = matched.end();
-        changed = true;
     }
 
-    if changed {
-        output.push_str(&input[emit_start..]);
-        reasons.push(reason);
-        (output, true)
-    } else {
-        (input.to_owned(), false)
-    }
+    output.push_str(&input[emit_start..]);
+    reasons.push(pattern.reason);
+    Some(output)
 }
 
 fn pii_pattern_may_match(input: &str, pattern: &str) -> bool {
@@ -7208,6 +7221,47 @@ mod tests {
                 "unknown patterns must use the regex"
             );
         }
+    }
+
+    #[test]
+    fn pii_scanners_keep_concurrent_requests_independent() {
+        let cases: [(&str, &str, &[&str]); 4] = [
+            (
+                "🦀 user@example.test; 123-45-6789; 202-555-0123.",
+                "🦀 [REDACTED:email_address]; [REDACTED:ssn]; [REDACTED:phone_number].",
+                &["email_address", "phone_number", "ssn"],
+            ),
+            (
+                "2025550123 user@example.test user@example.test",
+                "[REDACTED:phone_number] [REDACTED:email_address] [REDACTED:email_address]",
+                &["email_address", "phone_number"],
+            ),
+            ("ordinary release evidence", "ordinary release evidence", &[]),
+            (
+                "a@b.c 1025550123 ２０２５５５０１２３",
+                "a@b.c 1025550123 ２０２５５５０１２３",
+                &[],
+            ),
+        ];
+
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                scope.spawn(move || {
+                    for round in 0..32 {
+                        let (input, expected, reasons) = cases[(worker + round) % cases.len()];
+                        let report = redact_secret_like_content(input);
+                        assert_eq!(report.content, expected);
+                        assert_eq!(report.redacted_reasons, reasons);
+                        assert_eq!(report.redacted, !reasons.is_empty());
+
+                        let repeated = redact_secret_like_content(&report.content);
+                        assert_eq!(repeated.content, expected);
+                        assert!(!repeated.redacted);
+                        assert!(repeated.matches.is_empty());
+                    }
+                });
+            }
+        });
     }
 
     #[test]
