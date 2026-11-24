@@ -31,7 +31,6 @@ use crate::core::influence::{
 };
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
-    resolve_memory_seal_lineage,
 };
 use crate::core::provenance_health::{
     MemoryProvenanceHealth, ProvenancePointerStatus, assess_memory_provenance_health,
@@ -573,10 +572,10 @@ pub struct WhyReport {
     pub entity: Option<WhyEntityExplanation>,
     /// Whether the memory was found.
     pub found: bool,
-    /// Full memory body text when the memory was found. `None` when the memory
-    /// is not found or an error occurred. The why surface returns the full
-    /// body (no truncation) so an agent does not need to chain a separate
-    /// `ee show` call to read it.
+    /// Full admitted memory body text, or the public placeholder while its
+    /// seal is closed. `None` when the memory is not found or a required lookup
+    /// failed. Admitted bodies are never truncated, so an agent does
+    /// not need to chain a separate `ee show` call to read them.
     pub content: Option<String>,
     /// Storage explanation.
     pub storage: Option<StorageExplanation>,
@@ -1842,7 +1841,7 @@ fn explain_memory_in_scope_with_budget(
         return WhyReport::unsupported_result_target(memory_id.to_string(), source, conn);
     }
 
-    let memory = match conn.get_memory(memory_id) {
+    let mut memory = match conn.get_memory(memory_id) {
         Ok(Some(m)) => m,
         Ok(None) => return WhyReport::not_found(memory_id.to_string()),
         Err(e) => {
@@ -1852,6 +1851,26 @@ fn explain_memory_in_scope_with_budget(
             );
         }
     };
+
+    // Seal authority is required even when damaged or legacy storage contains
+    // a populated body. Resolve it once in the caller's source snapshot and
+    // withhold bytes before any body-dependent explanation enrichment.
+    let seal = match resolve_why_memory_seal(conn, &memory) {
+        Ok(seal) => seal,
+        Err(_) => {
+            return WhyReport::error(
+                memory_id.to_owned(),
+                "Could not verify memory seal; content was withheld".to_owned(),
+            );
+        }
+    };
+    if seal
+        .as_ref()
+        .is_some_and(crate::models::MemorySeal::is_sealed)
+    {
+        memory.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();
+    }
+    let seal = seal.map(seal_explanation);
 
     trace_why_math_surfaces(&memory.workspace_id, memory_id, "input", started, &[]);
 
@@ -2046,7 +2065,7 @@ fn explain_memory_in_scope_with_budget(
                         degraded: evidence_degradations,
                         agent_profile,
                         dedup_link: find_embed_dedup_link(&conn, memory_id),
-                        seal: fetch_seal(&conn, &memory),
+                        seal,
                     },
                 )
                 .with_content(memory.content.clone())
@@ -2094,7 +2113,7 @@ fn explain_memory_in_scope_with_budget(
             degraded: evidence_degradations,
             agent_profile,
             dedup_link: find_embed_dedup_link(&conn, memory_id),
-            seal: fetch_seal(&conn, &memory),
+            seal,
         },
     )
     .with_content(memory.content.clone())
@@ -2835,19 +2854,48 @@ fn build_report(
     }
 }
 
-/// Load the seal-state block for `ee why` when the memory was written
-/// sealed (bd-sealed-preregistration-memory-b67be). Read-only; storage
-/// errors degrade to `None` rather than failing the explanation.
-fn fetch_seal(conn: &DbConnection, memory: &crate::db::StoredMemory) -> Option<JsonValue> {
-    let seal = resolve_memory_seal_lineage(conn, memory).ok().flatten()?;
-    Some(serde_json::json!({
+/// Disclosure must not interpret an invalid explicit revision root as absence
+/// of a seal. Keep this strict read policy local to `why`; legacy rows without
+/// an explicit root retain their direct-seal or ordinary-memory behavior.
+fn resolve_why_memory_seal(
+    conn: &DbConnection,
+    memory: &crate::db::StoredMemory,
+) -> crate::db::Result<Option<crate::models::MemorySeal>> {
+    let direct_seal = conn.get_memory_seal(&memory.id)?;
+    let Some(logical_id) = conn.get_memory_logical_id(&memory.id)? else {
+        return Ok(direct_seal);
+    };
+    if logical_id == memory.id {
+        return Ok(direct_seal);
+    }
+    let invalid_lineage = || crate::db::DbError::MalformedRow {
+        operation: crate::db::DbOperation::Query,
+        message: "Memory seal revision root could not be verified".to_owned(),
+    };
+    let root = conn.get_memory(&logical_id)?.ok_or_else(invalid_lineage)?;
+    if root.workspace_id != memory.workspace_id
+        || conn.get_memory_logical_id(&root.id)?.as_deref() != Some(logical_id.as_str())
+    {
+        return Err(invalid_lineage());
+    }
+    // A direct seal still takes precedence, but cannot authenticate a broken
+    // explicit lineage. Without one, the validated root supplies authority.
+    match direct_seal {
+        Some(seal) => Ok(Some(seal)),
+        None => conn.get_memory_seal(&root.id),
+    }
+}
+
+/// Project the already-verified seal authority without another storage read.
+fn seal_explanation(seal: crate::models::MemorySeal) -> JsonValue {
+    serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
         "contentCommitment": seal.content_commitment,
         "sealedAt": seal.sealed_at,
         "revealedAt": seal.revealed_at,
         "revealVerified": seal.reveal_verified,
         "sealed": seal.is_sealed(),
-    }))
+    })
 }
 
 fn lifecycle_for_memory(
@@ -4232,6 +4280,314 @@ mod tests {
 
     fn canonical_memory_id(seed: u128) -> String {
         MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
+    }
+
+    fn insert_why_seal_memory(
+        conn: &DbConnection,
+        workspace_id: &str,
+        seed: u128,
+        content: &str,
+        logical_id: Option<&str>,
+    ) -> Result<String, String> {
+        let memory_id = canonical_memory_id(seed);
+        conn.insert_memory_with_timestamps(
+            &memory_id,
+            &CreateMemoryInput {
+                workspace_id: workspace_id.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: content.to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+            "2026-08-08T05:00:00Z",
+            "2026-08-08T05:00:00Z",
+            logical_id.unwrap_or(&memory_id),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(memory_id)
+    }
+
+    #[test]
+    fn why_uses_seal_authority_instead_of_body_shape_on_both_report_paths() -> TestResult {
+        const CLOSED_BODY: &str = "WITHHELD_WHY_PROTOCOL: review the unpublished deployment plan.";
+        let (conn, workspace_id, _) = native_rule_why_fixture()?;
+        for (seed, body, has_seal, revealed) in [
+            (940, "Inspect the public release checklist.", false, false),
+            (
+                941,
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                false,
+                false,
+            ),
+            (942, CLOSED_BODY, true, false),
+            (943, "The revealed experiment is reproducible.", true, true),
+            (
+                944,
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                true,
+                true,
+            ),
+        ] {
+            let memory_id = insert_why_seal_memory(&conn, &workspace_id, seed, body, None)?;
+            if has_seal {
+                conn.insert_memory_seal(
+                    &memory_id,
+                    &crate::models::memory_seal_commitment(body.as_bytes()),
+                    "2026-08-08T06:00:00Z",
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            if revealed {
+                assert!(
+                    conn.mark_memory_seal_revealed(&memory_id, "2026-08-08T07:00:00Z")
+                        .map_err(|error| error.to_string())?
+                );
+            }
+            let report =
+                explain_memory_with_connection(&native_rule_why_options(&memory_id), &conn);
+            assert!(report.found);
+            assert!(report.error.is_none());
+            let expected = if has_seal && !revealed {
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            } else {
+                body
+            };
+            assert_eq!(report.content.as_deref(), Some(expected));
+            assert_eq!(
+                report
+                    .seal
+                    .as_ref()
+                    .and_then(|seal| seal["sealed"].as_bool()),
+                has_seal.then_some(!revealed)
+            );
+            if has_seal && !revealed {
+                assert!(!crate::output::render_why_json(&report).contains(CLOSED_BODY));
+                assert_eq!(
+                    conn.get_memory(&memory_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "sealed memory disappeared".to_owned())?
+                        .content,
+                    CLOSED_BODY,
+                    "explanation must withhold bytes without rewriting storage"
+                );
+            }
+        }
+
+        // The partial-report branch must preserve the same content authority.
+        conn.execute_raw("ALTER TABLE pack_records RENAME TO unavailable_why_pack_records")
+            .map_err(|error| error.to_string())?;
+        let memory_id = canonical_memory_id(942);
+        let report = explain_memory_with_connection(&native_rule_why_options(&memory_id), &conn);
+        assert!(report.found);
+        assert!(report.error.is_none());
+        assert_eq!(
+            report.content.as_deref(),
+            Some(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+        );
+        assert_eq!(
+            report.seal.as_ref().map(|seal| &seal["sealed"]),
+            Some(&JsonValue::Bool(true))
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|notice| notice.code == "why_pack_selection_unavailable")
+        );
+        assert!(!crate::output::render_why_json(&report).contains(CLOSED_BODY));
+        Ok(())
+    }
+
+    #[test]
+    fn why_preserves_seal_authority_across_revision_lineage_and_reveal() -> TestResult {
+        const BODY: &str = "WITHHELD_REVISION_PROTOCOL: a preregistered release experiment.";
+        let (conn, workspace_id, _) = native_rule_why_fixture()?;
+        let root = insert_why_seal_memory(
+            &conn,
+            &workspace_id,
+            950,
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            None,
+        )?;
+        conn.insert_memory_seal(
+            &root,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            "2026-08-08T06:00:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        let revision = insert_why_seal_memory(&conn, &workspace_id, 951, BODY, Some(&root))?;
+        let options = native_rule_why_options(&revision);
+        let closed = explain_memory_with_connection(&options, &conn);
+        assert!(closed.found);
+        assert!(closed.error.is_none());
+        assert_eq!(
+            closed.content.as_deref(),
+            Some(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+        );
+        assert_eq!(
+            closed.seal.as_ref().map(|seal| &seal["sealed"]),
+            Some(&JsonValue::Bool(true))
+        );
+        assert!(!crate::output::render_why_json(&closed).contains(BODY));
+
+        assert!(
+            conn.mark_memory_seal_revealed(&root, "2026-08-08T07:00:00Z")
+                .map_err(|error| error.to_string())?
+        );
+        let revealed = explain_memory_with_connection(&options, &conn);
+        let root_report = explain_memory_with_connection(&native_rule_why_options(&root), &conn);
+        assert_eq!(revealed.content.as_deref(), Some(BODY));
+        assert_eq!(revealed.seal, root_report.seal);
+        assert_eq!(
+            revealed.seal.as_ref().map(|seal| &seal["sealed"]),
+            Some(&JsonValue::Bool(false))
+        );
+        assert_eq!(
+            revealed.seal.as_ref().map(|seal| &seal["revealVerified"]),
+            Some(&JsonValue::Bool(true))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn why_withholds_body_when_seal_authority_is_missing_or_malformed() -> TestResult {
+        const BODY: &str = "WITHHELD_AUTHORITY_PROTOCOL: an unverified release experiment.";
+        for malformed in [false, true] {
+            let (conn, workspace_id, _) = native_rule_why_fixture()?;
+            let memory_id = insert_why_seal_memory(&conn, &workspace_id, 960, BODY, None)?;
+            if malformed {
+                conn.insert_memory_seal(
+                    &memory_id,
+                    &crate::models::memory_seal_commitment(BODY.as_bytes()),
+                    "2026-08-08T06:00:00Z",
+                )
+                .map_err(|error| error.to_string())?;
+                conn.execute_raw("UPDATE memory_seals SET sealed_at = 'PRIVATE_INVALID_SEAL_TIME'")
+                    .map_err(|error| error.to_string())?;
+            } else {
+                conn.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_why_seals")
+                    .map_err(|error| error.to_string())?;
+            }
+            assert!(conn.get_memory_seal(&memory_id).is_err());
+            let report =
+                explain_memory_with_connection(&native_rule_why_options(&memory_id), &conn);
+            assert!(!report.found);
+            assert!(report.content.is_none());
+            assert!(report.seal.is_none());
+            assert!(report.storage.is_none());
+            assert_eq!(
+                report.error.as_deref(),
+                Some("Could not verify memory seal; content was withheld")
+            );
+            let rendered = crate::output::render_why_json(&report);
+            assert!(!rendered.contains(BODY));
+            assert!(!rendered.contains("PRIVATE_INVALID_SEAL_TIME"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_rejects_invalid_explicit_roots_but_preserves_unsealed_and_legacy_rows() -> TestResult {
+        const BODY: &str = "WITHHELD_BROKEN_LINEAGE: unpublished release analysis.";
+        const ROOT_BODY: &str = "PRIVATE_ROOT_AUTHORITY: unpublished source analysis.";
+        let (conn, workspace_id, _) = native_rule_why_fixture()?;
+        let valid_root = insert_why_seal_memory(&conn, &workspace_id, 970, ROOT_BODY, None)?;
+        let missing_root = canonical_memory_id(971);
+        let foreign_workspace = crate::testing::wsp("foreignwhy");
+        conn.insert_workspace(
+            &foreign_workspace,
+            &CreateWorkspaceInput {
+                path: "/why/foreign".to_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let foreign_root = insert_why_seal_memory(&conn, &foreign_workspace, 972, ROOT_BODY, None)?;
+        let rebound_root =
+            insert_why_seal_memory(&conn, &workspace_id, 973, ROOT_BODY, Some(&valid_root))?;
+        let null_root = insert_why_seal_memory(&conn, &workspace_id, 974, ROOT_BODY, None)?;
+        conn.execute_raw(&format!(
+            "UPDATE memories SET logical_id = NULL WHERE id = '{null_root}'"
+        ))
+        .map_err(|error| error.to_string())?;
+
+        for (index, root) in [missing_root, foreign_root, rebound_root, null_root]
+            .iter()
+            .enumerate()
+        {
+            let memory_id = insert_why_seal_memory(
+                &conn,
+                &workspace_id,
+                980 + index as u128,
+                BODY,
+                Some(root),
+            )?;
+            for direct_reveal in [false, true] {
+                if direct_reveal {
+                    conn.insert_memory_seal(
+                        &memory_id,
+                        &crate::models::memory_seal_commitment(BODY.as_bytes()),
+                        "2026-08-08T06:00:00Z",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    assert!(
+                        conn.mark_memory_seal_revealed(&memory_id, "2026-08-08T07:00:00Z")
+                            .map_err(|error| error.to_string())?
+                    );
+                }
+                let report =
+                    explain_memory_with_connection(&native_rule_why_options(&memory_id), &conn);
+                assert!(!report.found);
+                assert!(report.content.is_none());
+                assert!(report.seal.is_none());
+                assert!(report.storage.is_none());
+                assert_eq!(
+                    report.error.as_deref(),
+                    Some("Could not verify memory seal; content was withheld")
+                );
+                let rendered = crate::output::render_why_json(&report);
+                assert!(!rendered.contains(BODY));
+                assert!(!rendered.contains(ROOT_BODY));
+                assert!(!rendered.contains(root.as_str()));
+            }
+        }
+
+        // A valid unsealed chain and a legacy row with no explicit root still
+        // admit their bodies; stricter inspection does not rewrite either.
+        let public_body = "Inspect the public release checklist.";
+        let revision =
+            insert_why_seal_memory(&conn, &workspace_id, 990, public_body, Some(&valid_root))?;
+        let legacy = insert_why_seal_memory(&conn, &workspace_id, 991, public_body, None)?;
+        conn.execute_raw(&format!(
+            "UPDATE memories SET logical_id = NULL WHERE id = '{legacy}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        let before = conn
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        for memory_id in [revision, legacy] {
+            let report =
+                explain_memory_with_connection(&native_rule_why_options(&memory_id), &conn);
+            assert!(report.found);
+            assert!(report.error.is_none());
+            assert!(report.seal.is_none());
+            assert_eq!(report.content.as_deref(), Some(public_body));
+        }
+        assert_eq!(
+            conn.logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        Ok(())
     }
 
     const EVIDENCE_WHY_TEXT: &str =
