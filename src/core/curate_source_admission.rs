@@ -90,7 +90,7 @@ pub(crate) fn validate_memory_authority(
     Ok(())
 }
 
-pub(super) fn require_memory_authority(
+pub(crate) fn require_memory_authority(
     connection: &DbConnection,
     memory: &StoredMemory,
 ) -> Result<(), DomainError> {
@@ -103,6 +103,32 @@ pub(super) fn require_memory_authority(
             DomainError::Usage { message, repair }
         }
     })
+}
+
+/// Resolve a workspace's withheld sources in bounded batches before reading
+/// their bodies into a derivation. The caller has checked source ownership
+/// and keeps the body scan and both authority reads in one snapshot.
+pub(crate) fn withheld_memory_ids(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_ids: &[&str],
+) -> Result<std::collections::BTreeSet<String>, CurateValidationIssue> {
+    let seals = connection
+        .get_memory_seals_batch(memory_ids)
+        .map_err(|_| unavailable_issue())?;
+    let mut withheld = crate::core::memory_lifecycle::pending_memory_review_ids(
+        connection,
+        workspace_id,
+        memory_ids,
+    )
+    .map_err(|_| unavailable_issue())?;
+    withheld.extend(
+        seals
+            .into_values()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id),
+    );
+    Ok(withheld)
 }
 
 /// A reviewed proposal authorizes one new procedural object, not continued

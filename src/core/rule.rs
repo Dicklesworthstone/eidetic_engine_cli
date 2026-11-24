@@ -14,6 +14,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::core::curate::source_admission;
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
@@ -1308,6 +1309,29 @@ struct PreparedRuleUpdate {
     next_detail: RuleDetails,
 }
 
+enum RuleWriteError {
+    Domain(DomainError),
+    Storage(crate::db::DbError),
+}
+
+impl From<crate::db::DbError> for RuleWriteError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl RuleWriteError {
+    fn into_domain_error(self) -> DomainError {
+        match self {
+            Self::Domain(error) => error,
+            Self::Storage(error) => DomainError::Storage {
+                message: format!("Failed to complete procedural rule transaction: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            },
+        }
+    }
+}
+
 /// Post-commit derived-index convergence shared by every durable rule
 /// mutation (bd-index-auto-freshness-m5kwf). `index_status` becomes
 /// `indexed` only when the coalesced drain reports every job literally
@@ -1437,24 +1461,25 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
-    let workspace_id = crate::core::workspace::ensure_bound_workspace(
-        &connection,
-        &prepared.workspace_id,
-        &[&prepared.workspace_path, options.workspace_path],
-    )?;
-    prepared.workspace_id = workspace_id;
-    verify_source_memories(
-        &connection,
-        &prepared.workspace_id,
-        &prepared.source_memory_ids,
-    )?;
-
     let mut report = connection
-        .with_transaction(|| insert_prepared_rule(&connection, &prepared))
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to store procedural rule: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+        .with_transaction_error(|| {
+            prepared.workspace_id = crate::core::workspace::ensure_bound_workspace(
+                &connection,
+                &prepared.workspace_id,
+                &[&prepared.workspace_path, options.workspace_path],
+            )
+            .map_err(RuleWriteError::Domain)?;
+            // Source bytes and their disclosure authority share the writer
+            // fence with the new derived rule, audit, and publication job.
+            verify_source_memories(
+                &connection,
+                &prepared.workspace_id,
+                &prepared.source_memory_ids,
+            )
+            .map_err(RuleWriteError::Domain)?;
+            insert_prepared_rule(&connection, &prepared).map_err(RuleWriteError::Storage)
+        })
+        .map_err(RuleWriteError::into_domain_error)?;
     apply_rule_index_convergence(
         &connection,
         &prepared.workspace_id,
@@ -1983,15 +2008,45 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
     let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule update --help")?;
     let connection = open_existing_database(&prepared.database_path)?;
     bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
-    let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
-    let previous_detail = load_rule_details(&connection, stored)?;
-    let prepared_update = prepare_rule_update(&connection, &prepared, &previous_detail, options)?;
+    let update = || update_rule_in_snapshot(&connection, &prepared, &rule_id, options);
+    let mut report = if options.dry_run {
+        source_admission::with_snapshot(&connection, update)?
+    } else {
+        connection
+            .with_transaction_error(|| update().map_err(RuleWriteError::Domain))
+            .map_err(RuleWriteError::into_domain_error)?
+    };
+    if report.index_job_id.is_some() {
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            options.database_path,
+            &rule_id,
+            &mut report.index_status,
+            &mut report.degraded,
+        );
+    }
+    Ok(report)
+}
+
+/// The caller owns the source snapshot through preview or the writer fence
+/// through mutation. A source withdrawal cannot race the evidence check.
+fn update_rule_in_snapshot(
+    connection: &DbConnection,
+    prepared: &PreparedRuleRead,
+    rule_id: &str,
+    options: &RuleUpdateOptions<'_>,
+) -> Result<RuleUpdateReport, DomainError> {
+    let stored = load_active_rule(connection, &prepared.workspace_id, rule_id)?;
+    let previous_detail = load_rule_details(connection, stored)?;
+    let prepared_update = prepare_rule_update(connection, prepared, &previous_detail, options)?;
     let changed = !prepared_update.changed_fields.is_empty();
 
     if options.dry_run {
         return Ok(rule_update_report(RuleUpdateReportInput {
-            prepared: &prepared,
-            rule_id: &rule_id,
+            prepared,
+            rule_id,
             dry_run: true,
             persisted: false,
             changed,
@@ -2005,8 +2060,8 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
 
     if !changed {
         return Ok(rule_update_report(RuleUpdateReportInput {
-            prepared: &prepared,
-            rule_id: &rule_id,
+            prepared,
+            rule_id,
             dry_run: false,
             persisted: false,
             changed: false,
@@ -2021,49 +2076,48 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
     let audit_id = generate_audit_id();
     let index_job_id = generate_search_index_job_id();
     let audit_details = rule_update_audit_details(
-        &rule_id,
+        rule_id,
         &prepared_update.changed_fields,
         &previous_detail,
         &prepared_update.next_detail,
     );
-    connection
-        .with_transaction(|| {
-            connection.update_procedural_rule_metadata(&rule_id, &prepared_update.input)?;
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(prepared.workspace_id.clone()),
-                    actor: options
-                        .actor
-                        .map(str::to_owned)
-                        .or_else(|| Some("ee rule update".to_owned())),
-                    action: audit_actions::RULE_UPDATE.to_owned(),
-                    target_type: Some("rule".to_owned()),
-                    target_id: Some(rule_id.clone()),
-                    details: Some(audit_details.clone()),
-                },
-            )?;
-            connection.insert_search_index_job(
-                &index_job_id,
-                &CreateSearchIndexJobInput {
-                    workspace_id: prepared.workspace_id.clone(),
-                    job_type: SearchIndexJobType::SingleDocument,
-                    document_source: Some("rule".to_owned()),
-                    document_id: Some(rule_id.clone()),
-                    documents_total: 1,
-                },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to update procedural rule: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
+    (|| -> Result<(), RuleWriteError> {
+        if !connection.update_procedural_rule_metadata(rule_id, &prepared_update.input)? {
+            return Err(RuleWriteError::Domain(rule_not_found(rule_id)));
+        }
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(prepared.workspace_id.clone()),
+                actor: options
+                    .actor
+                    .map(str::to_owned)
+                    .or_else(|| Some("ee rule update".to_owned())),
+                action: audit_actions::RULE_UPDATE.to_owned(),
+                target_type: Some("rule".to_owned()),
+                target_id: Some(rule_id.to_owned()),
+                details: Some(audit_details.clone()),
+            },
+        )?;
+        connection.insert_search_index_job(
+            &index_job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: prepared.workspace_id.clone(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("rule".to_owned()),
+                document_id: Some(rule_id.to_owned()),
+                documents_total: 1,
+            },
+        )?;
+        Ok(())
+    })()
+    .map_err(RuleWriteError::into_domain_error)?;
 
-    let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
-    let updated_detail = load_rule_details(&connection, updated)?;
-    let mut report = rule_update_report(RuleUpdateReportInput {
-        prepared: &prepared,
-        rule_id: &rule_id,
+    let updated = load_active_rule(connection, &prepared.workspace_id, rule_id)?;
+    let updated_detail = load_rule_details(connection, updated)?;
+    Ok(rule_update_report(RuleUpdateReportInput {
+        prepared,
+        rule_id,
         dry_run: false,
         persisted: true,
         changed: true,
@@ -2072,19 +2126,7 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
         index_job_id: Some(index_job_id),
         previous_rule: previous_detail,
         rule: updated_detail,
-    });
-    if report.index_job_id.is_some() {
-        apply_rule_index_convergence(
-            &connection,
-            &prepared.workspace_id,
-            &prepared.workspace_path,
-            options.database_path,
-            &rule_id,
-            &mut report.index_status,
-            &mut report.degraded,
-        );
-    }
-    Ok(report)
+    }))
 }
 
 /// Extract procedural-rule curation candidates from repeated semantic memories.
@@ -2100,17 +2142,36 @@ pub fn extract_playbook_candidates(
     )?;
 
     let connection = open_existing_database(&prepared.database_path)?;
+    if options.dry_run {
+        return source_admission::with_snapshot(&connection, || {
+            bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
+            extract_playbook_candidates_in_snapshot(&connection, &prepared, options, since)
+        });
+    }
     connection.migrate().map_err(|error| DomainError::Storage {
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_owned()),
     })?;
-    let workspace_id = crate::core::workspace::ensure_bound_workspace(
-        &connection,
-        &prepared.workspace_id,
-        &[&prepared.workspace_path, options.workspace_path],
-    )?;
-    prepared.workspace_id = workspace_id;
+    connection
+        .with_transaction_error(|| {
+            prepared.workspace_id = crate::core::workspace::ensure_bound_workspace(
+                &connection,
+                &prepared.workspace_id,
+                &[&prepared.workspace_path, options.workspace_path],
+            )
+            .map_err(RuleWriteError::Domain)?;
+            extract_playbook_candidates_in_snapshot(&connection, &prepared, options, since)
+                .map_err(RuleWriteError::Domain)
+        })
+        .map_err(RuleWriteError::into_domain_error)
+}
 
+fn extract_playbook_candidates_in_snapshot(
+    connection: &DbConnection,
+    prepared: &PreparedRuleRead,
+    options: &PlaybookExtractOptions<'_>,
+    since: Option<DateTime<Utc>>,
+) -> Result<PlaybookExtractReport, DomainError> {
     let mut memories = connection
         .list_memories(&prepared.workspace_id, Some("semantic"), false)
         .map_err(|error| DomainError::Storage {
@@ -2133,8 +2194,22 @@ pub fn extract_playbook_candidates(
     memories.truncate(limit);
 
     let scanned_memory_count = memories.len();
-    let groups = group_playbook_memories(memories);
-    let existing_contents = existing_rule_candidate_contents(&connection, &prepared.workspace_id)?;
+    let memory_ids: Vec<_> = memories.iter().map(|memory| memory.id.as_str()).collect();
+    let withheld =
+        source_admission::withheld_memory_ids(connection, &prepared.workspace_id, &memory_ids)
+            .map_err(|issue| DomainError::Storage {
+                message: format!("{}: {}", issue.code, issue.message),
+                repair: Some(issue.repair),
+            })?;
+    // Withheld text must neither enter a proposal nor cast a vote toward a
+    // public lesson's corroboration threshold. Authority IO is batch-bounded.
+    let groups = group_playbook_memories(
+        memories
+            .into_iter()
+            .filter(|memory| !withheld.contains(&memory.id))
+            .collect(),
+    );
+    let existing_contents = existing_rule_candidate_contents(connection, &prepared.workspace_id)?;
 
     let mut candidates = Vec::new();
     let mut persisted_count = 0_usize;
@@ -2200,25 +2275,24 @@ pub fn extract_playbook_candidates(
                 &proposed_content,
                 confidence,
             );
-            connection
-                .with_transaction(|| {
-                    connection.insert_curation_candidate(&new_candidate_id, &input)?;
-                    connection.insert_audit(
-                        &new_audit_id,
-                        &CreateAuditInput {
-                            workspace_id: Some(prepared.workspace_id.clone()),
-                            actor: Some(actor.to_owned()),
-                            action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
-                            target_type: Some("curation_candidate".to_owned()),
-                            target_id: Some(new_candidate_id.clone()),
-                            details: Some(details.clone()),
-                        },
-                    )
-                })
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to persist playbook candidate: {error}"),
-                    repair: Some("ee curate candidates --type rule --json".to_owned()),
-                })?;
+            (|| {
+                connection.insert_curation_candidate(&new_candidate_id, &input)?;
+                connection.insert_audit(
+                    &new_audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(prepared.workspace_id.clone()),
+                        actor: Some(actor.to_owned()),
+                        action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                        target_type: Some("curation_candidate".to_owned()),
+                        target_id: Some(new_candidate_id.clone()),
+                        details: Some(details.clone()),
+                    },
+                )
+            })()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to persist playbook candidate: {error}"),
+                repair: Some("ee curate candidates --type rule --json".to_owned()),
+            })?;
             candidate_id = Some(new_candidate_id);
             audit_id = Some(new_audit_id);
             persisted = true;
@@ -2266,7 +2340,7 @@ pub fn extract_playbook_candidates(
         schema: PLAYBOOK_EXTRACT_SCHEMA_V1,
         command: "playbook extract",
         version: env!("CARGO_PKG_VERSION"),
-        workspace_id: prepared.workspace_id,
+        workspace_id: prepared.workspace_id.clone(),
         workspace_path: prepared.workspace_path.display().to_string(),
         database_path: prepared.database_path.display().to_string(),
         since: since.map(|timestamp| timestamp.to_rfc3339()),
@@ -2515,13 +2589,7 @@ pub fn import_playbook(
         .unwrap_or("ee playbook import");
 
     let plan = if options.dry_run {
-        prepare_playbook_import_candidates(
-            &connection,
-            &document,
-            &auth_state,
-            &prepared,
-            actor,
-        )?
+        prepare_playbook_import_candidates(&connection, &document, &auth_state, &prepared, actor)?
     } else {
         // Deduplication and writes share one writer-fenced snapshot. A second
         // importer cannot admit the same rules between the check and commit.
@@ -2579,7 +2647,9 @@ pub fn import_playbook(
         if index_status != "indexed" {
             for decision in &mut decisions {
                 if decision.status == "imported" {
-                    decision.issue_codes.push("rule_index_publish_failed".to_owned());
+                    decision
+                        .issue_codes
+                        .push("rule_index_publish_failed".to_owned());
                 }
             }
         }
@@ -4163,8 +4233,18 @@ fn prepare_rule_update(
             "ee rule update --help",
         ));
     }
-    if let Some(ids) = &source_memory_ids {
-        verify_source_memories(connection, &prepared.workspace_id, ids)?;
+    if source_memory_ids.is_some()
+        || content != previous.content
+        || previous.scope != scope.as_str()
+        || scope_pattern != previous.scope_pattern
+    {
+        // Existing derived rules remain independent of a later source hold,
+        // but changed instructions, applicability, or evidence are a new use.
+        verify_source_memories(
+            connection,
+            &prepared.workspace_id,
+            effective_source_memory_ids,
+        )?;
     }
 
     let mut changed_fields = Vec::new();
@@ -4497,6 +4577,7 @@ fn verify_source_memories(
                 "source memory {source_id} is tombstoned and cannot support a new rule"
             )));
         }
+        source_admission::require_memory_authority(connection, &memory)?;
     }
     Ok(())
 }
@@ -5389,6 +5470,419 @@ mod tests {
         ));
     }
 
+    fn rule_source_fixture() -> Result<(tempfile::TempDir, PathBuf, String), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = directory.path().join("ee.db");
+        let workspace_id = stable_workspace_id(directory.path());
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: directory.path().display().to_string(),
+                    name: Some("rule-source-authority".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok((directory, database, workspace_id))
+    }
+
+    fn seed_rule_source_group(
+        connection: &DbConnection,
+        workspace_id: &str,
+        seed: u128,
+        content: &str,
+    ) -> Result<Vec<String>, String> {
+        (seed..seed + 3)
+            .map(|seed| {
+                let id = MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+                connection
+                    .insert_memory(
+                        &id,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.to_owned(),
+                            level: "semantic".to_owned(),
+                            kind: "lesson".to_owned(),
+                            content: content.to_owned(),
+                            workflow_id: None,
+                            confidence: 0.7,
+                            utility: 0.6,
+                            importance: 0.6,
+                            provenance_uri: None,
+                            trust_class: "agent_assertion".to_owned(),
+                            trust_subclass: None,
+                            tags: Vec::new(),
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(id)
+            })
+            .collect()
+    }
+
+    fn hold_rule_source(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        target_type: &str,
+        seed: u64,
+    ) -> TestResult {
+        connection
+            .insert_feedback_quarantine(
+                &format!("fq_{seed:026}"),
+                &crate::db::CreateFeedbackQuarantineInput {
+                    workspace_id: workspace_id.to_owned(),
+                    source_id: "rule-source-authority".to_owned(),
+                    target_type: target_type.to_owned(),
+                    target_id: memory_id.to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "automated_check".to_owned(),
+                    proposed_event_id: None,
+                    recorded_at: "2026-05-24T00:05:00Z".to_owned(),
+                    reason: "PRIVATE_REVIEW_REASON".to_owned(),
+                    event_reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn playbook_extract_withholds_sealed_and_review_held_sources() -> TestResult {
+        const PUBLIC: &str = "Always validate public release metadata before publishing.";
+        const SEALED: &str = "Always review WITHHELD_SEAL_DIRECTIVE before deployment.";
+        const HELD: &str = "Always review WITHHELD_REVIEW_DIRECTIVE before migration.";
+        let (directory, database, workspace_id) = rule_source_fixture()?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let public = seed_rule_source_group(&connection, &workspace_id, 100, PUBLIC)?;
+        let sealed = seed_rule_source_group(&connection, &workspace_id, 200, SEALED)?;
+        let held = seed_rule_source_group(&connection, &workspace_id, 300, HELD)?;
+        for id in &sealed {
+            connection
+                .insert_memory_seal(
+                    id,
+                    &crate::models::memory_seal_commitment(SEALED.as_bytes()),
+                    "2026-05-24T00:05:00Z",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        // Two public repetitions cannot borrow a third vote from a held row.
+        hold_rule_source(&connection, &workspace_id, &held[2], "memory", 1)?;
+        // A rule-target hold with a matching string is not memory authority.
+        hold_rule_source(&connection, &workspace_id, &public[0], "rule", 2)?;
+        let generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut options = PlaybookExtractOptions {
+            workspace_path: directory.path(),
+            database_path: Some(&database),
+            since: None,
+            limit: 100,
+            dry_run: true,
+            actor: Some("test"),
+        };
+        let (preview, queries) =
+            crate::db::capture_query_sql_for_test(|| extract_playbook_candidates(&options));
+        let preview = preview.map_err(|error| error.message())?;
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("FROM memory_seals WHERE memory_id IN ("))
+                .count(),
+            1,
+            "a bounded source window must not issue one seal read per memory"
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.contains("SELECT DISTINCT target_id FROM feedback_quarantine"))
+                .count(),
+            1,
+            "review admission must query the complete source window once"
+        );
+        assert_eq!(preview.scanned_memory_count, 9);
+        assert_eq!(preview.candidate_count, 1);
+        assert_eq!(preview.candidates[0].proposed_content, PUBLIC);
+        let mut preview_sources = preview.candidates[0].source_memory_ids.clone();
+        preview_sources.sort();
+        let mut public_sources = public;
+        public_sources.sort();
+        assert_eq!(preview_sources, public_sources);
+        assert!(!preview.data_json().contains("WITHHELD_"));
+        assert!(!preview.data_json().contains("PRIVATE_REVIEW_REASON"));
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_workspace_generation(&workspace_id)
+                .map_err(|error| error.to_string())?,
+            generation
+        );
+        assert!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_curation_candidates(&workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        options.dry_run = false;
+        let applied = extract_playbook_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(applied.persisted_count, 1);
+        assert!(!applied.data_json().contains("WITHHELD_"));
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let audits = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(audits.len(), 1);
+        assert!(!format!("{audits:?}").contains("WITHHELD_"));
+        for id in &sealed {
+            assert_eq!(
+                connection
+                    .get_memory(id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("missing source")?
+                    .content,
+                SEALED
+            );
+            assert!(
+                connection
+                    .mark_memory_seal_revealed(id, "2026-05-24T00:06:00Z")
+                    .map_err(|error| error.to_string())?
+            );
+        }
+        connection
+            .execute_raw(
+                "UPDATE feedback_quarantine SET status = 'rejected' WHERE target_type = 'memory'",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let released = extract_playbook_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(released.candidate_count, 3);
+        assert_eq!(released.duplicate_count, 1);
+        assert_eq!(released.persisted_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn playbook_extract_authority_failure_and_late_write_failure_leave_no_prefix() -> TestResult {
+        for unavailable in [true, false] {
+            let (directory, database, workspace_id) = rule_source_fixture()?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_rule_source_group(
+                &connection,
+                &workspace_id,
+                100,
+                "Always audit deployment metadata.",
+            )?;
+            seed_rule_source_group(
+                &connection,
+                &workspace_id,
+                200,
+                "Never bypass migration verification.",
+            )?;
+            if unavailable {
+                connection
+                    .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals")
+                    .map_err(|error| error.to_string())?;
+            } else {
+                connection.execute_raw("CREATE TRIGGER fail_later_playbook_candidate BEFORE INSERT ON curation_candidates WHEN NEW.proposed_content = 'Never bypass migration verification.' BEGIN SELECT RAISE(ABORT, 'later playbook candidate refused'); END").map_err(|error| error.to_string())?;
+            }
+            connection.close().map_err(|error| error.to_string())?;
+            let error = extract_playbook_candidates(&PlaybookExtractOptions {
+                workspace_path: directory.path(),
+                database_path: Some(&database),
+                since: None,
+                limit: 100,
+                dry_run: false,
+                actor: Some("test"),
+            })
+            .expect_err("authority or later storage failure must refuse the proposal batch");
+            assert!(matches!(error, DomainError::Storage { .. }));
+            if unavailable {
+                assert!(
+                    error
+                        .message()
+                        .contains("derived_source_memory_authority_unavailable")
+                );
+            }
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert!(
+                connection
+                    .list_curation_candidates(&workspace_id, None, None, None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            );
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rule_add_and_update_refuse_withdrawn_evidence_without_mutation() -> TestResult {
+        const SOURCE: &str = "Always review WITHHELD_EVIDENCE before deployment.";
+        for sealed in [true, false] {
+            let (directory, database, workspace_id) = rule_source_fixture()?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let sources = seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?;
+            let rule_id = RuleId::now().to_string();
+            connection
+                .insert_procedural_rule(
+                    &rule_id,
+                    &CreateProceduralRuleInput {
+                        workspace_id: workspace_id.clone(),
+                        content: "Run the verified release procedure.".to_owned(),
+                        confidence: 0.75,
+                        utility: 0.7,
+                        importance: 0.8,
+                        trust_class: "agent_assertion".to_owned(),
+                        scope: "workspace".to_owned(),
+                        scope_pattern: None,
+                        maturity: "candidate".to_owned(),
+                        protected: false,
+                        source_memory_ids: sources.clone(),
+                        tags: Vec::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            if sealed {
+                connection
+                    .insert_memory_seal(
+                        &sources[0],
+                        &crate::models::memory_seal_commitment(SOURCE.as_bytes()),
+                        "2026-05-24T00:05:00Z",
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else {
+                hold_rule_source(&connection, &workspace_id, &sources[0], "memory", 1)?;
+            }
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let expected_code = if sealed {
+                "derived_source_memory_sealed"
+            } else {
+                "derived_source_memory_review_pending"
+            };
+            let error = add_rule(&RuleAddOptions {
+                workspace_path: directory.path(),
+                database_path: Some(&database),
+                content: "Run a new release procedure.",
+                scope: "workspace",
+                scope_pattern: None,
+                maturity: "candidate",
+                confidence: None,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "agent_assertion",
+                protected: false,
+                tags: &[],
+                source_memory_ids: &sources,
+                dry_run: false,
+                actor: Some("test"),
+            })
+            .expect_err("withdrawn evidence cannot support a new rule");
+            assert!(error.message().contains(expected_code));
+            assert!(!error.message().contains("WITHHELD_EVIDENCE"));
+
+            for dry_run in [true, false] {
+                for operation in ["reattach", "rewrite", "rescope"] {
+                    let error = update_rule(&RuleUpdateOptions {
+                        workspace_path: directory.path(),
+                        database_path: Some(&database),
+                        rule_id: &rule_id,
+                        content: (operation == "rewrite")
+                            .then_some("Run a revised release procedure."),
+                        scope: (operation == "rescope").then_some("global"),
+                        scope_pattern: None,
+                        clear_scope_pattern: false,
+                        trust_class: None,
+                        confidence: None,
+                        utility: None,
+                        importance: None,
+                        protected: None,
+                        tags: None,
+                        clear_tags: false,
+                        source_memory_ids: (operation == "reattach").then_some(sources.as_slice()),
+                        clear_source_memory_ids: false,
+                        dry_run,
+                        actor: Some("test"),
+                    })
+                    .expect_err(
+                        "new derivation must recheck retained as well as supplied evidence",
+                    );
+                    assert!(
+                        error.message().contains(expected_code),
+                        "{operation}: {error:?}"
+                    );
+                    assert!(!error.message().contains("WITHHELD_EVIDENCE"));
+                }
+            }
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "refusal must preserve rules, evidence, audits, jobs and generations"
+            );
+            connection.close().map_err(|error| error.to_string())?;
+
+            // An already-applied rule remains independent of later source
+            // withdrawal when an edit does not create a new derivation.
+            let metadata = update_rule(&RuleUpdateOptions {
+                workspace_path: directory.path(),
+                database_path: Some(&database),
+                rule_id: &rule_id,
+                content: None,
+                scope: None,
+                scope_pattern: None,
+                clear_scope_pattern: false,
+                trust_class: None,
+                confidence: None,
+                utility: Some(0.6),
+                importance: None,
+                protected: None,
+                tags: None,
+                clear_tags: false,
+                source_memory_ids: None,
+                clear_source_memory_ids: false,
+                dry_run: false,
+                actor: Some("test"),
+            })
+            .map_err(|error| error.message())?;
+            assert!(metadata.persisted);
+            assert_eq!(metadata.rule.content, "Run the verified release procedure.");
+            assert_eq!(metadata.rule.source_memory_ids, sources);
+        }
+        Ok(())
+    }
+
     #[test]
     fn playbook_extract_previews_and_applies_literal_lessons_with_matching_evidence() -> TestResult
     {
@@ -6041,7 +6535,9 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
-        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         for dry_run in [true, false] {
             let result = import_playbook(&PlaybookImportOptions {
                 workspace_path: &workspace_path,
@@ -6055,12 +6551,18 @@ mod tests {
                 "preview and apply must both reject an invalid later rule",
             )?;
             ensure(
-                connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?
+                    == before,
                 "validation failure must preserve all rules, audit rows and queued work",
             )?;
         }
         ensure(
-            !workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR).exists(),
+            !workspace_path
+                .join(".ee")
+                .join(crate::core::index::DEFAULT_INDEX_SUBDIR)
+                .exists(),
             "validation must not start an index publication",
         )
     }
@@ -6068,16 +6570,24 @@ mod tests {
     #[test]
     fn playbook_import_registers_missing_workspace_only_for_valid_applied_batch() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace_path = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let workspace_path = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let database_path = workspace_path.join("ee.db");
         let workspace_id = stable_workspace_id(&workspace_path);
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         let document = portable_document_for_contents(
             &workspace_id,
-            &["Run cargo fmt before publishing.", "Run cargo test before publishing."],
+            &[
+                "Run cargo fmt before publishing.",
+                "Run cargo test before publishing.",
+            ],
         );
         let source_path = workspace_path.join("playbook-preview.json");
         fs::write(
@@ -6098,7 +6608,10 @@ mod tests {
             "preview must admit valid rules without registering a workspace",
         )?;
         ensure(
-            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "preview must leave the unbound destination unchanged",
         )?;
 
@@ -6109,7 +6622,10 @@ mod tests {
             "an empty write plan must not register a workspace",
         )?;
         ensure(
-            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "an empty import must leave the unbound destination unchanged",
         )?;
 
@@ -6121,7 +6637,10 @@ mod tests {
             "an invalid later rule must reject before workspace registration",
         )?;
         ensure(
-            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "invalid input must not leave a workspace or committed prefix",
         )?;
 
@@ -6132,7 +6651,9 @@ mod tests {
                 && report.workspace_id == workspace_id,
             "a valid applied batch must register and import into its destination",
         )?;
-        let workspaces = connection.list_workspaces().map_err(|error| error.to_string())?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
         let rules = connection
             .list_procedural_rules(&workspace_id, None, None, true)
             .map_err(|error| error.to_string())?;
@@ -6145,7 +6666,10 @@ mod tests {
     #[test]
     fn playbook_import_rolls_back_completed_prefix_on_later_storage_failure() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace_path = temp.path().canonicalize().map_err(|error| error.to_string())?;
+        let workspace_path = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let database_path = workspace_path.join("ee.db");
         let workspace_id = stable_workspace_id(&workspace_path);
         let connection =
@@ -6153,14 +6677,19 @@ mod tests {
         connection.migrate().map_err(|error| error.to_string())?;
         let document = portable_document_for_contents(
             &workspace_id,
-            &["Run cargo fmt before publishing.", "Run cargo test before publishing."],
+            &[
+                "Run cargo fmt before publishing.",
+                "Run cargo test before publishing.",
+            ],
         );
         let mut prepared = PreparedRuleRead {
             workspace_id,
             workspace_path: workspace_path.clone(),
             database_path: database_path.clone(),
         };
-        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         let result = connection.with_transaction_error(|| {
             let mut plan = prepare_playbook_import_candidates(
                 &connection,
@@ -6179,11 +6708,17 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
         let reopened = open_existing_database(&database_path).map_err(|error| error.message())?;
         ensure(
-            reopened.logical_table_digests().map_err(|error| error.to_string())? == before,
+            reopened
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "reopening must see no workspace, rules, junctions, audits or jobs from the failed batch",
         )?;
         ensure(
-            !workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR).exists(),
+            !workspace_path
+                .join(".ee")
+                .join(crate::core::index::DEFAULT_INDEX_SUBDIR)
+                .exists(),
             "a rolled-back import must never publish derived state",
         )
     }
@@ -6222,7 +6757,9 @@ mod tests {
                 Ok(())
             })
             .map_err(|error| error.to_string())?;
-        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         let document = portable_document_for_contents(&workspace_id, &[retained]);
         let report = run_playbook_import(&workspace_path, &database_path, &document)?;
         ensure(
@@ -6230,7 +6767,10 @@ mod tests {
             "a rule beyond the first 1,000 rows must remain a duplicate",
         )?;
         ensure(
-            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "duplicate-only imports must leave the complete destination unchanged",
         )
     }
@@ -6249,7 +6789,10 @@ mod tests {
             ],
         );
         let report = run_playbook_import(&workspace_path, &database_path, &document)?;
-        ensure(report.imported_count == 3 && report.duplicate_count == 1, "batch decisions")?;
+        ensure(
+            report.imported_count == 3 && report.duplicate_count == 1,
+            "batch decisions",
+        )?;
         ensure(
             report.degraded.is_empty(),
             "a healthy batch must publish without a degradation",
@@ -6262,12 +6805,13 @@ mod tests {
             jobs.len() == 3 && jobs.iter().all(|job| job.status == "completed"),
             "every imported rule must have completed durable publication work",
         )?;
-        let status = crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
-            workspace_path: workspace_path.clone(),
-            database_path: Some(database_path.clone()),
-            index_dir: None,
-        })
-        .map_err(|error| format!("{error:?}"))?;
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: None,
+            })
+            .map_err(|error| format!("{error:?}"))?;
         ensure(
             status.health == crate::core::index::IndexHealth::Ready
                 && status.db_generation.is_some()
@@ -6311,14 +6855,19 @@ mod tests {
                 )?;
             }
         }
-        let before = connection.logical_table_digests().map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
         let retried = run_playbook_import(&workspace_path, &database_path, &document)?;
         ensure(
             retried.imported_count == 0 && retried.duplicate_count == document.rules.len(),
             "retrying the batch must not create duplicate rules",
         )?;
         ensure(
-            connection.logical_table_digests().map_err(|error| error.to_string())? == before,
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?
+                == before,
             "a duplicate-only retry must not publish or append audit/queue rows",
         )
     }
@@ -6329,14 +6878,19 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&temp)?;
         fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
-        let index_dir = workspace_path.join(".ee").join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let index_dir = workspace_path
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
         let blocked_target = workspace_path.join(".ee").join("blocked-index");
         fs::create_dir(&blocked_target).map_err(|error| error.to_string())?;
         std::os::unix::fs::symlink(&blocked_target, &index_dir)
             .map_err(|error| error.to_string())?;
         let document = portable_document_for_contents(
             &workspace_id,
-            &["Keep first publication rule durable.", "Keep second publication rule durable."],
+            &[
+                "Keep first publication rule durable.",
+                "Keep second publication rule durable.",
+            ],
         );
         let report = run_playbook_import(&workspace_path, &database_path, &document)?;
         ensure(
@@ -6352,7 +6906,10 @@ mod tests {
         )?;
         ensure(
             report.decisions.iter().all(|decision| {
-                decision.issue_codes.iter().any(|code| code == "rule_index_publish_failed")
+                decision
+                    .issue_codes
+                    .iter()
+                    .any(|code| code == "rule_index_publish_failed")
             }),
             "every imported rule must report incomplete publication",
         )?;
@@ -6360,7 +6917,9 @@ mod tests {
             serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
         ensure(
             json["degraded"].as_array().is_some_and(|entries| {
-                entries.iter().any(|entry| entry["code"] == "rule_index_publish_failed")
+                entries
+                    .iter()
+                    .any(|entry| entry["code"] == "rule_index_publish_failed")
             }),
             "JSON must not discard publication warnings",
         )?;
@@ -6376,9 +6935,13 @@ mod tests {
         let jobs = connection
             .list_search_index_jobs(&workspace_id, None)
             .map_err(|error| error.to_string())?;
-        ensure(rules.len() == 2 && jobs.len() == 2, "rules and jobs remain durable")?;
         ensure(
-            jobs.iter().all(|job| matches!(job.status.as_str(), "pending" | "failed")),
+            rules.len() == 2 && jobs.len() == 2,
+            "rules and jobs remain durable",
+        )?;
+        ensure(
+            jobs.iter()
+                .all(|job| matches!(job.status.as_str(), "pending" | "failed")),
             "the complete batch must remain retryable",
         )
     }
