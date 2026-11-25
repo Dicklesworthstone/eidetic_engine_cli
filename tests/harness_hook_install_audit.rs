@@ -54,6 +54,172 @@ fn successful(output: Output) -> Result<Value, String> {
 }
 
 #[cfg(unix)]
+fn hook_argv_probe_binary(root: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let binary = root.join("ee-hook-argv-probe");
+    fs::write(
+        &binary,
+        r#"#!/usr/bin/env python3
+import json, pathlib, sys
+with pathlib.Path("hook-argv.jsonl").open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(sys.argv) + "\n")
+print(json.dumps({"success": True, "degraded": [], "data": {"ambientContext": {"text": "Preserve release evidence.", "omittedBlocks": 0}, "suggestions": []}}))
+"#,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+    Ok(binary)
+}
+
+#[cfg(unix)]
+fn run_generated_hook(root: &Path, command: &str, event: &[u8]) -> Result<Output, String> {
+    let mut child = isolated_command("sh", root)
+        .args(["-c", command])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = child
+        .stdin
+        .take()
+        .ok_or("missing hook stdin")?
+        .write_all(event)
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(error.to_string());
+    }
+    child.wait_with_output().map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_session_hook_keeps_tasks_literal_through_the_cli_parser() -> TestResult {
+    use clap::Parser as _;
+
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let root = temp.path();
+        let binary = hook_argv_probe_binary(root)?;
+        let mut opts = options(target, &root.join("settings.json"), false, false);
+        opts.ee_binary_path = Some(binary);
+        let report = generate_harness_hook_install(&opts).map_err(|error| error.message())?;
+        let snippet = report
+            .snippets
+            .iter()
+            .find(|snippet| snippet.event == "SessionStart")
+            .ok_or("SessionStart snippet missing")?;
+        for (index, task) in [
+            "--help",
+            "--database=other.db",
+            "--max-tokens=1",
+            "--workspace=other",
+            "--",
+            "- prepare release",
+            "Release 'quoted' files\n$(touch hook-task-sentinel)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = json!({
+                "cwd": root,
+                "session_id": format!("literal-task-{index}"),
+                "task": task,
+                "hook_event_name": "SessionStart"
+            });
+            let output = run_generated_hook(root, &snippet.command, event.to_string().as_bytes())?;
+            assert!(output.stderr.is_empty());
+            let response = successful(output)?;
+            assert!(
+                response["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Preserve release evidence."))
+            );
+            let calls = fs::read_to_string(root.join("hook-argv.jsonl"))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(calls.lines().count(), index + 1);
+            let argv: Vec<String> =
+                serde_json::from_str(calls.lines().last().ok_or("hook argv missing")?)
+                    .map_err(|error| error.to_string())?;
+            // Parse what the generated Python actually passed, using the real
+            // CLI contract. A successful fixture response alone cannot detect
+            // tasks that Clap would interpret as flags or built-in help.
+            let parsed = ee::cli::Cli::try_parse_from(argv).map_err(|error| error.to_string())?;
+            assert_eq!(parsed.workspace.as_deref(), Some(Path::new(".")));
+            let Some(ee::cli::Command::Orient(orient)) = parsed.command else {
+                return Err("session hook did not invoke orient".to_owned());
+            };
+            assert_eq!(orient.task, task);
+            assert_eq!(orient.database, None);
+            assert_eq!(orient.max_tokens, 1072);
+            assert_eq!(orient.candidate_pool, Some(20));
+            assert!(orient.fast && orient.include_primer && orient.use_daemon);
+        }
+        assert!(!root.join("hook-task-sentinel").exists());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_hooks_ignore_invalid_events_without_invoking_ee_or_recording_state() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let root = temp.path();
+        let binary = hook_argv_probe_binary(root)?;
+        let mut opts = options(target, &root.join("settings.json"), false, false);
+        opts.ee_binary_path = Some(binary);
+        let report = generate_harness_hook_install(&opts).map_err(|error| error.message())?;
+        assert_eq!(report.snippets.len(), 4);
+        for snippet in &report.snippets {
+            for event in ["", "{", "null", "42", "true", "[]", "\"unexpected\""] {
+                let output = run_generated_hook(root, &snippet.command, event.as_bytes())?;
+                assert!(output.status.success(), "{}: {event:?}", snippet.event);
+                assert!(output.stdout.is_empty(), "{}: {event:?}", snippet.event);
+                assert!(output.stderr.is_empty(), "{}: {event:?}", snippet.event);
+                assert!(
+                    !root.join("hook-argv.jsonl").exists(),
+                    "{} invoked EE for invalid input {event:?}",
+                    snippet.event
+                );
+                assert!(
+                    !root.join(".ee").exists(),
+                    "{} wrote hook state for invalid input {event:?}",
+                    snippet.event
+                );
+            }
+        }
+        // Positive controls prove both session wrappers can invoke the same
+        // executable from this launcher when a valid event is supplied.
+        for (index, id) in [
+            "ee-ambient-session-orient",
+            "ee-ambient-session-capture-suggest",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let snippet = report
+                .snippets
+                .iter()
+                .find(|snippet| snippet.id == id)
+                .ok_or("session snippet missing")?;
+            let event = json!({
+                "cwd": root, "session_id": id, "hook_event_name": snippet.event
+            });
+            let output = run_generated_hook(root, &snippet.command, event.to_string().as_bytes())?;
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            let calls = fs::read_to_string(root.join("hook-argv.jsonl"))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(calls.lines().count(), index + 1);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_stores() -> TestResult {
     // isolated_command isolates "HOME" and "XDG_DATA_HOME".
@@ -331,7 +497,7 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
         .iter()
         .find(|snippet| snippet.event == "SessionStart")
         .ok_or("SessionStart snippet missing")?;
-    let invoke = |command: &str, session: &str| -> Result<Output, String> {
+    let invoke = |command: &str, session: &str, task: &str| -> Result<Output, String> {
         let mut child = isolated_command("sh", root)
             .args(["-c", command])
             .stdin(Stdio::piped())
@@ -339,7 +505,7 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| error.to_string())?;
-        let event = serde_json::json!({"cwd": root, "session_id": session, "task": "prepare release", "hook_event_name": "SessionStart"});
+        let event = serde_json::json!({"cwd": root, "session_id": session, "task": task, "hook_event_name": "SessionStart"});
         child
             .stdin
             .take()
@@ -356,7 +522,7 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
     // what a 2026-10-23 dispatch actually returned and which names none of the
     // three. The outcome IS recorded, in the state file this test already reads
     // below, so read it here instead of reporting the emptiness.
-    let first = invoke(&snippet.command, "first")?;
+    let first = invoke(&snippet.command, "first", "prepare release")?;
     if first.stdout.is_empty() {
         let recorded = root.join(".ee/hook-state/session_start_orient.last.json");
         return Err(format!(
@@ -396,11 +562,23 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
             .map_err(|error| error.to_string())?;
     assert_eq!(state["outcome"], "emitted");
     assert_eq!(state["emittedBytes"], context.len());
-    let duplicate = invoke(&snippet.command, "first")?;
+    let duplicate = invoke(&snippet.command, "first", "prepare release")?;
     assert!(duplicate.status.success());
     assert!(
         duplicate.stdout.is_empty(),
         "same-session context must be deduplicated"
+    );
+
+    let literal = successful(invoke(
+        &snippet.command,
+        "leading-hyphen-task",
+        "- prepare release",
+    )?)?;
+    assert!(
+        literal["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_some_and(|text| text.contains("Verify release checksums")),
+        "a leading-hyphen task must still retrieve real stored context: {literal}"
     );
 
     // A real exec failure must remain fail-open but be visible even though
@@ -415,7 +593,7 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
         .find(|snippet| snippet.event == "SessionStart")
         .ok_or("broken test snippet missing")?
         .command;
-    let failed = invoke(broken_command, "second")?;
+    let failed = invoke(broken_command, "second", "prepare release")?;
     assert!(
         failed.status.success(),
         "hook failures must leave the harness running"
@@ -1473,7 +1651,7 @@ fn install_reclaims_released_wrappers_without_claiming_user_python() -> TestResu
     let wrappers = fixture["wrappers"].as_array().unwrap();
     assert_eq!(
         wrappers.len(),
-        16,
+        18,
         "exercise every published or prior-main body"
     );
     for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
