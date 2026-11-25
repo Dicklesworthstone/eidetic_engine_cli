@@ -81,6 +81,7 @@ pub const PACK_DEFAULT_FORMAT_KEY: &str = "pack.default_format";
 pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
 pub const PACK_ADAPTIVE_BUDGET_KEY: &str = "pack.adaptive_budget";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
+pub const DEFAULT_PACK_MMR_LAMBDA: f32 = 0.75;
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
 pub const PACK_MEMORY_TIER_ADMISSION_KEY: &str = "pack.memory_tier_admission";
 pub const PACK_LOD_FULL_BASIS_POINTS_KEY: &str = "pack.lod_full_basis_points";
@@ -1237,7 +1238,7 @@ pub fn built_in_config(expander: &PathExpander) -> ConfigFile {
             default_format: Some("markdown".to_string()),
             default_max_tokens: Some(4000),
             adaptive_budget: Some(false),
-            mmr_lambda: Some(0.7),
+            mmr_lambda: Some(f64::from(DEFAULT_PACK_MMR_LAMBDA)),
             candidate_pool: Some(100),
             memory_tier_admission: Some(false),
             // Unset: the pack falls back to the in-code 70/20/10 LOD default,

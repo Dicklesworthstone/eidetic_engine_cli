@@ -2052,9 +2052,11 @@ default_profile  = "balanced"
 default_format   = "markdown"
 default_max_tokens = 4000
 adaptive_budget  = false
-mmr_lambda       = 0.7
-# Parsed but not yet read: pack selection uses a fixed relevance weight of
-# 0.75, and `ee config explain pack.mmr_lambda` reports it as forward_looking.
+mmr_lambda       = 0.75
+# MMR profiles: higher favors relevance, lower favors diversity (0.0..=1.0).
+# Resolved from user/workspace config on each request, including daemon packs.
+# The submodular profile keeps its independent facility-location objective.
+# Set with: ee config set pack.mmr_lambda 0.5 --workspace .
 candidate_pool   = 100
 memory_tier_admission = false
 

@@ -138,6 +138,38 @@ fn memory_why_not_observes_native_displacement_instead_of_rerunning_memory_selec
 }
 
 #[test]
+fn memory_why_not_uses_the_selection_weight_captured_before_config_changes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let opts = options(directory.path());
+    let request = ContextRequest::new(ContextRequestInput::for_query(&opts.query))?;
+    let candidate = memory(0x110, 0.8)?;
+    let probe = WhyNotSelectionProbe::new(PackEntityRef::Memory(candidate.memory_id));
+    probe.observe_mmr_relevance_weight(1.0);
+    probe.observe_memories(std::slice::from_ref(&candidate), OmissionCause::Filter);
+    let draft = crate::pack::assemble_draft_with_profile_and_options(
+        request.profile,
+        request.query.clone(),
+        request.budget,
+        vec![candidate],
+        PackAssemblyOptions {
+            mmr_relevance_weight: 1.0,
+            lod_budget_shares: None,
+            ..PackAssemblyOptions::default()
+        },
+    )?;
+    std::fs::create_dir_all(directory.path().join(".ee"))?;
+    std::fs::write(
+        directory.path().join(".ee/config.toml"),
+        "[pack]\nmmr_lambda = 0.0\n",
+    )?;
+    let response = ContextResponse::new(request, draft, Vec::new())?;
+    let report = memory_report(&opts, response, probe.into_observation())?;
+    assert!(report.selected);
+    assert!((report.scores.target_composite - 0.8).abs() < 0.000_01);
+    Ok(())
+}
+
+#[test]
 fn memory_why_not_preserves_v1_schema_when_linked_evidence_wins_the_result_slot() -> TestResult {
     let fixture = Fixture::new()?;
     let target = memory(0x111, 0.4)?;

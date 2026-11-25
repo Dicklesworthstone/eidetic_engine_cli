@@ -116,14 +116,11 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
         ConfigKnob {
             key: PACK_MMR_LAMBDA_KEY,
             category: "pack",
-            effect: "Intended MMR diversity/relevance tradeoff during pack selection: higher favors relevance, lower favors diversity.",
+            effect: "MMR diversity/relevance tradeoff during pack selection: higher favors relevance, lower favors diversity. The default is 0.75.",
             valid_range: "0.0 ..= 1.0",
-            // The config layer parses and shows this key, but pack selection
-            // never reads it: src/pack/mod.rs weights relevance with the
-            // DEFAULT_MMR_RELEVANCE_WEIGHT constant.
-            status: ConfigRuntimeStatus::ForwardLooking,
+            status: ConfigRuntimeStatus::Active,
             caveat: Some(
-                "Not read yet: pack selection weights relevance with a fixed 0.75 (DEFAULT_MMR_RELEVANCE_WEIGHT in src/pack/mod.rs), whatever this key holds, so its default of 0.7 is not the weight in use.",
+                "Applies to MMR pack profiles and their selection explanations. The submodular profile uses its independent facility-location objective; coverage-fill and anti-pattern reservation remain separate policies.",
             ),
         },
         ConfigKnob {
@@ -580,17 +577,15 @@ mod tests {
     }
 
     #[test]
-    fn mmr_lambda_knob_is_forward_looking_while_pack_uses_a_constant() {
+    fn mmr_lambda_knob_describes_the_active_selector_and_shared_default() {
         let knob = knob_for_key(PACK_MMR_LAMBDA_KEY).expect("pack.mmr_lambda is covered");
-        assert_eq!(knob.status, ConfigRuntimeStatus::ForwardLooking);
-        let caveat = knob
-            .caveat
-            .expect("pack.mmr_lambda must say it is not read");
+        assert_eq!(knob.status, ConfigRuntimeStatus::Active);
+        assert_eq!(knob.valid_range, "0.0 ..= 1.0");
         let weight = crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT.to_string();
-        assert!(
-            caveat.contains(&format!("fixed {weight} (DEFAULT_MMR_RELEVANCE_WEIGHT")),
-            "caveat must quote the weight pack selection actually uses ({weight}): {caveat}"
-        );
+        assert!(knob.effect.contains(&format!("default is {weight}")));
+        let caveat = knob.caveat.expect("the non-MMR profile is distinguished");
+        assert!(caveat.contains("submodular"));
+        assert!(caveat.contains("coverage-fill"));
     }
 
     #[test]

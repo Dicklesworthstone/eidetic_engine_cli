@@ -226,7 +226,8 @@ describe("the ee facts the figure states", () => {
     const pack = source("src/pack/mod.rs");
     expect(EE_BUDGET_TOKENS).toBe(4000);
     expect(pack).toContain("pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;");
-    expect(pack).toContain(`pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = ${MMR_RELEVANCE_WEIGHT};`);
+    expect(pack).toContain("pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = crate::config::DEFAULT_PACK_MMR_LAMBDA;");
+    expect(source("src/config/merge.rs")).toContain(`pub const DEFAULT_PACK_MMR_LAMBDA: f32 = ${MMR_RELEVANCE_WEIGHT};`);
     expect(pack).toContain(`pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = ${FILL_FLOOR};`);
     expect(pack).toContain('Self::RedundantCandidate => "redundant_candidate"');
     expect(pack).toContain('Self::ContradictionSuppressed => "contradiction_suppressed"');
