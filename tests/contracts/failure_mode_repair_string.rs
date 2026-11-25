@@ -841,20 +841,12 @@ fn work_packet_fallback_actions_have_repair_safety_metadata() -> TestResult {
 /// parses, so the list can only shrink.
 const UNBUILT_REPAIR_COMMANDS: &[(&str, &str)] = &[
     (
-        "graph_causal_no_evidence",
-        "bd-gfyw3: pins `ee outcome --causal-link`; ee why prints no repair for this code",
-    ),
-    (
         "mesh_cursor_repair_required",
         "bd-brj5x: `ee mesh repair` comes only from the uncompiled src/mesh/anti_entropy_model.rs",
     ),
     (
         "mesh_event_quarantined",
         "bd-brj5x: `ee mesh repair` comes only from the uncompiled src/mesh/anti_entropy_model.rs",
-    ),
-    (
-        "wal_holds_orphaned",
-        "bd-gfyw3: pins `ee lab list` and `ee lab cleanup-orphaned`; backup verify prints no repair",
     ),
 ];
 

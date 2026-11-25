@@ -6724,24 +6724,25 @@ ee graph centrality --algorithm authority --workspace . --json
 
 **Introduced by:** bd-bife.6 (epic G)
 
-**Trigger.** A causal explanation is requested for a memory whose causal_evidence subgraph has no rows.
+**Trigger.** A causal explanation is requested for a memory whose causal_evidence subgraph has no rows. No public command records causal evidence (only the fixture-seeding `ee diag causal-edge` writes rows), so the entry carries no repair.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
+ee config set graph.feature.causal_explain.enabled true --workspace .
 ee remember 'Failure note without causal evidence.' --workspace . --level episodic --kind failure --json
 ```
 
 **Invocation.**
 
 ```bash
-ee why <memory-id> --workspace . --json
+ee why <memory-id> --workspace . --causal-explain --json
 ```
 
-**Expected emission.** Message contains: `causal evidence ... no rows`
+**Expected emission.** Message contains: `No causal evidence rows`
 
-**Repair hint.** Record causal evidence with `ee outcome --causal-link ...`.
+**Repair hint.** Not provided — this code is informational; no operator action is required.
 
 **Fixture.** [`tests/fixtures/failure_modes/graph_causal_no_evidence.json`](../tests/fixtures/failure_modes/graph_causal_no_evidence.json)
 
@@ -18807,7 +18808,7 @@ EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
 
 **Introduced by:** bd-17c65.12.6 (epic L)
 
-**Trigger.** A backup manifest v2 includes WAL hold state whose rows should not be replayed into a restore side path.
+**Trigger.** A backup manifest v2 includes WAL hold state whose rows should not be replayed into a restore side path. Backup verification reports the issue with no repair; no command releases WAL holds.
 
 **Setup.**
 
@@ -18824,7 +18825,7 @@ ee backup verify <backup-id-or-path> --json
 
 **Expected emission.** Message contains: `WAL hold state ... restore side path`
 
-**Repair hint.** ee lab list --workspace WS --json shows which episodes have unreachable LSNs; ee lab cleanup-orphaned releases them.
+**Repair hint.** Not provided — this code is informational; no operator action is required.
 
 **Fixture.** [`tests/fixtures/failure_modes/wal_holds_orphaned.json`](../tests/fixtures/failure_modes/wal_holds_orphaned.json)
 
@@ -19625,5 +19626,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:33a8b051a097a29517b4df33c14bd86b15d9a6c1229559d37f1407649fce1b6a -->
-<!-- degraded-codes-fingerprint body=sha256:9d315def1e144806981beb27c08da4bb0db667893c3374066ea9f657cca76bca -->
+<!-- degraded-codes-fingerprint inputs=sha256:90181c69a10ae3d3c1eb637f99ec18dab2509b5edcf761cf48f70a12192b4802 -->
+<!-- degraded-codes-fingerprint body=sha256:e7d49c30ef9e6def703bc18d6bfe4b660939d95bb3bade70c193a51b6581bb4a -->

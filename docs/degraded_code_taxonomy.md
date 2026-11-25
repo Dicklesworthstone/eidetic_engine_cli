@@ -712,7 +712,7 @@ that helper is the thing to change.
 | `snapshot_pin_expired` | medium | bd-2caru.6 |
 | `snapshot_pin_force_released` | medium | bd-2caru.6 |
 | `snapshot_release_failed` | medium | bd-2caru.6 |
-| `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
+| `wal_holds_orphaned` | warning | bd-17c65.12.6 (derived backup assets) |
 | `cache_hotset_stale` | medium | (TBD) |
 | `hotset_prewarm_no_signals` | low | bd-1zb7k.10.3 (O3) |
 | `hotset_prewarm_apply_asset_missing` | low | bd-ty3pl.3 (hotset prewarm apply) |

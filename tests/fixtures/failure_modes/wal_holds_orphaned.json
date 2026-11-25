@@ -7,9 +7,9 @@
   },
   "surfaces": ["backup verify", "backup restore"],
   "severity": "warning",
-  "repair_present": true,
+  "repair_present": false,
   "trigger": {
-    "description": "A backup manifest v2 includes WAL hold state whose rows should not be replayed into a restore side path.",
+    "description": "A backup manifest v2 includes WAL hold state whose rows should not be replayed into a restore side path. Backup verification reports the issue with no repair; no command releases WAL holds.",
     "setup_commands": [
       "ee backup create --workspace . --include-derived",
       "# ensure derived/wal_holds.json records present=true and rowCount > 0"
@@ -19,9 +19,6 @@
   "expected_emission": {
     "code": "wal_holds_orphaned",
     "severity": "warning",
-    "message_contains": ["WAL hold state", "restore side path"],
-    "repair_contains": "ee lab",
-    "repair_string": "ee lab list --workspace WS --json shows which episodes have unreachable LSNs; ee lab cleanup-orphaned releases them.",
-    "repair_command_regex": "(?P<cmd>ee lab [a-z][a-z0-9-]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+    "message_contains": ["WAL hold state", "restore side path"]
   }
 }

@@ -7,20 +7,19 @@
   },
   "surfaces": ["why"],
   "severity": "low",
-  "repair_present": true,
+  "repair_present": false,
   "trigger": {
-    "description": "A causal explanation is requested for a memory whose causal_evidence subgraph has no rows.",
+    "description": "A causal explanation is requested for a memory whose causal_evidence subgraph has no rows. No public command records causal evidence (only the fixture-seeding `ee diag causal-edge` writes rows), so the entry carries no repair.",
     "setup_commands": [
       "ee init --workspace .",
+      "ee config set graph.feature.causal_explain.enabled true --workspace .",
       "ee remember 'Failure note without causal evidence.' --workspace . --level episodic --kind failure --json"
     ],
-    "invocation": "ee why <memory-id> --workspace . --json"
+    "invocation": "ee why <memory-id> --workspace . --causal-explain --json"
   },
   "expected_emission": {
     "code": "graph_causal_no_evidence",
     "severity": "low",
-    "message_contains": ["causal evidence", "no rows"],
-    "repair_contains": "ee outcome",
-    "repair_string": "Record causal evidence with `ee outcome --causal-link ...`."
+    "message_contains": ["No causal evidence rows"]
   }
 }

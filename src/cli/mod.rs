@@ -57923,9 +57923,19 @@ fn why_causal_explanation_json(
         .degraded
         .iter()
         .map(|degradation| {
+            // No public command records causal evidence (only the fixture-seeding
+            // `ee diag causal-edge` writes rows), so these entries carry no repair.
+            let message = match degradation.code.as_str() {
+                crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE => {
+                    "No causal evidence rows link this memory to a candidate cause."
+                }
+                "graph.causal_cycle" => "Causal evidence rows form a cycle through this memory.",
+                _ => "Causal ancestry was degraded.",
+            };
             serde_json::json!({
                 "code": &degradation.code,
                 "severity": &degradation.severity,
+                "message": message,
                 "cycleMembers": &degradation.cycle_members,
             })
         })
@@ -57939,7 +57949,8 @@ fn why_causal_explanation_json(
                     "code": "graph_causal_explanation_unavailable",
                     "severity": "low",
                     "message": "No terminal causal path was available for this memory.",
-                    "repair": "record causal evidence with `ee causal trace --workspace . --json`",
+                    // `ee causal trace` is read-only: it shows persisted chains, it records none.
+                    "repair": "inspect the persisted causal chains with `ee causal trace --workspace . --json`",
                 }));
             }
             Vec::new()
