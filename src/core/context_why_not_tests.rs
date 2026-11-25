@@ -50,6 +50,36 @@ fn options(workspace: &Path) -> ContextPackOptions {
     }
 }
 
+/// The report `pack` builds when the search index is missing, for `options`' query and modes.
+/// The why-not probe reads only its hits, so the remaining search options need not match a pack.
+fn missing_index_report(options: &ContextPackOptions) -> crate::core::search::SearchReport {
+    let search = crate::core::search::SearchOptions {
+        no_global: options.no_global,
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: options.index_dir.clone(),
+        query: options.query.clone(),
+        limit: 20,
+        speed: options.speed,
+        explain: false,
+        as_of: options.as_of,
+        include_tombstoned: options.include_tombstoned,
+        include_expired: options.include_expired,
+        include_future: options.include_future,
+        include_stale: options.include_stale,
+        relevance_floor: options.relevance_floor,
+        dedup_mode: crate::core::search::SearchDedupMode::DocId,
+        source_mode: options.source_mode,
+        strict_source_mode: options.strict_source_mode,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+    };
+    missing_index_search_report(
+        &search,
+        runtime_profile_for_workspace(&options.workspace_path),
+    )
+}
+
 fn memory(seed: u128, relevance: f32) -> TestResult<PackCandidate> {
     Ok(PackCandidate::new(PackCandidateInput {
         memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(seed)),
@@ -604,11 +634,7 @@ fn why_not_foreign_native_targets_retain_only_identity_and_scope_reason() -> Tes
     let mut options = fixture.options.clone();
     options.workspace_path = other.path().canonicalize()?;
     let request = context_request_from_options(&options)?;
-    let search = missing_index_search_report(
-        &options.query,
-        20,
-        runtime_profile_for_workspace(&options.workspace_path),
-    );
+    let search = missing_index_report(&options);
     for target in [
         PackEntityRef::Rule(rule),
         PackEntityRef::EvidenceSpan(evidence),
@@ -677,11 +703,7 @@ fn why_not_query_exclusions_have_authoritative_filter_reasons_before_candidate_a
                 options.query = query.to_owned();
                 options.as_of = Some(Utc::now() + chrono::Duration::minutes(1));
                 let request = context_request_from_options(&options)?;
-                let mut search = missing_index_search_report(
-                    query,
-                    20,
-                    runtime_profile_for_workspace(&options.workspace_path),
-                );
+                let mut search = missing_index_report(&options);
                 if retrieved {
                     let mut hit = admission_probe_hit(target.id_string());
                     hit.metadata =
@@ -794,11 +816,7 @@ fn why_not_missing_global_memories_keep_canonical_cross_workspace_admission() ->
             let mut options = fixture.options.clone();
             options.memory_scope = scope;
             let request = context_request_from_options(&options)?;
-            let search = missing_index_search_report(
-                &options.query,
-                20,
-                runtime_profile_for_workspace(&options.workspace_path),
-            );
+            let search = missing_index_report(&options);
             let probe = WhyNotSelectionProbe::new(PackEntityRef::Memory(id));
             probe.initialize(
                 &fixture.db,
