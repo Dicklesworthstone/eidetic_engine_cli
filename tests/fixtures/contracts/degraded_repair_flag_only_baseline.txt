@@ -231,7 +231,6 @@ src/core/status.rs	1	Use `--format json` or a binary built with TOON output supp
 src/core/tag_backfill.rs	3	Choose a writable --log path.
 src/core/task_frame.rs	1	Use --status completed or --status abandoned.
 src/core/task_frame.rs	1	Use --status open, then close the frame explicitly.
-src/core/verify.rs	1	Pass an existing memory ID or omit --memory-id.
 src/core/verify.rs	1	pass --target-id <memory-or-pack-id>
 src/core/verify.rs	1	pass --target-type memory or --target-type pack
 src/core/workspace.rs	3	Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.

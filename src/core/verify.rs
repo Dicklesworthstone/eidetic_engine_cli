@@ -1140,7 +1140,7 @@ pub fn verify_bounded_provenance(
                 return Err(DomainError::Usage {
                     message: format!("Memory {memory_id} was not found in the selected workspace."),
                     repair: Some(
-                        "Pass a memory ID from the selected workspace or omit --memory-id."
+                        "Pass a memory ID that `ee memory list --json` shows for this workspace, or omit --memory-id."
                             .to_owned(),
                     ),
                 });

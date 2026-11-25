@@ -2207,9 +2207,8 @@ fn with_recorder_finish_rollup_hook<T>(
             RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.replace(self.0.take()));
         }
     }
-    let _restore = RestoreHook(
-        RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))),
-    );
+    let _restore =
+        RestoreHook(RECORDER_FINISH_ROLLUP_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
     operation()
 }
 
@@ -2263,9 +2262,7 @@ pub fn record_and_persist_event(
     conn.with_transaction_error(|| {
         let run = conn
             .get_recorder_run(&options.run_id)?
-            .ok_or_else(|| {
-                RecordPersistedEventError::RunNotFound(options.run_id.clone())
-            })?;
+            .ok_or_else(|| RecordPersistedEventError::RunNotFound(options.run_id.clone()))?;
         if run.status != RecorderRunStatus::Active.as_str() || run.ended_at.is_some() {
             return Err(RecordPersistedEventError::RunNotActive {
                 run_id: options.run_id.clone(),
@@ -2348,7 +2345,11 @@ pub fn finish_and_persist_recording(
     ) {
         return Err(crate::models::DomainError::Usage {
             message: "Recorder finish status must be completed or abandoned.".to_owned(),
-            repair: Some("Use --status completed or --status abandoned.".to_owned()),
+            // The run id was validated above (run_ plus [A-Za-z0-9_-]), so it is safe to echo.
+            repair: Some(format!(
+                "Pass a final status: ee recorder finish {} --status completed, or --status abandoned.",
+                options.run_id
+            )),
         });
     }
 

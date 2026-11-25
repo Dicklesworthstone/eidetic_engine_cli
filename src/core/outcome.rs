@@ -2683,7 +2683,9 @@ fn harmful_burst_quarantine_recovery_actions() -> Vec<serde_json::Value> {
             "priority": 2,
             "kind": RecoveryKind::Config.as_str(),
             "configPath": ".ee/config.toml",
-            "configKey": "outcome.harmful_per_source_per_hour",
+            // The key the config loader reads (`[feedback]`); the hint used to name an
+            // `outcome.` key that nothing reads.
+            "configKey": crate::config::merge::FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
             "valueHint": "<higher integer if a burst is expected>",
             "rationale": "Raise the cap persistently if your domain legitimately produces high-rate harmful signals.",
         }),
@@ -3174,16 +3176,15 @@ fn release_feedback_quarantine_audited(
             // Evidence admission and native target ownership can change while
             // feedback is held. Recheck authoritative rows after writer
             // acquisition; failure must also roll back the review claim.
-            let learning_observation = validate_quarantined_feedback_target(
-                connection,
-                feedback_input,
-                event_id,
-            )
-            .map_err(|_| crate::db::DbError::MalformedRow {
+            let not_admitted = || crate::db::DbError::MalformedRow {
                 operation: crate::db::DbOperation::Execute,
-                message: "Quarantined feedback target is no longer admitted in its original workspace."
-                    .to_owned(),
-            })?;
+                message:
+                    "Quarantined feedback target is no longer admitted in its original workspace."
+                        .to_owned(),
+            };
+            let learning_observation =
+                validate_quarantined_feedback_target(connection, feedback_input, event_id)
+                    .map_err(|_| not_admitted())?;
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             // Admission releases the original observation; it does not grant
@@ -5249,8 +5250,7 @@ mod tests {
         HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
         OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineReviewOptions,
         OutcomeQuarantineSummary, OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus,
-        SPRT_QUARANTINE_CODE,
-        cancel_kind_from_backend_reason, default_feedback_weight,
+        SPRT_QUARANTINE_CODE, cancel_kind_from_backend_reason, default_feedback_weight,
         feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
         generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
         outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
@@ -7465,8 +7465,8 @@ mod tests {
         )?;
         ensure_equal(
             &recovery[1]["configKey"],
-            &serde_json::json!("outcome.harmful_per_source_per_hour"),
-            "config recovery identifies the harmful cap key",
+            &serde_json::json!("feedback.harmful_per_source_per_hour"),
+            "config recovery names the key the config loader reads",
         )?;
         ensure_equal(
             &recovery[2]["priority"],
