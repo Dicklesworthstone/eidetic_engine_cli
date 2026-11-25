@@ -159,8 +159,9 @@ Initialized ee workspace
 $ ee remember --workspace . --level procedural --kind rule \
     --tags rust,ci \
     "This project treats clippy warnings as errors with pedantic and nursery enabled."
-✓ memory mem_01HQ3K5Z stored (procedural · rule · confidence 0.80)
-✓ indexed in 14ms
+Stored procedural memory (rule): This project treats clippy warnings as errors with pedantic and nursery enabled.
+  ID: mem_01HQ3K5Z8YJ2R4N6P7W9X0ABCD
+  …
 
 # 3. Pull session evidence from your cass history and inspect the v2 payload
 $ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction, evidenceAdmission}'
@@ -190,11 +191,17 @@ $ ee search "release workflow failure" --workspace . --limit 20 --explain --json
 $ ee pack "enforce clippy warnings as errors in CI" --workspace . --profile thorough --json
 
 # 7. Inspect that manually remembered rule
-$ ee why mem_01HQ3K5Z --workspace . --json
+$ ee why mem_01HQ3K5Z8YJ2R4N6P7W9X0ABCD --workspace . --json
 
 # 8. Record that the rule helped
-$ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
-✓ utility +0.08 → confidence 0.63
+$ ee outcome mem_01HQ3K5Z8YJ2R4N6P7W9X0ABCD --workspace . --signal helpful \
+    --reason "Caught a clippy regression"
+Recorded outcome feedback
+
+  Target: memory mem_01HQ3K5Z8YJ2R4N6P7W9X0ABCD
+  Signal: helpful
+  …
+  Confidence: 0.5000 → 0.7500 (↑)
 ```
 
 `evidenceAdmission` says how many imported spans are searchable and why the
