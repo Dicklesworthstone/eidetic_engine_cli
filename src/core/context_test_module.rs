@@ -897,6 +897,7 @@ mod tests {
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -1901,6 +1902,7 @@ mod tests {
             source_mode: options.source_mode,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -3339,6 +3341,7 @@ mod tests {
             source_mode: crate::core::search::SearchSourceMode::default(),
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let (quality_hits, _policy_hash) = super::quality_scored_lexical_memory_fallback_hits(
@@ -8678,6 +8681,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -8850,6 +8854,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::SelfOnly,
+            no_global: false,
             strict_scope: true,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -8897,11 +8902,19 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn l2_search_report() -> SearchReport {
+        SearchReport {
+            source_mode_requested: super::SearchSourceMode::Hybrid,
+            source_mode_applied: super::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            ..ppr_search_report(Vec::new())
+        }
+    }
+
     #[test]
     fn l2_source_mode_metadata_uses_authoritative_search_report_policy() {
         let stale_options_requested = crate::core::search::SearchSourceMode::Hybrid;
-        let mut report =
-            super::missing_index_search_report("source metadata", 10, test_runtime_profile());
+        let mut report = l2_search_report();
         report.source_mode_requested = crate::core::search::SearchSourceMode::LexicalOnly;
         report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
         report.strict_source_mode = true;
@@ -9022,6 +9035,7 @@ pub fn unrelated_context() -> u64 {{
             // mutable-state bypass depend on whether a global store exists on
             // this host, as l2_try_hit_fixture already notes.
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -9054,6 +9068,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let key_input = super::PackL2CacheKeyInput {
@@ -9234,6 +9249,7 @@ pub fn unrelated_context() -> u64 {{
             // Verified, not Swarm: the Swarm scope makes the mutable-state
             // bypass depend on whether a global store exists on this host.
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -9266,6 +9282,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
         };
         let key_input = super::PackL2CacheKeyInput {
@@ -9472,8 +9489,7 @@ pub fn unrelated_context() -> u64 {{
         let mut fixture = l2_try_hit_fixture(tempdir.path(), file_root)?;
         // Only a persisted producer writes L2.
         fixture.options.persist_pack = true;
-        let search_report =
-            super::missing_index_search_report("l2 phase invariant", 10, test_runtime_profile());
+        let search_report = l2_search_report();
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(46)))?;
         super::finalize_context_response(&mut response, fixture.options.output_options, None, None);
@@ -9868,6 +9884,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::SelfOnly,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10002,6 +10019,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10150,6 +10168,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10209,6 +10228,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10253,8 +10273,7 @@ pub fn unrelated_context() -> u64 {{
             key: "blake3:l2-source-mode-fallback".to_owned(),
             key_input,
         };
-        let mut search_report =
-            super::missing_index_search_report("lexical fallback", 10, test_runtime_profile());
+        let mut search_report = l2_search_report();
         search_report.source_mode_requested = crate::core::search::SearchSourceMode::SemanticOnly;
         search_report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
         search_report.source_mode_fallback = true;
@@ -10310,6 +10329,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10355,8 +10375,7 @@ pub fn unrelated_context() -> u64 {{
             key: lookup_key.clone(),
             key_input: key_input.clone(),
         };
-        let search_report =
-            super::missing_index_search_report("backend transition", 10, test_runtime_profile());
+        let search_report = l2_search_report();
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(45)))?;
         response.data.embed_backend = EmbedBackend::NeuralLocal;
@@ -10462,6 +10481,7 @@ pub fn unrelated_context() -> u64 {{
                     relevance_floor: None,
                     redaction_level: crate::models::RedactionLevel::Minimal,
                     memory_scope: MemoryScope::Swarm,
+                    no_global: false,
                     strict_scope: false,
                     ppr_weight: None,
                     changed_symbols: Vec::new(),
@@ -10599,6 +10619,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10771,6 +10792,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -11686,6 +11708,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -11984,6 +12007,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -14936,7 +14960,7 @@ pub fn unrelated_context() -> u64 {{
         let root = directory.path().join("global");
         let paths = crate::core::global_store::GlobalStorePaths::from_root(&root);
         let mut policy = crate::config::MemoryConfig::default();
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "store_absent");
         assert!(binding.is_none());
 
@@ -14944,7 +14968,7 @@ pub fn unrelated_context() -> u64 {{
         let connection =
             DbConnection::open_file(&paths.database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "included");
         let empty = binding.ok_or("empty global store should have an observed binding")?;
         assert!(empty.binding_available);
@@ -14960,7 +14984,7 @@ pub fn unrelated_context() -> u64 {{
                 },
             )
             .map_err(|error| error.to_string())?;
-        let (_, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (_, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         let bound = binding.ok_or("global store should be included")?;
         assert!(bound.binding_available);
         assert_eq!(bound.workspace_id.as_deref(), Some(workspace_id.as_str()));
@@ -14972,11 +14996,14 @@ pub fn unrelated_context() -> u64 {{
         std::fs::write(&corrupt.database_path, b"not a database")
             .map_err(|error| error.to_string())?;
         policy.include_global = Some(false);
-        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
         assert_eq!(posture, "disabled_by_config");
         assert!(binding.is_none(), "disabled stores must not be opened");
         policy.include_global = Some(true);
-        let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, true);
+        assert_eq!(posture, "disabled_by_flag");
+        assert!(binding.is_none());
+        let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
         assert!(!binding.ok_or("present global address")?.binding_available);
         assert_eq!(
             std::fs::read(&corrupt.database_path).map_err(|error| error.to_string())?,
@@ -15126,9 +15153,64 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         Ok((temp, options, connection))
+    }
+
+    #[test]
+    fn missing_index_pack_honors_strict_source_and_reports_actual_retrieval() -> TestResult {
+        use crate::core::search::{SearchError, SearchSourceMode};
+        use crate::search::SpeedMode;
+
+        let (_temp, search, connection) = pack_source_authority_fixture()?;
+        drop(connection);
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = search.workspace_path;
+        options.database_path = search.database_path;
+        options.query = search.query;
+        options.as_of = search.as_of;
+        options.coordination_snapshot_path = None;
+        options.persist_pack = false;
+        options.relevance_floor = Some(0.0);
+        options.memory_scope = MemoryScope::Workspace;
+        options.strict_source_mode = true;
+        for requested in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            options.source_mode = requested;
+            let result = super::run_context_pack_with_performance(&options, PACK_COMMAND);
+            assert!(matches!(
+                result,
+                Err(super::ContextPackError::Search(SearchError::SourceModeUnavailable {
+                    requested: refused,
+                    ..
+                })) if refused == requested
+            ));
+        }
+
+        for (requested, speed, strict, fallback) in [
+            (SearchSourceMode::LexicalOnly, SpeedMode::Default, true, false),
+            (SearchSourceMode::Hybrid, SpeedMode::Default, false, true),
+            (SearchSourceMode::Hybrid, SpeedMode::Instant, false, false),
+        ] {
+            options.source_mode = requested;
+            options.speed = speed;
+            options.strict_source_mode = strict;
+            let run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+                .map_err(|error| error.to_string())?;
+            let plan = &run.performance["data"]["queryPlan"];
+            assert_eq!(plan["sourceModeRequested"], requested.as_str());
+            assert_eq!(plan["sourceModeApplied"], "lexical_only");
+            assert_eq!(plan["strictSourceMode"], strict);
+            assert_eq!(plan["fallbackApplied"], fallback);
+            assert_eq!(run.response.data.embed_backend, EmbedBackend::HashFallback);
+            assert!(
+                run.response.data.pack.items.iter().any(|item| {
+                    item.memory_id.to_string() == pack_source_authority_id(4)
+                })
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -15238,6 +15320,58 @@ pub fn unrelated_context() -> u64 {{
             ]),
             "reviewed and revealed content returns without reviving a superseded revision",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn orient_fast_recent_honors_review_holds_and_borrows_the_callers_snapshot() -> TestResult {
+        let (_temp, search, writer) = pack_source_authority_fixture()?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = search.workspace_path;
+        options.database_path = search.database_path;
+        options.as_of = search.as_of;
+        options.coordination_snapshot_path = None;
+        options.max_tokens = Some(4_000);
+        options.relevance_floor = Some(0.0);
+        let reader = DbConnection::open_file_read_only(
+            options.database_path.as_ref().ok_or("missing fixture path")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let recent = || -> Result<BTreeSet<String>, String> {
+            super::admit_recent_context_memories_with_connection(&options, 10, Some(&reader))
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|row| row.item.memory_id.to_string())
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        };
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let live = BTreeSet::from([pack_source_authority_id(4)]);
+        assert_eq!(recent()?, live);
+        writer
+            .execute_raw(
+                "UPDATE feedback_quarantine SET status = 'rejected', \
+                 reviewed_at = '2026-07-01T00:00:00Z', reviewed_by = 'reviewer'",
+            )
+            .map_err(|error| error.to_string())?;
+        writer
+            .tombstone_memory(&pack_source_authority_id(4))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(recent()?, live, "the caller still owns its source view");
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(recent()?, BTreeSet::from([pack_source_authority_id(3)]));
+
+        writer
+            .execute_raw("ALTER TABLE feedback_quarantine RENAME TO unavailable_review_state")
+            .map_err(|error| error.to_string())?;
+        let error = recent().expect_err("unreadable authority must withhold recent snippets");
+        assert!(error.contains("visibility could not be verified"));
+        assert!(!error.contains("unavailable_review_state"));
         Ok(())
     }
 
@@ -15445,6 +15579,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let run = |options: &SearchOptions| {
@@ -15691,6 +15826,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let mut degraded = Vec::new();
@@ -17048,6 +17184,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: options.source_mode,
             strict_source_mode: false,
             memory_scope: options.memory_scope,
+            no_global: false,
             strict_scope: false,
         };
         let capture = || -> Result<(String, String, String), String> {

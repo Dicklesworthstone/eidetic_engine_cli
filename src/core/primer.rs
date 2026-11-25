@@ -770,7 +770,8 @@ fn run_primer_with_global_lane_at(
     // the lane's content fingerprint must be part of the cache key or a
     // cached primer would silently omit fresh global rows. When the lane is
     // off the key is byte-identical to the pre-lane form.
-    let (mut global_rows, global_lane_degraded) = load_global_lane_rows(global_paths);
+    let (mut global_rows, global_lane_degraded) =
+        load_global_lane_rows(global_paths.filter(|_| settings.global_lane_enabled));
     // The global reader owns revision/seal admission but deliberately leaves
     // author validity to callers. Filter before both hashing and precedence:
     // an expired local twin must not suppress an applicable global rule.

@@ -480,6 +480,7 @@ fn repaired_publication_is_retried_by_the_next_durable_tick_and_becomes_searchab
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: true,
         memory_scope: crate::models::MemoryScope::Workspace,
+        no_global: false,
         strict_scope: false,
     })?;
     assert!(

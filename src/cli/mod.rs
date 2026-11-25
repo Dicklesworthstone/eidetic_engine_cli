@@ -3316,6 +3316,10 @@ pub struct ContextShowArgs {
 /// Arguments for `ee context`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct ContextArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -3690,6 +3694,10 @@ impl From<CompletionShell> for Shell {
     after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.omitted."
 )]
 pub struct PackArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -3950,6 +3958,10 @@ pub enum PackCommand {
 /// Arguments for `ee pack build`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct PackBuildArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -4167,6 +4179,7 @@ impl PackArgs {
             source_mode: self.source_mode,
             strict_source_mode: self.strict_source_mode,
             memory_scope: self.memory_scope,
+            no_global: self.no_global,
             strict_scope: self.strict_scope,
             read_fence: self.read_fence,
             strict_read_fence: self.strict_read_fence,
@@ -6752,6 +6765,10 @@ pub enum JournalCommand {
 /// Arguments for `ee primer` (ADR 0065 / bd-39tzu.3).
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct PrimerArgs {
+    /// Exclude memories from the separate user-global store for this primer.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Token budget for the assembled primer (default: [primer] default_tokens, 600).
     #[arg(long, value_name = "N")]
     pub tokens: Option<u32>,
@@ -9620,6 +9637,10 @@ pub struct RehearsePromotePlanArgs {
     after_help = "With --json, search documents live at data.results; result count lives at data.resultCount."
 )]
 pub struct SearchArgs {
+    /// Exclude the separate user-global memory store for this search.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "family")]
+    pub no_global: bool,
+
     /// Query string to search for. Omit it when retrieving an attempt family.
     #[arg(
         value_name = "QUERY",
@@ -17963,6 +17984,7 @@ fn pack_quality_actuals_for_cases(
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -18564,6 +18586,7 @@ fn run_eval_retrieval_queries(
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let report = crate::core::search::run_search_with_embedder(
@@ -36798,6 +36821,7 @@ where
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: args.memory_scope,
+        no_global: false,
         strict_scope: args.strict_scope,
     };
 
@@ -43107,8 +43131,19 @@ fn context_stream_pack_id(
     );
     let digest = blake3::hash(source.as_bytes()).to_hex().to_string();
     let bound = crate::core::context::task_paths_query_hash(&digest, &request.task_paths);
+    let bound = pack_query_hash_with_global_policy(bound, pack_options.no_global);
     let digest = bound.strip_prefix("blake3:").unwrap_or(&bound);
     format!("pack_stream_{}", &digest[..26])
+}
+
+fn pack_query_hash_with_global_policy(hash: String, no_global: bool) -> String {
+    if !no_global {
+        return hash;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.pack.query.no_global.v1\0");
+    hasher.update(hash.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn context_stream_header_frame(
@@ -43728,6 +43763,7 @@ where
             relevance_floor: None,
             redaction_level: BackupRedaction::Minimal.to_model(),
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -44646,6 +44682,7 @@ where
         relevance_floor: args.relevance_floor,
         redaction_level: redaction.level,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
         changed_symbols: args.changed_symbols.clone(),
@@ -48106,6 +48143,7 @@ where
                 .memory_scope
                 .or(lens_memory_scope)
                 .unwrap_or(MemoryScope::Swarm),
+            no_global: args.no_global,
             strict_scope: args.strict_scope,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
@@ -48130,8 +48168,20 @@ where
     }
 
     match &args.command {
+        Some(PackCommand::Build(build_args)) if args.no_global => {
+            let mut build_args = build_args.clone();
+            build_args.no_global = true;
+            handle_pack(process, cli, &build_args, stdout, stderr)
+        }
         Some(PackCommand::Build(build_args)) => {
             handle_pack(process, cli, build_args, stdout, stderr)
+        }
+        Some(PackCommand::Replay(_) | PackCommand::Diff(_)) if args.no_global => {
+            let error = DomainError::Usage {
+                message: "--no-global selects input stores when building a new pack.".to_owned(),
+                repair: Some("Use ee pack <task> --no-global for a fresh selection.".to_owned()),
+            };
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
         }
         Some(PackCommand::Replay(replay_args)) => {
             handle_pack_replay(cli, replay_args, stdout, stderr)
@@ -48273,6 +48323,7 @@ where
         };
         let query_hash = crate::models::compute_query_shape_hash(&request.query, &request.filters);
         let query_hash = crate::core::context::task_paths_query_hash(&query_hash, &task_paths);
+        let query_hash = pack_query_hash_with_global_policy(query_hash, args.no_global);
         let offset = match &request.pagination.cursor {
             Some(cursor_token) => match crate::models::PaginationCursor::decode(cursor_token) {
                 Ok(cursor) => {
@@ -48360,6 +48411,7 @@ where
             .memory_scope
             .or(lens_memory_scope)
             .unwrap_or(MemoryScope::Swarm),
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
         ppr_weight: None,
         changed_symbols: Vec::new(),
@@ -51223,6 +51275,10 @@ fn daemon_search_fallback_degradation(reason: DaemonSearchFallbackReason) -> Sea
 fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFallbackReason> {
     [
         (
+            args.no_global,
+            DaemonSearchFallbackReason::UnsupportedCliOption("--no-global remains in-process"),
+        ),
+        (
             matches!(args.memory_scope, MemoryScope::SelfOnly | MemoryScope::Team),
             // Scope admission still resolves EE_AGENT_NAME in the executing
             // process. The request's agent_id is an attribution field, not a
@@ -51565,7 +51621,11 @@ fn run_context_pack_with_daemon_retrieval(
     }
     let serving = std::sync::Mutex::new(None);
     let provider = |search_options: &SearchOptions, require_cached_local: bool| {
-        let result = if !options.filters.filters.is_empty() {
+        let result = if options.no_global {
+            Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--no-global remains in-process",
+            ))
+        } else if !options.filters.filters.is_empty() {
             Err(DaemonSearchFallbackReason::UnsupportedCliOption(
                 "metadata field filters remain in-process",
             ))
@@ -52017,6 +52077,7 @@ fn all_workspaces_search_options(
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
     }
 }
@@ -52411,6 +52472,7 @@ where
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
     };
     command_timings.push(cli_performance_timing_json(
@@ -53819,8 +53881,9 @@ where
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
-    let settings =
+    let mut settings =
         crate::core::primer::primer_settings_from_workspace(&workspace_path, format, args.tokens);
+    settings.global_lane_enabled &= !args.no_global;
     let report = match crate::core::primer::run_primer_with_persistence(
         &connection,
         &workspace_id,
@@ -57529,6 +57592,7 @@ where
         relevance_floor: None,
         redaction_level: BackupRedaction::Minimal.to_model(),
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),
@@ -75631,6 +75695,7 @@ mod tests {
             relevance_floor: None,
             redaction_level: RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: true,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -98476,6 +98541,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: args.memory_scope,
+                no_global: args.no_global,
                 strict_scope: false,
             };
             let reason = search_via_daemon(&args, &options, None)
@@ -99509,6 +99575,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         ensure_equal(
@@ -99661,6 +99728,7 @@ mod tests {
                     source_mode,
                     strict_source_mode: false,
                     memory_scope: MemoryScope::Swarm,
+                    no_global: false,
                     strict_scope: false,
                 };
                 let result = super::search_daemon_response_before(
@@ -99770,6 +99838,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             };
             let result = super::search_daemon_response_before(
@@ -99920,6 +99989,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let started = std::time::Instant::now();

@@ -30,6 +30,7 @@ fn options(workspace: &Path) -> ContextPackOptions {
         relevance_floor: None,
         redaction_level: crate::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Workspace,
+        no_global: false,
         strict_scope: false,
         ppr_weight: Some(0.0),
         changed_symbols: Vec::new(),

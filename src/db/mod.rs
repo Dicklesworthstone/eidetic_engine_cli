@@ -15468,6 +15468,14 @@ const INDEX_EVIDENCE_ROWID_COLUMN: usize = 4;
 const INDEX_EVIDENCE_HYDRATION_SQL: &str = "SELECT e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at, e.rowid FROM evidence_spans e WHERE e.rowid >= ?1 AND e.rowid <= ?2 ORDER BY e.rowid ASC LIMIT ?3";
 const INDEX_EVIDENCE_HYDRATED_ROWID_COLUMN: usize = 27;
 
+pub(crate) const CASS_BACKUP_CHUNK_ROWS: usize = 128;
+
+#[derive(Debug)]
+pub(crate) struct BackupEvidenceKey {
+    pub(crate) id: String,
+    rowid: i64,
+}
+
 /// One index-order page read by `read_index_evidence_page`.
 struct IndexEvidencePage {
     /// This workspace's search candidates among the rows read, hydrated.
@@ -18254,6 +18262,82 @@ impl DbConnection {
         )?;
 
         self.evidence_spans_from_rows(&rows)
+    }
+
+    /// Discover the workspace's archive order without sorting transcript bodies.
+    /// Rowids are transient addresses, consumed in the caller's source snapshot.
+    pub(crate) fn list_evidence_keys_for_backup(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<BackupEvidenceKey>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, rowid FROM evidence_spans WHERE workspace_id = ?1 ORDER BY session_id ASC, start_line ASC, end_line ASC, id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok(BackupEvidenceKey {
+                    id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                    rowid: required_i64(row, 1, DbOperation::Query, "rowid")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Hydrate one archive chunk. Consecutive physical rows share a range seek,
+    /// even when their transcript order differs. Never read bodies in gaps:
+    /// they can belong to another workspace. Admission evaluates raw rows via
+    /// the ordinary uncached reader and egress checks.
+    pub(crate) fn read_evidence_chunk_for_backup(
+        &self,
+        workspace_id: &str,
+        keys: &[BackupEvidenceKey],
+    ) -> Result<Vec<StoredEvidenceSpan>> {
+        let mismatch = || DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "Backup evidence chunk disagrees with source discovery".to_owned(),
+        };
+        if keys.len() > CASS_BACKUP_CHUNK_ROWS {
+            return Err(mismatch());
+        }
+        let mut physical: Vec<_> = keys.iter().enumerate().collect();
+        physical.sort_unstable_by_key(|(_, key)| key.rowid);
+        let mut ordered = Vec::with_capacity(keys.len());
+        let cx = asupersync::Cx::current();
+        for run in physical.chunk_by(|(_, a), (_, b)| a.rowid.checked_add(1) == Some(b.rowid)) {
+            checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+            let (_, first) = run.first().ok_or_else(mismatch)?;
+            let (_, last) = run.last().ok_or_else(mismatch)?;
+            let limit = i64::try_from(run.len()).map_err(|_| mismatch())? + 1;
+            let rows = self.query_for(
+                DbOperation::Query,
+                INDEX_EVIDENCE_HYDRATION_SQL,
+                &[
+                    Value::BigInt(first.rowid),
+                    Value::BigInt(last.rowid),
+                    Value::BigInt(limit),
+                ],
+            )?;
+            if rows.len() != run.len() {
+                return Err(mismatch());
+            }
+            for ((position, key), row) in run.iter().zip(&rows) {
+                let span = stored_evidence_span_from_row(row)?;
+                let rowid = required_i64(
+                    row,
+                    INDEX_EVIDENCE_HYDRATED_ROWID_COLUMN,
+                    DbOperation::Query,
+                    "rowid",
+                )?;
+                if rowid != key.rowid || span.id != key.id || span.workspace_id != workspace_id {
+                    return Err(mismatch());
+                }
+                ordered.push((*position, span));
+            }
+        }
+        ordered.sort_unstable_by_key(|(position, _)| *position);
+        Ok(ordered.into_iter().map(|(_, span)| span).collect())
     }
 
     /// List evidence spans for a workspace in deterministic transcript order.
@@ -60888,23 +60972,58 @@ UPDATE memories
             "ev_91234567890123456789012345",
             &evidence_span_input("sess_51234567890123456789012345", "a2-line20", 20),
         )?;
-        connection.insert_evidence_span(
-            "ev_81234567890123456789012345",
-            &evidence_span_input("sess_41234567890123456789012345", "a1-line30", 30),
-        )?;
-        connection.insert_evidence_span(
-            "ev_71234567890123456789012345",
-            &evidence_span_input("sess_41234567890123456789012345", "a1-line10", 10),
-        )?;
+        let mut structured =
+            evidence_span_input("sess_41234567890123456789012345", "a1-line30", 30);
+        structured.excerpt = r#"{"role":"assistant","content":"The build passed."}"#.to_owned();
+        structured.content_hash = super::canonical_evidence_hash(&structured.excerpt);
+        connection.insert_evidence_span("ev_81234567890123456789012345", &structured)?;
         // Workspace B span, which must NOT appear in workspace A results.
         let mut span_b = evidence_span_input("sess_61234567890123456789012345", "b1-line5", 5);
         span_b.workspace_id = "wsp_91234567890123456789012345".to_string();
         connection.insert_evidence_span("ev_01234567890123456789012345", &span_b)?;
+        connection.insert_evidence_span(
+            "ev_71234567890123456789012345",
+            &evidence_span_input("sess_41234567890123456789012345", "a1-line10", 10),
+        )?;
 
         // Workspace A: filtered + ordered by (session_id ASC, start_line ASC),
         // with workspace B's span excluded.
         let spans_a =
             connection.list_evidence_spans_for_workspace("wsp_01234567890123456789012345")?;
+        let workspace = "wsp_01234567890123456789012345";
+        let keys = connection.list_evidence_keys_for_backup(workspace)?;
+        let (archived, reads) = super::capture_query_sql_for_test(|| {
+            connection.read_evidence_chunk_for_backup(workspace, &keys)
+        });
+        let archived = archived?;
+        ensure_equal(
+            &archived.iter().map(|span| &span.id).collect::<Vec<_>>(),
+            &spans_a.iter().map(|span| &span.id).collect::<Vec<_>>(),
+            "physical range seeks restore the logical transcript order",
+        )?;
+        for (raw, cached) in archived.iter().zip(&spans_a) {
+            ensure_equal(
+                &raw.reader_body(),
+                &cached.reader_body(),
+                "uncached backup body matches the persisted projection",
+            )?;
+            ensure_equal(
+                &raw.row_admission_verdict(),
+                &cached.row_admission_verdict(),
+                "uncached backup admission agrees with the hydrated row",
+            )?;
+        }
+        ensure_equal(
+            &reads,
+            &vec![super::INDEX_EVIDENCE_HYDRATION_SQL.to_owned(); 2],
+            "two contiguous runs separated by a foreign span require two range seeks",
+        )?;
+        ensure(
+            connection
+                .read_evidence_chunk_for_backup("wsp_91234567890123456789012345", &keys)
+                .is_err(),
+            "a foreign page cannot be relabeled for another workspace",
+        )?;
         let cass_a: Vec<&str> = spans_a.iter().map(|s| s.cass_span_id.as_str()).collect();
         let expected_a1_line10 = super::canonical_evidence_hash("a1-line10");
         let expected_a1_line30 = super::canonical_evidence_hash("a1-line30");

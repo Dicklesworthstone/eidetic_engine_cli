@@ -59,6 +59,9 @@ fn hash_path(hasher: &mut blake3::Hasher, path: &Path) {
 pub(super) fn request_identity(options: &SearchOptions) -> Option<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.pack.retrieval_request_witness.v1");
+    if options.no_global {
+        hasher.update(b"no_global\0");
+    }
     hash_path(&mut hasher, &options.workspace_path);
     hash_path(&mut hasher, &options.resolve_database_path());
     hash_path(&mut hasher, &options.resolve_index_dir());
@@ -110,7 +113,7 @@ pub(super) fn capture(
         hash_path(&mut hasher, &paths.root);
         hash_path(&mut hasher, &paths.database_path);
         if let Some((_, snapshot)) = admitted {
-            if !participating || !enabled {
+            if options.no_global || !participating || !enabled {
                 return None;
             }
             hasher.update(b"admitted");
@@ -196,7 +199,7 @@ pub(super) fn capture(
                     store_present: paths.database_path.try_exists().ok()?,
                     participating,
                     config_enabled: enabled,
-                    no_global_flag: false,
+                    no_global_flag: options.no_global,
                 });
             // Failure to inspect an enabled store is not proof of an empty
             // lane. Keep the handoff unusable and let canonical retrieval retry.

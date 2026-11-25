@@ -1795,6 +1795,7 @@ fn warm_daemon_search_stack(
         source_mode: SearchSourceMode::default(),
         strict_source_mode: false,
         memory_scope: MemoryScope::default(),
+        no_global: false,
         strict_scope: false,
     };
     run_search_unaudited_with_runtime(&options, runtime).map(|_| ())
@@ -3173,6 +3174,7 @@ impl DaemonSearchParams {
                 source_mode,
                 strict_source_mode: self.strict_source_mode,
                 memory_scope,
+                no_global: false,
                 strict_scope: self.strict_scope,
             },
             kind,
@@ -6792,6 +6794,7 @@ impl DaemonContextParams {
             relevance_floor: self.relevance_floor,
             redaction_level: self.redaction_level,
             memory_scope: self.memory_scope,
+            no_global: false,
             strict_scope: self.strict_scope,
             ppr_weight: self.ppr_weight,
             changed_symbols: self.changed_symbols.clone(),
@@ -13587,6 +13590,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,

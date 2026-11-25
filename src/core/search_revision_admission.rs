@@ -339,7 +339,7 @@ pub(in crate::core::search) fn seed_is_visible(
 
 /// Own only snapshots begun here. A nested begin must not release a caller's
 /// existing transaction, and early returns must never leave a snapshot pinned.
-pub(in crate::core::search) struct RevisionReadSnapshot<'a> {
+pub(crate) struct RevisionReadSnapshot<'a> {
     connection: &'a DbConnection,
     active: bool,
 }
@@ -356,9 +356,7 @@ impl<'a> RevisionReadSnapshot<'a> {
     /// Canonical retrieval also accepts caller-provided connections. Borrow
     /// only the recognized already-open transaction; other BEGIN failures do
     /// not establish a snapshot and must propagate.
-    pub(in crate::core::search) fn begin_or_borrow(
-        connection: &'a DbConnection,
-    ) -> Result<Self, DbError> {
+    pub(crate) fn begin_or_borrow(connection: &'a DbConnection) -> Result<Self, DbError> {
         let active = match connection.begin_read_snapshot() {
             Ok(()) => true,
             Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
@@ -367,7 +365,7 @@ impl<'a> RevisionReadSnapshot<'a> {
         Ok(Self { connection, active })
     }
 
-    pub(in crate::core::search) fn finish(mut self) -> Result<(), DbError> {
+    pub(crate) fn finish(mut self) -> Result<(), DbError> {
         if self.active {
             self.connection.rollback_read_snapshot()?;
         }
@@ -478,6 +476,7 @@ mod seal_tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         Ok((temp, options, db))

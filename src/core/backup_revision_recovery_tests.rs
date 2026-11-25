@@ -1314,6 +1314,7 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
                     source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                     strict_source_mode: true,
                     memory_scope: crate::models::MemoryScope::Workspace,
+                    no_global: false,
                     strict_scope: false,
                 })
                 .map_err(|e| e.to_string())?;

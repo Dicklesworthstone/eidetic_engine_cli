@@ -33,6 +33,7 @@ fn options(workspace: &Path) -> ContextPackOptions {
         relevance_floor: Some(0.0),
         redaction_level: RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),

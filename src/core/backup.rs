@@ -48,7 +48,8 @@ use crate::db::shard::{
     resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
 };
 use crate::db::{
-    CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    CASS_BACKUP_CHUNK_ROWS, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
+    CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAgent, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
     StoredAuditEntry, StoredCausalEvidence, StoredCertificateRecord, StoredCurationCandidate,
@@ -86,7 +87,6 @@ const RECORDS_FILE: &str = "records.jsonl";
 const MANIFEST_FILE: &str = "manifest.json";
 const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
     "ee init --workspace . && ee migrate run --workspace . --json";
-const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v2";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
@@ -9263,10 +9263,10 @@ fn collect_procedure_history_payloads(
         .map(|row| row.id)
         .chain(
             connection
-                .list_evidence_spans_for_workspace(workspace_id)
+                .list_evidence_keys_for_backup(workspace_id)
                 .map_err(work_history_error)?
                 .into_iter()
-                .map(|row| row.id),
+                .map(|key| key.id),
         )
         .collect();
     let redact_uri = |uri: &str| redact_procedure_uri(uri, redaction, memory_ids, &provenance_ids);
@@ -13039,8 +13039,8 @@ fn collect_cass_payloads(
         }
     }
 
-    let evidence = match connection.list_evidence_spans_for_workspace(workspace_id) {
-        Ok(evidence) => evidence,
+    let keys = match connection.list_evidence_keys_for_backup(workspace_id) {
+        Ok(keys) => keys,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("evidence_spans", error));
             return None;
@@ -13051,10 +13051,21 @@ fn collect_cass_payloads(
         .map(|session| (session.id.as_str(), session))
         .collect::<BTreeMap<_, _>>();
     let mut admission = BackupEvidenceAdmissionSummary::default();
-    for (index, chunk) in evidence.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
-        let mut evidence_spans = Vec::with_capacity(chunk.len());
-        for span in chunk {
-            let mut record = BackupCassEvidenceRecord::from_stored(span);
+    // Keep only the sorted keys and the current chunk of export records.
+    // The source snapshot encloses both discovery and the rowid range reads.
+    // Publish the evidence family only after its final source row is readable.
+    let mut evidence_payloads = Vec::new();
+    for (index, chunk) in keys.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
+        let spans = match connection.read_evidence_chunk_for_backup(workspace_id, chunk) {
+            Ok(spans) => spans,
+            Err(error) => {
+                degraded.push(required_backup_rows_unreadable("evidence_spans", error));
+                return None;
+            }
+        };
+        let mut evidence_spans = Vec::with_capacity(spans.len());
+        for span in spans {
+            let mut record = BackupCassEvidenceRecord::from_stored(&span);
             if let Some(id) = record.memory_id.as_mut()
                 && let Some(restored_id) = memory_ids.get(id)
             {
@@ -13067,7 +13078,7 @@ fn collect_cass_payloads(
                         span.is_derivation_admitted_for_session(workspace_id, session)
                     });
             record.redact_for_export(redaction_level, provenance_admitted);
-            if let Err(error) = admission.observe(span, &record) {
+            if let Err(error) = admission.observe(&span, &record) {
                 degraded.push(required_backup_rows_unreadable("evidence_spans", error));
                 return None;
             }
@@ -13080,7 +13091,7 @@ fn collect_cass_payloads(
             evidence_spans,
         };
         match serialized_payload_bytes(&chunk) {
-            Ok(bytes) => payloads.push(derived_payload(
+            Ok(bytes) => evidence_payloads.push(derived_payload(
                 format!("derived/cass/evidence-spans-{index:04}.json"),
                 "cass_evidence_spans",
                 captured_at,
@@ -13093,6 +13104,7 @@ fn collect_cass_payloads(
             }
         }
     }
+    payloads.extend(evidence_payloads);
     Some(admission)
 }
 
@@ -24244,6 +24256,7 @@ mod tests {
                 source_mode: SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             })
             .map_err(|e| e.to_string())?;
@@ -26437,6 +26450,7 @@ mod tests {
                     relevance_floor: Some(0.0),
                     redaction_level: RedactionLevel::Standard,
                     memory_scope: crate::models::MemoryScope::Workspace,
+                    no_global: false,
                     strict_scope: false,
                     ppr_weight: Some(0.0),
                     changed_symbols: vec![],
@@ -27423,6 +27437,7 @@ mod tests {
                 source_mode: SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             })
             .map_err(|e| e.to_string())?;
@@ -27455,6 +27470,7 @@ mod tests {
                     relevance_floor: Some(0.0),
                     redaction_level: RedactionLevel::Standard,
                     memory_scope: crate::models::MemoryScope::Workspace,
+                    no_global: false,
                     strict_scope: false,
                     ppr_weight: Some(0.0),
                     changed_symbols: Vec::new(),
@@ -28637,6 +28653,7 @@ mod tests {
                         relevance_floor: None,
                         redaction_level: RedactionLevel::Standard,
                         memory_scope: crate::models::MemoryScope::Swarm,
+                        no_global: false,
                         strict_scope: false,
                         ppr_weight: Some(0.0),
                         changed_symbols: Vec::new(),
@@ -30123,7 +30140,7 @@ mod tests {
             .canonicalize()
             .map_err(|error| error.to_string())?
             .join("backups");
-        let created = create_backup(&BackupCreateOptions {
+        let options = BackupCreateOptions {
             workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: Some(out),
@@ -30136,8 +30153,24 @@ mod tests {
             include_derived,
             include_graph_cache: include_derived,
             dry_run: false,
-        })
-        .map_err(|error| error.message())?;
+        };
+        let (created, queries) =
+            crate::db::capture_query_sql_for_test(|| create_backup(&options));
+        let created = created.map_err(|error| error.message())?;
+        let ordered_reads: Vec<_> = queries
+            .iter()
+            .filter(|sql| {
+                sql.contains("FROM evidence_spans WHERE workspace_id = ?1 ORDER BY session_id")
+            })
+            .map(String::as_str)
+            .collect();
+        ensure(
+            !ordered_reads.is_empty()
+                && ordered_reads
+                    .iter()
+                    .all(|sql| sql.starts_with("SELECT id, rowid FROM evidence_spans ")),
+            "archive capture must not order or retain a full workspace of transcript bodies",
+        )?;
         let session_asset = created
             .derived
             .iter()

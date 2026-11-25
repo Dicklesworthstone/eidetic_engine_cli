@@ -166,6 +166,7 @@ fn ee_search_writes_hash_only_retrieval_audit_rows() -> TestResult {
         source_mode: ee::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
@@ -274,6 +275,7 @@ fn ee_search_audit_payloads_carry_hashed_never_raw_query_text() -> TestResult {
         source_mode: ee::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
@@ -377,6 +379,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         relevance_floor: None,
         redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),

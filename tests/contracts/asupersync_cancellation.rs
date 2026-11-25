@@ -217,6 +217,7 @@ fn cancellation_search_options(fixture: &IndexedWorkspaceFixture) -> SearchOptio
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     }
 }

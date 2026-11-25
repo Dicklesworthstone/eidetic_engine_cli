@@ -75,7 +75,7 @@ use crate::search::{
 // Test-only: used by the inline `#[cfg(test)]` suites further down.
 #[cfg(test)]
 use crate::search::HashEmbedder;
-use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+use crate::util::radix_ulid_sort::sort_slice_by_ulid_payload_or_lexical;
 use frankensearch::LexicalRead;
 
 #[path = "search_global_handoff.rs"]
@@ -477,6 +477,8 @@ struct CachedLexicalRamTierSearchConfig {
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
+    /// Exclude the separate user-global memory store for this request.
+    pub no_global: bool,
     pub workspace_path: PathBuf,
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
@@ -10182,6 +10184,7 @@ async fn run_similar_with_cx_and_posture(
         source_mode,
         strict_source_mode: false,
         memory_scope: options.memory_scope,
+        no_global: false,
         strict_scope: options.strict_scope,
     };
     let determinism = Deterministic::from_seed(0);
@@ -14239,7 +14242,7 @@ mod unpublished_tests;
 #[path = "search_rule_admission.rs"]
 mod rule_admission;
 pub(crate) use rule_admission::load_pack_rule_projections;
-pub(crate) use rule_admission::memory_revisions::admit_local_memory_ids;
+pub(crate) use rule_admission::memory_revisions::{RevisionReadSnapshot, admit_local_memory_ids};
 
 struct DiagSearchSyncResult {
     // Kept private: raw arm JSON intentionally contains only IDs, ranks and scores.
@@ -15378,12 +15381,23 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     // fusion-only hits and amongst themselves by descending rerank score;
     // non-reranked hits use the cross-scale relevance projection and retain
     // native score ordering within one score kind.
-    hits.sort_by(rerank_aware_hit_order);
+    if hits.len() < 2 {
+        return;
+    }
+    // Choose the policy once for the whole pool. Switching comparators for
+    // each pair can form a cycle when only some hits carry quality metadata.
+    let compare: fn(&SearchHit, &SearchHit) -> std::cmp::Ordering =
+        if hits.iter().any(|hit| hit.ranking_components_json().is_some()) {
+            quality_scored_hit_order
+        } else {
+            rerank_aware_hit_order
+        };
+    hits.sort_by(compare);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
         let mut run_end = run_start + 1;
         while run_end < hits.len()
-            && rerank_aware_hit_order(&hits[run_start], &hits[run_end]) == std::cmp::Ordering::Equal
+            && compare(&hits[run_start], &hits[run_end]) == std::cmp::Ordering::Equal
         {
             run_end += 1;
         }
@@ -15436,7 +15450,7 @@ fn admitted_global_store_memories(
             store_present: paths.database_path.exists(),
             participating: memory_config.participate.unwrap_or(true),
             config_enabled: memory_config.include_global.unwrap_or(true),
-            no_global_flag: false,
+            no_global_flag: options.no_global,
         });
     if !inclusion.included {
         // Presence is the first inclusion gate. Every other exclusion means
@@ -15684,6 +15698,7 @@ async fn global_store_snapshot_frankensearch_hits(
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: false,
         memory_scope: MemoryScope::Global,
+        no_global: false,
         strict_scope: options.strict_scope,
     };
     if reconcile && !source_only {
@@ -16337,6 +16352,17 @@ fn preload_returned_search_memories(
     }
 }
 
+/// Apply the quality score, or its defined relevance fallback, to every hit
+/// in a quality-ranked pool. Equal scores retain the native scale tie-break.
+fn quality_scored_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
+    right
+        .ranking_score()
+        .total_cmp(&left.ranking_score())
+        .then_with(|| right.relevance_score().total_cmp(&left.relevance_score()))
+        .then_with(|| left.score_kind().cmp(right.score_kind()))
+        .then_with(|| right.score.total_cmp(&left.score))
+}
+
 /// Ranking order for final search hits (bd-2vq2z.30). Reranked hits (those
 /// carrying a `rerank_score`) outrank fusion-only hits and order amongst
 /// themselves by descending rerank score, so a reranker's decision survives to
@@ -16345,14 +16371,6 @@ fn preload_returned_search_memories(
 /// native score breaks relevance ties within a score kind, preserving engine
 /// ordering where the projection clamps multiple values to the same endpoint.
 fn rerank_aware_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
-    if left.ranking_components_json().is_some() || right.ranking_components_json().is_some() {
-        return right
-            .ranking_score()
-            .total_cmp(&left.ranking_score())
-            .then_with(|| right.relevance_score().total_cmp(&left.relevance_score()))
-            .then_with(|| left.score_kind().cmp(right.score_kind()))
-            .then_with(|| right.score.total_cmp(&left.score));
-    }
     match (left.rerank_score, right.rerank_score) {
         (Some(left_rerank), Some(right_rerank)) => right_rerank.total_cmp(&left_rerank),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -16382,9 +16400,7 @@ fn sort_search_hit_score_tie_by_doc_id(hits: &mut [SearchHit]) {
 
 fn sort_search_hit_score_tie_by_doc_id_within_workspace(hits: &mut [SearchHit]) {
     if hits.iter().all(|hit| hit.doc_id.starts_with("mem_")) {
-        let mut ordered = hits.to_vec();
-        sort_by_ulid_payload_or_lexical(&mut ordered, |hit| hit.doc_id.as_str());
-        hits.clone_from_slice(&ordered);
+        sort_slice_by_ulid_payload_or_lexical(hits, |hit| hit.doc_id.as_str());
     } else {
         hits.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
     }
@@ -19227,6 +19243,7 @@ mod tests {
                     source_mode: SearchSourceMode::SemanticOnly,
                     strict_source_mode: true,
                     memory_scope: MemoryScope::Workspace,
+                    no_global: false,
                     strict_scope: false,
                 };
                 Self {
@@ -21882,6 +21899,7 @@ mod tests {
             source_mode,
             strict_source_mode,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
     }
@@ -22023,6 +22041,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         Ok((options, connection, selection))
@@ -25027,6 +25046,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -25163,6 +25183,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let mut degraded = Vec::new();
@@ -26250,6 +26271,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Global,
+            no_global: false,
             strict_scope: false,
         };
         let search = || {
@@ -26526,6 +26548,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26679,6 +26702,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26860,6 +26884,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26977,6 +27002,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -27318,6 +27344,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| error.to_string())?;
@@ -27645,6 +27672,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -27775,6 +27803,7 @@ mod tests {
             source_mode: SearchSourceMode::SemanticOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let old = Arc::new(IdentityHashEmbedder::new(
@@ -28092,6 +28121,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28128,6 +28158,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28239,6 +28270,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28325,6 +28357,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28719,6 +28752,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| format!("initial admitted-evidence search failed: {error}"))?;
@@ -28763,6 +28797,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28978,6 +29013,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             },
             Arc::clone(&hash_embedder),
@@ -29058,6 +29094,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
         .two_tier_config_for_limit(5);
@@ -29185,6 +29222,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -29268,6 +29306,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -29301,6 +29340,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let config = options.two_tier_config();
@@ -29344,6 +29384,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -30765,6 +30806,36 @@ mod tests {
     }
 
     #[test]
+    fn mixed_quality_and_rerank_hits_have_one_order_for_every_input_permutation() {
+        let mut reranked = synthetic_hit("reranked", 0.1);
+        reranked.rerank_score = Some(0.1);
+        let ordinary = synthetic_hit("ordinary", 0.9);
+        let mut quality = synthetic_hit("quality", 0.4);
+        quality.metadata = Some(serde_json::json!({
+            (super::SEARCH_QUALITY_SCORING_KEY): {
+                "schema": super::SEARCH_SCORING_POLICY_V1,
+                "components": { "finalScore": 0.5 }
+            }
+        }));
+        let original = [reranked, ordinary, quality];
+        for order in [
+            [0, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0],
+        ] {
+            let mut hits = order.map(|i| original[i].clone());
+            sort_search_hits_by_score_order(&mut hits);
+            assert_eq!(
+                hits.each_ref().map(|hit| hit.doc_id.as_str()),
+                ["ordinary", "quality", "reranked"],
+            );
+        }
+
+        let mut raw = [original[1].clone(), original[0].clone()];
+        sort_search_hits_by_score_order(&mut raw);
+        assert_eq!(raw[0].doc_id, "reranked");
+    }
+
+    #[test]
     fn search_hit_sort_compares_mixed_score_scales_by_relevance() {
         let lexical = SearchHit {
             doc_id: "mem_lexical".to_owned(),
@@ -31424,6 +31495,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
     }
@@ -32462,6 +32534,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| error.to_string())?;

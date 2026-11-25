@@ -302,7 +302,117 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
         "{found}"
     );
     assert_global_lane_exclusion(&found, None)?;
+    for daemon in [false, true] {
+        let mut args = search.to_vec();
+        args.push("--no-global");
+        if daemon {
+            args.push("--use-daemon");
+        }
+        let (code, excluded) = run(&format!("flag-search-daemon-{daemon}"), &args)?;
+        assert_eq!(code, 0, "{excluded}");
+        assert_global_lane_exclusion(&excluded, Some("disabled_by_flag"))?;
+        assert!(
+            excluded["data"]["results"]
+                .as_array()
+                .ok_or("results missing")?
+                .iter()
+                .all(|hit| hit["memoryId"] != global_id),
+            "{excluded}"
+        );
+    }
+    let (code, local_only) = run(
+        "flag-search-local",
+        &[
+            "search",
+            "Local promotion policy fixture",
+            "--no-global",
+            "--source-mode",
+            "lexical-only",
+        ],
+    )?;
+    assert_eq!(code, 0, "{local_only}");
+    assert!(
+        local_only["data"]["results"]
+            .as_array()
+            .ok_or("results missing")?
+            .iter()
+            .any(|hit| hit["memoryId"] == local_id),
+        "{local_only}"
+    );
     check_local_retrieval("missing-policy", None)?;
+
+    let query_text = "Globalpolicysentinel Local promotion policy fixture";
+    let query_file = root.join("local-pack.eeq.json");
+    std::fs::write(
+        &query_file,
+        serde_json::json!({"version": "ee.query.v1", "query": {"text": query_text}}).to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file = query_file.to_str().ok_or("non-UTF8 query fixture path")?;
+    for (label, mut args, expected_global) in [
+        ("pack-flag-control", vec!["pack", query_text], true),
+        ("pack-flag", vec!["pack", query_text, "--no-global"], false),
+        (
+            "context-flag",
+            vec!["context", query_text, "--no-global", "--use-daemon"],
+            false,
+        ),
+        (
+            "query-file-flag",
+            vec!["pack", "--query-file", query_file, "--no-global"],
+            false,
+        ),
+        (
+            "build-flag",
+            vec!["pack", "build", "--query-file", query_file, "--no-global"],
+            false,
+        ),
+    ] {
+        args.extend([
+            "--read-only",
+            "--source-mode",
+            "lexical-only",
+            "--relevance-floor",
+            "0",
+        ]);
+        let (code, packed) = run(label, &args)?;
+        assert_eq!(code, 0, "{packed}");
+        let ids = pack_item_memory_ids(&packed);
+        assert!(ids.iter().any(|id| id == local_id), "{packed}");
+        assert_eq!(
+            ids.iter().any(|id| id == global_id),
+            expected_global,
+            "{packed}"
+        );
+        assert_global_lane_exclusion(&packed, (!expected_global).then_some("disabled_by_flag"))?;
+    }
+
+    // Warm a mixed-store primer, opt out for one invocation, then read the
+    // ordinary primer again. Cache hits must respect the selected source set.
+    for (label, args, include_global) in [
+        ("primer-mixed", &["primer"][..], true),
+        ("primer-local", &["primer", "--no-global"][..], false),
+        ("primer-mixed-again", &["primer"][..], true),
+    ] {
+        let (code, primer) = run(label, args)?;
+        assert_eq!(code, 0, "{primer}");
+        let rules = primer["data"]["sections"]
+            .as_array()
+            .ok_or("missing primer sections")?
+            .iter()
+            .find(|section| section["name"] == "rules")
+            .and_then(|section| section["items"].as_array())
+            .ok_or("missing primer rules")?;
+        assert!(
+            rules.iter().any(|item| item["memory_id"] == local_id),
+            "{primer}"
+        );
+        assert_eq!(
+            rules.iter().any(|item| item["memory_id"] == global_id),
+            include_global,
+            "{primer}"
+        );
+    }
 
     let check_excluded_search = |label: &str, reason: Option<&str>| -> TestResult {
         let (code, excluded) = run(label, &search)?;

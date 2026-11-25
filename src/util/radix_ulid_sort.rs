@@ -161,6 +161,39 @@ where
     }
 }
 
+/// Apply the existing ID tie-break to a slice without cloning its records.
+pub(crate) fn sort_slice_by_ulid_payload_or_lexical<T, F>(items: &mut [T], key: F)
+where
+    F: Fn(&T) -> &str,
+{
+    if items.is_sorted_by(|left, right| {
+        compare_ulid_payload_or_lexical(key(left), key(right)).is_le()
+    }) {
+        return;
+    }
+
+    // Radix passes move only borrowed keys and indices. A search hit can own
+    // a large explanation, and a fallback memory owns its full source body.
+    let mut order: Vec<_> = items
+        .iter()
+        .enumerate()
+        .map(|(source, item)| (key(item), source))
+        .collect();
+    sort_by_ulid_payload_or_lexical(&mut order, |entry| entry.0);
+    let mut destination = vec![0; order.len()];
+    for (target, (_, source)) in order.into_iter().enumerate() {
+        destination[source] = target;
+    }
+
+    for index in 0..items.len() {
+        while destination[index] != index {
+            let target = destination[index];
+            items.swap(index, target);
+            destination.swap(index, target);
+        }
+    }
+}
+
 /// Compare two keys by canonical ULID payload when both support it.
 ///
 /// If neither key is a bare payload or public `<prefix>_<payload>` ID, this
@@ -364,6 +397,31 @@ mod tests {
                 byte: b'I'
             }
         );
+    }
+
+    #[test]
+    fn slice_sort_moves_non_clone_records_and_preserves_equal_key_order() {
+        struct Record(&'static str, usize);
+
+        let canonical = "mem_01J0000000000000000000000A";
+        let later = "mem_01J0000000000000000000000C";
+        for keys in [
+            [later, canonical, later, canonical],
+            ["fixture_z", canonical, "fixture_a", canonical],
+        ] {
+            let mut rows: Vec<_> = keys
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| Record(id, index))
+                .collect();
+            let mut expected: Vec<_> = keys.into_iter().zip(0..).collect();
+            expected.sort_by(|a, b| compare_ulid_payload_or_lexical(a.0, b.0));
+            for _ in 0..2 {
+                super::sort_slice_by_ulid_payload_or_lexical(&mut rows, |row| row.0);
+                let actual: Vec<_> = rows.iter().map(|row| (row.0, row.1)).collect();
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

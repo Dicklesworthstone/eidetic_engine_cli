@@ -110,6 +110,7 @@ fn lod_options(workspace_path: &Path, db_path: &Path) -> ContextPackOptions {
         relevance_floor: None,
         redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),

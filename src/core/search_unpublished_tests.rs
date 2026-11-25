@@ -72,6 +72,7 @@ impl Fixture {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         }
     }
@@ -257,6 +258,7 @@ impl Fixture {
             relevance_floor: Some(0.0),
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),

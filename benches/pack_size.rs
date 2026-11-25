@@ -319,6 +319,7 @@ impl PackSizeFixture {
             include_stale: false,
             relevance_floor: None,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             redaction_level: RedactionLevel::Minimal,
             ppr_weight: None,
