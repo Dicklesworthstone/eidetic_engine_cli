@@ -1,8 +1,8 @@
 //! bd-3usjw.9 — schema validator for `ee.audit.install_pipeline.v1`.
 //!
-//! Runs `scripts/audit_install_pipeline.sh` (or uses an existing
-//! `tests/audit_artifacts/latest_install_pipeline.json` symlink),
-//! parses the envelope, and asserts:
+//! Reads the newest audit run under `tests/audit_artifacts/` (normally
+//! the one `latest_install_pipeline.json` points at; see
+//! `resolve_audit_artifact_path`), parses the envelope, and asserts:
 //!
 //! 1. Schema field equals `ee.audit.install_pipeline.v1`.
 //! 2. `decided_path` is one of {path_a_post_release, path_b_pre_release}.
@@ -58,7 +58,8 @@ fn newest_audit_artifact_path(dir: &Path) -> Result<Option<PathBuf>, String> {
 
 /// `.rchignore` keeps `latest_*.json` out of remote sync, so a worker can hold a
 /// pointer from an older sync while the timestamped artifacts beside it are
-/// current. A lane run read such a pointer and failed on a stale audit.
+/// current. One lane run failed `release_workflow_inventory_present` on the
+/// 2026-09-17 audit while the tree's pointer named the 2026-11-16 one.
 /// Timestamped names sort chronologically, so read whichever run is newer.
 fn newer_of_pointer_and_newest(pointer: &Path) -> Result<Option<PathBuf>, String> {
     let dir = pointer
@@ -94,9 +95,18 @@ fn resolve_audit_artifact_path() -> Result<Option<PathBuf>, String> {
         return newer_of_pointer_and_newest(&path);
     }
 
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("audit artifact path {} has no parent", path.display()))?;
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A worker that never received the pointer (see above) has none at all.
+        // Returning None here made every test in this file pass by skipping on the
+        // lane, so read the newest tracked run. With no timestamped run either,
+        // that is still None and the tests skip, as on a checkout without audits.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return newest_audit_artifact_path(dir);
+        }
         Err(error) => return Err(format!("inspect {}: {error}", path.display())),
     };
 
@@ -108,10 +118,7 @@ fn resolve_audit_artifact_path() -> Result<Option<PathBuf>, String> {
             path.display(),
             target.display()
         );
-        return newest_audit_artifact_path(
-            path.parent()
-                .ok_or_else(|| format!("audit artifact path {} has no parent", path.display()))?,
-        );
+        return newest_audit_artifact_path(dir);
     }
 
     Ok(None)
