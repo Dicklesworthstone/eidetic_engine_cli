@@ -6752,6 +6752,10 @@ pub enum JournalCommand {
 /// Arguments for `ee primer` (ADR 0065 / bd-39tzu.3).
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct PrimerArgs {
+    /// Exclude memories from the separate user-global store for this primer.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Token budget for the assembled primer (default: [primer] default_tokens, 600).
     #[arg(long, value_name = "N")]
     pub tokens: Option<u32>,
@@ -53819,8 +53823,9 @@ where
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
-    let settings =
+    let mut settings =
         crate::core::primer::primer_settings_from_workspace(&workspace_path, format, args.tokens);
+    settings.global_lane_enabled &= !args.no_global;
     let report = match crate::core::primer::run_primer_with_persistence(
         &connection,
         &workspace_id,

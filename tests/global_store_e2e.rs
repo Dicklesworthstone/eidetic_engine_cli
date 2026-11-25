@@ -304,6 +304,33 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
     assert_global_lane_exclusion(&found, None)?;
     check_local_retrieval("missing-policy", None)?;
 
+    // Warm a mixed-store primer, opt out for one invocation, then read the
+    // ordinary primer again. Cache hits must respect the selected source set.
+    for (label, args, include_global) in [
+        ("primer-mixed", &["primer"][..], true),
+        ("primer-local", &["primer", "--no-global"][..], false),
+        ("primer-mixed-again", &["primer"][..], true),
+    ] {
+        let (code, primer) = run(label, args)?;
+        assert_eq!(code, 0, "{primer}");
+        let rules = primer["data"]["sections"]
+            .as_array()
+            .ok_or("missing primer sections")?
+            .iter()
+            .find(|section| section["name"] == "rules")
+            .and_then(|section| section["items"].as_array())
+            .ok_or("missing primer rules")?;
+        assert!(
+            rules.iter().any(|item| item["memory_id"] == local_id),
+            "{primer}"
+        );
+        assert_eq!(
+            rules.iter().any(|item| item["memory_id"] == global_id),
+            include_global,
+            "{primer}"
+        );
+    }
+
     let check_excluded_search = |label: &str, reason: Option<&str>| -> TestResult {
         let (code, excluded) = run(label, &search)?;
         assert_eq!(code, 0, "{excluded}");
