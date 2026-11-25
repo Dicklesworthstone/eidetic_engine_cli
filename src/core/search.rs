@@ -75,7 +75,7 @@ use crate::search::{
 // Test-only: used by the inline `#[cfg(test)]` suites further down.
 #[cfg(test)]
 use crate::search::HashEmbedder;
-use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+use crate::util::radix_ulid_sort::sort_slice_by_ulid_payload_or_lexical;
 use frankensearch::LexicalRead;
 
 #[path = "search_global_handoff.rs"]
@@ -16371,9 +16371,7 @@ fn sort_search_hit_score_tie_by_doc_id(hits: &mut [SearchHit]) {
 
 fn sort_search_hit_score_tie_by_doc_id_within_workspace(hits: &mut [SearchHit]) {
     if hits.iter().all(|hit| hit.doc_id.starts_with("mem_")) {
-        let mut ordered = hits.to_vec();
-        sort_by_ulid_payload_or_lexical(&mut ordered, |hit| hit.doc_id.as_str());
-        hits.clone_from_slice(&ordered);
+        sort_slice_by_ulid_payload_or_lexical(hits, |hit| hit.doc_id.as_str());
     } else {
         hits.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
     }
