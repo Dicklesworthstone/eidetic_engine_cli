@@ -927,6 +927,14 @@ fn import_jsonl_records_with_policy(
             return Ok(report);
         }
     };
+    let mut new_family_origins = match import_family_origins(&parsed) {
+        Ok(origins) => origins,
+        Err(issue) => {
+            report.issues.push(issue);
+            report.status = "rejected".to_owned();
+            return Ok(report);
+        }
+    };
     let links = match prepare_links(&parsed) {
         Ok(links) => links,
         Err(issues) => {
@@ -986,6 +994,28 @@ fn import_jsonl_records_with_policy(
             report.issues.extend(lineage_issues);
             report.status = "rejected".to_owned();
             return Ok(());
+        }
+        // Family origin is shared by every sibling. A new memory may restore
+        // a missing declaration but cannot relabel a family already present.
+        let mut preserved = Vec::new();
+        for (&family_id, &origin) in &new_family_origins {
+            if let Some((_, existing)) =
+                connection.get_attempt_family_declaration(&workspace_id, family_id)?
+            {
+                if existing != origin {
+                    report.issues.push(JsonlImportIssue::error(
+                        None,
+                        "reimport_divergent_existing_family",
+                        "attempt family origin conflicts with the destination; no memories or links were imported",
+                    ));
+                    report.status = "rejected".to_owned();
+                    return Ok(());
+                }
+                preserved.push(family_id);
+            }
+        }
+        for family_id in preserved {
+            new_family_origins.remove(family_id);
         }
         for memory in prepared.memories {
             match connection.get_memory(&memory.id)? {
@@ -1057,10 +1087,13 @@ fn import_jsonl_records_with_policy(
                         disposition: family.disposition.clone(),
                     },
                 )?;
-                if let Some(origin) = family.origin.as_deref() {
+                let family_id = family.family_id.trim();
+                if family.origin.is_some()
+                    && let Some(origin) = new_family_origins.remove(family_id)
+                {
                     connection.set_attempt_family_origin(
                         &memory.input.workspace_id,
-                        &family.family_id,
+                        family_id,
                         origin,
                     )?;
                 }
@@ -1404,6 +1437,40 @@ fn jsonl_import_shell_quote_arg(value: &str) -> String {
 /// A revision archive may fill missing rows in an identical existing chain,
 /// but cannot attach new members to divergent or unrepresented local history.
 /// Run before the first insert, inside the import transaction.
+/// An omitted origin in an older archive makes no claim. Every explicit
+/// claim for the same destination family must agree regardless of row order.
+fn import_family_origins(
+    parsed: &ParsedJsonlImport,
+) -> Result<BTreeMap<&str, &str>, JsonlImportIssue> {
+    let mut origins = BTreeMap::new();
+    for memory in &parsed.memories {
+        let Some(family) = &memory.attempt_family else {
+            continue;
+        };
+        let Some(origin) = family.origin.as_deref() else {
+            continue;
+        };
+        if !matches!(origin, "declared" | "legacy_v094") {
+            return Err(JsonlImportIssue::error(
+                None,
+                "invalid_memory_attempt_family",
+                "attempt family origin must be declared or legacy_v094",
+            ));
+        }
+        if origins
+            .insert(family.family_id.trim(), origin)
+            .is_some_and(|previous| previous != origin)
+        {
+            return Err(JsonlImportIssue::error(
+                None,
+                "invalid_memory_attempt_family",
+                "the archive gives conflicting origins for one attempt family",
+            ));
+        }
+    }
+    Ok(origins)
+}
+
 fn destination_lineage_issues(
     connection: &DbConnection,
     memories: &[PreparedMemory],
@@ -1472,6 +1539,32 @@ fn existing_memory_conflict(
             "reimport_divergent_existing_row",
             format!(
                 "memory `{}` differs on tags; the existing row is preserved",
+                incoming.id
+            ),
+        )));
+    }
+    let stored_family = connection.get_memory_attempt_family(&incoming.id)?;
+    let family_matches = match (stored_family.as_ref(), incoming.attempt_family.as_ref()) {
+        (None, None) => true,
+        (Some(stored), Some(archived)) => {
+            stored.family_id == archived.family_id.trim()
+                && archived
+                    .declared_size
+                    .is_none_or(|size| stored.declared_size == Some(size))
+                // Revisions share a logical ledger slot. A projection with
+                // no slot cannot contradict a sibling that restored one.
+                && ((archived.attempt_index.is_none() && archived.disposition.is_none())
+                    || (stored.attempt_index == archived.attempt_index
+                        && stored.disposition == archived.disposition))
+        }
+        _ => false,
+    };
+    if !family_matches {
+        return Ok(Some(JsonlImportIssue::warning(
+            None,
+            "reimport_divergent_existing_row",
+            format!(
+                "memory `{}` differs on attempt_family; the existing row is preserved",
                 incoming.id
             ),
         )));
@@ -6551,6 +6644,96 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_family_origins_reject_preview_and_apply_without_creating_storage() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        for origin in ["declared", "unknown"] {
+            let mut records = linked_jsonl_values()?;
+            records[1]["attempt_family"] = json!({"family_id": "review", "origin": "legacy_v094"});
+            records[3]["attempt_family"] = json!({"family_id": "review", "origin": origin});
+            let options = JsonlImportOptions {
+                workspace_path: dir.path().join("workspace"),
+                database_path: None,
+                source_path: dir.path().join("source.jsonl"),
+                dry_run: false,
+            };
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let report = import_jsonl_records(&JsonlImportOptions {
+                    dry_run,
+                    ..options.clone()
+                })
+                .map_err(|error| error.to_string())?;
+                assert_eq!(report.status, "rejected");
+                assert!(
+                    report.issues.iter().any(|issue| issue.code == "invalid_memory_attempt_family")
+                );
+                assert!(!database_path(&options).exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_imported_siblings_preserve_existing_family_origin() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: dir.path().join("workspace"),
+            database_path: None,
+            source_path: dir.path().join("source.jsonl"),
+            dry_run: false,
+        };
+        let mut seed = sample_jsonl()
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        seed[1]["attempt_family"] = json!({"family_id": "review", "origin": "legacy_v094"});
+        fs::write(&options.source_path, jsonl_values_text(&seed))
+            .map_err(|error| error.to_string())?;
+        let imported = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(imported.memories_imported, 1);
+        let mut records = linked_jsonl_values()?;
+        // An older record with no explicit origin defers to the destination.
+        records[1]["attempt_family"] = json!({"family_id": "review"});
+        records[3]["attempt_family"] = json!({"family_id": "review", "origin": "declared"});
+        fs::write(&options.source_path, jsonl_values_text(&records))
+            .map_err(|error| error.to_string())?;
+        let conflict = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(conflict.status, "rejected");
+        assert!(
+            conflict.issues.iter().any(|issue| issue.code == "reimport_divergent_existing_family")
+        );
+        let db =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
+        let original = db
+            .get_memory(records[1]["memory_id"].as_str().ok_or("seed id")?)
+            .map_err(|error| error.to_string())?
+            .ok_or("seed memory")?;
+        assert_eq!(
+            db.get_attempt_family_declaration(&original.workspace_id, "review")
+                .map_err(|error| error.to_string())?,
+            Some((None, "legacy_v094".to_owned()))
+        );
+        assert_eq!(
+            db.count_table_rows("memories").map_err(|error| error.to_string())?,
+            1
+        );
+        assert_eq!(
+            db.count_table_rows("memory_links").map_err(|error| error.to_string())?,
+            0
+        );
+        db.close().map_err(|error| error.to_string())?;
+
+        records[3]["attempt_family"] = json!({"family_id": "review"});
+        fs::write(&options.source_path, jsonl_values_text(&records))
+            .map_err(|error| error.to_string())?;
+        let legacy = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!((legacy.memories_imported, legacy.links_imported), (1, 1));
+        Ok(())
+    }
+
+    #[test]
     fn reimport_skips_new_links_to_semantically_different_existing_memories() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let options = JsonlImportOptions {
@@ -6571,6 +6754,7 @@ mod tests {
             ("utility", json!(0.25)),
             ("importance", json!(0.25)),
             ("tags", json!("different-review")),
+            ("attempt_family", json!({"family_id": "another-review"})),
         ] {
             let mut records = base.clone();
             if key == "tags" {
