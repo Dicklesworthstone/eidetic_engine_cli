@@ -75,8 +75,10 @@ CLASSIFICATIONS = ("quantitative", "invariant", "promise", "constraint")
 
 # Rust's char::is_whitespace is the Unicode White_Space property. Python's str.split() also splits on
 # \x1c-\x1f, which Rust does not, so canonicalization uses this class instead.
-_WS = "\t\n\x0b\x0c\r \x85\xa0                　"
-_WS_RUN = re.compile(f"[{_WS}]+")
+_WS = "".join(
+    map(chr, (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000))
+)
+_WS_RUN = re.compile(f"[{re.escape(_WS)}]+")
 
 
 def canonical(line: str) -> str:
@@ -346,7 +348,7 @@ def self_test() -> int:
     for length, digest in vectors.items():
         arm(f"blake3 reference vector, {length} bytes", blake3_hex(bytes(i % 251 for i in range(length))) == digest)
 
-    arm("canonical collapses tabs, runs and NBSP", canonical("\t a  b  c \n") == "a b c")
+    arm("canonical collapses tabs, runs and NBSP", canonical("\t a  b" + chr(0xA0) * 2 + "c " + chr(0x3000) + "\n") == "a b c")
     arm("canonical keeps \\x1c, as Rust's split_whitespace does", canonical("a\x1cb") == "a\x1cb")
     arm("lines() drops \\r and the empty tail", rust_lines("a\r\nb\n") == ["a", "b"])
     arm("trigger is word-bounded", not TRIGGER.search("everyone agrees") and bool(TRIGGER.search("EVERY run")))
