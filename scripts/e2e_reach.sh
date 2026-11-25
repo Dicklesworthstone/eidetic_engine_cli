@@ -29,8 +29,8 @@ ee_has_config_explain() {
 }
 
 ee_has_global_tier_cli() {
-    "$EE_BIN" remember --help 2>&1 | grep -q -- "--global" \
-        && "$EE_BIN" pack --help 2>&1 | grep -q -- "--no-global"
+    "$EE_BIN" remember --help 2>&1 | grep -F -- "--global" >/dev/null \
+        && "$EE_BIN" pack --help 2>&1 | grep -F -- "--no-global" >/dev/null
 }
 
 ee_has_timeline_cli() {
@@ -312,14 +312,9 @@ if ee_has_global_tier_cli; then
     )"
     assert_jq "$remember_global" '.schema == "ee.response.v2" and .success == true' \
         "remember --global stores a global rule"
-    assert_jq "$remember_global" '
-        ((.data.globalMemory.schema // .data.global.schema // .data.memory.global.schema // "") == "ee.global_memory.v1")
-        or ((.data.provenance.lane // .data.memory.provenanceLane // .data.lane // "") == "global")
-    ' "remember --global reports global store metadata or global provenance lane"
-    assert_jq "$remember_global" "
-        ([.. | scalars | tostring | select(contains(\"$GLOBAL_DB\"))] | length) >= 1
-        or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
-    " "remember --global reports the separate user-global database path"
+    global_id="$(printf '%s' "$remember_global" | jq -er '.data.memoryId | select(startswith("mem_"))')"
+    assert_json "$remember_global" '.data.database_path' "$GLOBAL_DB" \
+        "remember --global wrote to the separate user-global database"
 
     remember_conflict="$(
         HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
@@ -333,34 +328,31 @@ if ee_has_global_tier_cli; then
     )"
     assert_jq "$remember_conflict" '.schema == "ee.response.v2" and .success == true' \
         "workspace conflicting rule stores locally"
+    local_id="$(printf '%s' "$remember_conflict" | jq -er '.data.memoryId | select(startswith("mem_"))')"
+    assert_json "$remember_conflict" '.data.database_path' "$WS_B_DB" \
+        "the other rule was written to the local database"
 
     pack_default="$(
         HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
             EE_DATABASE_PATH="$WS_B_DB" EE_INDEX_DIR="$WS_B_INDEX" \
             ee_json pack "prepare cross-repo release verification" \
             --workspace "$WS_B" \
+            --source-mode lexical-only --relevance-floor 0 --include-non-affecting-degradations \
             --max-tokens 800 \
             --read-only \
             --json
     )"
     assert_jq "$pack_default" '.schema == "ee.response.v2" and .success == true' \
         "pack includes global tier by default"
+    assert_json "$pack_default" \
+        '.data.pack.items[] | select(.origin.lane == "global") | .memoryId' "$global_id" \
+        "the default pack selects the written global rule and labels its origin"
     assert_jq "$pack_default" '
-        ([.. | objects | select(((.schema? // "") == "ee.global_memory.v1"))] | length) >= 1
-        or ([.. | objects | select(((.lane? // .provenanceLane? // .memoryLane? // "") == "global"))] | length) >= 1
-    ' "default pack exposes global store metadata or global provenance lane"
-    assert_jq "$pack_default" "
-        ([.. | scalars | tostring | select(contains(\"$GLOBAL_DB\"))] | length) >= 1
-        or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
-    " "default pack identifies the separate user-global store"
+        any(.data.pack.items[]; any(.provenance[]?; .uri == "manual://bd-2vq2z.13/global-rule"))
+    ' "the selected global rule retains its source"
     assert_jq "$pack_default" '
-        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/global-rule"))] | length) >= 1
-        or ((.data.pack.text // "") | contains("remote RCH verification"))
-    ' "default pack includes the remembered global rule with provenance"
-    assert_jq "$pack_default" '
-        ([.. | objects | select(((.kind? // .conflictKind? // .globalConflictKind? // "") == "contradiction")
-            or ((.conflictKey? // "") | test("release|verification")))] | length) >= 1
-    ' "conflicting workspace/global rules are surfaced, not silently resolved"
+        any(.degraded[]; .code == "global_lane_conflict_deferred")
+    ' "the mixed pack reports the contradiction between the same-subject rules"
 
     pack_no_global="$(
         HOME="$USER_HOME" XDG_DATA_HOME="$USER_DATA" \
@@ -368,29 +360,22 @@ if ee_has_global_tier_cli; then
             ee_json pack "prepare cross-repo release verification" \
             --workspace "$WS_B" \
             --no-global \
+            --source-mode lexical-only --relevance-floor 0 --include-non-affecting-degradations \
             --max-tokens 800 \
             --read-only \
             --json
     )"
     assert_jq "$pack_no_global" '.schema == "ee.response.v2" and .success == true' \
         "--no-global pack still succeeds"
-    # PRECONDITION FIRST. Both clauses of the exclusion assertion below are
-    # satisfied by a pack that selected NOTHING: zero objects carry lane
-    # "global" because there are zero objects, and `.data.pack.text // ""`
-    # supplies the empty string, which contains no phrase at all. Having two
-    # clauses is not a safeguard when both go vacuous in the same world -- the
-    # pair cannot tell "the global tier was excluded" from "everything was
-    # excluded", so a --no-global that wrongly suppressed the WORKSPACE tier too
-    # would read as a pass. So prove the local rule survived first; the negative
-    # then has something to be negative about.
+    # Check the selected workspace ID before inspecting the global exclusion.
+    assert_json "$pack_no_global" '.data.pack.items[] | .memoryId' "$local_id" \
+        "--no-global still selects the local rule in this two-store fixture"
     assert_jq "$pack_no_global" '
-        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
-        or ((.data.pack.text // "") | contains("wait for central verify"))
-    ' "precondition: --no-global still selects the workspace-tier rule, so the exclusion below is not an empty pack"
-    assert_jq "$pack_no_global" '
-        ([.. | objects | select(((.lane? // .provenanceLane? // .memoryLane? // "") == "global"))] | length) == 0
-        and ((.data.pack.text // "") | contains("remote RCH verification") | not)
-    ' "--no-global excludes global-tier memories"
+        (.data.pack.items | length) == 1
+        and all(.data.pack.items[]; .origin.lane != "global")
+        and any(.degraded[]; .code == "global_lane_disabled"
+                              and (.message | contains("disabled_by_flag")))
+    ' "--no-global withholds the separate store and explains the source decision"
 else
     log_drop 1 "bd-2vq2z.13 global-tier CLI flags absent: when wired, assert remember --global writes the separate ~/.local/share/ee/global store, default pack includes global provenance/conflicts, and --no-global excludes it"
 fi
