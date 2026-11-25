@@ -575,6 +575,9 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
         pack_options.relevance_floor = Some(0.0);
         let pack =
             crate::core::context::run_context_pack_with_performance(&pack_options, "pack").unwrap();
+        // Search above admits the retired row, so a miss here is a pack-side
+        // drop. Name what the pack did select and why it degraded, rather than
+        // panicking on a bare None (bd-9ct8b).
         let item = pack
             .response
             .data
@@ -582,7 +585,24 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
             .items
             .iter()
             .find(|item| item.memory_id.to_string() == retired)
-            .unwrap();
+            .unwrap_or_else(|| {
+                panic!(
+                    "mixed={mixed}: the pack omitted retired global memory {retired}; items {:?}; degraded {:?}",
+                    pack.response
+                        .data
+                        .pack
+                        .items
+                        .iter()
+                        .map(|item| item.memory_id.to_string())
+                        .collect::<Vec<_>>(),
+                    pack.response
+                        .data
+                        .degraded
+                        .iter()
+                        .map(|entry| format!("{}: {}", entry.code, entry.message))
+                        .collect::<Vec<_>>(),
+                )
+            });
         assert!(item.tombstoned_at.is_some());
         assert!(pack.response.data.pack.items.iter().all(|item| {
             let id = item.memory_id.to_string();
@@ -859,10 +879,18 @@ fn global_source_retrieval_rejects_stopword_only_matches_in_every_lifecycle() {
                 .any(|entry| entry.code == "lexical_stopword_only_filtered"),
             "stopword-only global evidence must be reported: {lifecycle}"
         );
+        // The global source witness lives in metadata (4d69bd196). The
+        // top-level flag is emitted only when the preview elided something,
+        // so a short body carries none rather than `false`.
+        let public = guarded.data_json();
         assert_eq!(
-            guarded.data_json()["results"][0]["content_truncated"],
-            false,
-            "the public result contains the complete admitted source body"
+            public["results"][0]["metadata"]["content_truncated"], false,
+            "the public result contains the complete admitted source body: {lifecycle}"
+        );
+        assert!(
+            public["results"][0].get("content_truncated").is_none(),
+            "a body under the preview budget carries no top-level flag: {lifecycle}: {}",
+            public["results"][0]
         );
         if lifecycle == "unpublished" {
             assert!(
