@@ -8897,11 +8897,19 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    fn l2_search_report() -> SearchReport {
+        SearchReport {
+            source_mode_requested: super::SearchSourceMode::Hybrid,
+            source_mode_applied: super::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            ..ppr_search_report(Vec::new())
+        }
+    }
+
     #[test]
     fn l2_source_mode_metadata_uses_authoritative_search_report_policy() {
         let stale_options_requested = crate::core::search::SearchSourceMode::Hybrid;
-        let mut report =
-            super::missing_index_search_report("source metadata", 10, test_runtime_profile());
+        let mut report = l2_search_report();
         report.source_mode_requested = crate::core::search::SearchSourceMode::LexicalOnly;
         report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
         report.strict_source_mode = true;
@@ -9472,8 +9480,7 @@ pub fn unrelated_context() -> u64 {{
         let mut fixture = l2_try_hit_fixture(tempdir.path(), file_root)?;
         // Only a persisted producer writes L2.
         fixture.options.persist_pack = true;
-        let search_report =
-            super::missing_index_search_report("l2 phase invariant", 10, test_runtime_profile());
+        let search_report = l2_search_report();
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(46)))?;
         super::finalize_context_response(&mut response, fixture.options.output_options, None, None);
@@ -10253,8 +10260,7 @@ pub fn unrelated_context() -> u64 {{
             key: "blake3:l2-source-mode-fallback".to_owned(),
             key_input,
         };
-        let mut search_report =
-            super::missing_index_search_report("lexical fallback", 10, test_runtime_profile());
+        let mut search_report = l2_search_report();
         search_report.source_mode_requested = crate::core::search::SearchSourceMode::SemanticOnly;
         search_report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
         search_report.source_mode_fallback = true;
@@ -10355,8 +10361,7 @@ pub fn unrelated_context() -> u64 {{
             key: lookup_key.clone(),
             key_input: key_input.clone(),
         };
-        let search_report =
-            super::missing_index_search_report("backend transition", 10, test_runtime_profile());
+        let search_report = l2_search_report();
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(45)))?;
         response.data.embed_backend = EmbedBackend::NeuralLocal;
@@ -15129,6 +15134,60 @@ pub fn unrelated_context() -> u64 {{
             strict_scope: false,
         };
         Ok((temp, options, connection))
+    }
+
+    #[test]
+    fn missing_index_pack_honors_strict_source_and_reports_actual_retrieval() -> TestResult {
+        use crate::core::search::{SearchError, SearchSourceMode};
+        use crate::search::SpeedMode;
+
+        let (_temp, search, connection) = pack_source_authority_fixture()?;
+        drop(connection);
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = search.workspace_path;
+        options.database_path = search.database_path;
+        options.query = search.query;
+        options.as_of = search.as_of;
+        options.coordination_snapshot_path = None;
+        options.persist_pack = false;
+        options.relevance_floor = Some(0.0);
+        options.memory_scope = MemoryScope::Workspace;
+        options.strict_source_mode = true;
+        for requested in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            options.source_mode = requested;
+            let result = super::run_context_pack_with_performance(&options, PACK_COMMAND);
+            assert!(matches!(
+                result,
+                Err(super::ContextPackError::Search(SearchError::SourceModeUnavailable {
+                    requested: refused,
+                    ..
+                })) if refused == requested
+            ));
+        }
+
+        for (requested, speed, strict, fallback) in [
+            (SearchSourceMode::LexicalOnly, SpeedMode::Default, true, false),
+            (SearchSourceMode::Hybrid, SpeedMode::Default, false, true),
+            (SearchSourceMode::Hybrid, SpeedMode::Instant, false, false),
+        ] {
+            options.source_mode = requested;
+            options.speed = speed;
+            options.strict_source_mode = strict;
+            let run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+                .map_err(|error| error.to_string())?;
+            let plan = &run.performance["data"]["queryPlan"];
+            assert_eq!(plan["sourceModeRequested"], requested.as_str());
+            assert_eq!(plan["sourceModeApplied"], "lexical_only");
+            assert_eq!(plan["strictSourceMode"], strict);
+            assert_eq!(plan["fallbackApplied"], fallback);
+            assert_eq!(run.response.data.embed_backend, EmbedBackend::HashFallback);
+            assert!(
+                run.response.data.pack.items.iter().any(|item| {
+                    item.memory_id.to_string() == pack_source_authority_id(4)
+                })
+            );
+        }
+        Ok(())
     }
 
     #[test]

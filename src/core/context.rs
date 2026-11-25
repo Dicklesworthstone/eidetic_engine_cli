@@ -3429,11 +3429,7 @@ async fn run_context_pack_attempt(
             }
             Err(SearchError::NoIndex) => {
                 decision_time = search_options.as_of.unwrap_or_else(Utc::now);
-                missing_index_search_report(
-                    &request.query,
-                    request.candidate_pool,
-                    runtime_profile.clone(),
-                )
+                missing_index_search_report(&search_options, runtime_profile.clone())
             }
             Err(SearchError::Cancelled(reason)) => {
                 return Err(context_pack_cancellation_error(reason));
@@ -3478,6 +3474,16 @@ async fn run_context_pack_attempt(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
     );
+    if needs_index_fallback
+        && search_options.strict_source_mode
+        && search_options.execution_source_mode() != SearchSourceMode::LexicalOnly
+    {
+        return Err(ContextPackError::Search(SearchError::SourceModeUnavailable {
+            requested: search_options.source_mode,
+            reason: "the search index is unavailable and stored-memory retrieval is lexical only"
+                .to_owned(),
+        }));
+    }
     let can_add_tombstones = options.include_tombstoned
         && match search_options.execution_source_mode() {
             SearchSourceMode::LexicalOnly => true,
@@ -3536,8 +3542,16 @@ async fn run_context_pack_attempt(
             // Source fallback hits do not carry the complete calibration proof.
             search_calibration_identity = None;
             request.quality_scoring_policy = Some(quality_policy);
-            if needs_index_fallback {
+            if needs_index_fallback || search_report.results.is_empty() {
+                // A source scan serves the entire result, even when it finds no
+                // hits. Instant deliberately chooses lexical before retrieval.
+                search_report.source_mode_applied = SearchSourceMode::LexicalOnly;
+                search_report.source_mode_fallback =
+                    search_options.execution_source_mode() != SearchSourceMode::LexicalOnly;
+                search_report.embed_backend = EmbedBackend::HashFallback;
                 search_fusion_weights = None;
+            }
+            if needs_index_fallback {
                 push_degradation(
                     &mut degraded,
                     "context_lexical_fallback",
@@ -3560,13 +3574,6 @@ async fn run_context_pack_attempt(
                     ),
                     None,
                 );
-                if search_report.results.is_empty() {
-                    search_report.source_mode_applied = SearchSourceMode::LexicalOnly;
-                    search_report.source_mode_fallback =
-                        search_options.execution_source_mode() != SearchSourceMode::LexicalOnly;
-                    search_report.embed_backend = EmbedBackend::HashFallback;
-                    search_fusion_weights = None;
-                }
                 search_report.results.extend(fallback_hits);
                 crate::core::search::sort_search_hits_by_score_order(&mut search_report.results);
                 search_report
@@ -5436,16 +5443,15 @@ fn context_degradation_json(degraded: &ContextResponseDegradation) -> serde_json
 }
 
 fn missing_index_search_report(
-    query: &str,
-    limit: u32,
+    options: &SearchOptions,
     runtime_profile: RuntimeProfileReport,
 ) -> SearchReport {
     SearchReport {
         index_freshness: None,
         status: SearchStatus::IndexNotFound,
-        embed_backend: crate::core::index::active_embed_backend(),
-        query: query.to_owned(),
-        requested_limit: limit,
+        embed_backend: EmbedBackend::HashFallback,
+        query: options.query.clone(),
+        requested_limit: options.limit,
         results: Vec::new(),
         elapsed_ms: 0.0,
         errors: vec!["Search index not found".to_owned()],
@@ -5463,13 +5469,13 @@ fn missing_index_search_report(
         relevance_floor_applied: None,
         candidates_below_floor: 0,
         query_assist: None,
-        source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
-        source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+        source_mode_requested: options.source_mode,
+        source_mode_applied: options.execution_source_mode(),
         source_mode_fallback: false,
-        strict_source_mode: false,
-        memory_scope: MemoryScope::Swarm,
-        strict_scope: false,
-        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        strict_source_mode: options.strict_source_mode,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+        scope_stats: MemoryScopeStats::new(options.memory_scope, options.strict_scope, None, 0),
     }
 }
 
