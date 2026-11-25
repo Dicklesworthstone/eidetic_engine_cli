@@ -116,10 +116,15 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
         ConfigKnob {
             key: PACK_MMR_LAMBDA_KEY,
             category: "pack",
-            effect: "MMR diversity/relevance tradeoff during pack selection: higher favors relevance, lower favors diversity.",
+            effect: "Intended MMR diversity/relevance tradeoff during pack selection: higher favors relevance, lower favors diversity.",
             valid_range: "0.0 ..= 1.0",
-            status: ConfigRuntimeStatus::Active,
-            caveat: None,
+            // The config layer parses and shows this key, but pack selection
+            // never reads it: src/pack/mod.rs weights relevance with the
+            // DEFAULT_MMR_RELEVANCE_WEIGHT constant.
+            status: ConfigRuntimeStatus::ForwardLooking,
+            caveat: Some(
+                "Not read yet: pack selection weights relevance with a fixed 0.75 (DEFAULT_MMR_RELEVANCE_WEIGHT in src/pack/mod.rs), whatever this key holds, so its default of 0.7 is not the weight in use.",
+            ),
         },
         ConfigKnob {
             key: SEARCH_DEFAULT_SPEED_KEY,
@@ -571,6 +576,20 @@ mod tests {
         assert!(
             !speed.valid_range.contains("instant") && !speed.valid_range.contains("quality"),
             "config explain must not advertise query-schema speed tokens for search.default_speed"
+        );
+    }
+
+    #[test]
+    fn mmr_lambda_knob_is_forward_looking_while_pack_uses_a_constant() {
+        let knob = knob_for_key(PACK_MMR_LAMBDA_KEY).expect("pack.mmr_lambda is covered");
+        assert_eq!(knob.status, ConfigRuntimeStatus::ForwardLooking);
+        let caveat = knob
+            .caveat
+            .expect("pack.mmr_lambda must say it is not read");
+        let weight = crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT.to_string();
+        assert!(
+            caveat.contains(&format!("fixed {weight} (DEFAULT_MMR_RELEVANCE_WEIGHT")),
+            "caveat must quote the weight pack selection actually uses ({weight}): {caveat}"
         );
     }
 

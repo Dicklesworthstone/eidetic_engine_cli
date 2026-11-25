@@ -2043,6 +2043,8 @@ default_format   = "markdown"
 default_max_tokens = 4000
 adaptive_budget  = false
 mmr_lambda       = 0.7
+# Parsed but not yet read: pack selection uses a fixed relevance weight of
+# 0.75, and `ee config explain pack.mmr_lambda` reports it as forward_looking.
 candidate_pool   = 100
 memory_tier_admission = false
 
