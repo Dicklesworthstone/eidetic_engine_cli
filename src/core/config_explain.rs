@@ -178,10 +178,15 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
         ConfigKnob {
             key: STORAGE_DATABASE_PATH_KEY,
             category: "storage",
-            effect: "Filesystem path to the durable ee memory database (the source of truth).",
+            effect: "Intended filesystem path to the durable ee memory database (the source of truth).",
             valid_range: "filesystem path",
-            status: ConfigRuntimeStatus::Active,
-            caveat: None,
+            // The config layer parses and shows this key, but no command opens
+            // it: each falls back to default_workspace_database_path when
+            // --database is absent (bd-9ra55).
+            status: ConfigRuntimeStatus::ForwardLooking,
+            caveat: Some(
+                "Not read yet: workspace commands open --database, or <workspace>/.ee/ee.db when it is absent, whatever this key holds. EE_DATABASE_PATH sets this key too; `ee insights` is the one command that reads that variable directly.",
+            ),
         },
     ]
 }
@@ -586,6 +591,25 @@ mod tests {
         let caveat = knob.caveat.expect("the non-MMR profile is distinguished");
         assert!(caveat.contains("submodular"));
         assert!(caveat.contains("coverage-fill"));
+    }
+
+    /// bd-9ra55: no command opens storage.database_path. The caveat must name
+    /// the store commands do open, in the words every `--database` flag uses
+    /// ("Defaults to <workspace>/.ee/ee.db"), so wiring the key or moving the
+    /// default has to revisit this status.
+    #[test]
+    fn database_path_knob_is_forward_looking_while_commands_open_the_workspace_store() {
+        let knob = knob_for_key(STORAGE_DATABASE_PATH_KEY).expect("database_path is covered");
+        assert_eq!(knob.status, ConfigRuntimeStatus::ForwardLooking);
+        let caveat = knob.caveat.expect("storage.database_path must say it is not read");
+        assert!(
+            caveat.contains("--database") && caveat.contains("<workspace>/.ee/ee.db"),
+            "caveat must name the store commands actually open: {caveat}"
+        );
+        assert!(
+            caveat.contains("ee insights"),
+            "caveat must name the one command that reads EE_DATABASE_PATH: {caveat}"
+        );
     }
 
     #[test]

@@ -2006,9 +2006,11 @@ Full annotated example:
 # ~/.config/ee/config.toml
 
 [storage]
+# Parsed but not yet read: commands open <workspace>/.ee/ee.db (or --database)
+# and the index under .ee/index, and nothing writes memory.jsonl on its own.
 database_path = "~/.local/share/ee/ee.db"
 index_dir     = "~/.local/share/ee/indexes"
-jsonl_export  = false                # auto-export memory.jsonl on each commit
+jsonl_export  = false
 
 [runtime]
 daemon            = false            # one-shot CLI mode
