@@ -15205,7 +15205,7 @@ Request a fixture-backed ee.scale_envelope.v1 profile whose fixtureProfileId is 
 
 ```bash
 ee init --workspace .
-ee support bundle --include resource-admission --json
+ee support bundle --out support-bundle --workspace . --json
 ```
 
 **Invocation.**
@@ -19626,5 +19626,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:90181c69a10ae3d3c1eb637f99ec18dab2509b5edcf761cf48f70a12192b4802 -->
-<!-- degraded-codes-fingerprint body=sha256:e7d49c30ef9e6def703bc18d6bfe4b660939d95bb3bade70c193a51b6581bb4a -->
+<!-- degraded-codes-fingerprint inputs=sha256:8ddefb42c125d3cf0450ec9f04672b3743dd3f41ca869b12d2a39687bc6a787f -->
+<!-- degraded-codes-fingerprint body=sha256:1c83d6c97332ea3114745d404252f4bb15f90a76fd277df1d724b24cd8b58267 -->

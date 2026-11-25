@@ -281,7 +281,7 @@
         "primaryReason": "output_budget_pressure",
         "contributingReasons": ["output_budget_pressure"],
         "blockedBy": [],
-        "nextSafeAction": "ee pack <task> --resource-profile constrained --json",
+        "nextSafeAction": "ee pack <task> --resource-profile lean --json",
         "whatWouldChange": "output_budget_or_checkout_pressure_clears"
       }
     },

@@ -461,8 +461,8 @@ fn gate14_resource_admission_candidate_degrades_to_lean_under_pressure() -> Test
         report
             .next_commands
             .iter()
-            .any(|command| command.contains("--resource-profile constrained")),
-        "degrade_to_lean tells callers how to rerun leanly",
+            .any(|command| command.contains("--resource-profile lean")),
+        "degrade_to_lean tells callers how to rerun with the lean pack profile",
     )
 }
 

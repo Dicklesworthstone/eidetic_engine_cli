@@ -9,7 +9,7 @@
     "description": "The scale envelope observes cache, WAL, or index churn that exceeds ordinary command SLO assumptions. The response must surface the posture instead of treating slow command observations as normal steady state.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee support bundle --include resource-admission --json"
+      "ee support bundle --out support-bundle --workspace . --json"
     ],
     "invocation": "Emit ee.scale_envelope.v1 with pageCacheWalPosture.cacheState=thrashing, walState=checkpoint_recommended, or commandSlos[].status=thrashing."
   },

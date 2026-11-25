@@ -123,7 +123,7 @@ fn resource_admission_sample(decision: &str, recommended_profile: &str) -> Value
         "nextCommands": if decision == "wait_for_rch" {
             json!(["rch status --json"])
         } else {
-            json!(["ee pack <task> --resource-profile constrained --json"])
+            json!(["ee pack <task> --resource-profile lean --json"])
         },
         "nextCommandActions": [
             {

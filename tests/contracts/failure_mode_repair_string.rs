@@ -1026,3 +1026,117 @@ fn pinned_repair_commands_parse_under_the_cli() -> TestResult {
         ),
     )
 }
+
+/// Every `ee` command resource admission tells an agent to run next must parse once its
+/// placeholders hold sample values. The fixture guard above forgives any rejected value in a
+/// command that shows a `<placeholder>`, and that is how `ee pack <task> --resource-profile
+/// constrained` survived: pack profiles are lean, standard and swarm_heavy. The same review found
+/// `ee support bundle --include resource-admission` and `ee lab swarm replay --split-workload`,
+/// neither of which exists (bd-gfyw3).
+#[test]
+fn resource_admission_next_commands_parse_under_the_cli() -> TestResult {
+    use clap::Parser;
+    use ee::shadow::{
+        ResourceAdmissionDecision, ResourceAdmissionInput, ResourceBudgetPosture,
+        ResourceCostClass, ResourceHostCalibrationPosture, ResourceLanePressurePosture,
+        ResourceLocalCargoPosture, ResourceRchPosture, evaluate_resource_profile_budget_admission,
+    };
+
+    let base = ResourceAdmissionInput::default;
+    let cases = [
+        (
+            ResourceAdmissionDecision::Abstain,
+            ResourceAdmissionInput {
+                host_calibration: ResourceHostCalibrationPosture::Missing,
+                ..base()
+            },
+        ),
+        (
+            ResourceAdmissionDecision::RefuseLocalCargo,
+            ResourceAdmissionInput {
+                local_cargo: ResourceLocalCargoPosture::Unsafe,
+                rch: ResourceRchPosture::RemoteReady,
+                ..base()
+            },
+        ),
+        (
+            ResourceAdmissionDecision::WaitForRch,
+            ResourceAdmissionInput {
+                rch: ResourceRchPosture::Blocked,
+                ..base()
+            },
+        ),
+        (
+            ResourceAdmissionDecision::DegradeToLean,
+            ResourceAdmissionInput {
+                resource_budget: ResourceBudgetPosture::RecommendDecrease,
+                ..base()
+            },
+        ),
+        (
+            ResourceAdmissionDecision::SplitWorkload,
+            ResourceAdmissionInput {
+                estimated_cost_class: ResourceCostClass::SwarmHeavy,
+                ..base()
+            },
+        ),
+        (
+            ResourceAdmissionDecision::Queue,
+            ResourceAdmissionInput {
+                lane_pressure: ResourceLanePressurePosture::BackgroundPressure,
+                ..base()
+            },
+        ),
+    ];
+    let mut parsed = 0_usize;
+    let mut failures = Vec::new();
+    for (expected, input) in cases {
+        let report = evaluate_resource_profile_budget_admission(input);
+        ensure(
+            report.decision == expected,
+            format!("input meant for {expected:?} gave {:?}", report.decision),
+        )?;
+        for command in &report.next_commands {
+            for argv in shell_commands(command)? {
+                if argv.first().map(String::as_str) != Some("ee") {
+                    continue;
+                }
+                let mut words = Vec::with_capacity(argv.len());
+                for word in &argv {
+                    let sample = match word.as_str() {
+                        "<task>" => "sample task",
+                        "<dir>" => "bundle-dir",
+                        other if other.contains('<') => {
+                            failures.push(format!(
+                                "{expected:?}: `{command}`: no sample value for {other}"
+                            ));
+                            other
+                        }
+                        other => other,
+                    };
+                    words.push(sample);
+                }
+                parsed += 1;
+                if let Err(error) = ee::cli::Cli::try_parse_from(words.iter().copied()) {
+                    failures.push(format!(
+                        "{expected:?}: `{command}`: {:?}: {}",
+                        error.kind(),
+                        error.to_string().lines().next().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+    // Abstain, degrade_to_lean, split_workload and queue each name one `ee` command.
+    ensure(
+        parsed == 4,
+        format!("expected 4 ee next commands across the decisions, parsed {parsed}"),
+    )?;
+    ensure(
+        failures.is_empty(),
+        format!(
+            "resource-admission next commands do not parse:\n  - {}",
+            failures.join("\n  - ")
+        ),
+    )
+}

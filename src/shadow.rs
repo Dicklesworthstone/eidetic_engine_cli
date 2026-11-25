@@ -364,6 +364,19 @@ pub fn find_shadow_policy_inventory_entry(
 }
 
 pub const RESOURCE_ADMISSION_SCHEMA_V1: &str = "ee.resource_admission.v1";
+/// Next command when admission abstains. The bundle's `profile_evidence.json` carries
+/// `hostCalibration` and a `resourceAdmission` evaluated from the live host calibration,
+/// redacted by default. `--out` is required unless `--dry-run`, which writes nothing to read.
+pub const RESOURCE_ADMISSION_EVIDENCE_COMMAND: &str =
+    "ee support bundle --out <dir> --workspace . --json";
+/// Next command for `split_workload`: re-check admission for one narrower slice. The diag is a
+/// pure function of its posture flags, so the caller repeats the others with this cost class.
+pub const RESOURCE_ADMISSION_SPLIT_RECHECK_COMMAND: &str =
+    "ee diag resource-admission --estimated-cost-class standard --json";
+/// Next command for `degrade_to_lean`. `ee pack --resource-profile` takes the pack profiles
+/// lean, standard and swarm_heavy; the operating-profile name `constrained` is a usage error.
+pub const RESOURCE_ADMISSION_LEAN_PACK_COMMAND: &str =
+    "ee pack <task> --resource-profile lean --json";
 pub const RESOURCE_ADMISSION_POLICY_DOMAIN: &str = "resource_profile_budget_admission";
 pub const RESOURCE_ADMISSION_CANDIDATE_POLICY_ID: &str =
     "candidate.resource_profile_budget_admission";
@@ -1161,9 +1174,7 @@ fn queue_pressure_next_safe_action(
 ) -> &'static str {
     match decision {
         ResourceAdmissionDecision::Admit => "continue_with_existing_claim_gate",
-        ResourceAdmissionDecision::DegradeToLean => {
-            "ee pack <task> --resource-profile constrained --json"
-        }
+        ResourceAdmissionDecision::DegradeToLean => RESOURCE_ADMISSION_LEAN_PACK_COMMAND,
         ResourceAdmissionDecision::Queue
             if has_queue_pressure_reason(
                 contributing_reasons,
@@ -1349,10 +1360,7 @@ pub fn evaluate_resource_profile_budget_admission(
     let mut next_commands = Vec::new();
 
     let decision = if !abstention_reasons.is_empty() {
-        push_unique(
-            &mut next_commands,
-            "ee support bundle --include resource-admission --json",
-        );
+        push_unique(&mut next_commands, RESOURCE_ADMISSION_EVIDENCE_COMMAND);
         ResourceAdmissionDecision::Abstain
     } else if input.local_cargo == ResourceLocalCargoPosture::Unsafe {
         push_unique(&mut reason_codes, "local_cargo_refused");
@@ -1368,17 +1376,11 @@ pub fn evaluate_resource_profile_budget_admission(
         push_unique(&mut next_commands, "rch status --json");
         ResourceAdmissionDecision::WaitForRch
     } else if should_degrade_to_lean(&input) {
-        push_unique(
-            &mut next_commands,
-            "ee pack <task> --resource-profile constrained --json",
-        );
+        push_unique(&mut next_commands, RESOURCE_ADMISSION_LEAN_PACK_COMMAND);
         ResourceAdmissionDecision::DegradeToLean
     } else if should_split_workload(&input) {
         push_unique(&mut reason_codes, "conservative_profile_ceiling");
-        push_unique(
-            &mut next_commands,
-            "ee lab swarm replay --split-workload --dry-run --json",
-        );
+        push_unique(&mut next_commands, RESOURCE_ADMISSION_SPLIT_RECHECK_COMMAND);
         ResourceAdmissionDecision::SplitWorkload
     } else if should_queue(&input) {
         push_unique(&mut next_commands, "ee swarm brief --json");

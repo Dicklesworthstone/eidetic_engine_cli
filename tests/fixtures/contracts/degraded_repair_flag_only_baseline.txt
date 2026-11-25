@@ -139,7 +139,7 @@ src/core/backup.rs	1	inspect the copied records.jsonl and retry with a fresh --s
 src/core/backup.rs	1	inspect the staged records and retry with a fresh --side-path
 src/core/backup.rs	2	inspect the staged restore and retry with a fresh --side-path
 src/core/backup.rs	1	restore to a fresh --side-path and inspect records.jsonl
-src/core/backup.rs	5	restore to a fresh --side-path and retry
+src/core/backup.rs	4	restore to a fresh --side-path and retry
 src/core/backup.rs	1	retry backup creation with a writable --output-dir
 src/core/backup.rs	5	retry restore with a fresh --side-path
 src/core/backup.rs	1	select the source workspace with --workspace and recover its authentication keys

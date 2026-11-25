@@ -32672,21 +32672,21 @@ fn diag_resource_admission_next_command_shape(command: &str) -> (&'static str, &
             "route_remote",
             "Route Rust verification through the remote verifier instead of local Cargo.",
         ),
-        "ee pack <task> --resource-profile constrained --json" => (
+        crate::shadow::RESOURCE_ADMISSION_LEAN_PACK_COMMAND => (
             "rerun_with_profile",
-            "Use the constrained resource profile for the requested work.",
+            "Rerun the pack with the lean resource profile.",
         ),
-        "ee lab swarm replay --split-workload --dry-run --json" => (
+        crate::shadow::RESOURCE_ADMISSION_SPLIT_RECHECK_COMMAND => (
             "split_workload",
-            "Inspect a split-workload plan before running a swarm-heavy workload.",
+            "Split the swarm-heavy workload into narrower units, then re-check one unit with the same posture flags at the standard cost class.",
         ),
         "ee swarm brief --json" => (
             "refresh_evidence",
             "Refresh swarm lane pressure before starting queued work.",
         ),
-        "ee support bundle --include resource-admission --json" => (
+        crate::shadow::RESOURCE_ADMISSION_EVIDENCE_COMMAND => (
             "inspect_support_bundle",
-            "Collect bounded support evidence because required admission signals are unsafe.",
+            "Write a redacted support bundle; its profile_evidence.json re-evaluates admission from the live host calibration.",
         ),
         _ => (
             "refresh_evidence",
@@ -32785,38 +32785,29 @@ fn diag_resource_admission_degraded(
 ) -> Vec<serde_json::Value> {
     let mut degraded = Vec::new();
     for reason in &report.abstention_reasons {
-        let (severity, message, repair) = match reason.as_str() {
-            "missing_required_signal" => (
-                "high",
-                "Resource-admission input evidence is missing.",
-                "ee support bundle --include resource-admission --json",
-            ),
-            "stale_source_authority" => (
-                "warning",
-                "Resource-admission source authority is stale.",
-                "ee support bundle --include resource-admission --json",
-            ),
+        let (severity, message) = match reason.as_str() {
+            "missing_required_signal" => ("high", "Resource-admission input evidence is missing."),
+            "stale_source_authority" => {
+                ("warning", "Resource-admission source authority is stale.")
+            }
             "contradictory_evidence" => (
                 "high",
                 "Resource-admission source evidence is contradictory.",
-                "ee support bundle --include resource-admission --json",
             ),
             "redaction_posture_unknown" => (
                 "medium",
                 "Resource-admission redaction posture is not verified.",
-                "ee support bundle --include resource-admission --json",
             ),
             _ => (
                 "warning",
                 "Resource-admission evidence degraded the advisory decision.",
-                "ee support bundle --include resource-admission --json",
             ),
         };
         degraded.push(serde_json::json!({
             "code": reason,
             "severity": severity,
             "message": message,
-            "repair": repair,
+            "repair": crate::shadow::RESOURCE_ADMISSION_EVIDENCE_COMMAND,
         }));
     }
 

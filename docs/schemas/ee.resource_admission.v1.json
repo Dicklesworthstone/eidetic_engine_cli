@@ -1047,9 +1047,9 @@
         {
           "priority": 10,
           "kind": "rerun_with_profile",
-          "command": "ee pack <task> --resource-profile constrained --json",
+          "command": "ee pack <task> --resource-profile lean --json",
           "destructive": false,
-          "rationale": "Use the constrained resource profile while queue pressure is moderate."
+          "rationale": "Use the lean pack resource profile while queue pressure is moderate."
         }
       ],
       "evidence": [
@@ -1173,7 +1173,7 @@
         {
           "priority": 10,
           "kind": "inspect_support_bundle",
-          "command": "ee support bundle --include resource-admission --json",
+          "command": "ee support bundle --out <dir> --workspace . --json",
           "destructive": false,
           "rationale": "Collect bounded support evidence before retrying queue-pressure admission."
         }
@@ -1201,7 +1201,7 @@
           "code": "missing_required_signal",
           "severity": "high",
           "message": "Resource-admission queue-pressure inputs were unavailable or contradictory.",
-          "repair": "ee support bundle --include resource-admission --json"
+          "repair": "ee support bundle --out <dir> --workspace . --json"
         }
       ]
     }
