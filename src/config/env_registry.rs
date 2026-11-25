@@ -692,7 +692,8 @@ impl EnvVar {
             }
             // Not "Override the ... path": the key it sets is unread, and `ee capabilities` lists
             // this text as what the variable controls (bd-env-store-override-advertised-not-read-p6iqy).
-            // No commas: TOON would quote the string and the capabilities golden would change shape.
+            // TOON quotes a string holding a comma, colon, quote, backslash, bracket or brace
+            // (tru is_safe_unquoted), which would change the capabilities golden's shape.
             Self::DatabasePath => {
                 "Set `storage.database_path` in config. Workspace commands do not read that key yet; they open `--database` or the workspace `.ee/ee.db`. `ee insights` reads this variable directly."
             }

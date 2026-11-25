@@ -964,8 +964,8 @@ VOLUME fails, after which `RCH_VERIFY_COMMITTED_TREE_BASE` falls through to the
 ExFAT default from `~/.zshenv:62` and every pinned dispatch is refused as an
 AppleDouble shim. The refusal names the right fix in its last sentence ("If that
 image is configured already, it is not currently attached"), but it reads as a
-filesystem problem rather than a dead volume. Checking that the mount point
-exists after attaching is the one-command check.
+filesystem problem rather than a dead volume. The one-command check after
+attaching is the `/sbin/mount` line in the recipe below.
 
 **MOUNT IT INSIDE THE BUILD ROOT, NOT AT `/Volumes/EERCHExport`.** Measured
 2026-11-25: with the image at its default mount point, every pinned dispatch was
@@ -981,6 +981,13 @@ APFS volume with `diskutil` on a directory inside the root. With that, admission
 reported workspace, cargo target, tmpdir and artifact destination all
 `external: true`, and two dispatches went on to compile remotely.
 
+This is a limit of the 0.17.0 binary, not of the source. The source has
+recognized any mounted non-boot `/Volumes/<mount>` as external since
+`df0f6114f` (bd-build-admission-external-predicate-rejects-image-5bfb4), which
+is in v0.19.0. So a 0.19.0 `--build-admission-ee-bin` should admit
+`/Volumes/EERCHExport` too. That is unmeasured; the mount below is what was
+measured.
+
 ```bash
 # Create ONLY if ee-rch-export-2.sparseimage does not already exist. Never
 # overwrite an existing image: it may hold cached bundles.
@@ -989,7 +996,11 @@ hdiutil create -size 240g -type SPARSE -fs APFS -volname EERCHExport \
 hdiutil attach -nomount /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2.sparseimage
 diskutil list | grep EERCHExport   # the APFS Volume line's IDENTIFIER, e.g. disk16s1
 diskutil mount -mountPoint /Volumes/USBNVME16TB/temp_agent_space/eerchexport <identifier>
-ls -d /Volumes/USBNVME16TB/temp_agent_space/eerchexport/rch-committed-tree   # MUST exist
+# MUST print an apfs line. Do not test for the directory instead: it exists on
+# the ExFAT volume when nothing is mounted on it, and the first dispatch creates
+# rch-committed-tree with mkdir -p on whatever filesystem is there. (The xattr
+# guard then refuses that dispatch before exporting, so the mistake is loud.)
+/sbin/mount | grep ' on /Volumes/USBNVME16TB/temp_agent_space/eerchexport ('
 RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/USBNVME16TB/temp_agent_space/eerchexport/rch-committed-tree \
 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
     --pinned-franken-stack --treeish <sha> \
