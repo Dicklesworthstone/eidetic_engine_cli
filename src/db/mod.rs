@@ -18256,6 +18256,20 @@ impl DbConnection {
         self.evidence_spans_from_rows(&rows)
     }
 
+    /// Identify every span in archive order without retaining its excerpt or
+    /// reader projection. Backup hydrates these keys individually in the same
+    /// source snapshot, including records denied admission to search or pack.
+    pub(crate) fn list_evidence_ids_for_backup(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id FROM evidence_spans WHERE workspace_id = ?1 ORDER BY session_id ASC, start_line ASC, end_line ASC, id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(str::to_owned))
+            .collect()
+    }
+
     /// List evidence spans for a workspace in deterministic transcript order.
     pub fn list_evidence_spans_for_workspace(
         &self,
@@ -60905,6 +60919,13 @@ UPDATE memories
         // with workspace B's span excluded.
         let spans_a =
             connection.list_evidence_spans_for_workspace("wsp_01234567890123456789012345")?;
+        let archive_ids =
+            connection.list_evidence_ids_for_backup("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &archive_ids,
+            &spans_a.iter().map(|span| span.id.clone()).collect::<Vec<_>>(),
+            "compact backup scan preserves full workspace membership and transcript order",
+        )?;
         let cass_a: Vec<&str> = spans_a.iter().map(|s| s.cass_span_id.as_str()).collect();
         let expected_a1_line10 = super::canonical_evidence_hash("a1-line10");
         let expected_a1_line30 = super::canonical_evidence_hash("a1-line30");

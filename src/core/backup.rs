@@ -9263,10 +9263,8 @@ fn collect_procedure_history_payloads(
         .map(|row| row.id)
         .chain(
             connection
-                .list_evidence_spans_for_workspace(workspace_id)
-                .map_err(work_history_error)?
-                .into_iter()
-                .map(|row| row.id),
+                .list_evidence_ids_for_backup(workspace_id)
+                .map_err(work_history_error)?,
         )
         .collect();
     let redact_uri = |uri: &str| redact_procedure_uri(uri, redaction, memory_ids, &provenance_ids);
@@ -13039,8 +13037,8 @@ fn collect_cass_payloads(
         }
     }
 
-    let evidence = match connection.list_evidence_spans_for_workspace(workspace_id) {
-        Ok(evidence) => evidence,
+    let evidence_ids = match connection.list_evidence_ids_for_backup(workspace_id) {
+        Ok(ids) => ids,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("evidence_spans", error));
             return None;
@@ -13051,10 +13049,28 @@ fn collect_cass_payloads(
         .map(|session| (session.id.as_str(), session))
         .collect::<BTreeMap<_, _>>();
     let mut admission = BackupEvidenceAdmissionSummary::default();
-    for (index, chunk) in evidence.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
+    // Keep only the sorted keys and the current chunk of export records.
+    // The source snapshot encloses both discovery and the primary-key reads.
+    // Publish the evidence family only after its final source row is readable.
+    let mut evidence_payloads = Vec::new();
+    for (index, chunk) in evidence_ids.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
         let mut evidence_spans = Vec::with_capacity(chunk.len());
-        for span in chunk {
-            let mut record = BackupCassEvidenceRecord::from_stored(span);
+        for id in chunk {
+            let span = match connection.get_evidence_span(id) {
+                Ok(Some(span)) if span.id == *id && span.workspace_id == workspace_id => span,
+                Ok(_) => {
+                    degraded.push(required_backup_rows_unreadable(
+                        "evidence_spans",
+                        "source span missing or outside the workspace snapshot",
+                    ));
+                    return None;
+                }
+                Err(error) => {
+                    degraded.push(required_backup_rows_unreadable("evidence_spans", error));
+                    return None;
+                }
+            };
+            let mut record = BackupCassEvidenceRecord::from_stored(&span);
             if let Some(id) = record.memory_id.as_mut()
                 && let Some(restored_id) = memory_ids.get(id)
             {
@@ -13067,7 +13083,7 @@ fn collect_cass_payloads(
                         span.is_derivation_admitted_for_session(workspace_id, session)
                     });
             record.redact_for_export(redaction_level, provenance_admitted);
-            if let Err(error) = admission.observe(span, &record) {
+            if let Err(error) = admission.observe(&span, &record) {
                 degraded.push(required_backup_rows_unreadable("evidence_spans", error));
                 return None;
             }
@@ -13080,7 +13096,7 @@ fn collect_cass_payloads(
             evidence_spans,
         };
         match serialized_payload_bytes(&chunk) {
-            Ok(bytes) => payloads.push(derived_payload(
+            Ok(bytes) => evidence_payloads.push(derived_payload(
                 format!("derived/cass/evidence-spans-{index:04}.json"),
                 "cass_evidence_spans",
                 captured_at,
@@ -13093,6 +13109,7 @@ fn collect_cass_payloads(
             }
         }
     }
+    payloads.extend(evidence_payloads);
     Some(admission)
 }
 
@@ -30123,7 +30140,7 @@ mod tests {
             .canonicalize()
             .map_err(|error| error.to_string())?
             .join("backups");
-        let created = create_backup(&BackupCreateOptions {
+        let options = BackupCreateOptions {
             workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: Some(out),
@@ -30136,8 +30153,24 @@ mod tests {
             include_derived,
             include_graph_cache: include_derived,
             dry_run: false,
-        })
-        .map_err(|error| error.message())?;
+        };
+        let (created, queries) =
+            crate::db::capture_query_sql_for_test(|| create_backup(&options));
+        let created = created.map_err(|error| error.message())?;
+        let ordered_reads: Vec<_> = queries
+            .iter()
+            .filter(|sql| {
+                sql.contains("FROM evidence_spans WHERE workspace_id = ?1 ORDER BY session_id")
+            })
+            .map(String::as_str)
+            .collect();
+        ensure(
+            !ordered_reads.is_empty()
+                && ordered_reads
+                    .iter()
+                    .all(|sql| sql.starts_with("SELECT id FROM evidence_spans ")),
+            "archive capture must not order or retain a full workspace of transcript bodies",
+        )?;
         let session_asset = created
             .derived
             .iter()
