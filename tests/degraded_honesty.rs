@@ -750,6 +750,23 @@ fn init_workspace(workspace: &Path, context: &str) -> TestResult {
     )
 }
 
+/// An initialized workspace owned by one test. A command run without
+/// `--workspace` discovers the nearest `.ee/` above the cwd, which is the crate
+/// root, so its verdict depended on the store of whichever checkout ran it; a
+/// lane worker's holds a database fsqlite rejects as malformed
+/// (bd-tests-walk-up-into-checkout-store-uuaa3).
+fn initialized_workspace(name: &str) -> Result<PathBuf, String> {
+    let workspace = unique_artifact_dir(name)?.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    init_workspace(&workspace, name)?;
+    Ok(workspace)
+}
+
 #[test]
 fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResult {
     let workspace_root = unique_artifact_dir("context-missing-db-workspace")?;
@@ -921,10 +938,18 @@ fn retrieval_graph_memory_curate_rule_and_status_commands_have_no_fake_contract_
     .map_err(|error| format!("failed to write {}: {error}", query_file.display()))?;
     let query_file_arg = query_file.display().to_string();
 
+    // Status asserts exit 0, so it gets an initialized workspace of its own;
+    // the commands below keep the uninitialized one they were written against.
+    let status_workspace = initialized_workspace("status-success-workspace")?;
     let status_result = run_ee_logged(
         "status-success-contract",
-        None,
-        vec!["--json".to_owned(), "status".to_owned()],
+        Some(&status_workspace),
+        vec![
+            "--workspace".to_owned(),
+            status_workspace.display().to_string(),
+            "--json".to_owned(),
+            "status".to_owned(),
+        ],
     )?;
     ensure_equal(&status_result.exit_code, &0, "status exit code")?;
     ensure(
@@ -1334,11 +1359,15 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     let out_dir = artifact_dir.join("bundle-output");
     fs::create_dir_all(&out_dir)
         .map_err(|error| format!("failed to create {}: {error}", out_dir.display()))?;
+    let workspace = initialized_workspace("support-bundle-workspace")?;
+    let workspace_arg = workspace.display().to_string();
 
     let result = run_ee_logged(
         "support-bundle-dry-run",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
             "--json".to_owned(),
             "support".to_owned(),
             "bundle".to_owned(),
@@ -1372,8 +1401,10 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
 
     let result = run_ee_logged(
         "support-bundle-create",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
             "--json".to_owned(),
             "support".to_owned(),
             "bundle".to_owned(),
@@ -1789,19 +1820,25 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
             .is_some(),
         "support bundle QoS summary must include structured degraded array".to_owned(),
     )?;
-    let raw_workspace_path = env::current_dir()
+    // The bundle describes `workspace`, so that is the path that must not leak.
+    // The cwd is still checked, since the bundle has no business naming it.
+    let raw_cwd_path = env::current_dir()
         .map_err(|error| format!("failed to read current directory: {error}"))?
         .display()
         .to_string();
-    ensure(
-        !qos_lane_summary.contains(&raw_workspace_path),
-        "support bundle QoS summary must not include the raw workspace path".to_owned(),
-    )?;
+    for (raw_path, label) in [(&workspace_arg, "workspace"), (&raw_cwd_path, "cwd")] {
+        ensure(
+            !qos_lane_summary.contains(raw_path.as_str()),
+            format!("support bundle QoS summary must not include the raw {label} path"),
+        )?;
+    }
 
     let inspect_result = run_ee_logged(
         "support-bundle-inspect",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "support".to_owned(),
             "inspect".to_owned(),
@@ -2686,10 +2723,13 @@ fn learn_read_and_proposal_commands_use_persisted_ledgers() -> TestResult {
 
 #[test]
 fn lab_replay_reports_missing_frozen_inputs_without_generated_success() -> TestResult {
+    let workspace = initialized_workspace("lab-replay-workspace")?;
     let result = run_ee_logged(
         "lab-replay-missing-frozen-inputs",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
             "--json".to_owned(),
             "lab".to_owned(),
             "replay".to_owned(),
@@ -3135,10 +3175,13 @@ fn procedure_list_reports_persisted_records_without_unavailable_sentinel() -> Te
 
 #[test]
 fn situation_classify_reports_heuristic_routing_without_unavailable_sentinel() -> TestResult {
+    let workspace = initialized_workspace("situation-classify-workspace")?;
     let result = run_ee_logged(
         "situation-classify-heuristic",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
             "--json".to_owned(),
             "situation".to_owned(),
             "classify".to_owned(),
