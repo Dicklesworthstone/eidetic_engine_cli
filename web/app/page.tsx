@@ -35,8 +35,8 @@ function HeroWords() {
       </p>
       <p className="mt-4 max-w-[37rem] text-[15px] leading-relaxed text-slate-400">
         <span className="font-semibold text-slate-200">New in {siteConfig.version}:</span> fix recall now reads Go
-        terminal failures, Rust syntax errors and Vitest and Jest reports, and each retrieval response says whether the
-        optional daemon or the local process served it, without changing the pack&apos;s hash.{" "}
+        terminal failures, Rust syntax errors, and Vitest and Jest reports. Each retrieval response also says whether
+        the optional daemon or the local process served it, and that does not change the pack&apos;s hash.{" "}
         <a className={link} href={siteConfig.changelog}>
           What changed
         </a>
@@ -149,10 +149,10 @@ export default function Home() {
                   stays within the budget you set.
                 </p>
                 <p>
-                  It is a single Rust binary that keeps each workspace&apos;s store in its <Cmd>.ee</Cmd> directory,
-                  and a user-global store under <Cmd>~/.local/share/ee</Cmd>, and needs no cloud service or API key.
-                  Claude Code, Codex, shell scripts and, in a build with the <Cmd>mcp</Cmd> feature, MCP clients call
-                  the same commands and get the same JSON with <Cmd>--json</Cmd>.
+                  It is a single Rust binary that needs no cloud service or API key. Each workspace keeps its store in
+                  its <Cmd>.ee</Cmd> directory, beside a user-global store under <Cmd>~/.local/share/ee</Cmd>. Claude
+                  Code, Codex and shell scripts call the same commands and, with <Cmd>--json</Cmd>, get the same JSON;
+                  MCP clients reach the same contracts in a build with the <Cmd>mcp</Cmd> feature.
                 </p>
               </div>
             </div>

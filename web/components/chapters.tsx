@@ -737,8 +737,8 @@ function GraphChapter() {
         title="Each algorithm answers a [question]."
         kicker={
           <>
-            Each one is a command with deterministic JSON output. The first six work as installed; the rest name the
-            config flag that turns them on, because every graph feature flag is off by default. Graph views help
+            Each one is a command with deterministic JSON output. Every graph feature flag is off by default, so a tool
+            that needs one names the <Cmd>ee config set</Cmd> line that turns it on; the others work as installed. Graph views help
             explain and navigate memory, but a memory&apos;s own provenance stays the record of where it came from.
           </>
         }
@@ -810,7 +810,7 @@ function ProofChapter() {
         kicker={
           <>
             Each line below is a dependency that fails ee&apos;s forbidden-dependency check, and what ee uses instead.
-            Together they keep ee a single binary with its own runtime and storage stack and no HTTP code in the core.
+            Together they keep ee a single binary with its own runtime and storage stack and no HTTP framework.
             Hybrid search comes from one crate, Frankensearch, by convention; no check enforces that one.
           </>
         }

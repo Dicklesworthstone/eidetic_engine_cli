@@ -345,7 +345,7 @@ export const firstCommands = [
   {
     step: "Teach it a rule",
     command: 'ee remember "Run cargo fmt --check before tagging a release." \\\n  --workspace . --level procedural --kind rule --json',
-    note: "Text that looks like a secret is refused (exit 7) with where it matched. A memory you write this way is trusted as human_explicit.",
+    note: "Text that looks like a secret is refused with exit 7, and the error says where it matched. A memory written this way starts in the human_explicit trust class.",
   },
   {
     step: "Hand the next session a pack",
@@ -416,7 +416,7 @@ export const forbidden = [
   { no: "Tokio, async-std, smol", instead: "Asupersync", why: "Structured concurrency, cancellation as a value, deterministic lab tests." },
   { no: "rusqlite, SQLx, Diesel", instead: "FrankenSQLite + SQLModel", why: "One Rust storage stack with MVCC, owned end to end." },
   { no: "petgraph", instead: "FrankenNetworkX", why: "Graph algorithms with NetworkX semantics, in Rust." },
-  { no: "hyper, axum, reqwest", instead: "No HTTP in the core", why: "Memory does not need a network to work." },
+  { no: "hyper, axum, reqwest", instead: "No HTTP framework", why: "Memory needs no network. The optional ee serve is a loopback server on Rust's standard library." },
 ] as const;
 
 /** Counts behind the "rules" section, taken at COUNTED. */
