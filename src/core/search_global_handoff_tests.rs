@@ -733,3 +733,113 @@ fn global_tombstone_supplement_respects_modes_duplicates_and_source_budgets() {
     assert_eq!(degraded.len(), 1);
     assert_eq!(degraded[0].code, "search_tombstone_snapshot_unavailable");
 }
+
+#[test]
+fn global_source_retrieval_rejects_stopword_only_matches_in_every_lifecycle() {
+    if isolate_global_store(
+        "global_source_retrieval_rejects_stopword_only_matches_in_every_lifecycle",
+        "EE_TEST_GLOBAL_SOURCE_LEXICAL_ADMISSION",
+    ) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let _local_embedder = fixture.publish_index();
+    include_global(&fixture, true);
+    let global = GlobalQualityFixture::new(
+        crate::core::global_store::default_global_store_paths_from_env().unwrap(),
+    );
+    let created = Utc::now() - chrono::Duration::days(1);
+    let unrelated = global.memory(931, created);
+    let relevant = global.memory(932, created);
+    for (id, body) in [
+        (
+            &unrelated,
+            "How do I run release checks before shipping deployment packages?",
+        ),
+        (
+            &relevant,
+            "To bake sourdough bread, feed the starter and preheat the oven.",
+        ),
+    ] {
+        global
+            .db
+            .execute(
+                "UPDATE memories SET content = ?1 WHERE id = ?2",
+                &[
+                    sqlmodel_core::Value::Text(body.to_owned()),
+                    sqlmodel_core::Value::Text(id.clone()),
+                ],
+            )
+            .unwrap();
+    }
+    let _global_embedder =
+        crate::core::index::install_test_hash_workspace_embedder(&global.workspace);
+    let rebuild = crate::core::index::IndexRebuildOptions {
+        workspace_path: global.paths.root.clone(),
+        database_path: Some(global.paths.database_path.clone()),
+        index_dir: Some(global.paths.index_dir.clone()),
+        dry_run: false,
+    };
+    let mut options = SearchOptions {
+        query: "how do I bake sourdough bread".to_owned(),
+        relevance_floor: None,
+        memory_scope: MemoryScope::Global,
+        ..fixture.options()
+    };
+    for lifecycle in ["unpublished", "published", "retired"] {
+        if lifecycle == "retired" {
+            for id in [&unrelated, &relevant] {
+                global.db.tombstone_memory(id).unwrap();
+            }
+            options.include_tombstoned = true;
+        }
+        if lifecycle != "unpublished" {
+            let rebuilt = crate::core::index::rebuild_index(&rebuild).unwrap();
+            assert!(rebuilt.errors.is_empty());
+        }
+        // A zero floor explicitly opts out of the overlap guard. This arm
+        // proves both documents really reached the lexical engine, including
+        // the negative control that matches only "how", "do" and "I".
+        let control = run_pack_search(&SearchOptions {
+            relevance_floor: Some(0.0),
+            ..options.clone()
+        })
+        .unwrap();
+        assert_eq!(
+            control
+                .report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([unrelated.as_str(), relevant.as_str()]),
+            "zero-floor control must reach both global source rows: {lifecycle}"
+        );
+        let guarded = run_pack_search(&options).unwrap().report;
+        assert_eq!(guarded.status, SearchStatus::Success, "{lifecycle}");
+        assert_eq!(guarded.results.len(), 1, "{lifecycle}");
+        assert_eq!(guarded.results[0].doc_id, relevant, "{lifecycle}");
+        assert!(
+            guarded
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "lexical_stopword_only_filtered"),
+            "stopword-only global evidence must be reported: {lifecycle}"
+        );
+        assert_eq!(
+            guarded.data_json()["results"][0]["content_truncated"],
+            false,
+            "the public result contains the complete admitted source body"
+        );
+        if lifecycle == "unpublished" {
+            assert!(
+                !global.paths.index_dir.exists(),
+                "read-only admission must not publish the global index"
+            );
+        } else {
+            let direct = run_search_unaudited(&options).unwrap();
+            assert_eq!(direct.results.len(), 1, "{lifecycle}");
+            assert_eq!(direct.results[0].doc_id, relevant, "{lifecycle}");
+        }
+    }
+}

@@ -16238,6 +16238,10 @@ pub(crate) fn global_store_search_metadata(
         "valid_from": &memory.valid_from,
         "valid_to": &memory.valid_to,
         "validity_status": search_validity_status_for_memory(memory, reference_time),
+        // The pinned source below supplies the entire body. Without this
+        // witness, lexical admission treats every global result as an unknown
+        // preview and cannot reject matches supported only by stopwords.
+        "content_truncated": false,
         "memory_scope": MemoryScope::Global.as_str(),
         "tags": [GLOBAL_MEMORY_SCOPE_TAG],
     });
