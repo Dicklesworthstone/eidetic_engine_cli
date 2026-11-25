@@ -2006,8 +2006,8 @@ Full annotated example:
 # ~/.config/ee/config.toml
 
 [storage]
-# Parsed but not yet read: commands open <workspace>/.ee/ee.db (or --database)
-# and the index under .ee/index, and nothing writes memory.jsonl on its own.
+# Parsed but not yet read: workspace commands open <workspace>/.ee/ee.db (or
+# --database) and the index under .ee/index; nothing writes memory.jsonl itself.
 database_path = "~/.local/share/ee/ee.db"
 index_dir     = "~/.local/share/ee/indexes"
 jsonl_export  = false
