@@ -212,7 +212,7 @@ export function NegativeLedger() {
           <div className="rounded-xl border border-orange-300/20 bg-orange-300/[0.04] px-4 py-3">
             <p className="font-mono text-[10.5px] tracking-[0.16em] text-orange-200/90 uppercase">ee&rsquo;s own</p>
             <ul className="mt-2 space-y-1.5 text-slate-300">
-              <li>A failure carries its family as a typed field, and a search on it returns the family together.</li>
+              <li>A failure carries its family as a typed field, and a search on that field returns the family&rsquo;s failures together.</li>
               <li>
                 A rule exists only once <span className="font-mono text-[12px] text-slate-200">ee curate apply</span> accepts
                 it, and the next pack puts what not to do first.

@@ -248,7 +248,7 @@ export function SessionLoop() {
     >
       <div ref={ref} className="min-w-0" onFocus={onFocusIn} onBlur={onFocusOut}>
         <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
-          Nine stations: five read from ee, three write to it, one is the harness&apos;s own work. Pick one to see its
+          Nine stations: five only read from ee, three write to it, one is the harness&apos;s own work. Pick one to see its
           command and the JSON it returns, or press Play.
         </p>
 

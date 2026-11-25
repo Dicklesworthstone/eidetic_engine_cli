@@ -36,7 +36,7 @@ const FLOW = [
 const VERSUS = [
   { point: "What a session loads", notes: "the whole file", ee: "only what bears on the task" },
   { point: "As lessons pile up", notes: "grows, and costs more", ee: "stays inside your budget" },
-  { point: "An out-of-date line", notes: "nothing marks it", ee: "demoted, then dropped" },
+  { point: "A line that stopped helping", notes: "nothing marks it", ee: "the decay pass demotes, then retires it" },
   { point: "Each line says", notes: "nothing about itself", ee: "its source and score" },
 ];
 
@@ -132,7 +132,7 @@ function HeroWords() {
       </h1>
       <p className="lede mt-7 max-w-[37rem]">
         Eidetic Engine (ee) records what your agents learn as they work. At the start of each task it hands the agent the
-        part of that record that bears on the task, cut to a token budget, with the source of every line.
+        part of that record that bears on it, cut to a token budget, with the source of every line.
       </p>
       <ul aria-label="At a glance" className="mt-6 flex max-w-[37rem] flex-wrap gap-2">
         {HERO_FACTS.map((fact) => (

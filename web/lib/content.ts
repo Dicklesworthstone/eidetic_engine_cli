@@ -59,7 +59,7 @@ export const chapters: Chapter[] = [
     short: "Why",
     title: "Every session starts [from zero].",
     thesis:
-      "A new agent session re-learns the project's conventions, re-reads what an earlier session already read, and repeats its failures, because nothing those sessions learned was kept where it could be found.",
+      "A new agent session re-learns the project's conventions, re-reads what an earlier session already read, and repeats failures an earlier one already hit, because nothing those sessions learned was kept where it could be found.",
     colour: "#fb7185",
     share: {
       title: "Why agents forget, and why a notes file doesn't fix it",
@@ -90,7 +90,7 @@ export const chapters: Chapter[] = [
     short: "Memory",
     title: "Typed memories with [half-lives].",
     thesis:
-      "A scratch note is useful for a day and a procedural rule for a year, so ee stores memories at four levels, each with its own half-life. A stale memory is demoted, then leaves retrieval with an audit entry.",
+      "A scratch note is useful for a day and a procedural rule for a year, so ee stores memories at four levels, each with its own half-life. When the decay pass runs, a stale memory is demoted, then leaves retrieval with an audit entry.",
     colour: "#fbbf24",
     share: {
       title: "Typed memories with half-lives",
@@ -119,7 +119,7 @@ export const chapters: Chapter[] = [
     short: "Pack",
     title: "How ee builds [a pack].",
     thesis:
-      "The pack is what an agent reads at the start of a task: the memories that fit it, within a token budget, near-duplicates dropped, each item with its source and score. The same inputs give the same pack.",
+      "The pack is what an agent reads at the start of a task: the memories that match it, within a token budget, near-duplicates dropped, each item with its source and score. The same inputs give the same pack.",
     colour: "#a78bfa",
     share: {
       title: "How ee builds a context pack",

@@ -677,9 +677,9 @@ export function GraphLens() {
             Off by default
           </p>
           <p className="mt-2 text-slate-400">
-            What would change ranking, retention or pack explanations (Pack DNA, proximity, HITS profiles, structural
-            decay) and the knowledge skyline, under{" "}
-            <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span>.
+            The features that would change ranking, retention or pack explanations (Pack DNA, proximity, HITS profiles,
+            structural decay), and the knowledge skyline. Each is a{" "}
+            <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span> flag.
           </p>
         </li>
         <li className="rounded-xl border border-rose-300/20 bg-rose-300/[0.04] px-4 py-3">

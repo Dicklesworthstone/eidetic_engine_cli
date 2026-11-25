@@ -250,7 +250,7 @@ body::before {
 }
 
 /* Focus: one visible ring everywhere, in the recall colour. */
-:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+:where(a, button, input, select, summary, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--recall);
   outline-offset: 2px;
 }

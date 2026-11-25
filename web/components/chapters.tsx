@@ -403,8 +403,8 @@ function LearningChapter() {
         kicker={
           <>
             What ee proposes starts as a reviewable candidate, and applying one writes an audit entry. A person can also
-            tombstone a memory directly, and the decay pass demotes and tombstones with <Cmd>--include-decay</Cmd>; both
-            are audited. No LLM turns a session journal into candidates.
+            tombstone a memory directly, and the decay pass, run with <Cmd>--include-decay</Cmd>, demotes and tombstones
+            on its own; both are audited. No LLM turns a session journal into candidates.
           </>
         }
       >
@@ -608,8 +608,8 @@ function AgentsChapter() {
         title="A session, the way an agent [runs] it."
         kicker={
           <>
-            From orienting to handing off, every step but the work itself is one ee command, and its JSON answer has
-            named fields the next step reads.
+            From <Cmd>resume</Cmd> to <Cmd>handoff</Cmd>, every step but the work itself is one ee command, and its JSON
+            answer has named fields the next step reads.
           </>
         }
       >
