@@ -15525,6 +15525,26 @@ fn read_global_search_memories(
     }))
 }
 
+fn admit_global_memories_for_local_snapshot(
+    connection: Option<&DbConnection>,
+    memories: &mut Vec<StoredMemory>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> bool {
+    if memories.is_empty() {
+        return false;
+    }
+    let verified = connection.is_some_and(|db| {
+        retain_global_memories_without_local_owners(db, memories).is_ok()
+    });
+    if verified {
+        return !memories.is_empty();
+    }
+    degraded.push(SearchDegradation::scope_metadata_unavailable(
+        "Could not verify local memory ownership for global retrieval; the optional global lane was withheld",
+    ));
+    false
+}
+
 /// User-global rows for a context pack whose workspace retrieval could not
 /// run (no index, or a stale, corrupt or incompatible one). The global lane is
 /// a separate store (ADR 0083), so a workspace index problem must not hide it;
@@ -15533,6 +15553,7 @@ fn read_global_search_memories(
 /// untrustworthy one fails the request instead of enabling the lane.
 pub(crate) fn global_store_fallback_memories(
     options: &SearchOptions,
+    local_connection: &DbConnection,
     degraded: &mut Vec<SearchDegradation>,
 ) -> Result<(Vec<StoredMemory>, Option<GlobalMemoryFeedbackSnapshot>), SearchError> {
     if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
@@ -15541,15 +15562,25 @@ pub(crate) fn global_store_fallback_memories(
     }
     let memory_config = crate::config::workspace_memory_policy(&options.workspace_path)
         .map_err(SearchError::Configuration)?;
-    Ok(admitted_global_store_memories(
+    let Some((_, mut snapshot)) = admitted_global_store_memories(
         options,
         &memory_config,
         SearchMemoryFilters::default(),
         options.as_of.unwrap_or_else(Utc::now),
         degraded,
-    )
-    .map(|(_, snapshot)| (snapshot.memories, Some(snapshot.feedback)))
-    .unwrap_or_default())
+    ) else {
+        return Ok((Vec::new(), None));
+    };
+    // Resolve ownership before the pack preloads bodies or attributes feedback.
+    // Even a retired or out-of-scope local row owns its ID in this snapshot.
+    if !admit_global_memories_for_local_snapshot(
+        Some(local_connection),
+        &mut snapshot.memories,
+        degraded,
+    ) {
+        return Ok((Vec::new(), None));
+    }
+    Ok((snapshot.memories, Some(snapshot.feedback)))
 }
 
 async fn global_store_frankensearch_hits(
@@ -15592,18 +15623,8 @@ async fn global_store_frankensearch_hits(
     let Some((paths, mut snapshot)) = admitted else {
         return Vec::new();
     };
-    if !snapshot.memories.is_empty() {
-        let admitted = local_connection.is_some_and(|connection| {
-            retain_global_memories_without_local_owners(connection, &mut snapshot.memories).is_ok()
-        });
-        if !admitted {
-            degraded.push(SearchDegradation::scope_metadata_unavailable(
-                "Could not verify local memory ownership for global retrieval; the optional global lane was withheld",
-            ));
-            return Vec::new();
-        }
-    }
-    if snapshot.memories.is_empty() {
+    if !admit_global_memories_for_local_snapshot(local_connection, &mut snapshot.memories, degraded)
+    {
         return Vec::new();
     }
     global_store_snapshot_frankensearch_hits(

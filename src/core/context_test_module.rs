@@ -15696,7 +15696,7 @@ pub fn unrelated_context() -> u64 {{
         let mut degraded = Vec::new();
         let mut preloaded = BTreeMap::new();
         let (memories, feedback) =
-            super::global_store_fallback_memories(&options, &mut degraded, &mut preloaded)
+            super::global_store_fallback_memories(&options, &local, &mut degraded, &mut preloaded)
                 .map_err(|error| error.to_string())?;
         assert_eq!(preloaded.len(), 2);
         let (hits, _) = super::quality_scored_lexical_memory_fallback_hits(
@@ -15742,6 +15742,77 @@ pub fn unrelated_context() -> u64 {{
                 .iter()
                 .any(|entry| entry.code == "search_quality_signals_unavailable")
         );
+
+        // A global twin's body and harmful outcome must never be attributed to
+        // the local owner. The distinct global control must remain retrievable.
+        let stored_at = "2026-05-01T11:00:00Z";
+        local
+            .insert_memory_with_timestamps(
+                &harmful,
+                &CreateMemoryInput {
+                    workspace_id: local_workspace,
+                    content: "sharedfeedbacktoken local guidance".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    workflow_id: None,
+                    confidence: 1.0,
+                    utility: 1.0,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    provenance_uri: Some("manual://local-pack-feedback".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: Some(stored_at.to_owned()),
+                    valid_to: None,
+                },
+                stored_at,
+                stored_at,
+                &harmful,
+            )
+            .map_err(|error| error.to_string())?;
+        options.limit = 2;
+        for retired in [false, true] {
+            if retired {
+                local
+                    .execute_raw(&format!(
+                        "UPDATE memories SET tombstoned_at = '{stored_at}' WHERE id = '{harmful}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut preloaded = BTreeMap::new();
+            let (memories, feedback) = super::global_store_fallback_memories(
+                &options,
+                &local,
+                &mut degraded,
+                &mut preloaded,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(preloaded.keys().collect::<Vec<_>>(), vec![&helpful]);
+            let (hits, _) = super::quality_scored_lexical_memory_fallback_hits(
+                &local,
+                &options,
+                super::FallbackMemorySelection::NotTombstoned,
+                memories,
+                feedback.as_ref(),
+                &mut degraded,
+            )
+            .map_err(|error| error.to_string())?;
+            assert!(hits.iter().any(|hit| hit.doc_id == helpful));
+            let local_hit = hits.iter().find(|hit| hit.doc_id == harmful);
+            if retired {
+                assert!(
+                    local_hit.is_none(),
+                    "a global copy cannot revive a retired ID"
+                );
+            } else {
+                let local_hit = local_hit.ok_or("missing local owner")?;
+                assert_eq!(
+                    local_hit.ranking_components_json().ok_or("missing local score")?["inputs"]
+                        ["harmfulCount"],
+                    0,
+                );
+            }
+        }
         Ok(())
     }
 
