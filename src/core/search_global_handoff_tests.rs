@@ -382,7 +382,6 @@ fn pack_request_identity_resolves_workspace_aliases_with_unpublished_indexes() {
     assert!(!canonical.resolve_index_dir().exists());
 }
 
-
 #[test]
 fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
     if isolate_global_store(
@@ -423,9 +422,12 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
         )
         .unwrap();
     let expiry = (reference - chrono::Duration::hours(1)).to_rfc3339();
-    global.db.execute_raw(&format!(
-        "UPDATE memories SET valid_to = '{expiry}' WHERE id = '{expired}'"
-    )).unwrap();
+    global
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET valid_to = '{expiry}' WHERE id = '{expired}'"
+        ))
+        .unwrap();
     global
         .db
         .restore_imported_memory_supersession(
@@ -527,7 +529,10 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
             );
             assert_eq!(metadata["tombstoned"], true);
             assert!(metadata["tombstoned_at"].as_str().is_some());
-            assert_eq!(metadata["provenanceUri"], "manual://global-feedback-quality");
+            assert_eq!(
+                metadata["provenanceUri"],
+                "manual://global-feedback-quality"
+            );
             let public = report.data_json();
             let retired_result = public["results"]
                 .as_array()
@@ -623,7 +628,11 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
             .any(|entry| entry.code == "global_lane_disabled")
     );
     include_global(&fixture, true);
-    std::fs::write(global.paths.index_dir.join("meta.json"), b"invalid index metadata").unwrap();
+    std::fs::write(
+        global.paths.index_dir.join("meta.json"),
+        b"invalid index metadata",
+    )
+    .unwrap();
     let corrupt = run_search_unaudited(&historical).unwrap();
     assert!(corrupt.results.is_empty());
     assert!(
@@ -665,7 +674,8 @@ fn global_tombstone_supplement_respects_modes_duplicates_and_source_budgets() {
     let run = |options: &SearchOptions, memories: &[StoredMemory], mut hits: Vec<SearchHit>| {
         crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
             let mut degraded = Vec::new();
-            supplement_global_tombstone_hits(&cx, options, memories, &mut hits, &mut degraded).await;
+            supplement_global_tombstone_hits(&cx, options, memories, &mut hits, &mut degraded)
+                .await;
             (hits, degraded)
         })
         .unwrap()
@@ -840,6 +850,158 @@ fn global_source_retrieval_rejects_stopword_only_matches_in_every_lifecycle() {
             let direct = run_search_unaudited(&options).unwrap();
             assert_eq!(direct.results.len(), 1, "{lifecycle}");
             assert_eq!(direct.results[0].doc_id, relevant, "{lifecycle}");
+        }
+    }
+}
+
+#[test]
+fn global_retrieval_resolves_local_ownership_before_scoring() {
+    if isolate_global_store(
+        "global_retrieval_resolves_local_ownership_before_scoring",
+        "EE_TEST_GLOBAL_SOURCE_OWNERSHIP",
+    ) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let created = Utc::now() - chrono::Duration::days(1);
+    let unrelated = fixture.memory_with_content(
+        941,
+        1.0,
+        1.0,
+        created,
+        "Orchard irrigation follows the weekly rainfall forecast.",
+    );
+    let tagged_body = "qualityquasar local incident notes preserve the cache recovery procedure.";
+    let matching = fixture.memory_with_content(942, 1.0, 1.0, created, tagged_body);
+    let workspace_body = "qualityquasar workspace journal records a distinct release decision.";
+    let workspace_only = fixture.memory_with_content(944, 1.0, 1.0, created, workspace_body);
+    let unrelated_tagged = fixture.memory_with_content(
+        945,
+        1.0,
+        1.0,
+        created,
+        "Pottery glaze temperatures depend on clay and kiln cycles.",
+    );
+    for id in [&matching, &unrelated_tagged] {
+        fixture
+            .db
+            .add_memory_tags(id, &["global".to_owned()])
+            .unwrap();
+    }
+    let _local_embedder = fixture.publish_index();
+    let baseline = run_pack_search(&fixture.options()).unwrap().report;
+    let local_relevance = baseline
+        .results
+        .iter()
+        .map(|hit| (hit.doc_id.clone(), hit.relevance_score()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        local_relevance.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([matching.clone(), workspace_only.clone()])
+    );
+    include_global(&fixture, true);
+    let global = GlobalQualityFixture::new(
+        crate::core::global_store::default_global_store_paths_from_env().unwrap(),
+    );
+    for (number, id) in [
+        (941, &unrelated),
+        (942, &matching),
+        (944, &workspace_only),
+        (945, &unrelated_tagged),
+    ] {
+        assert_eq!(global.memory(number, created), *id);
+    }
+    let global_only = global.memory(943, created);
+    let _global_embedder =
+        crate::core::index::install_test_hash_workspace_embedder(&global.workspace);
+    let rebuild = crate::core::index::IndexRebuildOptions {
+        workspace_path: global.paths.root.clone(),
+        database_path: Some(global.paths.database_path.clone()),
+        index_dir: Some(global.paths.index_dir.clone()),
+        dry_run: false,
+    };
+    for lifecycle in ["unpublished", "published", "retired"] {
+        if lifecycle == "retired" {
+            for id in [
+                &unrelated,
+                &matching,
+                &workspace_only,
+                &unrelated_tagged,
+                &global_only,
+            ] {
+                global.db.tombstone_memory(id).unwrap();
+            }
+        }
+        if lifecycle != "unpublished" {
+            let rebuilt = crate::core::index::rebuild_index(&rebuild).unwrap();
+            assert!(rebuilt.errors.is_empty());
+        }
+        for scope in [
+            MemoryScope::Workspace,
+            MemoryScope::Swarm,
+            MemoryScope::Global,
+        ] {
+            let options = SearchOptions {
+                memory_scope: scope,
+                include_tombstoned: lifecycle == "retired",
+                ..fixture.options()
+            };
+            let handoff = run_pack_search(&options).unwrap();
+            assert!(handoff.snapshot_matches(&options, &fixture.db));
+            let mut reports = vec![handoff.report];
+            if lifecycle != "unpublished" {
+                reports.push(run_search_unaudited(&options).unwrap());
+            }
+            let mut expected = BTreeSet::from([matching.clone(), global_only.clone()]);
+            if scope != MemoryScope::Global {
+                expected.insert(workspace_only.clone());
+            }
+            for report in reports {
+                assert_eq!(
+                    report.status,
+                    SearchStatus::Success,
+                    "{lifecycle}, {scope:?}"
+                );
+                assert_eq!(
+                    report
+                        .results
+                        .iter()
+                        .map(|hit| hit.doc_id.clone())
+                        .collect::<BTreeSet<_>>(),
+                    expected,
+                    "global relevance must not admit an unrelated local twin: {lifecycle}, {scope:?}"
+                );
+                for (id, body) in [(&matching, tagged_body), (&workspace_only, workspace_body)] {
+                    let Some(hit) = report.results.iter().find(|hit| &hit.doc_id == id) else {
+                        assert_eq!(scope, MemoryScope::Global);
+                        assert_eq!(id, &workspace_only);
+                        continue;
+                    };
+                    assert_eq!(
+                        hit.relevance_score(),
+                        local_relevance[id],
+                        "local relevance must survive the global merge: {lifecycle}, {scope:?}"
+                    );
+                    let metadata = hit.metadata.as_ref().unwrap();
+                    assert!(metadata.get("storeLane").is_none());
+                    assert!(search_hit_content_text(metadata).unwrap().contains(body));
+                }
+                let distinct = report
+                    .results
+                    .iter()
+                    .find(|hit| hit.doc_id == global_only)
+                    .unwrap();
+                assert_eq!(
+                    distinct.metadata.as_ref().unwrap()["storeLane"],
+                    crate::core::global_store::GLOBAL_PROVENANCE_LANE
+                );
+            }
+        }
+        if lifecycle == "unpublished" {
+            assert!(
+                !global.paths.index_dir.exists(),
+                "read-only ownership admission must not publish the global index"
+            );
         }
     }
 }
