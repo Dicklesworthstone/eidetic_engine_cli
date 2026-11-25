@@ -1347,9 +1347,8 @@ fn apply_rule_index_convergence(
     index_status: &mut String,
     degraded: &mut Vec<RuleAddDegradation>,
 ) {
-    let index_dir = workspace_path
-        .join(".ee")
-        .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+    let index_dir =
+        crate::config::workspace::resolve_store_index_dir(workspace_path, database_path, None);
     let failure = match crate::core::index::process_pending_index_jobs_coalesced(
         connection,
         workspace_id,
@@ -4965,6 +4964,31 @@ mod tests {
         }
     }
 
+    fn index_files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        let mut files = BTreeMap::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                if entry
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    directories.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf();
+                    files.insert(relative, fs::read(path).map_err(|error| error.to_string())?);
+                }
+            }
+        }
+        Ok(files)
+    }
+
     #[test]
     fn validation_triggers_use_validation_counters_not_feedback_counters() -> TestResult {
         let validation_passed = RuleLifecycleEvidence::new()
@@ -7785,6 +7809,222 @@ mod tests {
                 .any(|entry| entry.code == "search_index_stale"),
             "no stale advisory after rule add",
         )
+    }
+
+    #[test]
+    fn rule_and_playbook_publish_to_selected_store_without_changing_workspace_index() -> TestResult
+    {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace");
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let create_rule = |database_path: Option<&Path>, content: &str| {
+                add_rule(&RuleAddOptions {
+                    workspace_path: &workspace,
+                    database_path,
+                    content,
+                    scope: "workspace",
+                    scope_pattern: None,
+                    maturity: "candidate",
+                    confidence: None,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "human_explicit",
+                    protected: false,
+                    tags: &[],
+                    source_memory_ids: &[],
+                    dry_run: false,
+                    actor: None,
+                })
+                .map_err(|error| error.message())
+            };
+            let original = create_rule(None, "Defaultstoreguard preserve the workspace rule.")?;
+            ensure(
+                original.index_status == "indexed",
+                "default rule is indexed",
+            )?;
+            let workspace_index = workspace.join(".ee/index");
+            let before = index_files(&workspace_index)?;
+            ensure(!before.is_empty(), "default index was published")?;
+            let store_dir = temp.path().join("alternate").join(store_marker);
+            let database = store_dir.join("ee.db");
+            let added = create_rule(
+                Some(&database),
+                "Storeisolation keep direct rules searchable.",
+            )?;
+            ensure(
+                added.persisted && added.index_status == "indexed" && added.degraded.is_empty(),
+                "selected store rule must be durably indexed",
+            )?;
+
+            let assert_searchable = |expected_ids: &[String]| -> TestResult {
+                let status =
+                    crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: None,
+                    })
+                    .map_err(|error| error.to_string())?;
+                ensure(
+                    status.health == crate::core::index::IndexHealth::Ready
+                        && status.db_generation.is_some()
+                        && status.db_generation == status.index_generation,
+                    "selected store index covers the committed generation",
+                )?;
+                let search = crate::core::search::run_search_with_filters(
+                    &crate::core::search::SearchOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: None,
+                        query: "Storeisolation".to_owned(),
+                        limit: 10,
+                        speed: crate::search::SpeedMode::Instant,
+                        explain: false,
+                        as_of: None,
+                        include_tombstoned: false,
+                        include_expired: false,
+                        include_future: false,
+                        include_stale: false,
+                        relevance_floor: Some(0.0),
+                        dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                        source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                        strict_source_mode: true,
+                        memory_scope: crate::models::MemoryScope::Workspace,
+                        strict_scope: false,
+                    },
+                    None,
+                    &[],
+                )
+                .map_err(|error| format!("selected store search: {error:?}"))?;
+                ensure(
+                    search
+                        .results
+                        .iter()
+                        .map(|hit| &hit.doc_id)
+                        .collect::<BTreeSet<_>>()
+                        == expected_ids.iter().collect::<BTreeSet<_>>(),
+                    "immediate search returns exactly the selected store rules",
+                )?;
+                ensure(
+                    index_files(&workspace_index)? == before,
+                    "selected store mutation must leave every default index file unchanged",
+                )
+            };
+            assert_searchable(std::slice::from_ref(&added.rule_id))?;
+            let document = portable_document_for_contents(
+                &added.workspace_id,
+                &[
+                    "Storeisolation run cargo fmt before release.",
+                    "Storeisolation run cargo test before release.",
+                ],
+            );
+            let imported = run_playbook_import(&workspace, &database, &document)?;
+            ensure(
+                imported.imported_count == 2 && imported.degraded.is_empty(),
+                "selected store playbook batch publishes successfully",
+            )?;
+            let mut expected_ids = vec![added.rule_id];
+            expected_ids.extend(
+                imported
+                    .decisions
+                    .iter()
+                    .filter_map(|decision| decision.imported_rule_id.clone()),
+            );
+            assert_searchable(&expected_ids)?;
+            ensure(
+                store_dir.join("index").is_dir(),
+                "index is beside the selected database",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&added.workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 3 && jobs.iter().all(|job| job.status == "completed"),
+                "direct and imported rules have completed durable publication jobs",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rule_and_playbook_selected_store_failure_keeps_publication_retryable() -> TestResult {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace with spaces");
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let workspace = workspace
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let store_dir = temp.path().join("alternate store").join(store_marker);
+            fs::create_dir_all(&store_dir).map_err(|error| error.to_string())?;
+            let database = store_dir.join("ee.db");
+            let blocker = temp.path().join("index-blocker");
+            fs::create_dir(&blocker).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&blocker, store_dir.join("index"))
+                .map_err(|error| error.to_string())?;
+
+            let added = add_rule(&RuleAddOptions {
+                workspace_path: &workspace,
+                database_path: Some(&database),
+                content: "Selected store rule must survive publication failure.",
+                scope: "workspace",
+                scope_pattern: None,
+                maturity: "candidate",
+                confidence: None,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "human_explicit",
+                protected: false,
+                tags: &[],
+                source_memory_ids: &[],
+                dry_run: false,
+                actor: None,
+            })
+            .map_err(|error| error.message())?;
+            let repair = rule_index_repair_command(&workspace, Some(&database));
+            ensure(
+                added.persisted && added.index_status == "queued",
+                "selected store rule remains durable and truthfully queued",
+            )?;
+            ensure(
+                added.degraded.iter().any(|entry| {
+                    entry.code == "rule_index_publish_failed" && entry.repair == repair
+                }),
+                "selected store rule failure includes the exact database repair",
+            )?;
+            let document = portable_document_for_contents(
+                &added.workspace_id,
+                &["Selected store playbook rule must survive publication failure."],
+            );
+            let imported = run_playbook_import(&workspace, &database, &document)?;
+            ensure(
+                imported.imported_count == 1
+                    && imported.degraded.iter().any(|entry| {
+                        entry.code == "rule_index_publish_failed" && entry.repair == repair
+                    }),
+                "selected store playbook failure preserves the durable rule and repair",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&added.workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 2
+                    && jobs
+                        .iter()
+                        .all(|job| matches!(job.status.as_str(), "pending" | "failed")),
+                "all selected store publication jobs remain retryable",
+            )?;
+            ensure(
+                !workspace.join(".ee/index").exists(),
+                "failed selected store publication never creates an unrelated workspace index",
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
