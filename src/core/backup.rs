@@ -4936,23 +4936,52 @@ fn remap_restored_workspace_id(
     })
 }
 
+// Archive paths use a minimum of four decimal digits. In larger archives
+// lexical ordering alone would place chunk 10000 before chunk 1001.
+fn restored_cass_chunks<'a>(
+    assets: &'a [BackupRestoredDerivedAssetReport],
+    kind: &str,
+) -> Vec<&'a BackupRestoredDerivedAssetReport> {
+    fn ordinal(path: &str) -> Option<u32> {
+        path.strip_suffix(".json")?.rsplit_once('-')?.1.parse().ok()
+    }
+
+    let mut chunks: Vec<_> = assets.iter().filter(|asset| asset.kind == kind).collect();
+    chunks.sort_by(|left, right| {
+        ordinal(&left.path)
+            .cmp(&ordinal(&right.path))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    chunks
+}
+
+struct CassRestoreError(DomainError);
+
+impl From<DomainError> for CassRestoreError {
+    fn from(error: DomainError) -> Self {
+        Self(error)
+    }
+}
+
+impl From<crate::db::DbError> for CassRestoreError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self(restore_database_error(
+            &error,
+            format!("failed restoring portable CASS rows: {error}"),
+            "restore to a fresh --side-path and retry",
+        ))
+    }
+}
+
 fn restore_cass_assets(
     restored_database_path: &Path,
     restored_derived: &[BackupRestoredDerivedAssetReport],
 ) -> Result<(u32, u32), DomainError> {
-    let mut session_assets = restored_derived
-        .iter()
-        .filter(|asset| asset.kind == "cass_sessions")
-        .collect::<Vec<_>>();
-    let mut evidence_assets = restored_derived
-        .iter()
-        .filter(|asset| asset.kind == "cass_evidence_spans")
-        .collect::<Vec<_>>();
+    let session_assets = restored_cass_chunks(restored_derived, "cass_sessions");
+    let evidence_assets = restored_cass_chunks(restored_derived, "cass_evidence_spans");
     if session_assets.is_empty() && evidence_assets.is_empty() {
         return Ok((0, 0));
     }
-    session_assets.sort_by(|left, right| left.path.cmp(&right.path));
-    evidence_assets.sort_by(|left, right| left.path.cmp(&right.path));
 
     let connection = DbConnection::open(DatabaseConfig::file(restored_database_path.to_path_buf()))
         .map_err(|error| DomainError::Import {
@@ -4976,68 +5005,59 @@ fn restore_cass_assets(
             repair: Some("retry restore with a fresh --side-path".to_owned()),
         })?;
 
-    let mut sessions = Vec::new();
-    for (expected_index, asset) in session_assets.into_iter().enumerate() {
-        let value = read_restored_derived_json(asset)?;
-        let chunk = serde_json::from_value::<BackupCassSessionChunk>(value)
-            .map_err(|error| malformed_cass_recovery_asset(asset, error))?;
-        if chunk.schema != "ee.backup.derived.cass_sessions.v1"
-            || chunk.source_locator_policy != "omitted_host_local"
-            || chunk.chunk_index != u32::try_from(expected_index).unwrap_or(u32::MAX)
-        {
-            return Err(unsupported_cass_recovery_asset(asset));
-        }
-        for record in chunk.sessions {
-            let workspace_id = remap_restored_workspace_id(
-                &workspaces,
-                Some(&record.workspace_id),
-                "CASS session",
-            )?
-            .ok_or_else(|| unsupported_cass_recovery_asset(asset))?;
-            sessions.push(record.into_restored(workspace_id));
-        }
-    }
-
-    let mut evidence = Vec::new();
-    for (expected_index, asset) in evidence_assets.into_iter().enumerate() {
-        let value = read_restored_derived_json(asset)?;
-        let chunk = serde_json::from_value::<BackupCassEvidenceChunk>(value)
-            .map_err(|error| malformed_cass_recovery_asset(asset, error))?;
-        if chunk.schema != "ee.backup.derived.cass_evidence_spans.v1"
-            || chunk.chunk_index != u32::try_from(expected_index).unwrap_or(u32::MAX)
-        {
-            return Err(unsupported_cass_recovery_asset(asset));
-        }
-        for record in chunk.evidence_spans {
-            let workspace_id = remap_restored_workspace_id(
-                &workspaces,
-                Some(&record.workspace_id),
-                "CASS evidence span",
-            )?
-            .ok_or_else(|| unsupported_cass_recovery_asset(asset))?;
-            evidence.push(record.into_restored(workspace_id));
-        }
-    }
-
+    // Consume each authenticated chunk before opening the next one. Keep the
+    // writer fence across both families: a late bad file or row must also
+    // roll back sessions and evidence inserted from earlier chunks.
     connection
-        .with_transaction(|| {
-            for session in &sessions {
-                connection.insert_session_for_recovery(session)?;
+        .with_transaction_error(|| -> Result<_, CassRestoreError> {
+            let mut sessions = 0_u32;
+            for (index, asset) in session_assets.into_iter().enumerate() {
+                let chunk: BackupCassSessionChunk =
+                    serde_json::from_value(read_restored_derived_json(asset)?)
+                        .map_err(|error| malformed_cass_recovery_asset(asset, error))?;
+                if chunk.schema != "ee.backup.derived.cass_sessions.v1"
+                    || chunk.source_locator_policy != "omitted_host_local"
+                    || usize::try_from(chunk.chunk_index).ok() != Some(index)
+                {
+                    return Err(unsupported_cass_recovery_asset(asset).into());
+                }
+                for record in chunk.sessions {
+                    let workspace_id = remap_restored_workspace_id(
+                        &workspaces,
+                        Some(&record.workspace_id),
+                        "CASS session",
+                    )?
+                    .ok_or_else(|| unsupported_cass_recovery_asset(asset))?;
+                    connection.insert_session_for_recovery(&record.into_restored(workspace_id))?;
+                    sessions = sessions.saturating_add(1);
+                }
             }
-            for span in &evidence {
-                connection.insert_evidence_span_for_recovery(span)?;
-            }
-            Ok(())
-        })
-        .map_err(|error| DomainError::Import {
-            message: format!("failed restoring portable CASS rows: {error}"),
-            repair: Some("restore to a fresh --side-path and retry".to_owned()),
-        })?;
 
-    Ok((
-        u32::try_from(sessions.len()).unwrap_or(u32::MAX),
-        u32::try_from(evidence.len()).unwrap_or(u32::MAX),
-    ))
+            let mut evidence = 0_u32;
+            for (index, asset) in evidence_assets.into_iter().enumerate() {
+                let chunk: BackupCassEvidenceChunk =
+                    serde_json::from_value(read_restored_derived_json(asset)?)
+                        .map_err(|error| malformed_cass_recovery_asset(asset, error))?;
+                if chunk.schema != "ee.backup.derived.cass_evidence_spans.v1"
+                    || usize::try_from(chunk.chunk_index).ok() != Some(index)
+                {
+                    return Err(unsupported_cass_recovery_asset(asset).into());
+                }
+                for record in chunk.evidence_spans {
+                    let workspace_id = remap_restored_workspace_id(
+                        &workspaces,
+                        Some(&record.workspace_id),
+                        "CASS evidence span",
+                    )?
+                    .ok_or_else(|| unsupported_cass_recovery_asset(asset))?;
+                    connection
+                        .insert_evidence_span_for_recovery(&record.into_restored(workspace_id))?;
+                    evidence = evidence.saturating_add(1);
+                }
+            }
+            Ok((sessions, evidence))
+        })
+        .map_err(|error| error.0)
 }
 
 fn malformed_cass_recovery_asset(
@@ -16105,6 +16125,86 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn cass_chunk_order_crosses_the_four_digit_boundary() {
+        let assets = ["10000", "1001", "0000", "9999"].map(|index| {
+            restored_cass_asset(
+                Path::new(&format!("sessions-{index}.json")),
+                "cass_sessions",
+            )
+        });
+        let paths: Vec<_> = restored_cass_chunks(&assets, "cass_sessions")
+            .into_iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "sessions-0000.json",
+                "sessions-1001.json",
+                "sessions-9999.json",
+                "sessions-10000.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn cass_recovery_consumes_chunks_in_order_and_rolls_back_a_late_read_error() -> TestResult {
+        let (tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string();
+        let ids = [4, 5].map(|n| SessionId::from_uuid(Uuid::from_u128(n)).to_string());
+        let paths = ["sessions-0000.json", "sessions-0001.json"].map(|p| tempdir.path().join(p));
+        let assets = [
+            restored_cass_asset(&paths[1], "cass_sessions"),
+            restored_cass_asset(&paths[0], "cass_sessions"),
+        ];
+        let write_chunk = |index: usize, ids: &[String]| -> TestResult {
+            let chunk = cass_session_chunk_with(
+                "ee.backup.derived.cass_sessions.v1",
+                "omitted_host_local",
+                u32::try_from(index).map_err(|e| e.to_string())?,
+                ids.iter()
+                    .map(|id| backup_cass_session_fixture(id, &workspace_id))
+                    .collect(),
+            );
+            let bytes = serde_json::to_vec(&chunk).map_err(|e| e.to_string())?;
+            fs::write(&paths[index], bytes).map_err(|e| e.to_string())
+        };
+
+        // The second file is absent. A duplicate in the first must reach
+        // storage before any attempt to open the second file.
+        write_chunk(0, &[ids[0].clone(), ids[0].clone()])?;
+        let error = restore_cass_assets(&database, &assets).expect_err("duplicate session");
+        ensure(
+            error
+                .message()
+                .contains("failed restoring portable CASS rows"),
+            format!("later file was read before the first chunk was written: {error}"),
+        )?;
+        write_chunk(0, &ids[..1])?;
+        let error = restore_cass_assets(&database, &assets).expect_err("missing second chunk");
+        ensure(
+            error
+                .message()
+                .contains("failed reading restored derived asset"),
+            format!("unexpected late read error: {error}"),
+        )?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        ensure_equal(
+            db.get_session(&ids[0]).map_err(|e| e.to_string())?,
+            None,
+            "late chunk failure rolls back the earlier session",
+        )?;
+        db.close().map_err(|e| e.to_string())?;
+
+        write_chunk(1, &ids[1..])?;
+        ensure_equal(
+            restore_cass_assets(&database, &assets).map_err(|error| error.message())?,
+            (2, 0),
+            "repairing the later chunk permits a complete retry",
+        )
     }
 
     #[test]
