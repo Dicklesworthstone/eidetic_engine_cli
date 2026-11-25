@@ -147,10 +147,13 @@ A typical session:
 ```bash
 # 1. Initialize a workspace
 $ ee init --workspace .
-✓ database opened at ~/.local/share/ee/ee.db
-✓ workspace registered: eidetic_engine_cli (a7f2c19e)
-✓ index dir ready: ~/.local/share/ee/indexes/combined
-✓ semantic backend: ready (neural_local, potion-multilingual-128M)
+Initialized ee workspace
+
+  Workspace: /path/to/project
+  ee directory: /path/to/project/.ee
+  Database: /path/to/project/.ee/ee.db
+  Index: /path/to/project/.ee/index
+  Semantic retrieval: ready
 
 # 2. Capture a durable rule you just learned
 $ ee remember --workspace . --level procedural --kind rule \
@@ -2220,28 +2223,26 @@ Additional runtime-adjacent modules:
 ## Storage Layout
 
 ```
-~/.local/share/ee/
+<workspace>/.ee/            # the workspace store, created by `ee init`
 ├── ee.db                   # FrankenSQLite source of truth (WAL mode)
-├── indexes/
-│   └── combined/
-│       ├── manifest.json   # generation, model id, lexical+vector files
-│       └── ...             # Frankensearch artifacts
-├── cache/                  # transient, safe to wipe
-└── logs/                   # tracing-subscriber JSON logs
-
-<workspace>/.ee/            # optional project artifacts (git-friendly)
+├── index/                  # derived Frankensearch index; `ee index rebuild` recreates it
 ├── config.toml             # checked-in project overrides
 ├── backups/                # default `ee backup create` root
-├── index/                  # default workspace index dir for local runs
 ├── discovery_policy.toml   # optional mesh discovery/responder policy
 ├── discovery_allowlist.toml / discovery_denylist.toml / respond_allowlist.toml
 ├── auto_enroll_overrides.toml  # reviewed mesh auto-enrollment overrides
 ├── playbook.yaml           # human-editable rules promoted into the project
 ├── memory.jsonl            # optional auto-export
 └── README.txt
+
+~/.local/share/ee/          # $XDG_DATA_HOME/ee when that is set
+├── global/                 # the user-global lane (ADR 0069)
+│   ├── ee.db
+│   └── indexes/
+└── models/                 # downloaded embedding models
 ```
 
-Workspaces are first-class rows inside the user-global DB. A project can opt into a project-local DB via `[storage] database_path = "./.ee/db.sqlite"` when isolation matters more than global recall.
+Each workspace has its own store. Commands that take `--workspace` read and write `<workspace>/.ee/ee.db` unless `--database` names another file. The user-global lane is a separate store beside them: packs consult it whenever it exists, and label what they take from it.
 
 ---
 
