@@ -321,6 +321,12 @@ Hard rules for agents working on this Mac:
    ~/.rustup/toolchains  ⇒  /Volumes/USBNVME16TB/rustup_toolchains   (symlink)
    ```
 
+   (Measured 2026-11-24, that is no longer the layout: `~/.rustup/toolchains`
+   is a real directory on the internal disk, so rustfmt runs without the drive
+   and only the other three items below still depend on it. Check with
+   `rustfmt --version` from the repo root, not `readlink`, which prints nothing
+   for a real directory. The rest of this item applies if the symlink returns.)
+
    With the drive unmounted that symlink dangles, so there is no toolchain at
    all. Measured when the drive dropped mid-session: `cargo fmt --check` — the
    ONE cargo subcommand the local tripwire permits — exits 1 having computed

@@ -13,6 +13,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `check`, `test`, `bench`, `clippy`, `doc`, `run`, `install`, `rustc` and `fix`.
 `fmt` is the one exception, so it is also the only local syntax check you have.
 
+**MEASURED 2026-11-24: THE TOOLCHAIN IS ON THE INTERNAL DISK AGAIN, SO THAT
+CHECK RUNS WITH OR WITHOUT THE USB VOLUME, AND IT WAS RED.**
+`~/.rustup/toolchains` is now a real directory, not the link to the USB volume
+described below. The state check further down, `test -d "$(readlink …)"`,
+prints `dangling` for a real directory, because `readlink` prints nothing for
+one. It reported "cannot run" while `cargo fmt --check` was red with 29 hunks
+from 7b78286b0 and e5f5ec104 (fixed in a88c2f012). Test whether rustfmt RUNS,
+not how it is linked: `rustfmt --version` from the repo root, which resolves
+the pinned toolchain through `rust-toolchain.toml`. The next three paragraphs
+describe the symlinked layout and apply again only if it returns.
+
 **AND IT IS UNAVAILABLE WHENEVER THE USB VOLUME IS NOT MOUNTED, which is most
 of the time. Do not read its failure as a formatting verdict.** `~/.rustup/toolchains`
 is a symlink to `/Volumes/USBNVME16TB/rustup_toolchains`, so with the volume
@@ -39,7 +50,7 @@ stage — had been RED since 2026-10-27 with nobody able to see it. Check the
 state and then run the family:
 
 ```bash
-test -d "$(readlink ~/.rustup/toolchains)" && echo MOUNTED || echo dangling
+rustfmt --version && echo AVAILABLE || echo unavailable   # NOT readlink: see above
 cargo fmt --check                              # the gated stage; fix with `cargo fmt`
 ./scripts/check-format.sh --self-test          # 7 arms; INCONCLUSIVE (3) when absent
 ./scripts/check-include-fmt.sh                 # and --self-test, 6 arms
@@ -50,7 +61,10 @@ cargo fmt --check                              # the gated stage; fix with `carg
 
 All six were run on 2026-10-30: `cargo fmt --check` red (9 hunks in 3 files,
 fixed), then 7/7, 6/6 + rc 0, rc 0, rc 0 (1026 files), rc 0 ("all red gates have
-tracking beads"). The last five FAIL CLOSED while the volume is absent, which is
+tracking beads"). Run again 2026-11-24 with the local toolchain: `cargo fmt
+--check` red (29 hunks in 5 files), `check-include-fmt.sh` red on the
+include!-only `src/core/context_test_module.rs`, both fixed in a88c2f012, then
+all six rc 0 (1065 files). The last five FAIL CLOSED while the volume is absent, which is
 the correct direction and is why they are easy to mistake for permanent
 environment noise — they are not, they are gates waiting for a rail.
 
