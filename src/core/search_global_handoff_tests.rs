@@ -403,16 +403,22 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
     let expired = global.memory(903, created);
     let held = global.memory(904, created);
     let superseded = global.memory(905, created);
-    for id in [&retired, &sealed, &expired, &held, &superseded] {
-        global.db.tombstone_memory(id).unwrap();
-    }
+    // Shape the retired row while it is live. set_memory_typed_fields_json
+    // updates only rows with tombstoned_at IS NULL and returns false otherwise,
+    // so attaching the family after the tombstone left the row without one and
+    // the family filter below matched nothing (bd-9ct8b item 2).
     global.db.execute_raw(&format!(
         "UPDATE memories SET kind = 'failure', content = 'qualityquasar historical runbook retains prior deployment commands and evidence pointers.' WHERE id = '{retired}'"
     )).unwrap();
-    global
-        .db
-        .set_memory_typed_fields_json(&retired, Some(r#"{"family":"historical-release"}"#))
-        .unwrap();
+    assert!(
+        global
+            .db
+            .set_memory_typed_fields_json(&retired, Some(r#"{"family":"historical-release"}"#))
+            .unwrap()
+    );
+    for id in [&retired, &sealed, &expired, &held, &superseded] {
+        global.db.tombstone_memory(id).unwrap();
+    }
     global
         .db
         .insert_memory_seal(
