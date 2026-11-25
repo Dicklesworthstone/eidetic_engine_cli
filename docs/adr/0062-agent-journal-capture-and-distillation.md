@@ -32,13 +32,22 @@ truth (no sidecar files). Columns and bounds:
   session/run identifier for later scoped distillation.
 - `kind` — enum `observation | command_failure | surprise | note`.
 - `source` — enum `hook | manual | stdin`.
-- `body` — UTF-8, hard cap 16 KiB; oversize input is truncated
-  **deterministically at the last char boundary ≤ cap** and reported via
-  `journal_entry_truncated` (info). Truncation never errors.
-- `structured` — bounded JSON sidecar for machine fields: `cmd` (≤ 2 KiB),
-  `exit_code` (int), `cwd` (≤ 1 KiB), `paths[]` (≤ 16 entries × 1 KiB),
-  `stderr_tail` (≤ 2 KiB); total serialized sidecar ≤ 8 KiB, validated per
-  field with per-field error details.
+- `body` — UTF-8, hard cap 16 KiB after screening; oversize evidence keeps
+  the longest prefix ending at a char boundary within the cap and reports
+  `journal_entry_truncated` (info).
+- `structured` — bounded JSON sidecar for machine fields: stored `cmd`
+  (≤ 2 KiB), `exit_code` (int), `cwd` (≤ 1 KiB),
+  `paths[]` (≤ 16 entries × 1 KiB), and stored `stderr_tail` (≤ 2 KiB);
+  total serialized sidecar ≤ 8 KiB, including JSON escaping. The complete
+  command and stderr inputs are screened before deterministic UTF-8
+  truncation: `cmd` retains its prefix and `stderr_tail` retains its suffix.
+  If their escaped representation still exceeds the total sidecar cap,
+  they share the remaining encoded-byte budget equally, with unused budget
+  from a shorter field available to the other. Session identifiers, working
+  directories, and paths retain strict validation and are never truncated;
+  metadata that cannot fit by itself still produces
+  `journal_structured_too_large`. Oversize command or stderr evidence alone
+  does not reject an otherwise valid entry.
 - `redaction_report` — JSON summary of classes applied at write time.
 - `instruction_risk` — stored risk grade from the policy screen (see §3).
 - `created_at` — RFC 3339 UTC.
@@ -74,6 +83,17 @@ Every `body` and `structured` field passes the policy redaction screen
 (`screen_external_text_for_ingestion` in `src/policy`) **before** any byte is
 persisted — secrets never reach disk; applied classes are recorded in
 `redaction_report` and surfaced as `journal_redaction_applied` (info).
+Screen the complete body, command, and stderr before applying any storage
+cap. Truncating raw input first could split a secret and hide it from the
+screen, or discard an instruction-risk cue. Redaction counts and the risk
+grade therefore cover the full inputs, including portions omitted from the
+stored excerpts.
+
+`journal_entry_truncated` covers body or sidecar truncation, including
+additional shortening to fit escaped JSON. It is emitted even when the body
+is short and unchanged. The message labels its stored/input byte counts as
+**body counts**; those counts do not describe command or stderr bytes.
+
 Instruction-like content (prompt-injection cues) is **stored but graded**
 with the existing `InstructionRisk` vocabulary; entries at or above the
 configured exclusion grade are skipped by distillation with a stable
@@ -239,11 +259,11 @@ object ee.journal.entry.v1
   source        "hook"|"manual"|"stdin"
   body          string                   (≤16 KiB post-truncation)
   structured    object | null
-    cmd         string | null            (≤2 KiB)
+    cmd         string | null            (≤2 KiB screened prefix)
     exitCode    integer | null
     cwd         string | null            (≤1 KiB)
     paths       string[] | null          (≤16 × ≤1 KiB)
-    stderrTail  string | null            (≤2 KiB)
+    stderrTail  string | null            (≤2 KiB screened suffix)
   redactionReport object                 {classesApplied: string[], spanCount: int}
   instructionRisk "none"|"low"|"medium"|"high"
   createdAt     string (rfc3339)

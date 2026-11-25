@@ -1471,7 +1471,11 @@ fn legacy_pre_015_hook_command(event: &str, legacy_ee_bin: &str) -> String {
 fn install_reclaims_released_wrappers_without_claiming_user_python() -> TestResult {
     let fixture = released_hook_wrappers();
     let wrappers = fixture["wrappers"].as_array().unwrap();
-    assert_eq!(wrappers.len(), 11, "exercise every unique released body");
+    assert_eq!(
+        wrappers.len(),
+        12,
+        "exercise every published or prior-main body"
+    );
     for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
         let temp = TempDir::new().map_err(|error| error.to_string())?;
         for (index, wrapper) in wrappers.iter().enumerate() {
