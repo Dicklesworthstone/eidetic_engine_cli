@@ -80,7 +80,8 @@ empty stream (no verdict at all)".
 
 **VERIFY.SH IS STILL BLOCKED, AND NOW FOR A DIFFERENT REASON THAN BEFORE.** With
 the toolchain present the remaining obstacle is `ee_require_current_binary`: the
-installed `ee` is 0.14.2 against a 0.18.0 tree, and the printed remedy
+installed `ee` is an arm64 0.17.0 against a 0.19.0 tree (measured
+2026-11-25; earlier text here said 0.14.2 against 0.18.0, which was stale), and the printed remedy
 (`cargo build --locked --bin ee`) is a tripwired subcommand. The fleet cannot
 supply one either — it is Linux, this is arm64 Darwin, and rch refuses the
 cross-platform artifact return with RCH-E327. So a mounted volume buys the five
@@ -412,7 +413,9 @@ says 0.18.0, so downloading the v0.18.0 asset gives this Mac a binary that
 every `scripts/e2e_*.sh` in one step. Measured 2026-10-31, that binary would be
 **1320 commits** behind HEAD: v0.18.0 was tagged 2026-10-14 and the version in
 `Cargo.toml` does not move until the next release, so the whole 0.18.0
-development window satisfies the guard.
+development window satisfies the guard. **The trap moves with every release:**
+re-measured 2026-11-25, `Cargo.toml` says 0.19.0 and v0.19.0 (tagged
+2026-11-21 at `7869e47e8`) is already 208 commits behind HEAD.
 
 The guard knows and says so at `scripts/lib/ee_binary_resolution.sh:249`:
 
