@@ -8379,7 +8379,7 @@ pub fn run_curate_auto_promote(
     }
 
     let next_action = if apply_mode {
-        "ee audit list --action memory.level_transition --json".to_owned()
+        "ee audit timeline --action memory.level_transition --json".to_owned()
     } else {
         "ee curate auto-promote --apply --json".to_owned()
     };

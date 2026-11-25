@@ -13846,14 +13846,18 @@ fn push_symbol_index_stale_degradation(
     }) {
         return;
     }
+    // ADR 0042 planned `ee symbol snapshot --refresh`, but no such command was
+    // built: the boost re-extracts symbols from sources on every pack.
     push_degradation(
         degraded,
         crate::models::symbol::SYMBOL_INDEX_STALE_CODE,
         ContextResponseSeverity::Low,
         message,
-        Some("ee symbol snapshot --workspace . --refresh".to_string()),
+        Some(SYMBOL_INDEX_STALE_REPAIR.to_string()),
     );
 }
+
+const SYMBOL_INDEX_STALE_REPAIR: &str = "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable.";
 
 fn context_proximity_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     let config = context_workspace_config(workspace_path, "Proximity-to-seed scoring")?;

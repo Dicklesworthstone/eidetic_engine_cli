@@ -445,9 +445,7 @@ impl HealthScorecardReport {
                 message: format!(
                     "Failed to list memory-debt snapshots for health scorecard: {error}"
                 ),
-                repair: Some(
-                    "ee steward run --job memory_debt_snapshot --workspace . --json".to_owned(),
-                ),
+                repair: Some("ee job run memory_debt_snapshot --workspace . --json".to_owned()),
             })?;
         let history = read_health_scorecard_snapshots(
             &connection,

@@ -22,8 +22,8 @@
 //! * `--algorithm hits-hubs` on a refreshed workspace surfaces
 //!   `status=algorithm_unavailable`, `algorithm=hits-hubs`, and a degraded
 //!   entry whose `code=graph_algorithm_unavailable`, `severity=medium`, and
-//!   whose `repair` echoes
-//!   `ee graph centrality-refresh --algorithm hits-hubs`.
+//!   whose `repair` is `ee graph hits --workspace . --json`: the snapshot
+//!   never holds HITS scores, so the repair names the command that computes them.
 //! * `--algorithm bogus_unknown` on a refreshed workspace surfaces
 //!   `algorithm=unknown` and `status=algorithm_unavailable`.
 //! * `--algorithm page-rank` (dash alias for pagerank) on a refreshed
@@ -252,9 +252,9 @@ fn graph_centrality_hits_hubs_alias_returns_algorithm_unavailable() -> TestResul
     )?;
     let repair = unavailable["repair"].as_str().unwrap_or_default();
     ensure(
-        repair.contains("ee graph centrality-refresh --algorithm hits-hubs"),
+        repair == "ee graph hits --workspace . --json",
         format!(
-            "graph_algorithm_unavailable repair must echo the original --algorithm value; got {repair}"
+            "graph_algorithm_unavailable repair for hits-hubs must name `ee graph hits`; got {repair}"
         ),
     )?;
     Ok(())

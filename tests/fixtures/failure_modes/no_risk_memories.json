@@ -20,7 +20,7 @@
       "Destructive command was recognized",
       "no matching risk, anti-pattern, or failure memories"
     ],
-    "repair_contains": "ee remember --workspace . --kind risk --severity high",
-    "repair_string": "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json"
+    "repair_contains": "ee remember --workspace . --kind risk",
+    "repair_string": "ee remember --workspace . --kind risk \"Document this destructive-command risk.\" --json"
   }
 }

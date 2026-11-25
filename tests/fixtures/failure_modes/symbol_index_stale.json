@@ -21,8 +21,7 @@
     "code": "symbol_index_stale",
     "severity": "warning",
     "message_contains": ["Symbol index is stale", "snapshot"],
-    "repair_contains": "ee symbol snapshot",
-    "repair_string": "ee symbol snapshot --workspace . --refresh",
-    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+    "repair_contains": "no index to rebuild",
+    "repair_string": "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable."
   }
 }

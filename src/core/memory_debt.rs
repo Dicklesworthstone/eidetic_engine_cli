@@ -537,7 +537,7 @@ pub fn run_memory_debt_snapshot(
             .insert_debt_snapshot(&input)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to insert memory debt snapshot: {error}"),
-                repair: Some("ee steward run --job memory_debt_snapshot --workspace .".to_owned()),
+                repair: Some("ee job run memory_debt_snapshot --workspace .".to_owned()),
             })?
     };
     Ok(MemoryDebtSnapshotReport {
@@ -684,7 +684,7 @@ fn build_memory_debt_report(
         trend,
         next_actions: vec![
             "ee curate doctor --workspace . --trend --json".to_owned(),
-            "ee steward run --job memory_debt_snapshot --workspace . --json".to_owned(),
+            "ee job run memory_debt_snapshot --workspace . --json".to_owned(),
         ],
     })
 }
@@ -1186,7 +1186,7 @@ fn load_trend(
         .list_debt_snapshots(workspace_id, TREND_LIMIT)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list memory debt snapshots: {error}"),
-            repair: Some("ee steward run --job memory_debt_snapshot --workspace .".to_owned()),
+            repair: Some("ee job run memory_debt_snapshot --workspace .".to_owned()),
         })?;
     Ok(MemoryDebtTrend {
         schema: MEMORY_DEBT_TREND_SCHEMA_V1,

@@ -61,16 +61,10 @@ watcher, or editor service.
 
 If a response contains `symbol_index_stale`, read the message before retrying.
 Common causes are missing file-span provenance, unreadable Rust sources, stale
-line ranges, or source files that are too large for the extractor budget. The
-failure-mode fixture pins the future durable repair command:
-
-```bash
-ee symbol snapshot --workspace . --refresh
-```
-
-Until that persistent command is exposed, the practical recovery is to make the
-source tree and file-span provenance readable, then rerun the context command
-with the same selector:
+line ranges, or source files that are too large for the extractor budget.
+Symbols are re-read on every pack, so there is no index to rebuild and no
+`ee symbol` command. Make the source tree and file-span provenance readable,
+then rerun the context command with the same selector:
 
 ```bash
 ee pack "review changed context scoring" \

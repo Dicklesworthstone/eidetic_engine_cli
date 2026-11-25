@@ -84,7 +84,7 @@ Run it after normal maintenance so the trend reflects post-maintenance content
 health:
 
 ```bash
-ee steward run --job memory_debt_snapshot --workspace . --json
+ee job run memory_debt_snapshot --workspace . --json
 ee health scorecard --workspace . --json
 ee curate doctor --workspace . --trend --json
 ```

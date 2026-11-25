@@ -4344,8 +4344,10 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(metrics.boosted_candidates, 0);
         assert!(degraded.iter().any(|entry| {
             entry.code == crate::models::symbol::SYMBOL_INDEX_STALE_CODE
-                && entry.repair.as_deref() == Some("ee symbol snapshot --workspace . --refresh")
+                && entry.repair.as_deref() == Some(super::SYMBOL_INDEX_STALE_REPAIR)
         }));
+        // There is no `ee symbol` command, so the repair must not send agents to one.
+        assert!(!super::SYMBOL_INDEX_STALE_REPAIR.contains("ee symbol"));
         Ok(())
     }
 

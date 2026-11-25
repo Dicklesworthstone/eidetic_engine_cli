@@ -3391,7 +3391,7 @@ fn add_proof_broker_summary_to_resume(report: &mut ResumeReport, summary: &serde
             "Owner metadata in a capsule may be stale and must not be treated as a live lease.",
         )
         .with_command(
-            "ee proof status --json --ledger-json .ee/derived/rch/proof_broker_ledger.json --fingerprint-id <id>",
+            "ee proof status --json --ledger-json .ee/derived/rch/proof_broker_ledger.json --fingerprint <id>",
         ),
     );
     if summary
@@ -4955,7 +4955,7 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
             if s.drift_detected {
                 return Err(DomainError::UnsatisfiedDegradedMode {
                     message: "Capsule snapshot is stale and --require-fresh was set; refresh the capsule before resuming.".to_owned(),
-                    repair: Some("ee handoff create --workspace . --refresh".to_owned()),
+                    repair: Some("ee handoff create --workspace .".to_owned()),
                 });
             }
         }
@@ -5121,7 +5121,7 @@ fn compute_stale_snapshot_state(
     }
     if memories_expired_since.is_some_and(|count| count > 0) {
         repair_hints.push(
-            "Expired memories likely misleading; rebuild: ee handoff create --workspace . --refresh-evidence"
+            "Expired memories likely misleading; rebuild: ee handoff create --workspace ."
                 .to_owned(),
         );
     }
@@ -5195,7 +5195,7 @@ fn stale_threshold_breach(
             threshold_field: "any_expired_in_pack",
             threshold_value: thresholds.any_expired_in_pack.to_string(),
             observed_value: observed.to_string(),
-            repair_hint: "Expired memories likely misleading; rebuild: ee handoff create --workspace . --refresh-evidence",
+            repair_hint: "Expired memories likely misleading; rebuild: ee handoff create --workspace .",
         });
     }
     if let Some(observed) = snapshot.content_drift_score

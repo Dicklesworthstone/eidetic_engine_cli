@@ -34000,7 +34000,9 @@ where
                 out.push_str(&format!(
                     "\nDegraded: {}\nNext: {}\n",
                     entry["message"].as_str().unwrap_or("write owner degraded"),
-                    entry["repair"].as_str().unwrap_or("ee diag locks --json")
+                    entry["repair"]
+                        .as_str()
+                        .unwrap_or(crate::core::write_owner::WRITE_OWNER_CONTENTION_REPAIR)
                 ));
             }
             write_stdout(stdout, &out)
@@ -37884,7 +37886,7 @@ where
                                 error.column(),
                             ),
                             repair: Some(
-                                "ee steward run retrieval_affinity_refresh --workspace . --json"
+                                "ee job run retrieval_affinity_refresh --workspace . --json"
                                     .to_owned(),
                             ),
                         };
@@ -38024,7 +38026,7 @@ where
                 "code": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_COLD_CODE,
                 "severity": "info",
                 "message": "Retrieval-affinity snapshot absent (cold); the blend proceeded without that signal.",
-                "repair": "ee steward run retrieval_affinity_refresh --workspace . --json  # after some real search/pack traffic",
+                "repair": "ee job run retrieval_affinity_refresh --workspace . --json  # after some real search/pack traffic",
             }));
         }
         if report.candidate_count == 0 {
@@ -39411,10 +39413,17 @@ fn build_graph_centrality_read_report(
                 "Graph centrality algorithm `{}` has no computed scores in the latest memory-link snapshot.",
                 args.algorithm
             ),
-            repair: format!(
-                "ee graph centrality-refresh --algorithm {}",
-                args.algorithm
-            ),
+            // The snapshot only ever holds PageRank and betweenness, and
+            // centrality-refresh takes no --algorithm, so refreshing cannot
+            // produce these scores. HITS is computed on demand by `ee graph hits`.
+            repair: match algorithm {
+                GraphCentralityReadAlgorithm::Authority
+                | GraphCentralityReadAlgorithm::HitsHubs
+                | GraphCentralityReadAlgorithm::HitsAuthorities => {
+                    "ee graph hits --workspace . --json".to_string()
+                }
+                _ => "ee graph centrality --algorithm pagerank --workspace . --json".to_string(),
+            },
         });
         return Ok(GraphCentralityReadReport {
             command: "graph centrality",

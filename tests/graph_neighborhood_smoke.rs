@@ -851,9 +851,8 @@ fn graph_centrality_read_reports_unavailable_algorithm() -> TestResult {
         "unavailable centrality algorithm should emit graph_algorithm_unavailable",
     )?;
     ensure(
-        degraded[0]["repair"]
-            == Value::String("ee graph centrality-refresh --algorithm authority".to_string()),
-        "unavailable centrality algorithm should include the targeted repair",
+        degraded[0]["repair"] == Value::String("ee graph hits --workspace . --json".to_string()),
+        "unavailable HITS algorithm should name the command that computes it",
     )
 }
 

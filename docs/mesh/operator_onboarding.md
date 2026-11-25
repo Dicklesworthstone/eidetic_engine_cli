@@ -347,8 +347,8 @@ Start with read-only evidence:
 
 ```bash
 ee mesh status --workspace . --json
-ee mesh status --workspace . --refresh --json
-ee mesh status --workspace . --explain-peer <node-key> --json
+ee mesh auto-enroll --workspace . --dry-run --json
+ee mesh auto-enroll --workspace . --dry-run --explain-skip <node-key> --json
 ee audit verify --workspace . --json
 ```
 
@@ -441,8 +441,8 @@ Start with read-only status surfaces:
 
 ```bash
 ee mesh status --workspace . --json
-ee mesh status --workspace . --refresh --json
-ee mesh status --workspace . --explain-peer <node-key> --json
+ee mesh auto-enroll --workspace . --dry-run --json
+ee mesh auto-enroll --workspace . --dry-run --explain-skip <node-key> --json
 ee doctor --workspace . --json
 ```
 

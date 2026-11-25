@@ -3584,7 +3584,7 @@ fn auto_status_next_action_hint(
             .to_owned();
     }
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count == 0 {
-        return "Tailnet status was not refreshed by this read-only command. Run `ee mesh status --refresh --json` to recheck discovery, or run ee on a second machine in this tailnet."
+        return "Tailnet status was not refreshed by this read-only command. Run `ee mesh auto-enroll --dry-run --json` to recheck discovery without enrolling, or run ee on a second machine in this tailnet."
             .to_owned();
     }
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count > 0 {

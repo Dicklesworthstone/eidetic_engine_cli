@@ -2807,7 +2807,9 @@ pub fn no_risk_memories_degradation() -> PreflightGuardDegradation {
         code: NO_RISK_MEMORIES_CODE,
         severity: "info",
         message: "Destructive command was recognized, but no matching risk, anti-pattern, or failure memories were available.".to_owned(),
-        repair: "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json".to_owned(),
+        // `ee remember` has no --severity: the guard reads a risk memory as high
+        // severity from its kind (`inferred_trauma_guard_severity`).
+        repair: "ee remember --workspace . --kind risk \"Document this destructive-command risk.\" --json".to_owned(),
     }
 }
 

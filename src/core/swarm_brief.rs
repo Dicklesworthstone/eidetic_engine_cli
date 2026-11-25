@@ -7623,7 +7623,7 @@ fn default_source_repair(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::Beads => BEADS_READY_COMMAND,
         SwarmBriefSourceKind::Bv => "bv --robot-triage --robot-triage-by-track",
         SwarmBriefSourceKind::Git => "git status --short --branch --untracked-files=all",
-        SwarmBriefSourceKind::HostProfile => "ee profile probe --json",
+        SwarmBriefSourceKind::HostProfile => "ee diag host-profile --json",
         SwarmBriefSourceKind::MemoryDrift => "ee memory drift --mode recent-pack-items --json",
         SwarmBriefSourceKind::Qos => "ee status --json | jq .data.qos",
         SwarmBriefSourceKind::Rch => "rch status --json",

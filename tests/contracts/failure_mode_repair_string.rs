@@ -835,3 +835,202 @@ fn work_packet_fallback_actions_have_repair_safety_metadata() -> TestResult {
         ))
     }
 }
+
+/// Pinned repairs that name a command the CLI does not have, with the bead that owns each.
+/// `pinned_repair_commands_parse_under_the_cli` skips these codes, and fails once one of them
+/// parses, so the list can only shrink.
+const UNBUILT_REPAIR_COMMANDS: &[(&str, &str)] = &[
+    (
+        "graph_causal_no_evidence",
+        "bd-gfyw3: pins `ee outcome --causal-link`; ee why prints no repair for this code",
+    ),
+    (
+        "mesh_cursor_repair_required",
+        "bd-brj5x: `ee mesh repair` comes only from the uncompiled src/mesh/anti_entropy_model.rs",
+    ),
+    (
+        "mesh_event_quarantined",
+        "bd-brj5x: `ee mesh repair` comes only from the uncompiled src/mesh/anti_entropy_model.rs",
+    ),
+    (
+        "wal_holds_orphaned",
+        "bd-gfyw3: pins `ee lab list` and `ee lab cleanup-orphaned`; backup verify prints no repair",
+    ),
+];
+
+/// The `ee ...` command lines a pinned repair tells an agent to run: the whole string when it
+/// starts with `ee `, otherwise each backticked span that does.
+fn ee_command_lines(pinned: &str) -> Vec<&str> {
+    if pinned.starts_with("ee ") {
+        return vec![pinned];
+    }
+    pinned
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.starts_with("ee "))
+        .collect()
+}
+
+/// Shell words of one command line, split into separate commands at `;`, `&&` and `||`.
+fn shell_commands(line: &str) -> Result<Vec<Vec<String>>, String> {
+    fn end_word(word: &mut String, started: &mut bool, command: &mut Vec<String>) {
+        if *started {
+            command.push(std::mem::take(word));
+            *started = false;
+        }
+    }
+    let mut commands = Vec::new();
+    let mut command = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(open), _) if ch == open => quote = None,
+            (Some('"'), '\\') | (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                    started = true;
+                }
+            }
+            (Some(_), _) => word.push(ch),
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+                started = true;
+            }
+            (None, ';') => {
+                end_word(&mut word, &mut started, &mut command);
+                commands.push(std::mem::take(&mut command));
+            }
+            (None, _) if ch.is_whitespace() => end_word(&mut word, &mut started, &mut command),
+            (None, _) => {
+                word.push(ch);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(format!("unterminated quote in `{line}`"));
+    }
+    end_word(&mut word, &mut started, &mut command);
+    commands.push(command);
+    Ok(commands
+        .iter()
+        .flat_map(|command| command.split(|word| word == "&&" || word == "||"))
+        .filter(|command| !command.is_empty())
+        .map(<[String]>::to_vec)
+        .collect())
+}
+
+/// Parse one `ee` argv with the real CLI. A bare `...` stands for arguments the agent supplies
+/// and is dropped. Missing required arguments are accepted, and so are rejected values when the
+/// repair leaves a `<memory-id>`-style placeholder to the agent. An unknown flag or subcommand
+/// is not.
+fn parse_ee_command(argv: &[String]) -> Result<(), String> {
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    let mut argv = argv
+        .iter()
+        .map(String::as_str)
+        .filter(|word| *word != "...")
+        .collect::<Vec<_>>();
+    // `ee::cli::run` rewrites `outcome quarantine` to `outcome-quarantine` before clap sees it.
+    if let Some(index) = argv
+        .windows(2)
+        .position(|pair| pair == ["outcome", "quarantine"])
+    {
+        argv[index] = "outcome-quarantine";
+        argv.remove(index + 1);
+    }
+    // A rejected value is the agent's to supply only when the repair shows a `<placeholder>`;
+    // otherwise it is a typo in the repair itself, such as an unknown job name.
+    let has_placeholder = argv.iter().any(|word| word.contains('<'));
+    match ee::cli::Cli::try_parse_from(argv) {
+        Ok(_) => Ok(()),
+        Err(error) => match error.kind() {
+            ErrorKind::DisplayHelp
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            | ErrorKind::DisplayVersion
+            | ErrorKind::MissingRequiredArgument
+            | ErrorKind::MissingSubcommand => Ok(()),
+            ErrorKind::InvalidValue | ErrorKind::ValueValidation if has_placeholder => Ok(()),
+            kind => Err(format!(
+                "{kind:?}: {}",
+                error.to_string().lines().next().unwrap_or_default()
+            )),
+        },
+    }
+}
+
+/// Every `ee` command a pinned repair names must parse under the real CLI (bd-gfyw3).
+///
+/// A repair string is what an agent runs after a degraded response. On 2026-11-25 a census found
+/// pinned and emitted repairs naming flags and subcommands that do not exist, for example
+/// `ee remember --severity`, `ee graph centrality-refresh --algorithm` and `ee symbol snapshot`.
+/// An agent that follows one gets a usage error instead of a repair.
+#[test]
+fn pinned_repair_commands_parse_under_the_cli() -> TestResult {
+    let mut parsed = 0_usize;
+    let mut failures = Vec::new();
+    let mut parsing_exemptions = Vec::new();
+    for path in list_fixture_files(&fixtures_dir())? {
+        let fixture = read_json(&path)?;
+        if fixture.get("retired").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let ctx = path.display().to_string();
+        let Some(expected) = fixture.get("expected_emission") else {
+            continue;
+        };
+        let Some(pinned) = collect_pinned_strings(expected, &ctx)? else {
+            continue;
+        };
+        let code = fixture
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut fixture_failures = Vec::new();
+        for text in &pinned {
+            for line in ee_command_lines(text) {
+                for argv in shell_commands(line)? {
+                    if argv.first().map(String::as_str) != Some("ee") {
+                        continue;
+                    }
+                    parsed += 1;
+                    if let Err(reason) = parse_ee_command(&argv) {
+                        fixture_failures.push(format!("{ctx}: `{}`: {reason}", argv.join(" ")));
+                    }
+                }
+            }
+        }
+        let exempt = UNBUILT_REPAIR_COMMANDS
+            .iter()
+            .any(|(unbuilt, _)| *unbuilt == code);
+        if exempt && fixture_failures.is_empty() {
+            parsing_exemptions.push(code.to_owned());
+        } else if !exempt {
+            failures.extend(fixture_failures);
+        }
+    }
+    ensure(
+        parsed >= 100,
+        format!("parsed only {parsed} pinned ee commands; the extraction regressed"),
+    )?;
+    ensure(
+        parsing_exemptions.is_empty(),
+        format!(
+            "these codes now parse; remove them from UNBUILT_REPAIR_COMMANDS: {parsing_exemptions:?}"
+        ),
+    )?;
+    ensure(
+        failures.is_empty(),
+        format!(
+            "{} pinned repair command(s) do not parse under the real CLI:\n  - {}",
+            failures.len(),
+            failures.join("\n  - ")
+        ),
+    )
+}

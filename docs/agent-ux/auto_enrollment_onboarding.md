@@ -62,8 +62,8 @@ Read-only inspection (never writes):
 
 ```bash
 ee mesh status --workspace . --json
-ee mesh status --workspace . --refresh --json   # bypass discovery cache
-ee mesh status --workspace . --explain-peer <node-key> --json
+ee mesh auto-enroll --workspace . --dry-run --json   # re-run discovery, write nothing
+ee mesh auto-enroll --workspace . --dry-run --explain-skip <node-key> --json
 ```
 
 ## Required Preconditions
@@ -147,8 +147,7 @@ tailscale shields-up).
 |---|---|---|
 | `ee status --json` | `ee.status.v1` (with `mesh.tailscale` block) | no |
 | `ee mesh status --json` | `ee.mesh.status.v1` (with `autoEnrollment` block) | no |
-| `ee mesh status --refresh --json` | `ee.mesh.status.v1` (cache bypassed) | no |
-| `ee mesh status --explain-peer <key> --json` | `ee.mesh.peer_state.v1` | no |
+| `ee mesh auto-enroll --dry-run --explain-skip <key> --json` | `ee.mesh.auto_enrollment_result.v1` (one peer's decision) | no |
 | `ee mesh auto-enroll --dry-run --json` | `ee.mesh.auto_enrollment_result.v1` | no |
 | `ee mesh auto-enroll --json` | `ee.mesh.auto_enrollment_result.v1` | YES (after audit row) |
 | `ee mesh auto-enroll --include <key>* --exclude <key>* --json` | same | YES |

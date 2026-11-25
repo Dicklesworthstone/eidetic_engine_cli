@@ -260,6 +260,11 @@ pub const DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS: usize = 16;
 /// Error code for write owner busy condition.
 pub const WRITE_OWNER_BUSY_CODE: &str = "write_owner_busy";
 
+/// Repair for a busy or unreachable write owner. `ee diag contention` reports the
+/// write-lock queue, read pool and group-commit coalescing. ADR 0013 planned a
+/// `ee diag locks` for this, but it was never built.
+pub const WRITE_OWNER_CONTENTION_REPAIR: &str = "ee diag contention --json";
+
 /// Error code for write spool backpressure.
 pub const WRITE_SPOOL_BACKPRESSURE_CODE: &str = "write_spool_backpressure";
 
@@ -1697,7 +1702,7 @@ impl WriteHandle {
             .await
             .map_err(|e| DomainError::Storage {
                 message: format!("write owner channel error: {e}"),
-                repair: Some("ee diag locks --json".into()),
+                repair: Some(WRITE_OWNER_CONTENTION_REPAIR.into()),
             })?;
 
         // Phase 2: Commit the request
@@ -2102,7 +2107,7 @@ impl WriteOwnerBusyError {
                 "Write owner is busy with {queue_depth} pending requests. Try again later."
             ),
             queue_depth,
-            repair: "ee diag locks --json",
+            repair: WRITE_OWNER_CONTENTION_REPAIR,
         }
     }
 }
@@ -4422,7 +4427,7 @@ mod tests {
         let err = WriteOwnerBusyError::new(5);
         assert_eq!(err.code, WRITE_OWNER_BUSY_CODE);
         assert!(err.message.contains("5 pending"));
-        assert_eq!(err.repair, "ee diag locks --json");
+        assert_eq!(err.repair, "ee diag contention --json");
     }
 
     #[test]

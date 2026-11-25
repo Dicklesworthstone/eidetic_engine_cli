@@ -358,7 +358,7 @@ pub fn plan_daemon_service_for_workspace(
             if let Some(path) = unit_path.as_ref() {
                 vec![
                     format!("launchctl load {}", path.display()),
-                    "ee daemon --status --json".to_owned(),
+                    "ee daemon status --json".to_owned(),
                 ]
             } else {
                 Vec::new()
@@ -367,12 +367,12 @@ pub fn plan_daemon_service_for_workspace(
         DaemonServiceKind::SystemdUser => vec![
             "systemctl --user daemon-reload".to_owned(),
             format!("systemctl --user enable --now {SYSTEMD_UNIT_NAME}"),
-            "ee daemon --status --json".to_owned(),
+            "ee daemon status --json".to_owned(),
         ],
         DaemonServiceKind::WindowsUserTask => vec![
             format!("schtasks /Create /TN {WINDOWS_TASK_NAME} /XML <unit-path> /F"),
             format!("schtasks /Run /TN {WINDOWS_TASK_NAME}"),
-            "ee daemon --status --json".to_owned(),
+            "ee daemon status --json".to_owned(),
         ],
         DaemonServiceKind::Unsupported => {
             vec!["ee mesh hello-responder run --workspace . --json".to_owned()]

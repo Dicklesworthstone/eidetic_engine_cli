@@ -5340,7 +5340,7 @@ impl ManualRunner {
                     message,
                     self.options.dry_run,
                     self.options.database_path.as_deref(),
-                    "ee curate disposition --dry-run --json",
+                    "ee curate disposition --json",
                 );
             }
         };
@@ -5405,7 +5405,7 @@ impl ManualRunner {
                     message,
                     self.options.dry_run,
                     self.options.database_path.as_deref(),
-                    "ee curate disposition --dry-run --json",
+                    "ee curate disposition --json",
                 );
             }
         };

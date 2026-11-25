@@ -17,6 +17,6 @@
     "code": "write_owner_busy",
     "severity": "medium",
     "message_contains": ["Write owner busy"],
-    "repair_contains": "diag locks"
+    "repair_contains": "diag contention"
   }
 }

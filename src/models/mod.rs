@@ -1115,7 +1115,8 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee memory show")
         || command_lower.starts_with("ee status")
         || command_lower.starts_with("ee why")
-        || command_lower.starts_with("ee schema show")
+        || command_lower.starts_with("ee schema export")
+        || command_lower.starts_with("ee schema list")
         || command_lower.starts_with("ee curate candidates")
         || command_lower.starts_with("ee curate show")
         || command_lower.starts_with("ee curate validate")
@@ -1127,6 +1128,8 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("rch check")
         || command_lower.starts_with("rch queue")
         || (command_lower.starts_with("ee support bundle")
+            && command_has_flag(&command_lower, "--dry-run"))
+        || (command_lower.starts_with("ee reflect ingest")
             && command_has_flag(&command_lower, "--dry-run"))
         || command_lower.starts_with("cargo fmt --check")
         || command_lower.starts_with("cargo metadata")
@@ -1721,8 +1724,8 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
             ),
             recovery_command(
                 2,
-                "ee schema show ee.curate.show.v1 --json",
-                "Inspect the expected derived candidate shape before retrying.",
+                "ee curate validate <candidate-id> --workspace . --dry-run --json",
+                "Validate the regenerated candidate's memorySpec before applying it.",
             ),
         ],
         REFLECT_REQUEST_EXPIRED_CODE | "reflection_request_expired" => vec![
@@ -1805,8 +1808,8 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
             ),
             recovery_command(
                 2,
-                "ee schema show ee.reflect.result.v1 --json",
-                "Inspect the result schema before retrying ingest.",
+                "ee reflect ingest --file <result.json> --workspace . --dry-run --json",
+                "Check the corrected result against the response schema without ingesting it.",
             ),
         ],
         REFLECT_RAW_COT_REJECTED_CODE => vec![

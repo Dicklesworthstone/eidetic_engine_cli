@@ -6719,7 +6719,7 @@ ee graph centrality --algorithm authority --workspace . --json
 
 **Expected emission.** Message contains: `Graph centrality algorithm ... no computed scores`
 
-**Repair hint.** ee graph centrality-refresh --algorithm authority
+**Repair hint.** ee graph hits --workspace . --json
 
 **Fixture.** [`tests/fixtures/failure_modes/graph_algorithm_unavailable.json`](../tests/fixtures/failure_modes/graph_algorithm_unavailable.json)
 
@@ -12435,7 +12435,7 @@ ee preflight check --cmd 'rm -rf build-output' --workspace . --json
 
 **Expected emission.** Message contains: `Destructive command was recognized ... no matching risk, anti-pattern, or failure memories`
 
-**Repair hint.** ee remember --workspace . --kind risk --severity high "Document this destructive-command risk." --json
+**Repair hint.** ee remember --workspace . --kind risk "Document this destructive-command risk." --json
 
 **Fixture.** [`tests/fixtures/failure_modes/no_risk_memories.json`](../tests/fixtures/failure_modes/no_risk_memories.json)
 
@@ -15065,7 +15065,7 @@ ee init --workspace .
 **Invocation.**
 
 ```bash
-ee steward run retrieval_affinity_refresh --workspace . --json
+ee job run retrieval_affinity_refresh --workspace . --json
 ```
 
 **Expected emission.** Message contains: `cold`
@@ -17507,7 +17507,7 @@ ee context 'changed symbol' --workspace . --json
 
 **Expected emission.** Message contains: `Symbol index is stale ... snapshot`
 
-**Repair hint.** ee symbol snapshot --workspace . --refresh
+**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable.
 
 **Fixture.** [`tests/fixtures/failure_modes/symbol_index_stale.json`](../tests/fixtures/failure_modes/symbol_index_stale.json)
 
@@ -19554,7 +19554,7 @@ ee diag write-owner --capacity 1 --enqueue 2 --workspace . --json
 
 **Expected emission.** Message contains: `Write owner busy`
 
-**Repair hint.** `diag locks`
+**Repair hint.** `diag contention`
 
 **Fixture.** [`tests/fixtures/failure_modes/write_owner_busy.json`](../tests/fixtures/failure_modes/write_owner_busy.json)
 
@@ -19639,5 +19639,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:334ecf48b66759c3bfcd60eb24e849a04d0597be1f031882ec414edcb066aa68 -->
-<!-- degraded-codes-fingerprint body=sha256:047428a29515dc1579b1c7313313095830bb68657b2a63e5b859bf86f8286442 -->
+<!-- degraded-codes-fingerprint inputs=sha256:91ed0dcc1f3cbb0a6a527de3c3a55cc7fa3b6dd737df763a2ba363d315bb2d7e -->
+<!-- degraded-codes-fingerprint body=sha256:c8192142332925165b499c48dd39320a74e22c0fc9027b196de89d222cc896b2 -->

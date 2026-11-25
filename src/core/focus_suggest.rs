@@ -227,7 +227,9 @@ fn suggest_in_snapshot(
                     code: "task_frame_unavailable".to_owned(),
                     severity: "warning".to_owned(),
                     message: format!("Failed to load task frame {frame_id}: {error}"),
-                    repair: Some("Verify the frame id with `ee task-frame show --all`.".to_owned()),
+                    repair: Some(
+                        "Verify the frame id with `ee task-frame show --json`, which lists frames when no id is given.".to_owned(),
+                    ),
                 });
                 return Ok(FocusSuggestReport {
                     recommendations: Vec::new(),
@@ -248,7 +250,7 @@ fn suggest_in_snapshot(
         // Distinguish "the recency window itself was empty" from "the
         // recency window had memories but none were linked from the
         // task frame". The first repair is `--recent-hours` / `ee
-        // remember`; the second is `ee task-frame evidence add` /
+        // remember`; the second is `ee task-frame update --memory-id` /
         // verify the frame id / drop `--task-frame`. Conflating them
         // (the pre-fix behavior) sent operators chasing the wrong
         // setting when their frame existed but didn't intersect the
@@ -264,7 +266,7 @@ fn suggest_in_snapshot(
                     options.recent_hours
                 ),
                 repair: Some(
-                    "Increase --recent-hours, attach newer evidence via `ee task-frame evidence add`, or omit --task-frame.".to_owned(),
+                    "Increase --recent-hours, attach newer evidence via `ee task-frame update <frame-id> --memory-id <memory-id>`, or omit --task-frame.".to_owned(),
                 ),
             });
         } else {

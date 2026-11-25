@@ -22,8 +22,8 @@
     "code": "graph_algorithm_unavailable",
     "severity": "medium",
     "message_contains": ["Graph centrality algorithm", "no computed scores"],
-    "repair_contains": "ee graph centrality-refresh --algorithm authority",
-    "repair_string": "ee graph centrality-refresh --algorithm authority",
+    "repair_contains": "ee graph hits",
+    "repair_string": "ee graph hits --workspace . --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }
