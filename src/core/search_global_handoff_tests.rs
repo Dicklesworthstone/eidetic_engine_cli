@@ -753,7 +753,24 @@ fn global_source_retrieval_rejects_stopword_only_matches_in_every_lifecycle() {
         return;
     }
     let fixture = Fixture::new();
-    let _local_embedder = fixture.publish_index();
+    // The local store is empty, so the local rebuild publishes an empty
+    // generation and reports NoDocuments (since ea14c54f6); `publish_index`
+    // asserts Success and is for seeded fixtures (bd-9ct8b). rebuild_index
+    // reads only its own database_path, so this cannot publish the global rows
+    // the "unpublished" arm below depends on.
+    let _local_embedder =
+        crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace);
+    let local = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+        workspace_path: fixture.root.clone(),
+        database_path: Some(fixture.root.join(".ee/ee.db")),
+        index_dir: None,
+        dry_run: false,
+    })
+    .unwrap();
+    assert_eq!(
+        local.status,
+        crate::core::index::IndexRebuildStatus::NoDocuments
+    );
     include_global(&fixture, true);
     let global = GlobalQualityFixture::new(
         crate::core::global_store::default_global_store_paths_from_env().unwrap(),
