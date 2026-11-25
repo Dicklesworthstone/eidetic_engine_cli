@@ -1439,8 +1439,8 @@ mod tests {
         for value in ["0.0", "0.5", "0.75", "1.0"] {
             set_config(&options, "pack.mmr_lambda", value, false)
                 .map_err(|error| error.to_string())?;
-            let shown = get_config(&options, "pack.mmr_lambda")
-                .map_err(|error| error.to_string())?;
+            let shown =
+                get_config(&options, "pack.mmr_lambda").map_err(|error| error.to_string())?;
             assert_eq!(shown.source, "project");
             let expected = value.parse::<f32>().map_err(|error| error.to_string())?;
             assert_eq!(
@@ -1449,7 +1449,10 @@ mod tests {
                 expected
             );
             assert_eq!(
-                shown.value.parse::<f32>().map_err(|error| error.to_string())?,
+                shown
+                    .value
+                    .parse::<f32>()
+                    .map_err(|error| error.to_string())?,
                 expected
             );
         }
@@ -1485,8 +1488,11 @@ mod tests {
             default.source(crate::config::PACK_MMR_LAMBDA_KEY),
             Some(ConfigValueSource::Default)
         );
-        fs::write(user_home.join(".config/ee/config.toml"), "[pack]\nmmr_lambda = 0.25\n")
-            .map_err(|error| error.to_string())?;
+        fs::write(
+            user_home.join(".config/ee/config.toml"),
+            "[pack]\nmmr_lambda = 0.25\n",
+        )
+        .map_err(|error| error.to_string())?;
         let user = merged_config_with_environment(&options, &environment)
             .map_err(|error| error.to_string())?;
         assert_eq!(user.values.pack.mmr_lambda, Some(0.25));

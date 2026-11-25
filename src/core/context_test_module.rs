@@ -15790,29 +15790,29 @@ pub fn unrelated_context() -> u64 {{
         options.coordination_snapshot_path = None;
         let search = ppr_search_report(Vec::new());
         let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
-        let hash = |options: &super::ContextPackOptions|
-         -> Result<super::PackHashComponents, String> {
-            let settings = super::ContextSelectionSettings::resolve(options)
-                .map_err(|error| error.to_string())?;
-            let mut request = request.clone();
-            request.effective_config_policy = Some(super::context_effective_config_policy(
-                options,
-                &super::context_effective_filters(options),
-                &settings,
-                &search,
-                None,
-                true,
-            ));
-            Ok(super::compute_pack_hash_components(
-                &request,
-                &draft,
-                &[],
-                Default::default(),
-                None,
-                None,
-                None,
-            ))
-        };
+        let hash =
+            |options: &super::ContextPackOptions| -> Result<super::PackHashComponents, String> {
+                let settings = super::ContextSelectionSettings::resolve(options)
+                    .map_err(|error| error.to_string())?;
+                let mut request = request.clone();
+                request.effective_config_policy = Some(super::context_effective_config_policy(
+                    options,
+                    &super::context_effective_filters(options),
+                    &settings,
+                    &search,
+                    None,
+                    true,
+                ));
+                Ok(super::compute_pack_hash_components(
+                    &request,
+                    &draft,
+                    &[],
+                    Default::default(),
+                    None,
+                    None,
+                    None,
+                ))
+            };
         let original = hash(&options)?;
         let cases: &[(&str, fn(&mut super::ContextPackOptions))] = &[
             ("speed", |o| o.speed = crate::search::SpeedMode::Instant),
@@ -16039,7 +16039,12 @@ pub fn unrelated_context() -> u64 {{
             changed.data.request.effective_config_policy
         );
         assert_ne!(
-            original.data.pack.hash.as_ref().ok_or("original pack hash")?,
+            original
+                .data
+                .pack
+                .hash
+                .as_ref()
+                .ok_or("original pack hash")?,
             changed.data.pack.hash.as_ref().ok_or("changed pack hash")?
         );
         // A subsequent request reads the edited value, including invalid
@@ -16064,17 +16069,17 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
         settings.mmr_relevance_weight = crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT;
         let search = ppr_search_report(Vec::new());
-        let digest =
-            |options: &super::ContextPackOptions, settings: &super::ContextSelectionSettings| {
-                super::context_effective_config_policy(
-                    options,
-                    &options.filters,
-                    settings,
-                    &search,
-                    None,
-                    true,
-                )
-            };
+        let digest = |options: &super::ContextPackOptions,
+                      settings: &super::ContextSelectionSettings| {
+            super::context_effective_config_policy(
+                options,
+                &options.filters,
+                settings,
+                &search,
+                None,
+                true,
+            )
+        };
         let default = digest(&options, &settings);
         let mut custom = settings.clone();
         custom.mmr_relevance_weight = 0.5;

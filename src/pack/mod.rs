@@ -3565,9 +3565,8 @@ fn why_not_scores(
 ) -> WhyNotSelectionScoreReport {
     let target_composite =
         why_not_candidate_score(target.relevance, target.utility, mmr_relevance_weight);
-    let last_included_composite = last_included.map(|item| {
-        why_not_candidate_score(item.relevance, item.utility, mmr_relevance_weight)
-    });
+    let last_included_composite = last_included
+        .map(|item| why_not_candidate_score(item.relevance, item.utility, mmr_relevance_weight));
     WhyNotSelectionScoreReport {
         target_relevance: round_metric(target.relevance.into_inner()),
         target_utility: round_metric(target.utility.into_inner()),
@@ -9053,8 +9052,7 @@ fn strict_mmr_marginal_gain_from_similarity(
         0.0
     } else {
         let relevance_score = candidate.candidate.relevance.into_inner();
-        (mmr_relevance_weight * relevance_score)
-            - ((1.0 - mmr_relevance_weight) * max_similarity)
+        (mmr_relevance_weight * relevance_score) - ((1.0 - mmr_relevance_weight) * max_similarity)
     }
 }
 
@@ -14331,7 +14329,6 @@ mod tests {
         )
     }
 
-
     fn mmr_weight_candidates() -> Result<Vec<PackCandidate>, String> {
         Ok(vec![
             candidate_with_content(1, 1.0, 0.5, 10, "alpha beta gamma delta")?,
@@ -14367,15 +14364,25 @@ mod tests {
                 vec![memory_id(1), memory_id(2), memory_id(3)]
             };
             assert_eq!(
-                baseline.items.iter().map(|item| item.memory_id).collect::<Vec<_>>(),
+                baseline
+                    .items
+                    .iter()
+                    .map(|item| item.memory_id)
+                    .collect::<Vec<_>>(),
                 expected_ids,
             );
-            assert!(baseline.items.iter().all(|item| {
-                item.selected_in == PackSelectionPhase::StrictMmr
-            }));
-            assert!(baseline.omitted.iter().all(|omission| {
-                omission.reason == PackOmissionReason::RedundantCandidate
-            }));
+            assert!(
+                baseline
+                    .items
+                    .iter()
+                    .all(|item| { item.selected_in == PackSelectionPhase::StrictMmr })
+            );
+            assert!(
+                baseline
+                    .omitted
+                    .iter()
+                    .all(|omission| { omission.reason == PackOmissionReason::RedundantCandidate })
+            );
             ensure_close(
                 baseline.selection_audit.steps[0].marginal_gain,
                 weight,
@@ -14401,7 +14408,10 @@ mod tests {
                     "prepare release",
                     budget,
                     mmr_weight_candidates()?,
-                    PackAssemblyOptions { arena_mode, ..options },
+                    PackAssemblyOptions {
+                        arena_mode,
+                        ..options
+                    },
                     &determinism,
                     &mut workspace,
                 )
@@ -14438,7 +14448,10 @@ mod tests {
                 "prepare release",
                 budget,
                 mmr_weight_candidates()?,
-                PackAssemblyOptions { mmr_relevance_weight: 0.75, ..options },
+                PackAssemblyOptions {
+                    mmr_relevance_weight: 0.75,
+                    ..options
+                },
             )
             .map_err(|error| error.to_string())?;
             assert_packs_equal_across_arena_mode(
@@ -14452,11 +14465,18 @@ mod tests {
                 vec![memory_id(1), memory_id(2), memory_id(3)]
             };
             assert_eq!(
-                default_draft.items.iter().map(|item| item.memory_id).collect::<Vec<_>>(),
+                default_draft
+                    .items
+                    .iter()
+                    .map(|item| item.memory_id)
+                    .collect::<Vec<_>>(),
                 expected,
             );
             if include_coverage_fill {
-                assert_eq!(default_draft.items[3].selected_in, PackSelectionPhase::CoverageFill);
+                assert_eq!(
+                    default_draft.items[3].selected_in,
+                    PackSelectionPhase::CoverageFill
+                );
                 ensure_close(
                     default_draft.selection_audit.steps[3].marginal_gain,
                     0.0,
@@ -14470,10 +14490,7 @@ mod tests {
     #[test]
     fn caller_mmr_weight_applies_to_coverage_fill_audit() -> TestResult {
         let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
-        for arena_mode in [
-            super::ArenaMode::Disabled,
-            super::ArenaMode::WorkspaceReuse,
-        ] {
+        for arena_mode in [super::ArenaMode::Disabled, super::ArenaMode::WorkspaceReuse] {
             let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
                 ContextPackProfile::Balanced,
                 "prepare release",
@@ -14489,13 +14506,23 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
             assert_eq!(draft.items.len(), 4);
-            let item = draft.items.iter().find(|item| item.memory_id == memory_id(2))
+            let item = draft
+                .items
+                .iter()
+                .find(|item| item.memory_id == memory_id(2))
                 .ok_or_else(|| "expected overlapping coverage-fill candidate".to_owned())?;
             assert_eq!(item.selected_in, PackSelectionPhase::CoverageFill);
-            let step = draft.selection_audit.steps.iter()
+            let step = draft
+                .selection_audit
+                .steps
+                .iter()
                 .find(|step| step.memory_id == memory_id(2))
                 .ok_or_else(|| "expected overlapping candidate audit".to_owned())?;
-            ensure_close(step.marginal_gain, -0.225, "coverage-fill weighted redundancy gain")?;
+            ensure_close(
+                step.marginal_gain,
+                -0.225,
+                "coverage-fill weighted redundancy gain",
+            )?;
             ensure_close(
                 draft.selection_audit.total_objective_value,
                 0.4,
@@ -14509,10 +14536,7 @@ mod tests {
     fn caller_mmr_weight_applies_to_reserved_anti_pattern_including_zero() -> TestResult {
         let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
         for weight in [0.0, 0.25, 1.0] {
-            for arena_mode in [
-                super::ArenaMode::Disabled,
-                super::ArenaMode::WorkspaceReuse,
-            ] {
+            for arena_mode in [super::ArenaMode::Disabled, super::ArenaMode::WorkspaceReuse] {
                 let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
                     ContextPackProfile::Balanced,
                     "prepare release",
@@ -14520,10 +14544,20 @@ mod tests {
                     vec![
                         candidate_with_content(1, 1.0, 0.5, 10, "alpha beta gamma delta")?,
                         candidate_in_section(
-                            10, PackSection::Failures, 0.8, 0.5, 10, "Avoid costly regressions.",
+                            10,
+                            PackSection::Failures,
+                            0.8,
+                            0.5,
+                            10,
+                            "Avoid costly regressions.",
                         )?,
                         candidate_in_section(
-                            11, PackSection::Failures, 0.7, 0.5, 10, "Avoid costly regressions.",
+                            11,
+                            PackSection::Failures,
+                            0.7,
+                            0.5,
+                            10,
+                            "Avoid costly regressions.",
                         )?,
                     ],
                     PackAssemblyOptions {
@@ -14538,7 +14572,10 @@ mod tests {
                 .map_err(|error| error.to_string())?;
                 assert_eq!(draft.items.len(), 2);
                 assert_eq!(draft.items[0].memory_id, memory_id(10));
-                assert_eq!(draft.items[0].selected_in, PackSelectionPhase::AntiPatternFirst);
+                assert_eq!(
+                    draft.items[0].selected_in,
+                    PackSelectionPhase::AntiPatternFirst
+                );
                 ensure_close(
                     draft.selection_audit.steps[0].marginal_gain,
                     weight * 0.8,
@@ -14546,7 +14583,10 @@ mod tests {
                 )?;
                 assert_eq!(draft.omitted.len(), 1);
                 assert_eq!(draft.omitted[0].memory_id, memory_id(11));
-                assert_eq!(draft.omitted[0].reason, PackOmissionReason::RedundantCandidate);
+                assert_eq!(
+                    draft.omitted[0].reason,
+                    PackOmissionReason::RedundantCandidate
+                );
             }
         }
         Ok(())
@@ -14565,10 +14605,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
         let mut workspace = arena_workspace();
         for weight in [0.0, 0.25, 1.0] {
-            for arena_mode in [
-                super::ArenaMode::Disabled,
-                super::ArenaMode::WorkspaceReuse,
-            ] {
+            for arena_mode in [super::ArenaMode::Disabled, super::ArenaMode::WorkspaceReuse] {
                 let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
                     ContextPackProfile::Submodular,
                     "prepare release",
@@ -14583,7 +14620,11 @@ mod tests {
                     &mut workspace,
                 )
                 .map_err(|error| error.to_string())?;
-                assert_packs_equal_across_arena_mode(&baseline, &draft, "facility ignores MMR weight")?;
+                assert_packs_equal_across_arena_mode(
+                    &baseline,
+                    &draft,
+                    "facility ignores MMR weight",
+                )?;
                 assert_eq!(
                     baseline.selection_audit.total_objective_value,
                     draft.selection_audit.total_objective_value,
@@ -14606,21 +14647,38 @@ mod tests {
                     ..classic_pack_options()
                 };
                 let result = assemble_draft_with_profile_and_options(
-                    profile, "prepare release", budget, Vec::<PackCandidate>::new(), options,
+                    profile,
+                    "prepare release",
+                    budget,
+                    Vec::<PackCandidate>::new(),
+                    options,
                 );
-                assert!(matches!(result, Err(PackValidationError::InvalidMmrRelevanceWeight)));
+                assert!(matches!(
+                    result,
+                    Err(PackValidationError::InvalidMmrRelevanceWeight)
+                ));
                 // An absent target does not assemble a draft, so validate it at the
                 // explanation entry point as well as the normal selection path.
                 let input = super::WhyNotSelectedInput::new(
-                    "prepare release", target.clone(), budget, profile, Vec::new(),
-                ).with_options(options);
+                    "prepare release",
+                    target.clone(),
+                    budget,
+                    profile,
+                    Vec::new(),
+                )
+                .with_options(options);
                 assert!(matches!(
                     super::explain_why_not_selected(input),
                     Err(PackValidationError::InvalidMmrRelevanceWeight),
                 ));
                 let input = super::WhyNotSelectedInput::new(
-                    "prepare release", target.clone(), budget, profile, vec![target.clone()],
-                ).with_options(options);
+                    "prepare release",
+                    target.clone(),
+                    budget,
+                    profile,
+                    vec![target.clone()],
+                )
+                .with_options(options);
                 assert!(matches!(
                     super::explain_why_not_selected_from_draft(input, valid_draft.clone()),
                     Err(PackValidationError::InvalidMmrRelevanceWeight),
@@ -14633,30 +14691,43 @@ mod tests {
     #[test]
     fn why_not_selected_uses_caller_mmr_weight_for_score_comparison() -> TestResult {
         let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
-        for (weight, selected, target_score, last_score) in [
-            (0.25, false, 0.6, 0.525),
-            (1.0, true, 0.9, 0.6),
-        ] {
+        for (weight, selected, target_score, last_score) in
+            [(0.25, false, 0.6, 0.525), (1.0, true, 0.9, 0.6)]
+        {
             let target = candidate_with_content(2, 0.9, 0.5, 10, "alpha beta gamma epsilon")?;
             let report = super::explain_why_not_selected(
                 super::WhyNotSelectedInput::new(
-                    "prepare release", target, budget, ContextPackProfile::Balanced,
+                    "prepare release",
+                    target,
+                    budget,
+                    ContextPackProfile::Balanced,
                     mmr_weight_candidates()?,
-                ).with_options(PackAssemblyOptions {
+                )
+                .with_options(PackAssemblyOptions {
                     mmr_relevance_weight: weight,
                     include_coverage_fill: false,
                     ..classic_pack_options()
                 }),
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             assert_eq!(report.selected, selected);
-            ensure_close(report.scores.target_composite, target_score, "target weighted score")?;
             ensure_close(
-                report.scores.last_included_composite
+                report.scores.target_composite,
+                target_score,
+                "target weighted score",
+            )?;
+            ensure_close(
+                report
+                    .scores
+                    .last_included_composite
                     .ok_or_else(|| "missing last selected score".to_owned())?,
                 last_score,
                 "last selected weighted score",
             )?;
-            assert_eq!(report.scores.last_included_memory_id, Some(memory_id(3).to_string()));
+            assert_eq!(
+                report.scores.last_included_memory_id,
+                Some(memory_id(3).to_string())
+            );
         }
         Ok(())
     }

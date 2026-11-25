@@ -601,7 +601,9 @@ mod tests {
     fn database_path_knob_is_forward_looking_while_commands_open_the_workspace_store() {
         let knob = knob_for_key(STORAGE_DATABASE_PATH_KEY).expect("database_path is covered");
         assert_eq!(knob.status, ConfigRuntimeStatus::ForwardLooking);
-        let caveat = knob.caveat.expect("storage.database_path must say it is not read");
+        let caveat = knob
+            .caveat
+            .expect("storage.database_path must say it is not read");
         assert!(
             caveat.contains("--database") && caveat.contains("<workspace>/.ee/ee.db"),
             "caveat must name the store commands actually open: {caveat}"

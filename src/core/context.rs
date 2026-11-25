@@ -10951,7 +10951,11 @@ fn context_effective_config_policy(
     if options.profile != Some(ContextPackProfile::Submodular)
         && settings.mmr_relevance_weight != crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT
     {
-        hash_policy_f32(&mut hasher, "pack.mmr_lambda", settings.mmr_relevance_weight);
+        hash_policy_f32(
+            &mut hasher,
+            "pack.mmr_lambda",
+            settings.mmr_relevance_weight,
+        );
     }
     if search.rerank_configured_mode == crate::config::SearchRerankMode::Auto {
         hash_labeled_count(&mut hasher, "rerank.top_k", search.rerank_configured_top_k);

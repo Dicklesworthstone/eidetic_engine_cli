@@ -14,8 +14,7 @@ use ee::obs::strip_volatile_fields;
 use ee::pack::{
     ArenaMode, ContextPackProfile, DEFAULT_MMR_RELEVANCE_WEIGHT, PackAssemblyOptions,
     PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection, TokenBudget,
-    assemble_draft,
-    assemble_draft_with_profile_and_options_seeded,
+    assemble_draft, assemble_draft_with_profile_and_options_seeded,
 };
 use ee::runtime::determinism::Deterministic;
 use ee::search::parse_search_query;
