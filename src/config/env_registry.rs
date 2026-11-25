@@ -690,7 +690,12 @@ impl EnvVar {
             Self::DaemonWarm => {
                 "Set to `off` to stop a workspace-bound `ee daemon` from warming its search stack at startup."
             }
-            Self::DatabasePath => "Override the configured storage database path.",
+            // Not "Override the ... path": the key it sets is unread, and `ee capabilities` lists
+            // this text as what the variable controls (bd-env-store-override-advertised-not-read-p6iqy).
+            // No commas: TOON would quote the string and the capabilities golden would change shape.
+            Self::DatabasePath => {
+                "Set `storage.database_path` in config. Workspace commands do not read that key yet; they open `--database` or the workspace `.ee/ee.db`. `ee insights` reads this variable directly."
+            }
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
             Self::DiagForceCapabilityGap => {
                 "Force selected capability probes to report build-gap diagnostics."
@@ -793,7 +798,10 @@ impl EnvVar {
             }
             Self::HarmfulPerSourcePerHour => "Override the harmful feedback rate limit per source.",
             Self::HookMode => "Use hook-oriented machine output defaults.",
-            Self::IndexDir => "Override the configured search index directory.",
+            // Same as DatabasePath: `storage.index_dir` is only displayed by `ee config show`.
+            Self::IndexDir => {
+                "Set `storage.index_dir` in config. No command reads that key yet; pass `--index-dir` to choose the search index directory."
+            }
             Self::IndexPublishLockRetryAttempts => {
                 "Override index publish advisory-lock retry attempts."
             }

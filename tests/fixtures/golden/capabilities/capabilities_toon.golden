@@ -712,7 +712,7 @@ data:
       source: registry_default
     - name: EE_DATABASE_PATH
       category: paths
-      controls: Override the configured storage database path.
+      controls: Set `storage.database_path` in config. Workspace commands do not read that key yet; they open `--database` or the workspace `.ee/ee.db`. `ee insights` reads this variable directly.
       defaultValue: null
       isSet: false
       source: unset
@@ -946,7 +946,7 @@ data:
       source: unset
     - name: EE_INDEX_DIR
       category: paths
-      controls: Override the configured search index directory.
+      controls: Set `storage.index_dir` in config. No command reads that key yet; pass `--index-dir` to choose the search index directory.
       defaultValue: null
       isSet: false
       source: unset

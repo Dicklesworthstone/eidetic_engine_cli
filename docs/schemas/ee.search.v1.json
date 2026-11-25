@@ -29,6 +29,16 @@
       "additionalProperties": false,
       "properties": {
         "command": { "type": "string", "const": "search" },
+        "servingPath": {
+          "type": "string",
+          "enum": ["in_process", "daemon", "hybrid", "in_process_fallback"],
+          "description": "Execution path for this invocation, as in ee.response.v2."
+        },
+        "retrievalPath": { "type": "string", "enum": ["in_process", "daemon"] },
+        "fallbackReason": {
+          "type": ["string", "null"],
+          "description": "Stable reason code when a requested daemon path fell back; null otherwise."
+        },
         "embed_backend": {
           "type": "string",
           "enum": ["neural_local", "remote_api", "hash_fallback"]
