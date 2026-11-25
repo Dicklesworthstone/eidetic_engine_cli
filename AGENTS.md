@@ -349,7 +349,7 @@ Hard rules for agents working on this Mac:
    the per-invocation `TMPDIR`, and the APFS sparse image that the pinned RCH
    lane uses as its committed-tree export base (mounted at
    `/Volumes/USBNVME16TB/temp_agent_space/eerchexport`, inside the only root the
-   build-admission preflight accepts — see CLAUDE.md). A dropped drive therefore also fails every
+   installed 0.17.0 build-admission preflight accepts — see CLAUDE.md). A dropped drive therefore also fails every
    dispatch, with `bash: script file read error: Input/output error` and exit
    128 from `scripts/rch_verify.sh` re-execing itself.
 
