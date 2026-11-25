@@ -60,8 +60,13 @@ where
 fn run_ee(workspace: &Path, args: &[&str], env: DedupEnv<'_>) -> Result<TimedOutput, String> {
     let started = Instant::now();
     let mut command = crate::isolated_ee::isolated_ee_command(&workspace.join(".ee-iso"))?;
+    // Name the workspace rather than relying on discovery from the cwd: when the
+    // temp dir sits inside another workspace (an rch worker roots it under the
+    // checkout), the walk-up found that checkout's `.ee` and `init` targeted it.
     command
         .current_dir(workspace)
+        .arg("--workspace")
+        .arg(workspace)
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")

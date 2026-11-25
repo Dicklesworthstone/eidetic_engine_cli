@@ -236,6 +236,7 @@ tests/audit_artifacts/install_pipeline_*.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T052258Z.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T192108Z.json
 !tests/audit_artifacts/install_pipeline_2026-09-17T124501Z.json
+!tests/audit_artifacts/install_pipeline_2026-11-16T202055Z.json
 .stash_janitor_workspace/
 
 # UBS (Ultimate Bug Scanner) reports at the repo root. `ubs` writes its

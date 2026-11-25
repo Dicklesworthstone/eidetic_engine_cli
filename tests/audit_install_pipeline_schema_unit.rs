@@ -56,10 +56,42 @@ fn newest_audit_artifact_path(dir: &Path) -> Result<Option<PathBuf>, String> {
     Ok(candidates.pop())
 }
 
+/// `.rchignore` keeps `latest_*.json` out of remote sync, so a worker can hold a
+/// pointer from an older sync while the timestamped artifacts beside it are
+/// current. A lane run read such a pointer and failed on a stale audit.
+/// Timestamped names sort chronologically, so read whichever run is newer.
+fn newer_of_pointer_and_newest(pointer: &Path) -> Result<Option<PathBuf>, String> {
+    let dir = pointer
+        .parent()
+        .ok_or_else(|| format!("audit artifact path {} has no parent", pointer.display()))?;
+    let target = std::fs::canonicalize(pointer)
+        .map_err(|error| format!("resolve {}: {error}", pointer.display()))?;
+    let Some(newest) = newest_audit_artifact_path(dir)? else {
+        return Ok(Some(pointer.to_path_buf()));
+    };
+    let file_name_of = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    };
+    match (file_name_of(&target), file_name_of(&newest)) {
+        (Some(current), Some(candidate))
+            if current.starts_with("install_pipeline_") && candidate > current =>
+        {
+            eprintln!(
+                "audit: latest pointer {} names `{current}`, older than `{candidate}`; reading the newer run",
+                pointer.display()
+            );
+            Ok(Some(newest))
+        }
+        _ => Ok(Some(pointer.to_path_buf())),
+    }
+}
+
 fn resolve_audit_artifact_path() -> Result<Option<PathBuf>, String> {
     let path = audit_artifact_path();
     if path.exists() {
-        return Ok(Some(path));
+        return newer_of_pointer_and_newest(&path);
     }
 
     let metadata = match std::fs::symlink_metadata(&path) {

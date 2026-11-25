@@ -938,24 +938,18 @@ fn validate_json_schema(
         return validate_json_schema(value, target, root_schema, path);
     }
 
-    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
-        if options
-            .iter()
-            .any(|candidate| validate_json_schema(value, candidate, root_schema, path).is_ok())
+    // A matching branch must not end validation: the sibling keywords still apply.
+    // Returning Ok here skipped `properties` on every object that carries a union,
+    // so once ee.pack.replay.v2 gave `selectedItem` a oneOf, a relevance score of
+    // 1.5 passed its `maximum: 1`.
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(options) = schema.get(keyword).and_then(Value::as_array)
+            && !options
+                .iter()
+                .any(|candidate| validate_json_schema(value, candidate, root_schema, path).is_ok())
         {
-            return Ok(());
+            return Err(format!("{path} did not match any {keyword} branch"));
         }
-        return Err(format!("{path} did not match any oneOf branch"));
-    }
-
-    if let Some(options) = schema.get("anyOf").and_then(Value::as_array) {
-        if options
-            .iter()
-            .any(|candidate| validate_json_schema(value, candidate, root_schema, path).is_ok())
-        {
-            return Ok(());
-        }
-        return Err(format!("{path} did not match any anyOf branch"));
     }
 
     if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {

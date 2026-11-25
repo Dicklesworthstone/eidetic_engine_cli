@@ -3221,12 +3221,27 @@ fn situation_classify_reports_heuristic_routing_without_unavailable_sentinel() -
 
 #[test]
 fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel() -> TestResult {
+    // An explicit empty workspace. Without one, discovery walks up from the test's
+    // cwd (the crate root) and the recipe catalog reads whatever `.ee/ee.db` it finds
+    // there, so the result depended on the checkout running the test: a lane run
+    // exited 3 (storage), which the catalog-only path cannot produce.
+    let workspace_root = unique_artifact_dir("plan-catalog-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
     let commands = [
         (
             "plan-goal-catalog",
             "plan goal",
             "ee.plan.recommend.v1",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "--json".to_owned(),
                 "plan".to_owned(),
                 "goal".to_owned(),
@@ -3239,6 +3254,8 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
             "plan explain",
             "ee.plan.explain.v1",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg,
                 "--json".to_owned(),
                 "plan".to_owned(),
                 "explain".to_owned(),
@@ -3248,9 +3265,13 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
     ];
 
     for (artifact_name, command, schema, args) in commands {
-        let result = run_ee_logged(artifact_name, None, args)?;
+        let result = run_ee_logged(artifact_name, Some(&workspace), args)?;
 
-        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
+        ensure_equal(
+            &result.exit_code,
+            &0,
+            &format!("{command} exit code (stdout: {})", result.stdout.trim()),
+        )?;
         ensure(
             result.stderr.is_empty(),
             format!("{command} JSON response must keep stderr empty"),
