@@ -1072,6 +1072,11 @@ fn record_outcome_inner(
                 &target_id,
                 options.workspace_id.as_deref(),
                 options.prompt_injection_guard,
+                if options.dry_run {
+                    OutcomeTargetAdmission::Live
+                } else {
+                    OutcomeTargetAdmission::OwnershipOnly
+                },
             )?
         };
 
@@ -1243,6 +1248,19 @@ fn record_outcome_inner(
             });
         }
 
+        // Exact receipts above retain their identity after later retirement
+        // or evidence withdrawal. A new observation still needs current live
+        // admission, under the same writer fence as its ownership and commit.
+        if matches!(target_type.as_str(), "rule" | "evidence") {
+            resolve_target_workspace(
+                &connection,
+                &target_type,
+                &target_id,
+                Some(&target.workspace_id),
+                options.prompt_injection_guard,
+                OutcomeTargetAdmission::Live,
+            )?;
+        }
         // A retry belongs to its already-recorded observation, even if the
         // target was revised later. Only new observations require the current
         // revision; do not redirect feedback to a different memory implicitly.
@@ -2825,6 +2843,14 @@ pub fn review_feedback_quarantine(
     ))
 }
 
+/// Receipt lookup verifies the target's durable identity and current owner.
+/// Only a new observation (or quarantine release) needs live admission.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OutcomeTargetAdmission {
+    OwnershipOnly,
+    Live,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TargetResolution {
     workspace_id: String,
@@ -3146,6 +3172,7 @@ fn validate_quarantined_feedback_target(
             &feedback_input.target_id,
             Some(&feedback_input.workspace_id),
             false,
+            OutcomeTargetAdmission::Live,
         )?;
     }
     require_current_memory_outcome_revision(
@@ -3302,6 +3329,7 @@ fn resolve_target_workspace(
     target_id: &str,
     workspace_id: Option<&str>,
     prompt_injection_guard: bool,
+    admission: OutcomeTargetAdmission,
 ) -> Result<TargetResolution, DomainError> {
     if target_type == "rule" {
         crate::models::RuleId::from_str(target_id).map_err(|error| DomainError::Usage {
@@ -3320,10 +3348,11 @@ fn resolve_target_workspace(
                 repair: Some("ee rule list --json".to_owned()),
             })?;
         require_outcome_target_workspace(target_type, &rule.workspace_id, workspace_id)?;
-        if rule.tombstoned_at.is_some()
-            || rule.superseded_by.is_some()
-            || !crate::models::RuleMaturity::from_str(&rule.maturity)
-                .is_ok_and(|maturity| maturity.is_active())
+        if admission == OutcomeTargetAdmission::Live
+            && (rule.tombstoned_at.is_some()
+                || rule.superseded_by.is_some()
+                || !crate::models::RuleMaturity::from_str(&rule.maturity)
+                    .is_ok_and(|maturity| maturity.is_active()))
         {
             return Err(DomainError::PolicyDenied {
                 message: "Outcome feedback requires an active native rule.".to_owned(),
@@ -3401,24 +3430,26 @@ fn resolve_target_workspace(
                 id: target_id.to_owned(),
                 repair: Some("ee search --help".to_owned()),
             })?;
-        let session = connection
-            .get_session(&span.session_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query evidence provenance: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?
-            .ok_or_else(|| DomainError::NotFound {
-                resource: "evidence".to_owned(),
-                id: target_id.to_owned(),
-                repair: Some("ee import cass --help".to_owned()),
-            })?;
-        if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
-            return Err(DomainError::PolicyDenied {
-                message: "Evidence target no longer has live pack admission.".to_owned(),
-                repair: Some("ee import status --json".to_owned()),
-            });
-        }
         require_outcome_target_workspace(target_type, &span.workspace_id, workspace_id)?;
+        if admission == OutcomeTargetAdmission::Live {
+            let session = connection
+                .get_session(&span.session_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query evidence provenance: {error}"),
+                    repair: Some("ee doctor".to_owned()),
+                })?
+                .ok_or_else(|| DomainError::NotFound {
+                    resource: "evidence".to_owned(),
+                    id: target_id.to_owned(),
+                    repair: Some("ee import cass --help".to_owned()),
+                })?;
+            if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
+                return Err(DomainError::PolicyDenied {
+                    message: "Evidence target no longer has live pack admission.".to_owned(),
+                    repair: Some("ee import status --json".to_owned()),
+                });
+            }
+        }
         return Ok(TargetResolution {
             workspace_id: span.workspace_id,
             verified: true,
@@ -7757,6 +7788,156 @@ mod tests {
             after,
             "a distinct feedback weight must conflict without changing the native rule or its job"
         );
+        Ok(())
+    }
+
+    fn assert_historical_outcome_receipt_is_replayable(
+        connection: &DbConnection,
+        options: &OutcomeRecordOptions<'_>,
+        expected: OutcomeRecordStatus,
+    ) -> TestResult {
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let replay = record_outcome(options).map_err(|error| error.message())?;
+        assert_eq!(replay.status, expected);
+        assert_eq!(replay.event_id, options.event_id);
+        assert!(replay.audit_id.is_none());
+        if expected == OutcomeRecordStatus::Quarantined {
+            assert!(replay.quarantine.is_some_and(|summary| summary.replayed));
+        }
+
+        let mut conflict = options.clone();
+        conflict.weight = Some(options.weight.unwrap_or(1.0) + 0.5);
+        assert!(matches!(
+            record_outcome(&conflict),
+            Err(DomainError::Usage { .. })
+        ));
+        let mut foreign = options.clone();
+        foreign.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+        assert!(matches!(
+            record_outcome(&foreign),
+            Err(DomainError::PolicyDenied { .. })
+        ));
+        let mut fresh = options.clone();
+        fresh.event_id = Some("fb_00000000000000000000000990".to_owned());
+        assert!(matches!(
+            record_outcome(&fresh),
+            Err(DomainError::PolicyDenied { .. })
+        ));
+        let mut preview = options.clone();
+        preview.dry_run = true;
+        assert!(matches!(
+            record_outcome(&preview),
+            Err(DomainError::PolicyDenied { .. })
+        ));
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before,
+            "receipt replay and refused observations cannot change learning, publication, audits or quarantine"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_receipts_survive_retirement_without_readmitting_feedback() -> TestResult {
+        for retirement in [
+            "UPDATE procedural_rules SET maturity = 'deprecated'",
+            "UPDATE procedural_rules SET maturity = 'superseded'",
+            "UPDATE procedural_rules SET superseded_by = id",
+            "UPDATE procedural_rules SET tombstoned_at = '2026-09-25T00:00:00Z'",
+        ] {
+            let (_dir, database) = seed_outcome_database("ee-retired-rule-receipt")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            let options =
+                native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000670");
+            assert_eq!(
+                record_outcome(&options)
+                    .map_err(|error| error.message())?
+                    .status,
+                OutcomeRecordStatus::Recorded
+            );
+            connection
+                .execute_raw(retirement)
+                .map_err(|error| error.to_string())?;
+            assert_historical_outcome_receipt_is_replayable(
+                &connection,
+                &options,
+                OutcomeRecordStatus::AlreadyRecorded,
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_receipts_survive_withdrawal_without_readmitting_feedback() -> TestResult {
+        for receipt in ["recorded", "pending", "released"] {
+            let (dir, database) = seed_outcome_database("ee-withdrawn-evidence-receipt")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let evidence_id = seed_quarantine_evidence(&connection)?;
+            let mut options =
+                native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000671");
+            options.target_type = "evidence".to_owned();
+            options.target_id = evidence_id.clone();
+            let expected = if receipt == "recorded" {
+                assert_eq!(
+                    record_outcome(&options)
+                        .map_err(|error| error.message())?
+                        .status,
+                    OutcomeRecordStatus::Recorded
+                );
+                OutcomeRecordStatus::AlreadyRecorded
+            } else {
+                let held =
+                    queue_native_feedback_quarantine(&database, "evidence", &evidence_id, None)?;
+                options.signal = held.signal.clone();
+                options.weight = Some(held.weight);
+                options.source_type = held.source_type.clone();
+                options.source_id = Some(held.source_id.clone());
+                options.reason = held.event_reason.clone();
+                options.evidence_json = held.evidence_json.clone();
+                options.session_id = held.session_id.clone();
+                options.event_id = held.proposed_event_id.clone();
+                if receipt == "released" {
+                    let review = OutcomeQuarantineReviewOptions {
+                        workspace_path: dir.path(),
+                        database_path: Some(&database),
+                        quarantine_id: &held.id,
+                        reject: false,
+                        actor: Some("receipt-reviewer"),
+                        dry_run: false,
+                    };
+                    assert_eq!(
+                        review_feedback_quarantine(&review)
+                            .map_err(|error| error.message())?
+                            .status,
+                        "released"
+                    );
+                    OutcomeRecordStatus::AlreadyRecorded
+                } else {
+                    OutcomeRecordStatus::Quarantined
+                }
+            };
+            connection
+                .with_transaction_error(|| {
+                    connection.withdraw_cass_evidence_in_current_snapshot(
+                        OUTCOME_TEST_WORKSPACE_ID,
+                        &evidence_id,
+                        "Withdraw source admission after recording feedback.",
+                        Some("receipt-reviewer"),
+                        false,
+                    )
+                })
+                .map_err(|error| format!("{error:?}"))?;
+            assert_historical_outcome_receipt_is_replayable(&connection, &options, expected)?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 

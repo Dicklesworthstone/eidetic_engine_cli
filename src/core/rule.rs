@@ -1347,9 +1347,8 @@ fn apply_rule_index_convergence(
     index_status: &mut String,
     degraded: &mut Vec<RuleAddDegradation>,
 ) {
-    let index_dir = workspace_path
-        .join(".ee")
-        .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+    let index_dir =
+        crate::config::workspace::resolve_store_index_dir(workspace_path, database_path, None);
     let failure = match crate::core::index::process_pending_index_jobs_coalesced(
         connection,
         workspace_id,
@@ -2868,17 +2867,17 @@ fn portable_import_maturity(
     Some(parsed.as_str())
 }
 
-fn portable_import_trust_class<'a>(
-    rule: &'a PlaybookPortableRule,
+fn portable_import_trust_class(
+    declared: TrustClass,
     auth_state: &PlaybookAuthState,
     issue_codes: &mut Vec<String>,
-) -> &'a str {
-    if rule.trust_class == TrustClass::PeerHumanAttested.as_str() {
+) -> TrustClass {
+    if declared == TrustClass::PeerHumanAttested {
         issue_codes.push("playbook_peer_human_attested_capped".to_owned());
-        return TrustClass::AgentValidated.as_str();
+        return TrustClass::AgentValidated;
     }
 
-    if rule.trust_class == TrustClass::HumanExplicit.as_str()
+    if declared == TrustClass::HumanExplicit
         && !matches!(auth_state, PlaybookAuthState::Authenticated)
     {
         issue_codes.push(match auth_state {
@@ -2889,10 +2888,10 @@ fn portable_import_trust_class<'a>(
                 "playbook_trust_capped_unauthenticated".to_owned()
             }
         });
-        return TrustClass::AgentValidated.as_str();
+        return TrustClass::AgentValidated;
     }
 
-    &rule.trust_class
+    declared
 }
 
 fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(), DomainError> {
@@ -2971,6 +2970,17 @@ fn prepare_playbook_import_candidates(
         downgraded_count: 0,
     };
     for rule in &document.rules {
+        // Apply trust policy to the same normalized class that will be stored.
+        // Validate even duplicate rows so aliases cannot bypass the trust cap
+        // and malformed classes cannot hide behind an existing instruction.
+        let declared_trust_class =
+            TrustClass::from_str(&rule.trust_class).map_err(|error| DomainError::Import {
+                message: format!(
+                    "playbook rule {} has invalid trust class: {error}",
+                    rule.source_rule_id.as_deref().unwrap_or("<portable>"),
+                ),
+                repair: Some("correct the rule trust class or re-export the playbook".to_owned()),
+            })?;
         let normalized = normalize_rule_text(&rule.content);
         let mut decision = PlaybookImportDecision {
             source_rule_id: rule.source_rule_id.clone(),
@@ -2999,9 +3009,12 @@ fn prepare_playbook_import_candidates(
         {
             plan.downgraded_count += 1;
         }
-        let effective_trust_class =
-            portable_import_trust_class(rule, auth_state, &mut decision.issue_codes);
-        if effective_trust_class != rule.trust_class {
+        let effective_trust_class = portable_import_trust_class(
+            declared_trust_class,
+            auth_state,
+            &mut decision.issue_codes,
+        );
+        if effective_trust_class != declared_trust_class {
             plan.downgraded_count += 1;
         }
         let mut candidate = prepare_rule_add(&RuleAddOptions {
@@ -3014,7 +3027,7 @@ fn prepare_playbook_import_candidates(
             confidence: Some(rule.confidence),
             utility: rule.utility,
             importance: rule.importance,
-            trust_class: effective_trust_class,
+            trust_class: effective_trust_class.as_str(),
             protected: rule.protected,
             tags: &rule.tags,
             source_memory_ids: &[],
@@ -4963,6 +4976,31 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    fn index_files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        let mut files = BTreeMap::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                if entry
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    directories.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf();
+                    files.insert(relative, fs::read(path).map_err(|error| error.to_string())?);
+                }
+            }
+        }
+        Ok(files)
     }
 
     #[test]
@@ -7387,6 +7425,155 @@ mod tests {
     }
 
     #[test]
+    fn playbook_import_normalizes_trust_before_authentication_caps() -> TestResult {
+        let aliases = [
+            ("human_explicit", TrustClass::HumanExplicit),
+            ("HUMAN_EXPLICIT", TrustClass::HumanExplicit),
+            ("human-explicit", TrustClass::HumanExplicit),
+            ("humanExplicit", TrustClass::HumanExplicit),
+            (" HumanExplicit ", TrustClass::HumanExplicit),
+            ("peer_human_attested", TrustClass::PeerHumanAttested),
+            ("PEER_HUMAN_ATTESTED", TrustClass::PeerHumanAttested),
+            ("peer-human-attested", TrustClass::PeerHumanAttested),
+            ("peerHumanAttested", TrustClass::PeerHumanAttested),
+            (" PeerHumanAttested ", TrustClass::PeerHumanAttested),
+            (" agentValidated ", TrustClass::AgentValidated),
+            ("AgentAssertion", TrustClass::AgentAssertion),
+            ("CASS_EVIDENCE", TrustClass::CassEvidence),
+            ("legacy-import", TrustClass::LegacyImport),
+        ];
+        for authenticated in [false, true] {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+            let mut document = human_explicit_portable_document(&workspace_id);
+            let template = document.rules[0].clone();
+            document.rules = aliases
+                .iter()
+                .enumerate()
+                .map(|(index, (alias, _))| PlaybookPortableRule {
+                    source_rule_id: Some(RuleId::now().to_string()),
+                    content: format!("Trust alias {index}: run cargo fmt before release."),
+                    trust_class: (*alias).to_owned(),
+                    ..template.clone()
+                })
+                .collect();
+            document.rule_count = document.rules.len();
+            if authenticated {
+                authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+            }
+
+            let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+            ensure(
+                report.imported_count == aliases.len(),
+                "every recognized trust alias must import at its permitted trust class",
+            )?;
+            let connection =
+                open_existing_database(&database_path).map_err(|error| error.message())?;
+            let mut expected_downgrades = 0;
+            for (index, (alias, declared)) in aliases.iter().enumerate() {
+                let peer_cap = *declared == TrustClass::PeerHumanAttested;
+                let human_cap = *declared == TrustClass::HumanExplicit && !authenticated;
+                let expected = if peer_cap || human_cap {
+                    expected_downgrades += 1;
+                    TrustClass::AgentValidated
+                } else {
+                    *declared
+                };
+                let decision = &report.decisions[index];
+                let rule_id = decision
+                    .imported_rule_id
+                    .as_deref()
+                    .ok_or("expected an imported rule id for each alias")?;
+                let stored = connection
+                    .get_procedural_rule(rule_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("expected the imported rule to be persisted")?;
+                ensure(
+                    stored.trust_class == expected.as_str(),
+                    format!("wrong stored trust for alias {alias:?}, authenticated={authenticated}"),
+                )?;
+                ensure(
+                    decision
+                        .issue_codes
+                        .iter()
+                        .any(|code| code == "playbook_peer_human_attested_capped")
+                        == peer_cap,
+                    "peer attestation aliases must consistently report their trust cap",
+                )?;
+                ensure(
+                    decision
+                        .issue_codes
+                        .iter()
+                        .any(|code| code == "playbook_trust_capped_unauthenticated")
+                        == human_cap,
+                    "human trust aliases must follow the verified authentication result",
+                )?;
+            }
+            ensure(
+                report.downgraded_count == expected_downgrades,
+                "canonicalizing a trust alias must not count as a trust downgrade",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn playbook_import_rejects_invalid_trust_before_duplicate_short_circuit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let connection = open_existing_database(&database_path).map_err(|error| error.message())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let source_path = workspace_path.join("invalid-trust-playbook.json");
+        for invalid_class in ["", "human explicit", "human_explicit_admin"] {
+            let mut document = portable_document_for_contents(
+                &workspace_id,
+                &[
+                    "Run cargo fmt before publishing.",
+                    "Run cargo fmt before publishing.",
+                ],
+            );
+            document.rules[1].trust_class = invalid_class.to_owned();
+            fs::write(
+                &source_path,
+                serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let error = import_playbook(&PlaybookImportOptions {
+                    workspace_path: &workspace_path,
+                    database_path: Some(&database_path),
+                    source_path: &source_path,
+                    dry_run,
+                    actor: Some("test"),
+                })
+                .err()
+                .ok_or("malformed trust on a duplicate must fail the whole import")?;
+                ensure(
+                    matches!(&error, DomainError::Import { .. })
+                        && error.message().contains("invalid trust class"),
+                    "preview and apply must report malformed trust as an import error",
+                )?;
+                ensure(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?
+                        == before,
+                    "malformed duplicate trust must not persist rules, audit rows or queued work",
+                )?;
+            }
+        }
+        ensure(
+            !workspace_path
+                .join(".ee")
+                .join(crate::core::index::DEFAULT_INDEX_SUBDIR)
+                .exists(),
+            "invalid trust must not start an index publication",
+        )
+    }
+
+    #[test]
     fn playbook_import_caps_unauthenticated_human_explicit() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
@@ -7785,6 +7972,222 @@ mod tests {
                 .any(|entry| entry.code == "search_index_stale"),
             "no stale advisory after rule add",
         )
+    }
+
+    #[test]
+    fn rule_and_playbook_publish_to_selected_store_without_changing_workspace_index() -> TestResult
+    {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace");
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let create_rule = |database_path: Option<&Path>, content: &str| {
+                add_rule(&RuleAddOptions {
+                    workspace_path: &workspace,
+                    database_path,
+                    content,
+                    scope: "workspace",
+                    scope_pattern: None,
+                    maturity: "candidate",
+                    confidence: None,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "human_explicit",
+                    protected: false,
+                    tags: &[],
+                    source_memory_ids: &[],
+                    dry_run: false,
+                    actor: None,
+                })
+                .map_err(|error| error.message())
+            };
+            let original = create_rule(None, "Defaultstoreguard preserve the workspace rule.")?;
+            ensure(
+                original.index_status == "indexed",
+                "default rule is indexed",
+            )?;
+            let workspace_index = workspace.join(".ee/index");
+            let before = index_files(&workspace_index)?;
+            ensure(!before.is_empty(), "default index was published")?;
+            let store_dir = temp.path().join("alternate").join(store_marker);
+            let database = store_dir.join("ee.db");
+            let added = create_rule(
+                Some(&database),
+                "Storeisolation keep direct rules searchable.",
+            )?;
+            ensure(
+                added.persisted && added.index_status == "indexed" && added.degraded.is_empty(),
+                "selected store rule must be durably indexed",
+            )?;
+
+            let assert_searchable = |expected_ids: &[String]| -> TestResult {
+                let status =
+                    crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: None,
+                    })
+                    .map_err(|error| error.to_string())?;
+                ensure(
+                    status.health == crate::core::index::IndexHealth::Ready
+                        && status.db_generation.is_some()
+                        && status.db_generation == status.index_generation,
+                    "selected store index covers the committed generation",
+                )?;
+                let search = crate::core::search::run_search_with_filters(
+                    &crate::core::search::SearchOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: None,
+                        query: "Storeisolation".to_owned(),
+                        limit: 10,
+                        speed: crate::search::SpeedMode::Instant,
+                        explain: false,
+                        as_of: None,
+                        include_tombstoned: false,
+                        include_expired: false,
+                        include_future: false,
+                        include_stale: false,
+                        relevance_floor: Some(0.0),
+                        dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                        source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                        strict_source_mode: true,
+                        memory_scope: crate::models::MemoryScope::Workspace,
+                        strict_scope: false,
+                    },
+                    None,
+                    &[],
+                )
+                .map_err(|error| format!("selected store search: {error:?}"))?;
+                ensure(
+                    search
+                        .results
+                        .iter()
+                        .map(|hit| &hit.doc_id)
+                        .collect::<BTreeSet<_>>()
+                        == expected_ids.iter().collect::<BTreeSet<_>>(),
+                    "immediate search returns exactly the selected store rules",
+                )?;
+                ensure(
+                    index_files(&workspace_index)? == before,
+                    "selected store mutation must leave every default index file unchanged",
+                )
+            };
+            assert_searchable(std::slice::from_ref(&added.rule_id))?;
+            let document = portable_document_for_contents(
+                &added.workspace_id,
+                &[
+                    "Storeisolation run cargo fmt before release.",
+                    "Storeisolation run cargo test before release.",
+                ],
+            );
+            let imported = run_playbook_import(&workspace, &database, &document)?;
+            ensure(
+                imported.imported_count == 2 && imported.degraded.is_empty(),
+                "selected store playbook batch publishes successfully",
+            )?;
+            let mut expected_ids = vec![added.rule_id];
+            expected_ids.extend(
+                imported
+                    .decisions
+                    .iter()
+                    .filter_map(|decision| decision.imported_rule_id.clone()),
+            );
+            assert_searchable(&expected_ids)?;
+            ensure(
+                store_dir.join("index").is_dir(),
+                "index is beside the selected database",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&added.workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 3 && jobs.iter().all(|job| job.status == "completed"),
+                "direct and imported rules have completed durable publication jobs",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rule_and_playbook_selected_store_failure_keeps_publication_retryable() -> TestResult {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace with spaces");
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let workspace = workspace
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let store_dir = temp.path().join("alternate store").join(store_marker);
+            fs::create_dir_all(&store_dir).map_err(|error| error.to_string())?;
+            let database = store_dir.join("ee.db");
+            let blocker = temp.path().join("index-blocker");
+            fs::create_dir(&blocker).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&blocker, store_dir.join("index"))
+                .map_err(|error| error.to_string())?;
+
+            let added = add_rule(&RuleAddOptions {
+                workspace_path: &workspace,
+                database_path: Some(&database),
+                content: "Selected store rule must survive publication failure.",
+                scope: "workspace",
+                scope_pattern: None,
+                maturity: "candidate",
+                confidence: None,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "human_explicit",
+                protected: false,
+                tags: &[],
+                source_memory_ids: &[],
+                dry_run: false,
+                actor: None,
+            })
+            .map_err(|error| error.message())?;
+            let repair = rule_index_repair_command(&workspace, Some(&database));
+            ensure(
+                added.persisted && added.index_status == "queued",
+                "selected store rule remains durable and truthfully queued",
+            )?;
+            ensure(
+                added.degraded.iter().any(|entry| {
+                    entry.code == "rule_index_publish_failed" && entry.repair == repair
+                }),
+                "selected store rule failure includes the exact database repair",
+            )?;
+            let document = portable_document_for_contents(
+                &added.workspace_id,
+                &["Selected store playbook rule must survive publication failure."],
+            );
+            let imported = run_playbook_import(&workspace, &database, &document)?;
+            ensure(
+                imported.imported_count == 1
+                    && imported.degraded.iter().any(|entry| {
+                        entry.code == "rule_index_publish_failed" && entry.repair == repair
+                    }),
+                "selected store playbook failure preserves the durable rule and repair",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&added.workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 2
+                    && jobs
+                        .iter()
+                        .all(|job| matches!(job.status.as_str(), "pending" | "failed")),
+                "all selected store publication jobs remain retryable",
+            )?;
+            ensure(
+                !workspace.join(".ee/index").exists(),
+                "failed selected store publication never creates an unrelated workspace index",
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]

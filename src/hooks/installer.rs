@@ -3024,7 +3024,7 @@ VERBOSE_BUDGET = 1600
 try:
     data = json.load(sys.stdin)
 except Exception:
-    data = {}
+    sys.exit(0)
 if not isinstance(data, dict):
     sys.exit(0)
 def ambient_enabled():
@@ -3045,7 +3045,9 @@ BUDGET = VERBOSE_BUDGET if VERBOSITY == "verbose" else DEFAULT_BUDGET
 task = str(data.get("task") or data.get("prompt") or "session start")[:240]
 # Budget the actual prompt, reserving room for the provenance header below.
 # The diagnostic envelope is parsed, never injected into the agent's context.
-cmd = [ee, "orient", task, "--workspace", ".", "--use-daemon", "--include-primer", "--fast", "--candidate-pool", "20", "--format", "hook", "--fields", "command,ambientContext", "--max-tokens", str(BUDGET - 128)]
+# A task is literal text, even when it starts with a CLI option or a dash.
+# Put every option before the separator so task text cannot redirect the read.
+cmd = [ee, "orient", "--workspace", ".", "--use-daemon", "--include-primer", "--fast", "--candidate-pool", "20", "--format", "hook", "--fields", "command,ambientContext", "--max-tokens", str(BUDGET - 128), "--", task]
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
 except subprocess.TimeoutExpired:
@@ -3091,7 +3093,7 @@ MAX_SUGGESTIONS = 2
 try:
     data = json.load(sys.stdin)
 except Exception:
-    data = {}
+    sys.exit(0)
 if not isinstance(data, dict):
     sys.exit(0)
 def ambient_enabled():
@@ -3966,12 +3968,16 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
             "68a1bf46ddd39b12deeda0841fa83644abd7fa1c7f7ecf429cfe41be9ce1a9c9",
         ],
         "ee-ambient-session-orient" => &[
+            // Complete wrapper from main before literal task argv and invalid-event no-op.
+            "6fb02cb7e8781d135465d631635cf815ad8615dca0ed4d8b488a24b43ec71067",
             // Complete wrapper from main before context-window refresh.
             "9dde95a128416af791d1db1c5e2b3782ff6f963adf8a810d89e5ce4a06c24caa",
             "95fc71cc3d89ce5b87015fc83ab36d9a80a2c391f177f20a3fcb2e2d349c337c",
             "4eaf6174f5ac01be0236932cedb45d4d8c47f2889c7678160584c4fa25444e80",
         ],
         "ee-ambient-session-capture-suggest" => &[
+            // Complete wrapper from main before invalid-event no-op.
+            "7f25a5769cb8759d7082d28910517c24556f355fed902de07443cb251892b4e2",
             // Complete wrapper from main before context-window refresh.
             "7c1ca88b8ae48bdb5f87e274c1db83221aa337e9b90a8b6abbbb5027d0797b62",
             "5ca5423d0b8aefa6ded06fdb263f55ba69287b8eaa41a3f03eb72e02382dccd6",

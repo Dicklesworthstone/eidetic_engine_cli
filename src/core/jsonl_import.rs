@@ -1207,9 +1207,11 @@ fn import_jsonl_records_with_policy(
         // path so a prior failed deterministic job is requeued and retried.
         // A drain failure downgrades to a truthful non-fatal issue while the
         // durable jobs remain retryable (bd-index-auto-freshness-m5kwf).
-        let index_dir = workspace_path
-            .join(".ee")
-            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let index_dir = crate::config::workspace::resolve_store_index_dir(
+            &workspace_path,
+            Some(&database_path),
+            None,
+        );
         let expected_job_ids = publication_memory_ids
             .iter()
             .map(|memory_id| import_search_index_job_id(&workspace_id, memory_id))
@@ -3117,6 +3119,31 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn index_files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        let mut files = BTreeMap::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                if entry
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    directories.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf();
+                    files.insert(relative, fs::read(path).map_err(|error| error.to_string())?);
+                }
+            }
+        }
+        Ok(files)
     }
 
     fn unauthenticated() -> NativeAuthState {
@@ -5232,6 +5259,195 @@ mod tests {
             false,
             "no stale advisory after import drain",
         )
+    }
+
+    #[test]
+    fn import_jsonl_publishes_to_selected_store_without_changing_workspace_index() -> TestResult {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace");
+            fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+            let source = temp.path().join("source.jsonl");
+            fs::write(
+                &source,
+                sample_jsonl().replace(
+                    "Run cargo fmt --check before release.",
+                    "Defaultstoreguard preserve the original workspace memory.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+            import_jsonl_records(&JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                source_path: source.clone(),
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())?;
+            let workspace_index = workspace.join(".ee/index");
+            let before = index_files(&workspace_index)?;
+            ensure(before.is_empty(), false, "default index was published")?;
+
+            let store_dir = temp.path().join("alternate").join(store_marker);
+            let database = store_dir.join("ee.db");
+            fs::write(&source, sample_jsonl()).map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                source_path: source,
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())?;
+            ensure(
+                report.memories_imported,
+                1,
+                "alternate store imported memory",
+            )?;
+            ensure(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "import_index_publish_failed"),
+                false,
+                "selected store publication succeeds",
+            )?;
+            let status =
+                crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database.clone()),
+                    index_dir: None,
+                })
+                .map_err(|error| error.to_string())?;
+            ensure(
+                status.health == crate::core::index::IndexHealth::Ready
+                    && status.db_generation.is_some()
+                    && status.db_generation == status.index_generation,
+                true,
+                "selected store index covers the committed generation",
+            )?;
+            ensure(
+                store_dir.join("index").is_dir(),
+                true,
+                "index is beside selected database",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let workspace_id =
+                ensure_workspace(&connection, &workspace).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 1 && jobs.iter().all(|job| job.status == "completed"),
+                true,
+                "selected store durable publication job completed",
+            )?;
+            let search = crate::core::search::run_search_with_filters(
+                &crate::core::search::SearchOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database),
+                    index_dir: None,
+                    query: "cargo fmt release".to_owned(),
+                    limit: 5,
+                    speed: crate::search::SpeedMode::Instant,
+                    explain: false,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                    source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    memory_scope: crate::models::MemoryScope::Workspace,
+                    strict_scope: false,
+                },
+                None,
+                &[],
+            )
+            .map_err(|error| format!("selected store search: {error:?}"))?;
+            ensure(
+                search
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["mem_01234567890123456789012345"]),
+                "selected memory is immediately searchable",
+            )?;
+            ensure(
+                index_files(&workspace_index)?,
+                before,
+                "alternate store import leaves every default index file unchanged",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_jsonl_selected_store_failure_keeps_publication_retryable() -> TestResult {
+        for store_marker in [".ee", ".ee-campaign"] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = temp.path().join("workspace with spaces");
+            fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+            let store_dir = temp.path().join("alternate store").join(store_marker);
+            fs::create_dir_all(&store_dir).map_err(|error| error.to_string())?;
+            let database = store_dir.join("ee.db");
+            let blocker = temp.path().join("index-blocker");
+            fs::create_dir(&blocker).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&blocker, store_dir.join("index"))
+                .map_err(|error| error.to_string())?;
+            let source = temp.path().join("source.jsonl");
+            fs::write(&source, sample_jsonl()).map_err(|error| error.to_string())?;
+
+            let report = import_jsonl_records(&JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                source_path: source,
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())?;
+            ensure(
+                report.memories_imported,
+                1,
+                "selected store memory remains durable",
+            )?;
+            let expected_repair = format!(
+                "ee index rebuild --workspace {} --database {}",
+                jsonl_import_shell_quote_arg(workspace.to_string_lossy().as_ref()),
+                jsonl_import_shell_quote_arg(database.to_string_lossy().as_ref()),
+            );
+            ensure(
+                report.issues.iter().any(|issue| {
+                    issue.code == "import_index_publish_failed"
+                        && issue.repair.as_deref() == Some(expected_repair.as_str())
+                }),
+                true,
+                "publication failure names the exact selected store repair",
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let workspace_id =
+                ensure_workspace(&connection, &workspace).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                jobs.len() == 1
+                    && jobs
+                        .iter()
+                        .all(|job| matches!(job.status.as_str(), "pending" | "failed")),
+                true,
+                "selected store publication remains retryable",
+            )?;
+            ensure(
+                workspace.join(".ee/index").exists(),
+                false,
+                "failed selected store publication never creates an unrelated workspace index",
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
