@@ -3351,6 +3351,9 @@ fn require_harness_settings_snapshot(
     }
 }
 
+/// How long [`HarnessSettingsLock::acquire`] waits for a held settings lock.
+const HARNESS_SETTINGS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct HarnessSettingsLock {
     _file: fs::File,
     path: PathBuf,
@@ -3385,12 +3388,31 @@ impl HarnessSettingsLock {
         if !metadata.is_file() {
             return Err(harness_settings_changed(&path));
         }
-        file.try_lock().map_err(|error| DomainError::Storage {
-            message: format!("Cannot lock harness settings '{}': {error}", path.display()),
-            repair: Some(
-                "Wait for the other harness installation or undo to finish, then retry.".to_owned(),
-            ),
-        })?;
+        // A child forked by another thread of this process shares the lock's open
+        // file description until it execs, so a lock released a moment ago can
+        // still read as held (bd-pj9oc). Wait such holders out briefly; another
+        // installer or undo that keeps the lock still fails at the deadline.
+        let deadline = Instant::now() + HARNESS_SETTINGS_LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "Cannot lock harness settings '{}': {error}",
+                            path.display()
+                        ),
+                        repair: Some(
+                            "Wait for the other harness installation or undo to finish, then retry."
+                                .to_owned(),
+                        ),
+                    });
+                }
+            }
+        }
         let lock = Self {
             _file: file,
             path,
@@ -7245,6 +7267,27 @@ pathlib.Path("journal-hook-capture.json").write_text(json.dumps({"argv": sys.arg
             );
         }
         Ok(())
+    }
+
+    /// bd-pj9oc: a child forked by a parallel test holds the lock until it execs, so the
+    /// lock must wait out a short-lived holder instead of failing on the first try.
+    #[test]
+    fn harness_settings_lock_waits_out_a_briefly_held_lock() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let backup = harness_backup_path(&temp.path().join("settings.json"));
+        let held = HarnessSettingsLock::acquire(&backup).map_err(|error| error.message())?;
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                HarnessSettingsLock::acquire(&backup)
+                    .map(drop)
+                    .map_err(|error| error.message())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+            waiter
+                .join()
+                .map_err(|_| "lock waiter panicked".to_owned())?
+        })
     }
 
     #[cfg(unix)]
