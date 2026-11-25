@@ -48,7 +48,8 @@ use crate::db::shard::{
     resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
 };
 use crate::db::{
-    CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    CASS_BACKUP_CHUNK_ROWS, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
+    CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAgent, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
     StoredAuditEntry, StoredCausalEvidence, StoredCertificateRecord, StoredCurationCandidate,
@@ -86,7 +87,6 @@ const RECORDS_FILE: &str = "records.jsonl";
 const MANIFEST_FILE: &str = "manifest.json";
 const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
     "ee init --workspace . && ee migrate run --workspace . --json";
-const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v2";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
@@ -9263,8 +9263,10 @@ fn collect_procedure_history_payloads(
         .map(|row| row.id)
         .chain(
             connection
-                .list_evidence_ids_for_backup(workspace_id)
-                .map_err(work_history_error)?,
+                .list_evidence_keys_for_backup(workspace_id)
+                .map_err(work_history_error)?
+                .into_iter()
+                .map(|key| key.id),
         )
         .collect();
     let redact_uri = |uri: &str| redact_procedure_uri(uri, redaction, memory_ids, &provenance_ids);
@@ -13037,8 +13039,8 @@ fn collect_cass_payloads(
         }
     }
 
-    let evidence_ids = match connection.list_evidence_ids_for_backup(workspace_id) {
-        Ok(ids) => ids,
+    let keys = match connection.list_evidence_keys_for_backup(workspace_id) {
+        Ok(keys) => keys,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("evidence_spans", error));
             return None;
@@ -13050,26 +13052,19 @@ fn collect_cass_payloads(
         .collect::<BTreeMap<_, _>>();
     let mut admission = BackupEvidenceAdmissionSummary::default();
     // Keep only the sorted keys and the current chunk of export records.
-    // The source snapshot encloses both discovery and the primary-key reads.
+    // The source snapshot encloses both discovery and the rowid range reads.
     // Publish the evidence family only after its final source row is readable.
     let mut evidence_payloads = Vec::new();
-    for (index, chunk) in evidence_ids.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
-        let mut evidence_spans = Vec::with_capacity(chunk.len());
-        for id in chunk {
-            let span = match connection.get_evidence_span(id) {
-                Ok(Some(span)) if span.id == *id && span.workspace_id == workspace_id => span,
-                Ok(_) => {
-                    degraded.push(required_backup_rows_unreadable(
-                        "evidence_spans",
-                        "source span missing or outside the workspace snapshot",
-                    ));
-                    return None;
-                }
-                Err(error) => {
-                    degraded.push(required_backup_rows_unreadable("evidence_spans", error));
-                    return None;
-                }
-            };
+    for (index, chunk) in keys.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
+        let spans = match connection.read_evidence_chunk_for_backup(workspace_id, chunk) {
+            Ok(spans) => spans,
+            Err(error) => {
+                degraded.push(required_backup_rows_unreadable("evidence_spans", error));
+                return None;
+            }
+        };
+        let mut evidence_spans = Vec::with_capacity(spans.len());
+        for span in spans {
             let mut record = BackupCassEvidenceRecord::from_stored(&span);
             if let Some(id) = record.memory_id.as_mut()
                 && let Some(restored_id) = memory_ids.get(id)
@@ -30168,7 +30163,7 @@ mod tests {
             !ordered_reads.is_empty()
                 && ordered_reads
                     .iter()
-                    .all(|sql| sql.starts_with("SELECT id FROM evidence_spans ")),
+                    .all(|sql| sql.starts_with("SELECT id, rowid FROM evidence_spans ")),
             "archive capture must not order or retain a full workspace of transcript bodies",
         )?;
         let session_asset = created
